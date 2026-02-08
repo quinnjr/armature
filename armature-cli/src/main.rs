@@ -34,7 +34,7 @@ mod generators;
 mod templates;
 mod watcher;
 
-use commands::{build, config, dev, generate, info, mock, new, openapi, repl, routes};
+use commands::{build, config, dev, generate, info, mock, new, openapi, repl, routes, run};
 use error::{CliError, CliResult};
 
 /// Armature CLI - Modern Rust Web Framework Tools
@@ -171,6 +171,9 @@ enum Commands {
     /// Run mock server with fake data from OpenAPI spec
     #[command(alias = "m")]
     Mock(MockArgs),
+
+    /// Run a Rhai application script
+    Run(RunArgs),
 }
 
 // =============================================================================
@@ -208,6 +211,29 @@ struct MockArgs {
     seed: Option<u64>,
 
     /// Watch spec file for changes
+    #[arg(short, long)]
+    watch: bool,
+}
+
+// =============================================================================
+// RUN COMMAND ARGS
+// =============================================================================
+
+#[derive(Args)]
+struct RunArgs {
+    /// Path to the Rhai application script
+    #[arg(default_value = "app.rhai")]
+    script: String,
+
+    /// Port to run the server on (overrides script-defined port)
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// Host to bind to (overrides script-defined host)
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Watch for script changes and restart
     #[arg(short, long)]
     watch: bool,
 }
@@ -2260,6 +2286,10 @@ async fn main() {
                 watch: args.watch,
             };
             mock::run(mock_args).await
+        }
+
+        Commands::Run(args) => {
+            run::run(&args.script, args.port, args.host.as_deref(), args.watch).await
         }
     };
 

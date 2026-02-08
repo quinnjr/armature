@@ -1,0 +1,28 @@
+[package]
+name = "armature-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Build complete Armature applications in Rhai scripts"
+keywords = ["rhai", "scripting", "web", "framework", "application"]
+categories = ["web-programming", "development-tools"]
+
+[dependencies]
+armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-rhai = { path = "../armature-rhai", version = "0.1.0" }
+
+rhai = { version = "1.19", features = ["sync", "serde", "metadata"] }
+tokio = { version = "1.35", features = ["sync", "fs", "time", "rt-multi-thread", "macros", "signal"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
+tempfile = "3.10"

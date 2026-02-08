@@ -189,16 +189,15 @@ pub struct RateLimitInterceptor;
 #[async_trait]
 impl ResponseInterceptor for RateLimitInterceptor {
     async fn intercept(&self, response: Response) -> Result<Response> {
-        if response.status() == http::StatusCode::TOO_MANY_REQUESTS {
-            if let Some(retry_after) = response.headers().get(http::header::RETRY_AFTER) {
-                if let Ok(seconds) = retry_after.to_str().unwrap_or("0").parse::<u64>() {
-                    tracing::warn!(
-                        retry_after_seconds = seconds,
-                        "Rate limited, should retry after {} seconds",
-                        seconds
-                    );
-                }
-            }
+        if response.status() == http::StatusCode::TOO_MANY_REQUESTS
+            && let Some(retry_after) = response.headers().get(http::header::RETRY_AFTER)
+            && let Ok(seconds) = retry_after.to_str().unwrap_or("0").parse::<u64>()
+        {
+            tracing::warn!(
+                retry_after_seconds = seconds,
+                "Rate limited, should retry after {} seconds",
+                seconds
+            );
         }
         Ok(response)
     }

@@ -30,12 +30,11 @@ fn extract_route_info(method: &ImplItemFn) -> Option<RouteInfo> {
 
     // Check if method has HttpRequest parameter
     let has_request_param = method.sig.inputs.iter().any(|arg| {
-        if let FnArg::Typed(PatType { ty, .. }) = arg {
-            if let Type::Path(type_path) = ty.as_ref() {
-                if let Some(segment) = type_path.path.segments.last() {
-                    return segment.ident == "HttpRequest";
-                }
-            }
+        if let FnArg::Typed(PatType { ty, .. }) = arg
+            && let Type::Path(type_path) = ty.as_ref()
+            && let Some(segment) = type_path.path.segments.last()
+        {
+            return segment.ident == "HttpRequest";
         }
         false
     });

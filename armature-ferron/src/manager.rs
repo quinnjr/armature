@@ -177,20 +177,20 @@ impl FerronManager {
     /// Start with supervision (auto-restart on crash)
     pub async fn start_supervised(self: Arc<Self>) -> Result<tokio::task::JoinHandle<()>> {
         // Start health checking if configured
-        if let Some(ref health_state) = self.health_state {
-            if let Some(ref registry) = self.registry {
-                let backends: Vec<String> = {
-                    let services = registry.get_services().await;
-                    let mut urls = Vec::new();
-                    for service in services {
-                        urls.extend(registry.get_urls(&service).await);
-                    }
-                    urls
-                };
-
-                if !backends.is_empty() {
-                    let _ = health_state.clone().start_background_checks(backends).await;
+        if let Some(ref health_state) = self.health_state
+            && let Some(ref registry) = self.registry
+        {
+            let backends: Vec<String> = {
+                let services = registry.get_services().await;
+                let mut urls = Vec::new();
+                for service in services {
+                    urls.extend(registry.get_urls(&service).await);
                 }
+                urls
+            };
+
+            if !backends.is_empty() {
+                let _ = health_state.clone().start_background_checks(backends).await;
             }
         }
 

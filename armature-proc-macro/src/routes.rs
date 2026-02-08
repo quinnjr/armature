@@ -85,12 +85,11 @@ fn parse_extractor_attr(param: &PatType) -> Option<(ExtractorKind, Ident, Type)>
     }
 
     // Check if it's HttpRequest type (pass through)
-    if let Type::Path(type_path) = &param_type {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "HttpRequest" {
-                return Some((ExtractorKind::Request, param_name, param_type));
-            }
-        }
+    if let Type::Path(type_path) = &param_type
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "HttpRequest"
+    {
+        return Some((ExtractorKind::Request, param_name, param_type));
     }
 
     None
@@ -244,12 +243,12 @@ pub fn route_impl(attr: TokenStream, item: TokenStream, method: &str) -> TokenSt
     let mut has_extractors = false;
 
     for arg in &input.sig.inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Some((kind, param_name, param_type)) = parse_extractor_attr(pat_type) {
-                let extraction = generate_extraction(&kind, &param_name, &param_type);
-                extractions.push(extraction);
-                has_extractors = true;
-            }
+        if let FnArg::Typed(pat_type) = arg
+            && let Some((kind, param_name, param_type)) = parse_extractor_attr(pat_type)
+        {
+            let extraction = generate_extraction(&kind, &param_name, &param_type);
+            extractions.push(extraction);
+            has_extractors = true;
         }
     }
 

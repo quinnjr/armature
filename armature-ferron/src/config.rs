@@ -503,13 +503,14 @@ impl FerronConfig {
             lb.validate()?;
         }
 
-        if let Some(ref tls) = self.tls {
-            if !tls.auto && (tls.cert_path.is_none() || tls.key_path.is_none()) {
-                return Err(FerronError::invalid_config(
-                    "tls",
-                    "manual TLS requires both cert_path and key_path",
-                ));
-            }
+        if let Some(ref tls) = self.tls
+            && !tls.auto
+            && (tls.cert_path.is_none() || tls.key_path.is_none())
+        {
+            return Err(FerronError::invalid_config(
+                "tls",
+                "manual TLS requires both cert_path and key_path",
+            ));
         }
 
         Ok(())
@@ -536,11 +537,11 @@ impl FerronConfig {
                 writeln!(output, "    tls \"{}\" \"{}\"", cert, key)
                     .map_err(|e| FerronError::config(e.to_string()))?;
             }
-            if tls.hsts {
-                if let Some(max_age) = tls.hsts_max_age {
-                    writeln!(output, "    hsts max_age={}", max_age)
-                        .map_err(|e| FerronError::config(e.to_string()))?;
-                }
+            if tls.hsts
+                && let Some(max_age) = tls.hsts_max_age
+            {
+                writeln!(output, "    hsts max_age={}", max_age)
+                    .map_err(|e| FerronError::config(e.to_string()))?;
             }
             if let Some(ref min_ver) = tls.min_version {
                 writeln!(output, "    tls_min_version \"{}\"", min_ver)

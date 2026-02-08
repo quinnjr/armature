@@ -208,15 +208,15 @@ impl CircuitBreaker {
         }
 
         let opened_at = *self.opened_at.read();
-        if let Some(opened) = opened_at {
-            if opened.elapsed() >= self.config.reset_timeout {
-                let mut state = self.state.write();
-                if *state == CircuitState::Open {
-                    debug!("Circuit breaker transitioning to half-open");
-                    *state = CircuitState::HalfOpen;
-                    self.half_open_count.store(0, Ordering::SeqCst);
-                    self.success_count.store(0, Ordering::SeqCst);
-                }
+        if let Some(opened) = opened_at
+            && opened.elapsed() >= self.config.reset_timeout
+        {
+            let mut state = self.state.write();
+            if *state == CircuitState::Open {
+                debug!("Circuit breaker transitioning to half-open");
+                *state = CircuitState::HalfOpen;
+                self.half_open_count.store(0, Ordering::SeqCst);
+                self.success_count.store(0, Ordering::SeqCst);
             }
         }
     }

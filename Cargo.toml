@@ -59,6 +59,7 @@ members = [
     "armature-payments",
     "armature-rhai",
     "armature-siem",
+    "armature-app",
 ]
 exclude = [
     "templates/*",
@@ -388,6 +389,9 @@ path = "armature-http-client"
 [dev-dependencies.armature-ferron]
 path = "armature-ferron"
 
+[dev-dependencies.armature-app]
+path = "armature-app"
+
 [dev-dependencies.fastrand]
 version = "2.3"
 
@@ -646,6 +650,10 @@ path = "examples/benchmark_server.rs"
 [[example]]
 name = "memory_profile_server"
 path = "examples/memory_profile_server.rs"
+
+[[example]]
+name = "rhai_app"
+path = "examples/rhai_app.rs"
 
 # Benchmark Tools
 [[bin]]

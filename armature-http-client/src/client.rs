@@ -107,10 +107,10 @@ impl HttpClient {
     /// Execute a request with retry and circuit breaker logic.
     pub(crate) async fn execute(&self, request: Request) -> Result<Response> {
         // Check circuit breaker
-        if let Some(cb) = &self.circuit_breaker {
-            if !cb.is_allowed() {
-                return Err(HttpClientError::CircuitOpen);
-            }
+        if let Some(cb) = &self.circuit_breaker
+            && !cb.is_allowed()
+        {
+            return Err(HttpClientError::CircuitOpen);
         }
 
         // Execute with retry if configured
@@ -133,10 +133,10 @@ impl HttpClient {
 
         loop {
             // Check max retry time
-            if let Some(max_time) = retry_config.max_retry_time {
-                if start.elapsed() > max_time {
-                    break;
-                }
+            if let Some(max_time) = retry_config.max_retry_time
+                && start.elapsed() > max_time
+            {
+                break;
             }
 
             // Clone request for retry (reqwest requests can't be reused)

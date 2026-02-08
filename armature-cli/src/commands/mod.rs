@@ -10,3 +10,4 @@ pub mod new;
 pub mod openapi;
 pub mod repl;
 pub mod routes;
+pub mod run;

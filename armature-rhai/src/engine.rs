@@ -7,7 +7,6 @@ use parking_lot::RwLock;
 use rhai::{AST, Dynamic, Engine, Scope};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Rhai engine with Armature bindings.
 ///
@@ -60,7 +59,8 @@ impl Default for EngineConfig {
 }
 
 impl RhaiEngine {
-    /// Create a new engine with default configuration.
+    /// Create a new engine builder with default configuration.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new() -> RhaiEngineBuilder {
         RhaiEngineBuilder::new()
     }

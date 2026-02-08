@@ -244,12 +244,11 @@ impl FerronProcess {
         *self.pid.write().await = pid;
 
         // Write PID file
-        if let Some(ref pid_path) = self.config.pid_file {
-            if let Some(pid) = pid {
-                if let Err(e) = std::fs::write(pid_path, pid.to_string()) {
-                    warn!("Failed to write PID file: {}", e);
-                }
-            }
+        if let Some(ref pid_path) = self.config.pid_file
+            && let Some(pid) = pid
+            && let Err(e) = std::fs::write(pid_path, pid.to_string())
+        {
+            warn!("Failed to write PID file: {}", e);
         }
 
         // Spawn stdout/stderr handlers
@@ -260,8 +259,8 @@ impl FerronProcess {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     debug!("[ferron] {}", line);
-                    if let Some(ref log_path) = stdout_log {
-                        if let Err(e) = tokio::fs::OpenOptions::new()
+                    if let Some(ref log_path) = stdout_log
+                        && let Err(e) = tokio::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(log_path)
@@ -272,9 +271,8 @@ impl FerronProcess {
                                     f.write_all(format!("{}\n", line).as_bytes()),
                                 )
                             })
-                        {
-                            warn!("Failed to write to stdout log: {}", e);
-                        }
+                    {
+                        warn!("Failed to write to stdout log: {}", e);
                     }
                 }
             });
@@ -287,8 +285,8 @@ impl FerronProcess {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     warn!("[ferron] {}", line);
-                    if let Some(ref log_path) = stderr_log {
-                        if let Err(e) = tokio::fs::OpenOptions::new()
+                    if let Some(ref log_path) = stderr_log
+                        && let Err(e) = tokio::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(log_path)
@@ -299,9 +297,8 @@ impl FerronProcess {
                                     f.write_all(format!("{}\n", line).as_bytes()),
                                 )
                             })
-                        {
-                            warn!("Failed to write to stderr log: {}", e);
-                        }
+                    {
+                        warn!("Failed to write to stderr log: {}", e);
                     }
                 }
             });
@@ -360,12 +357,11 @@ impl FerronProcess {
         *self.status.write().await = ProcessStatus::Stopped;
 
         // Remove PID file
-        if let Some(ref pid_path) = self.config.pid_file {
-            if pid_path.exists() {
-                if let Err(e) = std::fs::remove_file(pid_path) {
-                    warn!("Failed to remove PID file: {}", e);
-                }
-            }
+        if let Some(ref pid_path) = self.config.pid_file
+            && pid_path.exists()
+            && let Err(e) = std::fs::remove_file(pid_path)
+        {
+            warn!("Failed to remove PID file: {}", e);
         }
 
         info!("Ferron server stopped");

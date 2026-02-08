@@ -185,7 +185,7 @@ async fn handle_connection(
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
 
-    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return Ok(());
     }
@@ -515,11 +515,8 @@ fn generate_mock_response(
                 .strip_prefix("#/components/responses/")
                 .unwrap_or(reference);
             if let Some(components) = &spec.components {
-                if let Some(resp) = components.responses.get(ref_name) {
-                    match resp {
-                        ReferenceOr::Item(r) => r,
-                        _ => return (status_code, json!({"message": "OK"}).to_string()),
-                    }
+                if let Some(ReferenceOr::Item(r)) = components.responses.get(ref_name) {
+                    r
                 } else {
                     return (status_code, json!({"message": "OK"}).to_string());
                 }
@@ -571,11 +568,8 @@ fn generate_mock_data(
                 .strip_prefix("#/components/schemas/")
                 .unwrap_or(reference);
             if let Some(components) = &spec.components {
-                if let Some(schema) = components.schemas.get(ref_name) {
-                    match schema {
-                        ReferenceOr::Item(s) => s,
-                        _ => return json!(null),
-                    }
+                if let Some(ReferenceOr::Item(s)) = components.schemas.get(ref_name) {
+                    s
                 } else {
                     return json!(null);
                 }

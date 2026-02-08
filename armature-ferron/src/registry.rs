@@ -130,24 +130,24 @@ impl ServiceRegistry {
     pub async fn deregister(&self, service_name: &str, instance_id: &str) -> Result<()> {
         let mut services = self.services.write().await;
 
-        if let Some(instances) = services.get_mut(service_name) {
-            if instances.remove(instance_id).is_some() {
-                info!(
-                    "Deregistered instance {} from service {}",
-                    instance_id, service_name
-                );
+        if let Some(instances) = services.get_mut(service_name)
+            && instances.remove(instance_id).is_some()
+        {
+            info!(
+                "Deregistered instance {} from service {}",
+                instance_id, service_name
+            );
 
-                // Remove empty service entries
-                if instances.is_empty() {
-                    services.remove(service_name);
-                }
-
-                // Notify listeners
-                drop(services); // Release lock before notifying
-                self.notify_listeners(service_name).await;
-
-                return Ok(());
+            // Remove empty service entries
+            if instances.is_empty() {
+                services.remove(service_name);
             }
+
+            // Notify listeners
+            drop(services); // Release lock before notifying
+            self.notify_listeners(service_name).await;
+
+            return Ok(());
         }
 
         Err(FerronError::ServiceNotFound(format!(
@@ -160,12 +160,12 @@ impl ServiceRegistry {
     pub async fn heartbeat(&self, service_name: &str, instance_id: &str) -> Result<()> {
         let mut services = self.services.write().await;
 
-        if let Some(instances) = services.get_mut(service_name) {
-            if let Some(instance) = instances.get_mut(instance_id) {
-                instance.heartbeat();
-                debug!("Updated heartbeat for {}:{}", service_name, instance_id);
-                return Ok(());
-            }
+        if let Some(instances) = services.get_mut(service_name)
+            && let Some(instance) = instances.get_mut(instance_id)
+        {
+            instance.heartbeat();
+            debug!("Updated heartbeat for {}:{}", service_name, instance_id);
+            return Ok(());
         }
 
         Err(FerronError::ServiceNotFound(format!(
@@ -220,15 +220,15 @@ impl ServiceRegistry {
     pub async fn mark_unhealthy(&self, service_name: &str, instance_id: &str) -> Result<()> {
         let mut services = self.services.write().await;
 
-        if let Some(instances) = services.get_mut(service_name) {
-            if let Some(instance) = instances.get_mut(instance_id) {
-                instance.healthy = false;
-                warn!(
-                    "Marked instance {}:{} as unhealthy",
-                    service_name, instance_id
-                );
-                return Ok(());
-            }
+        if let Some(instances) = services.get_mut(service_name)
+            && let Some(instance) = instances.get_mut(instance_id)
+        {
+            instance.healthy = false;
+            warn!(
+                "Marked instance {}:{} as unhealthy",
+                service_name, instance_id
+            );
+            return Ok(());
         }
 
         Err(FerronError::ServiceNotFound(format!(
@@ -241,15 +241,15 @@ impl ServiceRegistry {
     pub async fn mark_healthy(&self, service_name: &str, instance_id: &str) -> Result<()> {
         let mut services = self.services.write().await;
 
-        if let Some(instances) = services.get_mut(service_name) {
-            if let Some(instance) = instances.get_mut(instance_id) {
-                instance.healthy = true;
-                info!(
-                    "Marked instance {}:{} as healthy",
-                    service_name, instance_id
-                );
-                return Ok(());
-            }
+        if let Some(instances) = services.get_mut(service_name)
+            && let Some(instance) = instances.get_mut(instance_id)
+        {
+            instance.healthy = true;
+            info!(
+                "Marked instance {}:{} as healthy",
+                service_name, instance_id
+            );
+            return Ok(());
         }
 
         Err(FerronError::ServiceNotFound(format!(

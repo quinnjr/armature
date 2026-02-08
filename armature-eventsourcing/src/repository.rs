@@ -73,10 +73,10 @@ where
         aggregate.mark_events_committed();
 
         // Check if we should create a snapshot
-        if let Some(frequency) = self.snapshot_frequency {
-            if aggregate.version().is_multiple_of(frequency) {
-                self.create_snapshot(aggregate).await?;
-            }
+        if let Some(frequency) = self.snapshot_frequency
+            && aggregate.version().is_multiple_of(frequency)
+        {
+            self.create_snapshot(aggregate).await?;
         }
 
         Ok(())

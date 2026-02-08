@@ -143,7 +143,7 @@ fn generate_typescript_client(
         for (name, schema) in &components.schemas {
             if let ReferenceOr::Item(schema) = schema {
                 types.push_str(&generate_ts_type(name, schema));
-                types.push_str("\n");
+                types.push('\n');
             }
         }
     }
@@ -434,7 +434,7 @@ fn schema_kind_to_ts_type(kind: &SchemaKind) -> String {
                 let item_type = arr
                     .items
                     .as_ref()
-                    .map(|s| boxed_schema_to_ts_type(s))
+                    .map(boxed_schema_to_ts_type)
                     .unwrap_or_else(|| "unknown".to_string());
                 format!("{}[]", item_type)
             }
@@ -511,7 +511,7 @@ fn parse_operation(method: &str, path: &str, op: &Operation) -> OperationInfo {
         if let ReferenceOr::Item(body) = rb {
             body.content
                 .get("application/json")
-                .and_then(|mt| mt.schema.as_ref().map(|s| schema_to_ts_type(s)))
+                .and_then(|mt| mt.schema.as_ref().map(schema_to_ts_type))
         } else {
             None
         }
@@ -532,7 +532,7 @@ fn parse_operation(method: &str, path: &str, op: &Operation) -> OperationInfo {
                 response
                     .content
                     .get("application/json")
-                    .and_then(|mt| mt.schema.as_ref().map(|s| schema_to_ts_type(s)))
+                    .and_then(|mt| mt.schema.as_ref().map(schema_to_ts_type))
             } else {
                 None
             }
@@ -682,7 +682,7 @@ fn generate_rust_client(
         for (name, schema) in &components.schemas {
             if let ReferenceOr::Item(schema) = schema {
                 types.push_str(&generate_rust_type(name, schema));
-                types.push_str("\n");
+                types.push('\n');
             }
         }
     }
@@ -912,14 +912,12 @@ fn generate_rust_type(name: &str, schema: &Schema) -> String {
             output.push_str("#[derive(Debug, Clone, Serialize, Deserialize)]\n");
             output.push_str(&format!("pub enum {} {{\n", name.to_pascal_case()));
 
-            for variant in &s.enumeration {
-                if let Some(v) = variant {
-                    let variant_name = v.to_pascal_case();
-                    if variant_name != *v {
-                        output.push_str(&format!("    #[serde(rename = \"{}\")]\n", v));
-                    }
-                    output.push_str(&format!("    {},\n", variant_name));
+            for v in s.enumeration.iter().flatten() {
+                let variant_name = v.to_pascal_case();
+                if variant_name != *v {
+                    output.push_str(&format!("    #[serde(rename = \"{}\")]\n", v));
                 }
+                output.push_str(&format!("    {},\n", variant_name));
             }
 
             output.push_str("}\n");
@@ -971,7 +969,7 @@ fn schema_kind_to_rust_type(kind: &SchemaKind) -> String {
                 let item_type = arr
                     .items
                     .as_ref()
-                    .map(|s| boxed_schema_to_rust_type(s))
+                    .map(boxed_schema_to_rust_type)
                     .unwrap_or_else(|| "serde_json::Value".to_string());
                 format!("Vec<{}>", item_type)
             }
@@ -1042,7 +1040,7 @@ fn parse_rust_operation(method: &str, path: &str, op: &Operation) -> RustOperati
         if let ReferenceOr::Item(body) = rb {
             body.content
                 .get("application/json")
-                .and_then(|mt| mt.schema.as_ref().map(|s| schema_to_rust_type(s)))
+                .and_then(|mt| mt.schema.as_ref().map(schema_to_rust_type))
         } else {
             None
         }
@@ -1062,7 +1060,7 @@ fn parse_rust_operation(method: &str, path: &str, op: &Operation) -> RustOperati
                 response
                     .content
                     .get("application/json")
-                    .and_then(|mt| mt.schema.as_ref().map(|s| schema_to_rust_type(s)))
+                    .and_then(|mt| mt.schema.as_ref().map(schema_to_rust_type))
             } else {
                 None
             }
@@ -1126,7 +1124,7 @@ fn generate_rust_method(op: &RustOperationInfo) -> String {
     for (orig, snake) in &path_replacements {
         path_code.push_str(&format!(".replace(\"{{{}}}\", {})", orig, snake));
     }
-    path_code.push_str(";");
+    path_code.push(';');
 
     // Build request
     let method_call = format!(

@@ -49,6 +49,9 @@ reqwest = { version = "0.12", features = ["json"], default-features = false }
 # Mock server (uses armature-core)
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
+# Rhai application runner
+armature-app = { path = "../armature-app" }
+
 [dev-dependencies]
 tempfile = "3.20"
 assert_cmd = "2.0"

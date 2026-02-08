@@ -163,12 +163,11 @@ pub trait Storage: Send + Sync {
 pub fn generate_unique_key(original_name: Option<&str>, preserve_extension: bool) -> String {
     let id = uuid::Uuid::new_v4();
 
-    if preserve_extension {
-        if let Some(name) = original_name {
-            if let Some(ext) = std::path::Path::new(name).extension() {
-                return format!("{}.{}", id, ext.to_string_lossy());
-            }
-        }
+    if preserve_extension
+        && let Some(name) = original_name
+        && let Some(ext) = std::path::Path::new(name).extension()
+    {
+        return format!("{}.{}", id, ext.to_string_lossy());
     }
 
     id.to_string()

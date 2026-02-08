@@ -124,9 +124,9 @@ impl From<tungstenite::Message> for Message {
     fn from(msg: tungstenite::Message) -> Self {
         match msg {
             tungstenite::Message::Text(text) => Self::text(text.to_string()),
-            tungstenite::Message::Binary(data) => Self::binary(Bytes::from(data)),
-            tungstenite::Message::Ping(data) => Self::ping(Bytes::from(data)),
-            tungstenite::Message::Pong(data) => Self::pong(Bytes::from(data)),
+            tungstenite::Message::Binary(data) => Self::binary(data),
+            tungstenite::Message::Ping(data) => Self::ping(data),
+            tungstenite::Message::Pong(data) => Self::pong(data),
             tungstenite::Message::Close(_) => Self::close(),
             tungstenite::Message::Frame(_) => Self::binary(Bytes::new()),
         }
