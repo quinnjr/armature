@@ -1,6 +1,6 @@
 [package]
 name = "armature-cli"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -50,7 +50,7 @@ reqwest = { version = "0.12", features = ["json"], default-features = false }
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # Rhai application runner
-armature-app = { path = "../armature-app" }
+armature-app = { path = "../armature-app", version = "0.1.1" }
 
 [dev-dependencies]
 tempfile = "3.20"
