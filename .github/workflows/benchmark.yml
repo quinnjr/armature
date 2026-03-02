@@ -201,7 +201,7 @@ jobs:
           shared-key: "benchmark"
 
       - name: Download PR benchmark results
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results-${{ github.sha }}
           path: pr-results
@@ -286,7 +286,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download benchmark results
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results-${{ github.sha }}
           path: benchmark-results
