@@ -62,6 +62,62 @@ pub fn patch(attr: TokenStream, item: TokenStream) -> TokenStream {
     routes::route_impl(attr, item, "PATCH")
 }
 
+/// HTTP OPTIONS route decorator
+///
+/// Used for handling CORS preflight requests or other OPTIONS method calls.
+/// Note: For automatic CORS handling, consider using the CORS middleware instead.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::{controller, routes, options};
+///
+/// #[controller("/api")]
+/// struct ApiController;
+///
+/// #[routes]
+/// impl ApiController {
+///     #[options("/resource")]
+///     async fn resource_options() -> Result<HttpResponse, Error> {
+///         Ok(HttpResponse::no_content()
+///             .with_header("Allow", "GET, POST, OPTIONS"))
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn options(attr: TokenStream, item: TokenStream) -> TokenStream {
+    routes::route_impl(attr, item, "OPTIONS")
+}
+
+/// HTTP HEAD route decorator
+///
+/// HEAD requests are identical to GET requests but without the response body.
+/// Useful for checking resource existence or metadata without transferring data.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::{controller, routes, head};
+///
+/// #[controller("/api")]
+/// struct ApiController;
+///
+/// #[routes]
+/// impl ApiController {
+///     #[head("/resource/:id")]
+///     async fn check_resource(req: HttpRequest) -> Result<HttpResponse, Error> {
+///         let id = req.param("id")?;
+///         // Check if resource exists
+///         Ok(HttpResponse::ok()
+///             .with_header("X-Resource-Exists", "true"))
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn head(attr: TokenStream, item: TokenStream) -> TokenStream {
+    routes::route_impl(attr, item, "HEAD")
+}
+
 /// Routes impl block decorator
 ///
 /// This macro should be applied to the impl block of a controller to register

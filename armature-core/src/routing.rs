@@ -163,6 +163,34 @@ impl Router {
         self
     }
 
+    /// Add an OPTIONS route with an optimized handler.
+    ///
+    /// OPTIONS requests are typically used for CORS preflight checks.
+    /// For automatic CORS handling, consider using the CORS middleware instead.
+    #[inline]
+    pub fn options<H, Args>(&mut self, path: impl Into<String>, handler: H) -> &mut Self
+    where
+        H: IntoHandler<Args>,
+    {
+        self.routes
+            .push(Route::new(HttpMethod::OPTIONS, path, handler));
+        self
+    }
+
+    /// Add a HEAD route with an optimized handler.
+    ///
+    /// HEAD requests are identical to GET but without the response body.
+    /// Useful for checking resource existence or metadata.
+    #[inline]
+    pub fn head<H, Args>(&mut self, path: impl Into<String>, handler: H) -> &mut Self
+    where
+        H: IntoHandler<Args>,
+    {
+        self.routes
+            .push(Route::new(HttpMethod::HEAD, path, handler));
+        self
+    }
+
     /// Match a route without executing the handler.
     /// Returns the handler and path parameters if a route matches.
     /// Useful for route lookup benchmarking and inspection.
@@ -422,9 +450,32 @@ mod tests {
             .get("/users", test_handler)
             .post("/users", test_handler)
             .put("/users/:id", test_handler)
-            .delete("/users/:id", test_handler);
+            .delete("/users/:id", test_handler)
+            .patch("/users/:id", test_handler)
+            .options("/users", test_handler)
+            .head("/users/:id", test_handler);
 
-        assert_eq!(router.routes.len(), 4);
+        assert_eq!(router.routes.len(), 7);
+    }
+
+    #[test]
+    fn test_router_options_route() {
+        let mut router = Router::new();
+        router.options("/api/resource", test_handler);
+
+        assert_eq!(router.routes.len(), 1);
+        assert_eq!(router.routes[0].method, HttpMethod::OPTIONS);
+        assert_eq!(router.routes[0].path, "/api/resource");
+    }
+
+    #[test]
+    fn test_router_head_route() {
+        let mut router = Router::new();
+        router.head("/api/resource/:id", test_handler);
+
+        assert_eq!(router.routes.len(), 1);
+        assert_eq!(router.routes[0].method, HttpMethod::HEAD);
+        assert_eq!(router.routes[0].path, "/api/resource/:id");
     }
 
     #[test]
