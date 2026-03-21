@@ -2,17 +2,19 @@
 //!
 //! Handles JSON-RPC 2.0 requests for the Model Context Protocol.
 
+use crate::auth::{authenticate, McpAuthConfig, McpAuthContext};
 use crate::error::{McpError, Result};
 use crate::resource::McpResourceRegistry;
 use crate::tool::McpToolRegistry;
 use crate::types::*;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// MCP protocol version
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Configuration for the MCP service
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpConfig {
     /// Server name
     pub server_name: String,
@@ -24,6 +26,21 @@ pub struct McpConfig {
     pub enable_resources: bool,
     /// Enable prompts capability
     pub enable_prompts: bool,
+    /// Authentication configuration
+    pub auth: McpAuthConfig,
+}
+
+impl std::fmt::Debug for McpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpConfig")
+            .field("server_name", &self.server_name)
+            .field("server_version", &self.server_version)
+            .field("enable_tools", &self.enable_tools)
+            .field("enable_resources", &self.enable_resources)
+            .field("enable_prompts", &self.enable_prompts)
+            .field("auth", &"<auth_config>")
+            .finish()
+    }
 }
 
 impl Default for McpConfig {
@@ -34,6 +51,7 @@ impl Default for McpConfig {
             enable_tools: true,
             enable_resources: true,
             enable_prompts: false,
+            auth: McpAuthConfig::default(),
         }
     }
 }
@@ -59,6 +77,12 @@ impl McpConfig {
 
     pub fn with_prompts(mut self, enabled: bool) -> Self {
         self.enable_prompts = enabled;
+        self
+    }
+
+    /// Configure authentication for MCP access
+    pub fn with_auth(mut self, auth: McpAuthConfig) -> Self {
+        self.auth = auth;
         self
     }
 }
@@ -90,10 +114,10 @@ impl McpService {
     }
 
     /// Handle a JSON-RPC request and return a response
-    pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
+    pub async fn handle_request(&self, request: JsonRpcRequest, headers: &HashMap<String, String>) -> JsonRpcResponse {
         let id = request.id.clone();
 
-        match self.dispatch_method(&request.method, request.params).await {
+        match self.dispatch_method(&request.method, request.params, headers).await {
             Ok(result) => JsonRpcResponse::success(id, result),
             Err(e) => JsonRpcResponse::error(
                 id,
@@ -102,12 +126,12 @@ impl McpService {
         }
     }
 
-    /// Handle a raw JSON request string
-    pub async fn handle_json(&self, json: &str) -> String {
+    /// Handle a raw JSON request string with headers
+    pub async fn handle_json(&self, json: &str, headers: &HashMap<String, String>) -> String {
         let request: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(json);
 
         let response = match request {
-            Ok(req) => self.handle_request(req).await,
+            Ok(req) => self.handle_request(req, headers).await,
             Err(e) => JsonRpcResponse::error(
                 None,
                 JsonRpcError::parse_error(e.to_string()),
@@ -119,8 +143,16 @@ impl McpService {
         })
     }
 
+    /// Handle a JSON request without authentication (for backwards compatibility)
+    pub async fn handle_json_unauthenticated(&self, json: &str) -> String {
+        self.handle_json(json, &HashMap::new()).await
+    }
+
     /// Dispatch a method call to the appropriate handler
-    async fn dispatch_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    async fn dispatch_method(&self, method: &str, params: Option<Value>, headers: &HashMap<String, String>) -> Result<Value> {
+        // Authenticate the request
+        let _auth_context = authenticate(&self.config.auth, headers, method).await?;
+
         match method {
             "initialize" => self.handle_initialize(params),
             "tools/list" => self.handle_tools_list(params),
@@ -130,6 +162,11 @@ impl McpService {
             "ping" => Ok(serde_json::json!({})),
             _ => Err(McpError::MethodNotFound(method.to_string())),
         }
+    }
+
+    /// Get the authentication context for a request (for custom handling)
+    pub async fn authenticate(&self, headers: &HashMap<String, String>, method: &str) -> Result<McpAuthContext> {
+        authenticate(&self.config.auth, headers, method).await
     }
 
     /// Handle initialize request
@@ -239,12 +276,16 @@ impl Default for McpService {
 mod tests {
     use super::*;
 
+    fn empty_headers() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[tokio::test]
     async fn test_handle_initialize() {
         let service = McpService::new();
         let request = JsonRpcRequest::new("initialize");
 
-        let response = service.handle_request(request).await;
+        let response = service.handle_request(request, &empty_headers()).await;
 
         assert!(response.error.is_none());
         assert!(response.result.is_some());
@@ -259,7 +300,7 @@ mod tests {
         let service = McpService::new();
         let request = JsonRpcRequest::new("ping");
 
-        let response = service.handle_request(request).await;
+        let response = service.handle_request(request, &empty_headers()).await;
 
         assert!(response.error.is_none());
     }
@@ -269,7 +310,7 @@ mod tests {
         let service = McpService::new();
         let request = JsonRpcRequest::new("tools/list");
 
-        let response = service.handle_request(request).await;
+        let response = service.handle_request(request, &empty_headers()).await;
 
         assert!(response.error.is_none());
         assert!(response.result.is_some());
@@ -280,7 +321,7 @@ mod tests {
         let service = McpService::new();
         let request = JsonRpcRequest::new("unknown/method");
 
-        let response = service.handle_request(request).await;
+        let response = service.handle_request(request, &empty_headers()).await;
 
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, -32601);
@@ -291,7 +332,7 @@ mod tests {
         let service = McpService::new();
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 
-        let response = service.handle_json(json).await;
+        let response = service.handle_json(json, &empty_headers()).await;
 
         assert!(response.contains("result"));
     }
@@ -301,7 +342,7 @@ mod tests {
         let service = McpService::new();
         let json = "not valid json";
 
-        let response = service.handle_json(json).await;
+        let response = service.handle_json(json, &empty_headers()).await;
 
         assert!(response.contains("error"));
         assert!(response.contains("-32700")); // Parse error

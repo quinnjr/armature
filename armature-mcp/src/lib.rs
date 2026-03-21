@@ -114,6 +114,7 @@
 //! }
 //! ```
 
+pub mod auth;
 pub mod controller;
 pub mod error;
 pub mod resource;
@@ -125,6 +126,10 @@ pub mod types;
 pub use inventory;
 
 // Re-export main types
+pub use auth::{
+    ApiTokenAuth, JwtAuth, McpAuthConfig, McpAuthContext, McpAuthMethod, McpAuthenticator,
+    OAuth2Auth,
+};
 pub use controller::{McpController, McpRouterExt};
 pub use error::{McpError, Result};
 pub use resource::{McpResourceEntry, McpResourceProvider, McpResourceRegistry};
@@ -134,6 +139,7 @@ pub use types::*;
 
 /// Prelude module for convenient imports
 pub mod prelude {
+    pub use crate::auth::{ApiTokenAuth, JwtAuth, McpAuthConfig, McpAuthContext, OAuth2Auth};
     pub use crate::controller::{McpController, McpRouterExt};
     pub use crate::error::{McpError, Result};
     pub use crate::resource::{McpResourceEntry, McpResourceProvider, McpResourceRegistry};

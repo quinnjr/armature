@@ -1,7 +1,9 @@
 //! MCP Controller for HTTP endpoint
 //!
-//! Provides an auto-registering `/mcp` endpoint that handles MCP JSON-RPC requests.
+//! Provides an auto-registering `/mcp` endpoint that handles MCP JSON-RPC requests
+//! with configurable authentication.
 
+use crate::auth::McpAuthConfig;
 use crate::service::{McpConfig, McpService};
 use armature_core::{Error, HttpRequest, HttpResponse};
 use std::sync::Arc;
@@ -59,7 +61,7 @@ impl McpController {
         let body = String::from_utf8(req.body.clone())
             .map_err(|e| Error::BadRequest(format!("Invalid UTF-8: {}", e)))?;
 
-        let response_json = self.service.handle_json(&body).await;
+        let response_json = self.service.handle_json(&body, &req.headers).await;
 
         Ok(HttpResponse::ok()
             .with_header("Content-Type".to_string(), "application/json".to_string())
@@ -131,9 +133,32 @@ impl Default for McpController {
 
 /// Extension trait to add MCP routes to a Router
 pub trait McpRouterExt {
-    /// Add MCP endpoint routes to the router
+    /// Add MCP endpoint routes to the router (no authentication)
     fn with_mcp(self) -> Self;
-    
+
+    /// Add MCP endpoint routes with authentication
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use armature_mcp::{McpRouterExt, McpAuthConfig, ApiTokenAuth};
+    ///
+    /// // API token authentication
+    /// let router = Router::new()
+    ///     .with_mcp_auth(McpAuthConfig::api_token(
+    ///         ApiTokenAuth::new().with_tokens(vec!["secret-token-123"])
+    ///     ));
+    ///
+    /// // JWT authentication
+    /// let router = Router::new()
+    ///     .with_mcp_auth(McpAuthConfig::jwt(
+    ///         JwtAuth::new()
+    ///             .with_secret("my-jwt-secret")
+    ///             .with_issuer("my-app")
+    ///     ));
+    /// ```
+    fn with_mcp_auth(self, auth: McpAuthConfig) -> Self;
+
     /// Add MCP endpoint routes with custom configuration
     fn with_mcp_config(self, config: McpConfig) -> Self;
 }
@@ -141,6 +166,10 @@ pub trait McpRouterExt {
 impl McpRouterExt for armature_core::routing::Router {
     fn with_mcp(self) -> Self {
         self.with_mcp_config(McpConfig::default())
+    }
+
+    fn with_mcp_auth(self, auth: McpAuthConfig) -> Self {
+        self.with_mcp_config(McpConfig::default().with_auth(auth))
     }
 
     fn with_mcp_config(mut self, config: McpConfig) -> Self {
