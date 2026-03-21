@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Model Context Protocol (MCP) server support for Armature applications"
-keywords = ["mcp", "model-context-protocol", "ai", "llm", "tools"]
+keywords = ["mcp", "ai", "llm", "tools", "armature"]
 categories = ["web-programming", "development-tools"]
 
 [dependencies]
