@@ -201,13 +201,11 @@ impl NumaNode {
         let path = format!("/sys/devices/system/node/node{}/meminfo", self.id);
         if let Ok(content) = std::fs::read_to_string(&path) {
             for line in content.lines() {
-                if line.contains("MemTotal:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(3) {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
+                if line.contains("MemTotal:")
+                    && let Some(kb_str) = line.split_whitespace().nth(3)
+                        && let Ok(kb) = kb_str.parse::<u64>() {
                             return kb * 1024;
                         }
-                    }
-                }
             }
         }
         0
@@ -231,13 +229,11 @@ impl NumaNode {
         let path = format!("/sys/devices/system/node/node{}/meminfo", self.id);
         if let Ok(content) = std::fs::read_to_string(&path) {
             for line in content.lines() {
-                if line.contains("MemFree:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(3) {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
+                if line.contains("MemFree:")
+                    && let Some(kb_str) = line.split_whitespace().nth(3)
+                        && let Ok(kb) = kb_str.parse::<u64>() {
                             return kb * 1024;
                         }
-                    }
-                }
             }
         }
         0
@@ -262,13 +258,11 @@ impl NumaNode {
     #[cfg(target_os = "linux")]
     fn distance_to_linux(&self, other: &NumaNode) -> u32 {
         let path = format!("/sys/devices/system/node/node{}/distance", self.id);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Some(dist_str) = content.split_whitespace().nth(other.id) {
-                if let Ok(dist) = dist_str.parse::<u32>() {
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Some(dist_str) = content.split_whitespace().nth(other.id)
+                && let Ok(dist) = dist_str.parse::<u32>() {
                     return dist;
                 }
-            }
-        }
         if self.id == other.id { 10 } else { 20 }
     }
 }
@@ -294,11 +288,10 @@ fn current_numa_node_linux() -> usize {
     if let Ok(content) = std::fs::read_to_string("/proc/self/stat") {
         // Field 39 (0-indexed 38) is the processor number
         let fields: Vec<&str> = content.split_whitespace().collect();
-        if fields.len() > 38 {
-            if let Ok(cpu) = fields[38].parse::<usize>() {
+        if fields.len() > 38
+            && let Ok(cpu) = fields[38].parse::<usize>() {
                 return cpu_to_numa_node(cpu);
             }
-        }
     }
     0
 }

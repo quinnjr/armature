@@ -475,40 +475,36 @@ impl ConnectionManager {
 
     /// Mark a connection as active.
     pub fn mark_active(&self, id: ConnectionId) {
-        if let Ok(mut connections) = self.connections.write() {
-            if let Some(state) = connections.get_mut(&id) {
+        if let Ok(mut connections) = self.connections.write()
+            && let Some(state) = connections.get_mut(&id) {
                 state.last_active = Instant::now();
                 state.requests += 1;
             }
-        }
         self.load.record_request();
     }
 
     /// Record bytes read on a connection.
     pub fn record_bytes_read(&self, id: ConnectionId, bytes: u64) {
-        if let Ok(mut connections) = self.connections.write() {
-            if let Some(state) = connections.get_mut(&id) {
+        if let Ok(mut connections) = self.connections.write()
+            && let Some(state) = connections.get_mut(&id) {
                 state.bytes_read += bytes;
             }
-        }
     }
 
     /// Record bytes written on a connection.
     pub fn record_bytes_written(&self, id: ConnectionId, bytes: u64) {
-        if let Ok(mut connections) = self.connections.write() {
-            if let Some(state) = connections.get_mut(&id) {
+        if let Ok(mut connections) = self.connections.write()
+            && let Some(state) = connections.get_mut(&id) {
                 state.bytes_written += bytes;
             }
-        }
     }
 
     /// Set connection keep-alive status.
     pub fn set_keep_alive(&self, id: ConnectionId, keep_alive: bool) {
-        if let Ok(mut connections) = self.connections.write() {
-            if let Some(state) = connections.get_mut(&id) {
+        if let Ok(mut connections) = self.connections.write()
+            && let Some(state) = connections.get_mut(&id) {
                 state.is_keep_alive = keep_alive;
             }
-        }
     }
 
     // ========================================================================
@@ -618,7 +614,7 @@ impl ConnectionManager {
                 .collect();
 
             // Sort by idle duration (longest first)
-            idle_connections.sort_by(|a, b| b.1.cmp(&a.1));
+            idle_connections.sort_by_key(|k| std::cmp::Reverse(k.1));
 
             // Take up to batch size, but keep min connections
             let max_cull = (current - self.config.min_connections).min(self.config.cull_batch_size);

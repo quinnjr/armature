@@ -198,11 +198,10 @@ impl RuntimeConfig {
             Builder::new_multi_thread()
         };
 
-        if let Some(threads) = self.worker_threads {
-            if !self.current_thread {
+        if let Some(threads) = self.worker_threads
+            && !self.current_thread {
                 builder.worker_threads(threads);
             }
-        }
 
         builder.thread_name(&self.thread_name);
 

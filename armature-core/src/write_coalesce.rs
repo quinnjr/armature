@@ -275,14 +275,13 @@ impl WriteCoalescer {
         }
 
         // Timeout (if enabled)
-        if self.config.flush_timeout_us > 0 {
-            if let Some(first_time) = self.first_write_time {
+        if self.config.flush_timeout_us > 0
+            && let Some(first_time) = self.first_write_time {
                 let elapsed_us = first_time.elapsed().as_micros() as u64;
                 if elapsed_us >= self.config.flush_timeout_us {
                     return true;
                 }
             }
-        }
 
         false
     }

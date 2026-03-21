@@ -575,25 +575,19 @@ impl StaticAssetServer {
         };
 
         // Check conditional headers
-        if let Some(ref etag_value) = etag {
-            if let Some(if_none_match) = req.headers.get("If-None-Match") {
-                if if_none_match == etag_value {
+        if let Some(ref etag_value) = etag
+            && let Some(if_none_match) = req.headers.get("If-None-Match")
+                && if_none_match == etag_value {
                     return Ok(self.not_modified_response(etag_value));
                 }
-            }
-        }
 
-        if self.config.enable_last_modified {
-            if let Some(modified_time) = modified {
-                if let Some(if_modified_since) = req.headers.get("If-Modified-Since") {
-                    if let Ok(since_time) = httpdate::parse_http_date(if_modified_since) {
-                        if modified_time <= since_time {
+        if self.config.enable_last_modified
+            && let Some(modified_time) = modified
+                && let Some(if_modified_since) = req.headers.get("If-Modified-Since")
+                    && let Ok(since_time) = httpdate::parse_http_date(if_modified_since)
+                        && modified_time <= since_time {
                             return Ok(self.not_modified_response(etag.as_deref().unwrap_or("")));
                         }
-                    }
-                }
-            }
-        }
 
         // Try to serve pre-compressed file first
         let (content, used_compression) = if let Some(algo) = compression {
@@ -664,14 +658,13 @@ impl StaticAssetServer {
         }
 
         // Last-Modified
-        if self.config.enable_last_modified {
-            if let Some(modified_time) = modified {
+        if self.config.enable_last_modified
+            && let Some(modified_time) = modified {
                 let formatted = httpdate::fmt_http_date(modified_time);
                 response
                     .headers
                     .insert("Last-Modified".to_string(), formatted);
             }
-        }
 
         // CORS
         if self.config.enable_cors {
@@ -841,11 +834,10 @@ impl StaticAssetServer {
         metadata.len().hash(&mut hasher);
 
         // Hash modification time
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+        if let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
                 duration.as_secs().hash(&mut hasher);
             }
-        }
 
         // Hash compression algorithm
         if let Some(algo) = compression {

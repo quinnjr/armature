@@ -409,8 +409,8 @@ impl CircuitBreaker {
             return;
         }
 
-        if let Some(opened_at) = inner.opened_at {
-            if opened_at.elapsed() >= self.config.reset_timeout {
+        if let Some(opened_at) = inner.opened_at
+            && opened_at.elapsed() >= self.config.reset_timeout {
                 drop(inner); // Release read lock before acquiring write lock
 
                 let mut inner = self.inner.write();
@@ -421,7 +421,6 @@ impl CircuitBreaker {
                     self.success_count.store(0, Ordering::SeqCst);
                 }
             }
-        }
     }
 
     /// Manually reset the circuit breaker to closed state.

@@ -1569,12 +1569,10 @@ impl ChunkOptimizer {
 
     /// Get average chunk size.
     pub fn average_chunk_size(&self) -> usize {
-        let chunks = self.total_chunks();
-        if chunks > 0 {
-            (self.total_bytes() / chunks) as usize
-        } else {
-            self.min_chunk
-        }
+        self.total_bytes()
+            .checked_div(self.total_chunks())
+            .map(|v| v as usize)
+            .unwrap_or(self.min_chunk)
     }
 }
 
@@ -1828,21 +1826,21 @@ impl AdaptiveChunkOptimizer {
 
     /// Record throughput sample.
     pub fn record_throughput(&self, bytes: usize, duration_ms: u64) {
-        if duration_ms > 0 {
-            let bytes_per_sec = (bytes as u64 * 1000) / duration_ms;
-            self.throughput_tracker.record(bytes_per_sec);
-            // Update condition based on throughput too
-            let throughput_condition = NetworkCondition::from_throughput(bytes_per_sec);
-            let rtt_condition = self.current_condition();
-            // Use worse of the two estimates
-            let combined = if (throughput_condition as u8) > (rtt_condition as u8) {
-                throughput_condition
-            } else {
-                rtt_condition
-            };
-            self.network_condition
-                .store(combined as u8, Ordering::Relaxed);
-        }
+        let Some(bytes_per_sec) = (bytes as u64 * 1000).checked_div(duration_ms) else {
+            return;
+        };
+        self.throughput_tracker.record(bytes_per_sec);
+        // Update condition based on throughput too
+        let throughput_condition = NetworkCondition::from_throughput(bytes_per_sec);
+        let rtt_condition = self.current_condition();
+        // Use worse of the two estimates
+        let combined = if (throughput_condition as u8) > (rtt_condition as u8) {
+            throughput_condition
+        } else {
+            rtt_condition
+        };
+        self.network_condition
+            .store(combined as u8, Ordering::Relaxed);
     }
 
     /// Record a chunk being sent.
@@ -1887,12 +1885,10 @@ impl AdaptiveChunkOptimizer {
 
     /// Get average chunk size.
     pub fn average_chunk_size(&self) -> usize {
-        let chunks = self.chunks_sent();
-        if chunks > 0 {
-            (self.bytes_sent() / chunks) as usize
-        } else {
-            self.base_chunk
-        }
+        self.bytes_sent()
+            .checked_div(self.chunks_sent())
+            .map(|v| v as usize)
+            .unwrap_or(self.base_chunk)
     }
 
     /// Get content type.
@@ -2183,22 +2179,18 @@ impl ChunkStats {
 
     /// Get average chunk size.
     pub fn average_chunk_size(&self) -> usize {
-        let chunks = self.chunks_created();
-        if chunks > 0 {
-            (self.bytes_chunked() / chunks) as usize
-        } else {
-            0
-        }
+        self.bytes_chunked()
+            .checked_div(self.chunks_created())
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 
     /// Get average RTT.
     pub fn average_rtt(&self) -> u64 {
-        let samples = self.rtt_samples.load(Ordering::Relaxed);
-        if samples > 0 {
-            self.rtt_sum.load(Ordering::Relaxed) / samples
-        } else {
-            0
-        }
+        self.rtt_sum
+            .load(Ordering::Relaxed)
+            .checked_div(self.rtt_samples.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 }
 
@@ -2504,12 +2496,10 @@ impl StreamingStats {
 
     /// Get average chunk size.
     pub fn average_chunk_size(&self) -> usize {
-        let chunks = self.chunks_sent();
-        if chunks > 0 {
-            (self.bytes_sent() / chunks) as usize
-        } else {
-            0
-        }
+        self.bytes_sent()
+            .checked_div(self.chunks_sent())
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 }
 

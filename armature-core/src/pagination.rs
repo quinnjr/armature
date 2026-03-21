@@ -598,12 +598,11 @@ impl FilterParams {
             }
 
             // Parse field__operator format
-            if let Some((field, op_str)) = key.split_once("__") {
-                if let Some(operator) = FilterOperator::from_suffix(op_str) {
+            if let Some((field, op_str)) = key.split_once("__")
+                && let Some(operator) = FilterOperator::from_suffix(op_str) {
                     conditions.push(FilterCondition::new(field, operator, Some(value.clone())));
                     continue;
                 }
-            }
 
             // Default to equality
             conditions.push(FilterCondition::new(
@@ -764,18 +763,16 @@ impl FieldSelection {
     /// Check if a field should be included
     pub fn should_include(&self, field: &str) -> bool {
         // If include is specified, field must be in it
-        if let Some(ref include) = self.include {
-            if !include.contains(&field.to_string()) {
+        if let Some(ref include) = self.include
+            && !include.contains(&field.to_string()) {
                 return false;
             }
-        }
 
         // If exclude is specified, field must not be in it
-        if let Some(ref exclude) = self.exclude {
-            if exclude.contains(&field.to_string()) {
+        if let Some(ref exclude) = self.exclude
+            && exclude.contains(&field.to_string()) {
                 return false;
             }
-        }
 
         true
     }

@@ -1139,11 +1139,10 @@ where
     /// If at capacity, evicts a random entry.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         // Simple eviction: remove first entry if at capacity
-        if self.data.len() >= self.max_entries && !self.data.contains_key(&key) {
-            if let Some(first_key) = self.data.keys().next().cloned() {
+        if self.data.len() >= self.max_entries && !self.data.contains_key(&key)
+            && let Some(first_key) = self.data.keys().next().cloned() {
                 self.data.remove(&first_key);
             }
-        }
         self.data.insert(key, value)
     }
 

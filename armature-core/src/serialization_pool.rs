@@ -423,11 +423,10 @@ impl TypeSizeInfo {
 
     /// Get average size.
     pub fn average(&self) -> usize {
-        if self.count == 0 {
-            0
-        } else {
-            (self.sum / self.count) as usize
-        }
+        self.sum
+            .checked_div(self.count)
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 
     /// Get minimum size.
@@ -588,12 +587,10 @@ impl SerializationStats {
 
     /// Get average serialization size.
     pub fn average_size(&self) -> usize {
-        let count = self.serializations();
-        if count == 0 {
-            0
-        } else {
-            (self.bytes_serialized() / count) as usize
-        }
+        self.bytes_serialized()
+            .checked_div(self.serializations())
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 }
 

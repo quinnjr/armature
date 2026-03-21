@@ -102,12 +102,9 @@ pub fn mcp_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let tool_name = args.name.unwrap_or_else(|| fn_name_str.clone());
 
     // Use provided description or generate from function name
-    let description = args.description.unwrap_or_else(|| {
-        format!(
-            "{}",
-            fn_name_str.replace('_', " ").trim()
-        )
-    });
+    let description = args
+        .description
+        .unwrap_or_else(|| fn_name_str.replace('_', " ").trim().to_string());
 
     // Check if owner was provided
     let has_owner = args.owner.is_some();
@@ -149,8 +146,7 @@ pub fn mcp_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     // Check if the function takes an argument
-    let handler_impl = if input_type.is_some() {
-        let input_ty = input_type.unwrap();
+    let handler_impl = if let Some(input_ty) = input_type {
         quote! {
             async fn #wrapper_name(args: ::serde_json::Value) -> ::armature_mcp::Result<::armature_mcp::ToolCallResult> {
                 let input: #input_ty = ::serde_json::from_value(args)

@@ -271,17 +271,15 @@ impl RouteConstraint for LengthConstraint {
     fn validate(&self, value: &str) -> Result<(), String> {
         let len = value.len();
 
-        if let Some(min) = self.min {
-            if len < min {
+        if let Some(min) = self.min
+            && len < min {
                 return Err(format!("'{}' must be at least {} characters", value, min));
             }
-        }
 
-        if let Some(max) = self.max {
-            if len > max {
+        if let Some(max) = self.max
+            && len > max {
                 return Err(format!("'{}' must be at most {} characters", value, max));
             }
-        }
 
         Ok(())
     }
@@ -348,17 +346,15 @@ impl RouteConstraint for RangeConstraint {
             .parse::<i64>()
             .map_err(|_| format!("'{}' is not a valid number", value))?;
 
-        if let Some(min) = self.min {
-            if num < min {
+        if let Some(min) = self.min
+            && num < min {
                 return Err(format!("'{}' must be at least {}", value, min));
             }
-        }
 
-        if let Some(max) = self.max {
-            if num > max {
+        if let Some(max) = self.max
+            && num > max {
                 return Err(format!("'{}' must be at most {}", value, max));
             }
-        }
 
         Ok(())
     }

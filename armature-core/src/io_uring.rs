@@ -348,11 +348,10 @@ impl IoUringStats {
 #[cfg(target_os = "linux")]
 pub fn is_available() -> bool {
     // Check kernel version >= 5.1
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if let Some(ver) = parse_kernel_version(&version) {
+    if let Ok(version) = std::fs::read_to_string("/proc/version")
+        && let Some(ver) = parse_kernel_version(&version) {
             return ver >= (5, 1);
         }
-    }
     false
 }
 

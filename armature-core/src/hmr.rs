@@ -273,14 +273,12 @@ impl HmrManager {
         let now = std::time::SystemTime::now();
         let mut last_events_map = last_events.write().await;
 
-        if let Some(last_time) = last_events_map.get(&path) {
-            if let Ok(duration) = now.duration_since(*last_time) {
-                if duration.as_millis() < config.debounce_ms as u128 {
+        if let Some(last_time) = last_events_map.get(&path)
+            && let Ok(duration) = now.duration_since(*last_time)
+                && duration.as_millis() < config.debounce_ms as u128 {
                     // Too recent, skip
                     return None;
                 }
-            }
-        }
 
         // Update last event time
         last_events_map.insert(path.clone(), now);
