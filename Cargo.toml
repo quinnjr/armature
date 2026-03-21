@@ -60,6 +60,7 @@ members = [
     "armature-rhai",
     "armature-siem",
     "armature-app",
+    "armature-mcp",
 ]
 exclude = [
     "templates/*",
