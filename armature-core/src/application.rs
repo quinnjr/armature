@@ -35,6 +35,40 @@ pub struct Application {
     http3_config: Http3Config,
     /// Shared HTTP/3 statistics
     http3_stats: Arc<Http3Stats>,
+    /// Optional CORS configuration applied to every response
+    cors_config: Option<Arc<CorsConfig>>,
+}
+
+/// CORS configuration for the application.
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub allow_origin: String,
+    pub allow_methods: String,
+    pub allow_headers: String,
+    pub allow_credentials: bool,
+    pub max_age: u32,
+}
+
+impl CorsConfig {
+    pub fn new(origin: impl Into<String>) -> Self {
+        Self {
+            allow_origin: origin.into(),
+            allow_methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH".to_string(),
+            allow_headers: "Content-Type, Authorization, Accept, X-Requested-With".to_string(),
+            allow_credentials: false,
+            max_age: 86400,
+        }
+    }
+
+    pub fn with_credentials(mut self) -> Self {
+        self.allow_credentials = true;
+        self
+    }
+
+    pub fn allow_headers(mut self, headers: impl Into<String>) -> Self {
+        self.allow_headers = headers.into();
+        self
+    }
 }
 
 impl Application {
@@ -50,7 +84,15 @@ impl Application {
             http2_stats: Arc::new(Http2Stats::new()),
             http3_config: Http3Config::default(),
             http3_stats: Arc::new(Http3Stats::new()),
+            cors_config: None,
         }
+    }
+
+    /// Configure CORS for the application. Handles preflight OPTIONS
+    /// requests automatically and adds CORS headers to every response.
+    pub fn with_cors(mut self, config: CorsConfig) -> Self {
+        self.cors_config = Some(Arc::new(config));
+        self
     }
 
     /// Set the pipeline configuration for HTTP/1.1 pipelining
@@ -196,6 +238,7 @@ impl Application {
             http2_stats: Arc::new(Http2Stats::new()),
             http3_config: Http3Config::default(),
             http3_stats: Arc::new(Http3Stats::new()),
+            cors_config: None,
         }
     }
 
@@ -458,6 +501,7 @@ impl Application {
         );
 
         let router = self.router.clone();
+        let self_cors = self.cors_config.clone();
         let pipeline_builder = PipelinedHttp1Builder::with_stats(
             self.pipeline_config.clone(),
             Arc::clone(&self.pipeline_stats),
@@ -482,14 +526,17 @@ impl Application {
             // Track connection
             stats.connection_opened();
 
+            let cors_for_spawn = self_cors.clone();
             tokio::spawn(async move {
                 let stats_for_close = Arc::clone(&stats);
+                let cors = cors_for_spawn;
                 let service = service_fn(move |req: Request<IncomingBody>| {
                     let router = router.clone();
                     let stats = Arc::clone(&stats);
+                    let cors = cors.clone();
                     async move {
                         stats.request_processed();
-                        handle_request(req, router).await
+                        handle_request(req, router, cors).await
                     }
                 });
 
@@ -575,7 +622,7 @@ impl Application {
                             let stats = Arc::clone(&stats);
                             async move {
                                 stats.request_processed();
-                                handle_request(req, router).await
+                                handle_request(req, router, None).await
                             }
                         });
 
@@ -660,7 +707,7 @@ impl Application {
 
                         let service = service_fn(move |req: Request<IncomingBody>| {
                             let router = router.clone();
-                            async move { handle_request(req, router).await }
+                            async move { handle_request(req, router, None).await }
                         });
 
                         if let Err(err) = http1::Builder::new().serve_connection(io, service).await
@@ -729,7 +776,7 @@ impl Application {
                     let stats = Arc::clone(&stats);
                     async move {
                         stats.request_processed();
-                        handle_request(req, router).await
+                        handle_request(req, router, None).await
                     }
                 });
 
@@ -817,7 +864,7 @@ impl Application {
                                 let stats = Arc::clone(&stats);
                                 async move {
                                     stats.request_processed();
-                                    handle_request(req, router).await
+                                    handle_request(req, router, None).await
                                 }
                             });
 
@@ -838,7 +885,7 @@ impl Application {
                                 let stats = Arc::clone(&stats);
                                 async move {
                                     stats.request_processed();
-                                    handle_request(req, router).await
+                                    handle_request(req, router, None).await
                                 }
                             });
 
@@ -1031,6 +1078,7 @@ async fn start_http_redirect_server(addr: &str, https_port: u16) -> Result<(), E
 async fn handle_request(
     req: Request<IncomingBody>,
     router: Arc<Router>,
+    cors: Option<Arc<CorsConfig>>,
 ) -> Result<Response<Full<bytes::Bytes>>, hyper::Error> {
     use std::time::Instant;
 
@@ -1041,6 +1089,20 @@ async fn handle_request(
     let path = req.uri().path().to_string();
 
     trace!(method = %method, path = %path, "Incoming request");
+
+    if method == "OPTIONS" {
+        if let Some(ref cors) = cors {
+            let mut builder = Response::builder().status(204);
+            builder = builder.header("Access-Control-Allow-Origin", &cors.allow_origin);
+            builder = builder.header("Access-Control-Allow-Methods", &cors.allow_methods);
+            builder = builder.header("Access-Control-Allow-Headers", &cors.allow_headers);
+            builder = builder.header("Access-Control-Max-Age", cors.max_age.to_string());
+            if cors.allow_credentials {
+                builder = builder.header("Access-Control-Allow-Credentials", "true");
+            }
+            return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
+        }
+    }
 
     let mut armature_req = HttpRequest::new(method.clone(), path.clone());
 
@@ -1100,6 +1162,15 @@ async fn handle_request(
 
     for (key, value) in &response.headers {
         builder = builder.header(key, value);
+    }
+    for cookie_value in &response.cookies {
+        builder = builder.header("Set-Cookie", cookie_value);
+    }
+    if let Some(ref cors) = cors {
+        builder = builder.header("Access-Control-Allow-Origin", &cors.allow_origin);
+        if cors.allow_credentials {
+            builder = builder.header("Access-Control-Allow-Credentials", "true");
+        }
     }
 
     // Zero-copy body passthrough to Hyper

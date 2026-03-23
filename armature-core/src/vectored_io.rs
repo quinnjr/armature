@@ -187,6 +187,10 @@ impl StatusLine {
 impl ResponseChunks {
     /// Create new response chunks from status, headers, and body.
     pub fn new(status: u16, headers: &HashMap<String, String>, body: Bytes) -> Self {
+        Self::with_cookies(status, headers, &[], body)
+    }
+
+    pub fn with_cookies(status: u16, headers: &HashMap<String, String>, cookies: &[String], body: Bytes) -> Self {
         // Status line
         let status_line = if has_precomputed_status(status) {
             StatusLine::Static(status_line(status))
@@ -197,11 +201,17 @@ impl ResponseChunks {
         };
 
         // Headers - estimate size: avg 30 bytes per header
-        let mut headers_buf = BytesMut::with_capacity(headers.len() * 30 + 32);
+        let mut headers_buf = BytesMut::with_capacity((headers.len() + cookies.len()) * 30 + 32);
         for (name, value) in headers {
             headers_buf.extend_from_slice(name.as_bytes());
             headers_buf.extend_from_slice(HEADER_SEP);
             headers_buf.extend_from_slice(value.as_bytes());
+            headers_buf.extend_from_slice(CRLF);
+        }
+        for cookie_value in cookies {
+            headers_buf.extend_from_slice(b"Set-Cookie");
+            headers_buf.extend_from_slice(HEADER_SEP);
+            headers_buf.extend_from_slice(cookie_value.as_bytes());
             headers_buf.extend_from_slice(CRLF);
         }
 
@@ -375,8 +385,9 @@ impl From<crate::HttpResponse> for ResponseChunks {
     fn from(response: crate::HttpResponse) -> Self {
         let status = response.status;
         let headers = response.headers.to_hashmap();
+        let cookies = response.cookies.clone();
         let body = response.into_body_bytes();
-        Self::new(status, &headers, body)
+        Self::with_cookies(status, &headers, &cookies, body)
     }
 }
 
@@ -397,7 +408,7 @@ impl crate::HttpResponse {
     #[inline]
     pub fn to_vectored(&self) -> ResponseChunks {
         let headers = self.headers.to_hashmap();
-        ResponseChunks::new(self.status, &headers, self.body_bytes())
+        ResponseChunks::with_cookies(self.status, &headers, &self.cookies, self.body_bytes())
     }
 }
 
