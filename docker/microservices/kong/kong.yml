@@ -1,0 +1,153 @@
+# Kong Declarative Configuration for Armature Microservices
+_format_version: "3.0"
+
+# Services
+services:
+  # User Service
+  - name: user-service
+    url: http://user-service:3000
+    routes:
+      - name: users-api
+        paths:
+          - /api/v1/users
+          - /api/v1/auth
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 100
+              policy: local
+          - name: cors
+            config:
+              origins:
+                - "*"
+              methods:
+                - GET
+                - POST
+                - PUT
+                - PATCH
+                - DELETE
+              headers:
+                - Accept
+                - Authorization
+                - Content-Type
+              credentials: true
+              max_age: 3600
+
+  # Product Service
+  - name: product-service
+    url: http://product-service:3000
+    routes:
+      - name: products-api
+        paths:
+          - /api/v1/products
+          - /api/v1/categories
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 200
+              policy: local
+          - name: request-size-limiting
+            config:
+              allowed_payload_size: 10
+
+  # Order Service
+  - name: order-service
+    url: http://order-service:3000
+    routes:
+      - name: orders-api
+        paths:
+          - /api/v1/orders
+          - /api/v1/cart
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 50
+              policy: local
+          - name: jwt
+            config:
+              claims_to_verify:
+                - exp
+
+  # Health Check Route
+  - name: health-service
+    url: http://user-service:3000
+    routes:
+      - name: health
+        paths:
+          - /health
+        strip_path: false
+        methods:
+          - GET
+
+# Global Plugins
+plugins:
+  # Request/Response logging
+  - name: file-log
+    config:
+      path: /dev/stdout
+      reopen: true
+
+  # Add correlation ID
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+
+  # Response transformer for consistent API format
+  - name: response-transformer
+    config:
+      add:
+        headers:
+          - X-Powered-By:Armature
+
+# Consumers (API clients)
+consumers:
+  - username: web-app
+    keyauth_credentials:
+      - key: web-app-api-key
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 1000
+          policy: local
+
+  - username: mobile-app
+    keyauth_credentials:
+      - key: mobile-app-api-key
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 500
+          policy: local
+
+  - username: partner-api
+    keyauth_credentials:
+      - key: partner-api-key
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 100
+          policy: local
+

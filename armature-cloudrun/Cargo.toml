@@ -1,6 +1,6 @@
 [package]
 name = "armature-cloudrun"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,7 +13,7 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Armature core
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # GCP SDK (optional, for GCP service access)
 armature-gcp = { path = "../armature-gcp", version = "0.1.0", optional = true }

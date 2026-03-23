@@ -1,0 +1,297 @@
+# Armature Full-Stack Production Setup
+# =====================================
+# Complete stack with database, cache, search, and message queue
+#
+# Services:
+# - Armature API (x2 instances)
+# - PostgreSQL (primary + replica)
+# - Redis (cache + sessions)
+# - Elasticsearch (search)
+# - RabbitMQ (message queue)
+# - Ferron (load balancer / reverse proxy)
+# - MinIO (S3-compatible storage)
+#
+# Usage:
+#   docker compose up -d
+#   API: http://localhost
+#   RabbitMQ UI: http://localhost:15672 (guest/guest)
+#   MinIO UI: http://localhost:9001 (minioadmin/minioadmin)
+#   Elasticsearch: http://localhost:9200
+
+version: "3.8"
+
+services:
+  # ============================================
+  # Load Balancer / Reverse Proxy (Ferron)
+  # ============================================
+  ferron:
+    image: ghcr.io/ferronserver/ferron:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ferron/ferron.kdl:/etc/ferron/ferron.kdl:ro
+      - ./ferron/ssl:/etc/ferron/ssl:ro
+    depends_on:
+      - api-1
+      - api-2
+    networks:
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  # ============================================
+  # Armature API Instances
+  # ============================================
+  api-1:
+    build:
+      context: ../..
+      dockerfile: docker/full-stack/Dockerfile
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+      - INSTANCE_ID=api-1
+      - RUST_LOG=info,armature=debug
+      - DATABASE_URL=postgres://armature:armature@postgres-primary:5432/armature
+      - DATABASE_REPLICA_URL=postgres://armature:armature@postgres-replica:5432/armature
+      - REDIS_URL=redis://redis:6379
+      - REDIS_SESSION_URL=redis://redis:6379/1
+      - RABBITMQ_URL=amqp://armature:armature@rabbitmq:5672
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET=armature
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
+  api-2:
+    build:
+      context: ../..
+      dockerfile: docker/full-stack/Dockerfile
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+      - INSTANCE_ID=api-2
+      - RUST_LOG=info,armature=debug
+      - DATABASE_URL=postgres://armature:armature@postgres-primary:5432/armature
+      - DATABASE_REPLICA_URL=postgres://armature:armature@postgres-replica:5432/armature
+      - REDIS_URL=redis://redis:6379
+      - REDIS_SESSION_URL=redis://redis:6379/1
+      - RABBITMQ_URL=amqp://armature:armature@rabbitmq:5672
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET=armature
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
+  # ============================================
+  # PostgreSQL Primary
+  # ============================================
+  postgres-primary:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: armature
+      POSTGRES_PASSWORD: armature
+      POSTGRES_DB: armature
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_primary_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - "5432:5432"
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U armature -d armature"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # PostgreSQL Replica (Read-only)
+  # ============================================
+  postgres-replica:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: armature
+      POSTGRES_PASSWORD: armature
+      POSTGRES_DB: armature
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # ============================================
+  # Redis (Cache + Sessions)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # RabbitMQ (Message Queue)
+  # ============================================
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: armature
+      RABBITMQ_DEFAULT_PASS: armature
+      RABBITMQ_DEFAULT_VHOST: armature
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ============================================
+  # Elasticsearch (Search)
+  # ============================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=armature
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ============================================
+  # MinIO (S3-Compatible Object Storage)
+  # ============================================
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ============================================
+  # MinIO Bucket Initialization
+  # ============================================
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/armature --ignore-existing;
+      mc anonymous set public myminio/armature/public;
+      exit 0;
+      "
+    networks:
+      - backend
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_primary_data:
+  postgres_replica_data:
+  redis_data:
+  rabbitmq_data:
+  elasticsearch_data:
+  minio_data:
+

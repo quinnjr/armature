@@ -1,6 +1,6 @@
 [package]
 name = "armature-lambda"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,14 +13,14 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Armature core
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # AWS Lambda runtime
 lambda_http = "1.0"
 lambda_runtime = "1.0"
 
 # AWS SDK (optional, for AWS service access)
-armature-aws = { path = "../armature-aws", version = "0.1.0", optional = true }
+armature-aws = { path = "../armature-aws", version = "0.1.1", optional = true }
 
 # Async runtime
 tokio = { version = "1.35", features = ["macros", "rt-multi-thread"] }

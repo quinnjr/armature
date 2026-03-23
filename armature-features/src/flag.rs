@@ -110,10 +110,10 @@ impl FeatureFlag {
         }
 
         // Check rollout
-        if let Some(ref rollout) = self.rollout
-            && let Some(variation) = rollout.evaluate(context, &self.key)
-        {
-            return variation;
+        if let Some(ref rollout) = self.rollout {
+            if let Some(variation) = rollout.evaluate(context, &self.key) {
+                return variation;
+            }
         }
 
         // Return default variation

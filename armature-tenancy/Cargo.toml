@@ -1,6 +1,6 @@
 [package]
 name = "armature-tenancy"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["multi-tenant", "tenancy", "saas", "isolation"]
 categories = ["web-programming"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

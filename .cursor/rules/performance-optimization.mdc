@@ -1,0 +1,181 @@
+---
+description: Performance optimization and profiling guidelines for Armature
+globs: benches/**/*.rs, examples/*profile*.rs, scripts/*profile*.sh
+alwaysApply: false
+---
+
+# Performance Optimization
+
+Guidelines for optimizing performance and profiling the Armature framework.
+
+## Benchmarking with Criterion
+
+```rust
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
+
+fn bench_request_parsing(c: &mut Criterion) {
+    let data = setup_test_data();
+
+    c.bench_function("parse_request", |b| {
+        b.iter(|| {
+            black_box(parse_request(black_box(&data)))
+        })
+    });
+}
+
+criterion_group!(benches, bench_request_parsing);
+criterion_main!(benches);
+```
+
+## Memory Optimization
+
+### Arena Allocation
+
+Use arena allocators for request-scoped data:
+
+```rust
+use armature_core::arena::{with_arena, reset_arena};
+
+async fn handle_request(req: Request) -> Response {
+    with_arena(|arena| {
+        // Allocations here are freed together
+        let data = arena.alloc_str(&req.body);
+        process(data)
+    });
+
+    reset_arena(); // Free all at once
+}
+```
+
+### Object Pools
+
+Reuse frequently allocated objects:
+
+```rust
+use crossbeam::queue::ArrayQueue;
+
+pub struct Pool<T> {
+    objects: ArrayQueue<T>,
+    factory: fn() -> T,
+}
+
+impl<T> Pool<T> {
+    pub fn get(&self) -> PoolGuard<T> {
+        let obj = self.objects.pop().unwrap_or_else(|| (self.factory)());
+        PoolGuard { pool: self, obj: Some(obj) }
+    }
+}
+```
+
+### Bounded Collections
+
+Always bound caches to prevent memory leaks:
+
+```rust
+use lru::LruCache;
+use std::num::NonZeroUsize;
+
+// Good - bounded cache
+let cache: LruCache<Key, Value> = LruCache::new(NonZeroUsize::new(10_000).unwrap());
+
+// Bad - unbounded, can grow forever
+let cache: HashMap<Key, Value> = HashMap::new();
+```
+
+## Avoiding Allocations
+
+```rust
+// Prefer &str over String in function parameters
+fn process(data: &str) { }  // Good
+fn process(data: String) { } // Allocates
+
+// Use Cow for conditional ownership
+use std::borrow::Cow;
+fn normalize(s: &str) -> Cow<str> {
+    if needs_change(s) {
+        Cow::Owned(transform(s))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+// Use SmallVec for typically-small collections
+use smallvec::SmallVec;
+let items: SmallVec<[Item; 8]> = SmallVec::new();
+```
+
+## Async Optimization
+
+```rust
+// Use tokio::join! for concurrent independent operations
+let (users, posts) = tokio::join!(
+    fetch_users(),
+    fetch_posts()
+);
+
+// Buffer streams for batching
+use futures::StreamExt;
+stream.chunks(100).for_each_concurrent(4, |batch| async {
+    process_batch(batch).await;
+});
+```
+
+## Memory Profiling
+
+Run memory profiling with DHAT:
+
+```bash
+./scripts/memory-profile.sh dhat 30
+```
+
+Check for leaks with Valgrind:
+
+```bash
+./scripts/memory-profile.sh valgrind 30
+```
+
+## Build Profiles
+
+```toml
+# Fast compilation for development
+[profile.dev]
+opt-level = 0
+
+# Maximum optimization for release
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+
+# Maximum optimization, slower compile
+[profile.release-fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+```
+
+## Profiling Commands
+
+```bash
+# CPU flamegraph
+cargo flamegraph --release --example server
+
+# Memory profiling
+cargo run --example memory_profile_server --features memory-profiling
+
+# Benchmarks
+cargo bench --bench <name>
+
+# HTTP load testing
+oha -n 10000 -c 100 http://localhost:3000/
+```
+
+## Checklist
+
+- [ ] Use `black_box()` in benchmarks
+- [ ] Bound all caches with LRU or similar
+- [ ] Profile before optimizing
+- [ ] Use arena allocation for request data
+- [ ] Prefer `&str` over `String` parameters
+- [ ] Use `tokio::join!` for concurrent I/O

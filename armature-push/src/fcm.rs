@@ -119,10 +119,10 @@ impl FcmProvider {
         // Check if we have a valid token
         {
             let token = self.access_token.read().unwrap();
-            if let Some(t) = token.as_ref()
-                && t.expires_at > Instant::now() + Duration::from_secs(60)
-            {
-                return Ok(t.token.clone());
+            if let Some(t) = token.as_ref() {
+                if t.expires_at > Instant::now() + Duration::from_secs(60) {
+                    return Ok(t.token.clone());
+                }
             }
         }
 

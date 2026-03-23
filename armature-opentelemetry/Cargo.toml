@@ -1,6 +1,6 @@
 [package]
 name = "armature-opentelemetry"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["opentelemetry", "tracing", "metrics", "observability"]
 categories = ["development-tools::profiling", "web-programming"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # OpenTelemetry core (all versions must match)
 opentelemetry = "0.31"

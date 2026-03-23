@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod decorators;
+pub mod federation;
 pub mod resolver;
 pub mod schema_builder;
 pub mod schema_docs;

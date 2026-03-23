@@ -69,10 +69,10 @@ fn find_routes(dir: &str) -> Result<Vec<RouteInfo>, CliError> {
     ];
 
     for path in paths_to_search {
-        if Path::new(&path).exists()
-            && let Ok(content) = fs::read_to_string(&path)
-        {
-            routes.extend(parse_routes(&content));
+        if Path::new(&path).exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                routes.extend(parse_routes(&content));
+            }
         }
     }
 
@@ -98,11 +98,10 @@ fn parse_routes(content: &str) -> Vec<RouteInfo> {
         let line = line.trim();
 
         // Match route decorators like #[get("/path")]
-        if line.starts_with("#[")
-            && line.contains("(\"")
-            && let Some(route) = parse_route_decorator(line)
-        {
-            routes.push(route);
+        if line.starts_with("#[") && line.contains("(\"") {
+            if let Some(route) = parse_route_decorator(line) {
+                routes.push(route);
+            }
         }
     }
 
@@ -115,18 +114,19 @@ fn parse_route_decorator(line: &str) -> Option<RouteInfo> {
 
     for method in methods {
         let pattern = format!("#[{}(\"", method);
-        if line.contains(&pattern)
-            && let Some(start) = line.find("(\"")
-            && let Some(end) = line[start..].find("\")")
-        {
-            let path = &line[start + 2..start + end];
-            return Some(RouteInfo {
-                method: method.to_uppercase(),
-                path: path.to_string(),
-                handler: "handler".to_string(),
-                middleware: Vec::new(),
-                guards: Vec::new(),
-            });
+        if line.contains(&pattern) {
+            if let Some(start) = line.find("(\"") {
+                if let Some(end) = line[start..].find("\")") {
+                    let path = &line[start + 2..start + end];
+                    return Some(RouteInfo {
+                        method: method.to_uppercase(),
+                        path: path.to_string(),
+                        handler: "handler".to_string(),
+                        middleware: Vec::new(),
+                        guards: Vec::new(),
+                    });
+                }
+            }
         }
     }
 

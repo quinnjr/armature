@@ -238,25 +238,26 @@ impl I18n {
         let messages = self.messages.read();
 
         // Try exact locale
-        if let Some(bundle) = messages.get_bundle(locale)
-            && let Some(msg) = bundle.get(key)
-        {
-            return msg.to_string();
+        if let Some(bundle) = messages.get_bundle(locale) {
+            if let Some(msg) = bundle.get(key) {
+                return msg.to_string();
+            }
         }
 
         // Try fallback locale
-        if let Some(ref fallback) = self.fallback_locale
-            && let Some(bundle) = messages.get_bundle(fallback)
-            && let Some(msg) = bundle.get(key)
-        {
-            return msg.to_string();
+        if let Some(ref fallback) = self.fallback_locale {
+            if let Some(bundle) = messages.get_bundle(fallback) {
+                if let Some(msg) = bundle.get(key) {
+                    return msg.to_string();
+                }
+            }
         }
 
         // Try default locale
-        if let Some(bundle) = messages.get_bundle(&self.default_locale)
-            && let Some(msg) = bundle.get(key)
-        {
-            return msg.to_string();
+        if let Some(bundle) = messages.get_bundle(&self.default_locale) {
+            if let Some(msg) = bundle.get(key) {
+                return msg.to_string();
+            }
         }
 
         // Return key as fallback

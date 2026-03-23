@@ -77,17 +77,17 @@ impl Parse for CatchArgs {
                         let key = ident.to_string();
                         match key.as_str() {
                             "priority" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value
-                                    && let Lit::Int(lit_int) = &expr_lit.lit
-                                {
-                                    priority = Some(lit_int.base10_parse()?);
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Int(lit_int) = &expr_lit.lit {
+                                        priority = Some(lit_int.base10_parse()?);
+                                    }
                                 }
                             }
                             "name" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value
-                                    && let Lit::Str(lit_str) = &expr_lit.lit
-                                {
-                                    name = Some(lit_str.value());
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Str(lit_str) = &expr_lit.lit {
+                                        name = Some(lit_str.value());
+                                    }
                                 }
                             }
                             _ => {}

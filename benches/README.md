@@ -5,7 +5,7 @@ including comparisons with other popular Rust web frameworks.
 
 ## Overview
 
-The benchmark suite measures performance across **15 categories**:
+The benchmark suite measures performance across **16 categories**:
 
 ### Core Framework Benchmarks
 1. **Core Benchmarks** - HTTP request/response, routing, middleware, status codes
@@ -13,6 +13,7 @@ The benchmark suite measures performance across **15 categories**:
 3. **Validation Benchmarks** - Form validation, email, URL, patterns
 4. **Data Benchmarks** - Queue jobs, cron expressions
 5. **Framework Comparison** - Comparison with Actix-web, Axum, Warp, Rocket
+6. **Memory Benchmarks** - Allocation patterns, leak detection, object pools
 
 ### Infrastructure Benchmarks
 6. **Resilience Benchmarks** - Circuit breaker, retry, bulkhead, timeout, fallback
@@ -69,6 +70,9 @@ cargo bench --bench data_benchmarks
 
 # Framework comparison (micro-benchmarks)
 cargo bench --bench framework_comparison
+
+# Memory allocation patterns and leak detection
+cargo bench --bench memory_benchmarks
 
 # === Infrastructure Benchmarks ===
 # Resilience patterns (circuit breaker, retry, bulkhead)
@@ -268,6 +272,18 @@ open target/criterion/report/index.html
 - **DI** - Container operations, service resolution
 - **Handlers** - Async handler invocation patterns
 - **Full Cycle** - Complete request handling
+
+### Memory Benchmarks (`memory_benchmarks.rs`)
+
+- **String Allocations** - Small, medium, large strings, formatting, concatenation
+- **Vec Allocations** - With/without capacity, clone, nested vectors
+- **HashMap Allocations** - With/without capacity, string keys, clone
+- **Smart Pointers** - Box, Arc, Rc allocation and cloning
+- **Request/Response** - Simulated HTTP object allocation patterns
+- **Object Pool** - Pool vs direct allocation comparison
+- **Leak Patterns** - Bounded vs unbounded cache, weak references
+- **Allocation Sizes** - Various sizes from 64B to 64KB
+- **Drop Timing** - Deallocation performance for various structures
 
 ### Resilience Benchmarks (`resilience_benchmarks.rs`)
 
@@ -500,12 +516,36 @@ For detailed profiling:
 # CPU profiling with flamegraph
 cargo flamegraph --bench core_benchmarks
 
-# Memory profiling
-cargo bench --bench core_benchmarks -- --profile-time=10
+# Memory profiling with DHAT
+./scripts/memory-profile.sh dhat 30
+
+# Memory profiling with Valgrind
+./scripts/memory-profile.sh valgrind 30
+
+# Memory profiling with Heaptrack
+./scripts/memory-profile.sh heaptrack 30
 
 # Cachegrind
 valgrind --tool=cachegrind target/release/deps/core_benchmarks-*
 ```
+
+### Memory Leak Detection
+
+Use the memory profiling server for leak detection:
+
+```bash
+# Build with memory profiling
+cargo build --example memory_profile_server --release --features memory-profiling
+
+# Run and generate load
+./target/release/examples/memory_profile_server &
+curl http://localhost:3000/health  # Generate requests
+kill %1  # Generates DHAT report
+
+# View report at: https://nnethercote.github.io/dh_view/dh_view.html
+```
+
+See `docs/memory-profiling-guide.md` for comprehensive documentation.
 
 ## Troubleshooting
 

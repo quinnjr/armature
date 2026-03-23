@@ -135,12 +135,12 @@ fn validate_toml(content: &str, errors: &mut Vec<String>, warnings: &mut Vec<Str
                 }
 
                 // Check for database config
-                if table.contains_key("database")
-                    && let Some(db) = table.get("database").and_then(|v| v.as_table())
-                    && !db.contains_key("url")
-                    && !db.contains_key("host")
-                {
-                    warnings.push("Database config missing 'url' or 'host'".to_string());
+                if table.contains_key("database") {
+                    if let Some(db) = table.get("database").and_then(|v| v.as_table()) {
+                        if !db.contains_key("url") && !db.contains_key("host") {
+                            warnings.push("Database config missing 'url' or 'host'".to_string());
+                        }
+                    }
                 }
             }
         }

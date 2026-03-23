@@ -67,6 +67,9 @@ pub mod nats;
 #[cfg(feature = "aws")]
 pub mod aws;
 
+#[cfg(feature = "mq-bridge")]
+pub mod mq_bridge;
+
 pub use config::*;
 pub use error::*;
 

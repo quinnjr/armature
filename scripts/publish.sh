@@ -554,8 +554,8 @@ get_crate_version() {
         return
     fi
 
-    # Check for workspace version
-    if grep -q 'version.workspace\s*=\s*true' "$cargo_toml"; then
+    # Check for workspace version (must be exactly "version.workspace", not "rust-version.workspace")
+    if grep -qE '^version\.workspace\s*=\s*true' "$cargo_toml"; then
         # Get version from root Cargo.toml
         grep -E '^version\s*=' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/'
     else

@@ -1,0 +1,52 @@
+# Armature Worker Service Dockerfile
+# Background job processing service
+
+# Build stage
+FROM rust:1.83-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+COPY Cargo.toml Cargo.lock ./
+COPY armature-core/Cargo.toml armature-core/
+COPY armature-proc-macro/Cargo.toml armature-proc-macro/
+COPY armature-log/Cargo.toml armature-log/
+COPY armature-queue/Cargo.toml armature-queue/
+
+# Stub files for dependency caching
+RUN mkdir -p armature-core/src armature-proc-macro/src armature-log/src armature-queue/src && \
+    echo "fn main() {}" > armature-core/src/lib.rs && \
+    echo "fn main() {}" > armature-proc-macro/src/lib.rs && \
+    echo "fn main() {}" > armature-log/src/lib.rs && \
+    echo "fn main() {}" > armature-queue/src/lib.rs
+
+RUN cargo build --release 2>/dev/null || true
+
+COPY . .
+
+# Build worker (use actual worker binary)
+RUN cargo build --release --example cqrs_example && \
+    strip /app/target/release/examples/cqrs_example
+
+# Runtime stage
+FROM alpine:3.19
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 1000 armature
+
+COPY --from=builder /app/target/release/examples/cqrs_example /app/worker
+
+USER armature
+
+# Workers don't need to expose ports
+# EXPOSE 3000
+
+# No HTTP health check for workers - rely on process health
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
+    CMD ps aux | grep worker || exit 1
+
+ENTRYPOINT ["/app/worker"]
+

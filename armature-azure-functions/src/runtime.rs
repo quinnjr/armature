@@ -83,16 +83,16 @@ where
         let mut request = request;
 
         // Strip base path if configured
-        if let Some(base_path) = &self.config.function.base_path
-            && request.path.starts_with(base_path)
-        {
-            request.path = request
-                .path
-                .strip_prefix(base_path)
-                .unwrap_or(&request.path)
-                .to_string();
-            if request.path.is_empty() {
-                request.path = "/".to_string();
+        if let Some(base_path) = &self.config.function.base_path {
+            if request.path.starts_with(base_path) {
+                request.path = request
+                    .path
+                    .strip_prefix(base_path)
+                    .unwrap_or(&request.path)
+                    .to_string();
+                if request.path.is_empty() {
+                    request.path = "/".to_string();
+                }
             }
         }
 

@@ -1,0 +1,226 @@
+---
+description: Real-time communication with WebSockets and Server-Sent Events
+globs: armature-websocket/**/*.rs, armature-sse/**/*.rs, "**/realtime/**/*.rs"
+alwaysApply: false
+---
+
+# WebSocket & SSE
+
+Guidelines for real-time communication in Armature.
+
+## WebSocket Handler
+
+```rust
+use armature_websocket::{WebSocket, Message};
+
+#[controller("/ws")]
+pub struct WebSocketController {
+    connections: Arc<ConnectionManager>,
+}
+
+#[get("/chat")]
+async fn chat(&self, ws: WebSocket, user: AuthUser) -> Result<(), Error> {
+    let (tx, mut rx) = ws.split();
+
+    // Register connection
+    self.connections.add(user.id, tx.clone()).await;
+
+    // Handle incoming messages
+    while let Some(msg) = rx.next().await {
+        match msg? {
+            Message::Text(text) => {
+                self.handle_message(&user, &text).await?;
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // Cleanup
+    self.connections.remove(user.id).await;
+    Ok(())
+}
+```
+
+## Connection Manager
+
+```rust
+pub struct ConnectionManager {
+    connections: DashMap<UserId, Sender<Message>>,
+}
+
+impl ConnectionManager {
+    pub async fn broadcast(&self, message: &str) {
+        for entry in self.connections.iter() {
+            let _ = entry.value().send(Message::Text(message.into())).await;
+        }
+    }
+
+    pub async fn send_to(&self, user_id: UserId, message: &str) -> Result<(), Error> {
+        if let Some(tx) = self.connections.get(&user_id) {
+            tx.send(Message::Text(message.into())).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_to_room(&self, room: &str, message: &str) {
+        // Implement room-based routing
+    }
+}
+```
+
+## Message Protocol
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClientMessage {
+    #[serde(rename = "join")]
+    Join { room: String },
+
+    #[serde(rename = "leave")]
+    Leave { room: String },
+
+    #[serde(rename = "message")]
+    Message { room: String, content: String },
+
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServerMessage {
+    #[serde(rename = "joined")]
+    Joined { room: String, users: Vec<String> },
+
+    #[serde(rename = "message")]
+    Message { from: String, content: String, timestamp: i64 },
+
+    #[serde(rename = "error")]
+    Error { code: String, message: String },
+
+    #[serde(rename = "pong")]
+    Pong,
+}
+```
+
+## Server-Sent Events
+
+```rust
+use armature_sse::{Sse, Event};
+
+#[controller("/events")]
+pub struct EventsController {
+    events: Arc<EventBroadcaster>,
+}
+
+#[get("/stream")]
+async fn stream(&self, user: AuthUser) -> Sse<impl Stream<Item = Event>> {
+    let rx = self.events.subscribe(user.id);
+
+    let stream = rx.map(|event| {
+        Event::default()
+            .event(&event.event_type)
+            .data(&event.data)
+            .id(&event.id)
+    });
+
+    Sse::new(stream)
+        .keep_alive(Duration::from_secs(30))
+}
+```
+
+## Event Broadcasting
+
+```rust
+pub struct EventBroadcaster {
+    sender: broadcast::Sender<ServerEvent>,
+}
+
+impl EventBroadcaster {
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity);
+        Self { sender }
+    }
+
+    pub fn subscribe(&self, _user_id: UserId) -> broadcast::Receiver<ServerEvent> {
+        self.sender.subscribe()
+    }
+
+    pub fn broadcast(&self, event: ServerEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+```
+
+## Heartbeat / Keep-Alive
+
+```rust
+async fn handle_connection(ws: WebSocket) {
+    let (tx, mut rx) = ws.split();
+
+    // Spawn heartbeat task
+    let heartbeat = tokio::spawn({
+        let tx = tx.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if tx.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Handle messages...
+
+    heartbeat.abort();
+}
+```
+
+## Scaling with Redis Pub/Sub
+
+```rust
+use redis::AsyncCommands;
+
+pub struct RedisEventBroadcaster {
+    redis: ConnectionManager,
+    channel: String,
+}
+
+impl RedisEventBroadcaster {
+    pub async fn publish(&self, event: &ServerEvent) -> Result<(), Error> {
+        let payload = serde_json::to_string(event)?;
+        self.redis.publish(&self.channel, payload).await?;
+        Ok(())
+    }
+
+    pub async fn subscribe(&self) -> impl Stream<Item = ServerEvent> {
+        let mut pubsub = self.redis.get_async_pubsub().await.unwrap();
+        pubsub.subscribe(&self.channel).await.unwrap();
+
+        pubsub.into_on_message().filter_map(|msg| async {
+            let payload: String = msg.get_payload().ok()?;
+            serde_json::from_str(&payload).ok()
+        })
+    }
+}
+```
+
+## Error Handling
+
+```rust
+async fn handle_message(msg: Result<Message, Error>) -> ControlFlow<(), Message> {
+    match msg {
+        Ok(Message::Text(text)) => ControlFlow::Continue(Message::Text(text)),
+        Ok(Message::Close(_)) => ControlFlow::Break(()),
+        Err(e) => {
+            tracing::error!(?e, "WebSocket error");
+            ControlFlow::Break(())
+        }
+        _ => ControlFlow::Continue(Message::Ping(vec![])),
+    }
+}
+```

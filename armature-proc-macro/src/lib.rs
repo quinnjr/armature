@@ -7,6 +7,7 @@ mod body_limit_attr;
 mod cache_attr;
 mod controller;
 mod injectable;
+mod mcp;
 mod module;
 mod params;
 mod route_validation;
@@ -60,6 +61,62 @@ pub fn delete(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn patch(attr: TokenStream, item: TokenStream) -> TokenStream {
     routes::route_impl(attr, item, "PATCH")
+}
+
+/// HTTP OPTIONS route decorator
+///
+/// Used for handling CORS preflight requests or other OPTIONS method calls.
+/// Note: For automatic CORS handling, consider using the CORS middleware instead.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::{controller, routes, options};
+///
+/// #[controller("/api")]
+/// struct ApiController;
+///
+/// #[routes]
+/// impl ApiController {
+///     #[options("/resource")]
+///     async fn resource_options() -> Result<HttpResponse, Error> {
+///         Ok(HttpResponse::no_content()
+///             .with_header("Allow", "GET, POST, OPTIONS"))
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn options(attr: TokenStream, item: TokenStream) -> TokenStream {
+    routes::route_impl(attr, item, "OPTIONS")
+}
+
+/// HTTP HEAD route decorator
+///
+/// HEAD requests are identical to GET requests but without the response body.
+/// Useful for checking resource existence or metadata without transferring data.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::{controller, routes, head};
+///
+/// #[controller("/api")]
+/// struct ApiController;
+///
+/// #[routes]
+/// impl ApiController {
+///     #[head("/resource/:id")]
+///     async fn check_resource(req: HttpRequest) -> Result<HttpResponse, Error> {
+///         let id = req.param("id")?;
+///         // Check if resource exists
+///         Ok(HttpResponse::ok()
+///             .with_header("X-Resource-Exists", "true"))
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn head(attr: TokenStream, item: TokenStream) -> TokenStream {
+    routes::route_impl(attr, item, "HEAD")
 }
 
 /// Routes impl block decorator
@@ -249,4 +306,78 @@ pub fn body_limit(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn cache(attr: TokenStream, item: TokenStream) -> TokenStream {
     cache_attr::cache_impl(attr, item)
+}
+
+/// MCP tool decorator
+///
+/// Marks an async function as an MCP (Model Context Protocol) tool that can be
+/// discovered and invoked by AI clients like Cursor and Claude.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::mcp;
+/// use armature_mcp::ToolCallResult;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct WeatherInput {
+///     location: String,
+/// }
+///
+/// #[mcp(name = "get_weather", description = "Get current weather for a location")]
+/// async fn get_weather(input: WeatherInput) -> ToolCallResult {
+///     let weather = fetch_weather(&input.location).await;
+///     ToolCallResult::text(format!("Weather in {}: {}", input.location, weather))
+/// }
+/// ```
+///
+/// # Attributes
+///
+/// - `name` - Tool name (defaults to function name)
+/// - `description` - Human-readable description
+/// - `owner` - Owner type for grouping (auto-generated if not specified)
+///
+/// # Requirements
+///
+/// - Function must be async
+/// - Function should return `ToolCallResult` or implement `Into<ToolCallResult>`
+/// - Input parameter should implement `Deserialize`
+#[proc_macro_attribute]
+pub fn mcp(attr: TokenStream, item: TokenStream) -> TokenStream {
+    mcp::mcp_impl(attr, item)
+}
+
+/// MCP resource decorator
+///
+/// Marks an async function as an MCP resource that exposes data to AI clients.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature::mcp_resource;
+/// use armature_mcp::ResourceContent;
+///
+/// #[mcp_resource(
+///     uri = "config://app/settings",
+///     name = "App Settings",
+///     description = "Application configuration",
+///     mime_type = "application/json"
+/// )]
+/// async fn get_settings() -> ResourceContent {
+///     let settings = load_settings().await;
+///     ResourceContent::json("config://app/settings", serde_json::to_string(&settings).unwrap())
+/// }
+/// ```
+///
+/// # Attributes
+///
+/// - `uri` - Resource URI (required)
+/// - `name` - Human-readable name (defaults to function name)
+/// - `description` - Optional description
+/// - `mime_type` - MIME type of the resource
+/// - `owner` - Owner type for grouping
+#[proc_macro_attribute]
+pub fn mcp_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    mcp::mcp_resource_impl(attr, item)
 }

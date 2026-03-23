@@ -149,6 +149,11 @@ impl IntoHttpResponse for HttpResponse {
                     headers.insert(name, value);
                 }
             }
+            for cookie_value in &self.cookies {
+                if let Ok(value) = HeaderValue::try_from(cookie_value.as_str()) {
+                    headers.append(HeaderName::from_static("set-cookie"), value);
+                }
+            }
         }
 
         builder

@@ -278,10 +278,10 @@ where
                         if worker_start.elapsed() >= duration {
                             break;
                         }
-                    } else if let Some(max_requests) = requests_per_worker
-                        && request_count >= max_requests
-                    {
-                        break;
+                    } else if let Some(max_requests) = requests_per_worker {
+                        if request_count >= max_requests {
+                            break;
+                        }
                     }
 
                     // Execute test function

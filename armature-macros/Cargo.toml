@@ -1,6 +1,6 @@
 [package]
 name = "armature-macros"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,6 +12,6 @@ keywords = ["macros", "framework", "web"]
 categories = ["web-programming", "development-tools::procedural-macro-helpers"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 serde_json = "1.0"
 

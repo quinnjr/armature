@@ -76,12 +76,12 @@ impl CompressionMiddleware {
         }
 
         // Check if already encoded
-        if !self.config.compress_encoded
-            && let Some(encoding) = response.headers.get("Content-Encoding")
-            && !encoding.is_empty()
-            && encoding != "identity"
-        {
-            return false;
+        if !self.config.compress_encoded {
+            if let Some(encoding) = response.headers.get("Content-Encoding") {
+                if !encoding.is_empty() && encoding != "identity" {
+                    return false;
+                }
+            }
         }
 
         // Check content type

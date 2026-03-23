@@ -32,8 +32,9 @@ use crate::buffer_pool::{BufferSize, PooledBuffer, acquire_buffer};
 #[cfg(feature = "simd-json")]
 use crate::json::Json;
 use bytes::Bytes;
+use lru::LruCache;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -282,21 +283,23 @@ pub struct SizeTracker {
     recent_sizes: Vec<usize>,
     /// Current index in ring buffer
     index: usize,
-    /// Size by type name
-    type_sizes: HashMap<String, TypeSizeInfo>,
+    /// Size by type name (bounded LRU cache to prevent unbounded growth)
+    type_sizes: LruCache<String, TypeSizeInfo>,
     /// Total serializations
     total_count: u64,
 }
 
 impl SizeTracker {
     const HISTORY_SIZE: usize = 64;
+    /// Maximum number of type entries to track (prevents unbounded growth)
+    const MAX_TYPE_ENTRIES: usize = 256;
 
     /// Create new tracker.
     pub fn new() -> Self {
         Self {
             recent_sizes: Vec::with_capacity(Self::HISTORY_SIZE),
             index: 0,
-            type_sizes: HashMap::new(),
+            type_sizes: LruCache::new(NonZeroUsize::new(Self::MAX_TYPE_ENTRIES).unwrap()),
             total_count: 0,
         }
     }
@@ -316,10 +319,10 @@ impl SizeTracker {
     pub fn record_size_for_type(&mut self, type_name: &str, size: usize) {
         self.record_size(size);
 
+        // LruCache handles bounded eviction automatically when capacity exceeded
         let info = self
             .type_sizes
-            .entry(type_name.to_string())
-            .or_insert_with(TypeSizeInfo::new);
+            .get_or_insert_mut(type_name.to_string(), TypeSizeInfo::new);
 
         info.record(size);
     }
@@ -342,7 +345,7 @@ impl SizeTracker {
     /// Get recommended size for a specific type.
     pub fn recommended_size_for_type(&self, type_name: &str) -> Option<SerializationSize> {
         self.type_sizes
-            .get(type_name)
+            .peek(type_name)
             .map(|info| SerializationSize::estimate_from_hint(info.p90_size()))
     }
 
@@ -420,11 +423,10 @@ impl TypeSizeInfo {
 
     /// Get average size.
     pub fn average(&self) -> usize {
-        if self.count == 0 {
-            0
-        } else {
-            (self.sum / self.count) as usize
-        }
+        self.sum
+            .checked_div(self.count)
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 
     /// Get minimum size.
@@ -585,12 +587,10 @@ impl SerializationStats {
 
     /// Get average serialization size.
     pub fn average_size(&self) -> usize {
-        let count = self.serializations();
-        if count == 0 {
-            0
-        } else {
-            (self.bytes_serialized() / count) as usize
-        }
+        self.bytes_serialized()
+            .checked_div(self.serializations())
+            .map(|v| v as usize)
+            .unwrap_or(0)
     }
 }
 

@@ -74,10 +74,10 @@ impl ValidationBuilder {
         let mut all_errors = Vec::new();
 
         for rule in &self.rules {
-            if let Some(value) = data.get(&rule.field)
-                && let Err(mut errors) = rule.validate(value)
-            {
-                all_errors.append(&mut errors);
+            if let Some(value) = data.get(&rule.field) {
+                if let Err(mut errors) = rule.validate(value) {
+                    all_errors.append(&mut errors);
+                }
             }
         }
 

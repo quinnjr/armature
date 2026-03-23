@@ -293,10 +293,10 @@ impl CorsConfig {
         }
 
         // Check exact match
-        if let Some(ref origins) = self.allowed_origins
-            && origins.contains(origin)
-        {
-            return true;
+        if let Some(ref origins) = self.allowed_origins {
+            if origins.contains(origin) {
+                return true;
+            }
         }
 
         // Check regex patterns
@@ -347,17 +347,17 @@ impl CorsConfig {
         self.add_cors_headers(&mut response, origin);
 
         // Add preflight-specific headers
-        if let Some(method) = request.headers.get("access-control-request-method")
-            && self.is_method_allowed(method)
-        {
-            response.headers.insert(
-                "Access-Control-Allow-Methods".to_string(),
-                self.allowed_methods
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
+        if let Some(method) = request.headers.get("access-control-request-method") {
+            if self.is_method_allowed(method) {
+                response.headers.insert(
+                    "Access-Control-Allow-Methods".to_string(),
+                    self.allowed_methods
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
         }
 
         if let Some(headers) = request.headers.get("access-control-request-headers") {

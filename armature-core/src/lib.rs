@@ -150,6 +150,8 @@ pub mod headers;
 pub mod health;
 pub mod hmr;
 pub mod http;
+pub mod http2;
+pub mod http3;
 pub mod interceptor;
 pub mod io_uring;
 pub mod json;
@@ -193,6 +195,11 @@ pub mod worker;
 pub mod write_coalesce;
 pub mod zero_cost;
 
+/// Micro-framework API for lightweight applications
+///
+/// Provides an Actix-style API without the full module/controller system.
+pub mod micro;
+
 // Re-export commonly used types
 pub use application::*;
 pub use body_limits::*;
@@ -216,6 +223,8 @@ pub use headers::{Header as HeaderEntry, HeaderMap, INLINE_HEADERS};
 pub use health::*;
 pub use hmr::*;
 pub use http::*;
+pub use http2::*;
+pub use http3::*;
 pub use interceptor::*;
 pub use lifecycle::*;
 pub use logging::*;

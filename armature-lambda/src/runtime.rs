@@ -114,16 +114,16 @@ async fn handle_request<App: RequestHandler>(
     let mut lambda_request = LambdaRequest::from_lambda_request(request);
 
     // Strip base path if configured
-    if let Some(base_path) = &config.base_path
-        && lambda_request.path.starts_with(base_path)
-    {
-        lambda_request.path = lambda_request
-            .path
-            .strip_prefix(base_path)
-            .unwrap_or(&lambda_request.path)
-            .to_string();
-        if lambda_request.path.is_empty() {
-            lambda_request.path = "/".to_string();
+    if let Some(base_path) = &config.base_path {
+        if lambda_request.path.starts_with(base_path) {
+            lambda_request.path = lambda_request
+                .path
+                .strip_prefix(base_path)
+                .unwrap_or(&lambda_request.path)
+                .to_string();
+            if lambda_request.path.is_empty() {
+                lambda_request.path = "/".to_string();
+            }
         }
     }
 

@@ -1,0 +1,171 @@
+---
+description: Security and authentication standards for Armature applications
+globs: armature-auth/**/*.rs, armature-oauth2/**/*.rs, armature-saml/**/*.rs, **/auth/**/*.rs
+alwaysApply: false
+---
+
+# Security & Authentication
+
+Security standards for authentication, authorization, and secure coding.
+
+## Password Hashing
+
+Use Argon2id (preferred) or bcrypt:
+
+```rust
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::{SaltString, rand_core::OsRng};
+
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+
+    Ok(argon2
+        .hash_password(password.as_bytes(), &salt)?
+        .to_string())
+}
+
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
+    let parsed_hash = PasswordHash::new(hash)?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+```
+
+## JWT Configuration
+
+```rust
+// Use RS256 for production, HS256 only for development
+pub struct JwtConfig {
+    pub algorithm: Algorithm,      // RS256 preferred
+    pub access_ttl: Duration,      // 15 minutes max
+    pub refresh_ttl: Duration,     // 7 days max
+    pub issuer: String,
+    pub audience: Vec<String>,
+}
+
+// Always validate claims
+fn validate_token(token: &str) -> Result<Claims, AuthError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&["my-app"]);
+    validation.set_issuer(&["my-issuer"]);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+
+    decode::<Claims>(token, &key, &validation)
+}
+```
+
+## OAuth2 / PKCE
+
+Always use PKCE for public clients:
+
+```rust
+use pkce::{CodeChallenge, CodeVerifier};
+
+let verifier = CodeVerifier::new();
+let challenge = CodeChallenge::from_verifier(&verifier);
+
+// Store verifier in session, send challenge to authorization server
+```
+
+## Authorization Guards
+
+```rust
+#[injectable]
+pub struct RoleGuard {
+    required_roles: Vec<String>,
+}
+
+impl Guard for RoleGuard {
+    async fn can_activate(&self, ctx: &RequestContext) -> Result<bool, GuardError> {
+        let user = ctx.get::<AuthenticatedUser>()?;
+
+        let has_role = self.required_roles
+            .iter()
+            .any(|role| user.roles.contains(role));
+
+        if !has_role {
+            // Log authorization failure
+            tracing::warn!(
+                user_id = %user.id,
+                required = ?self.required_roles,
+                "Authorization denied"
+            );
+        }
+
+        Ok(has_role)
+    }
+}
+```
+
+## Input Validation
+
+```rust
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct LoginRequest {
+    #[validate(email)]
+    pub email: String,
+
+    #[validate(length(min = 8, max = 128))]
+    pub password: String,
+}
+
+// Always validate before processing
+async fn login(req: Json<LoginRequest>) -> Result<Response, Error> {
+    req.validate()?;
+    // ...
+}
+```
+
+## Security Headers
+
+```rust
+fn security_headers() -> impl Middleware {
+    SecurityHeaders::new()
+        .content_security_policy("default-src 'self'")
+        .strict_transport_security(Duration::days(365), true)
+        .x_frame_options(XFrameOptions::Deny)
+        .x_content_type_options(XContentTypeOptions::NoSniff)
+        .referrer_policy(ReferrerPolicy::StrictOriginWhenCrossOrigin)
+}
+```
+
+## Cookie Security
+
+```rust
+Cookie::build("session", token)
+    .http_only(true)      // Prevent XSS access
+    .secure(true)         // HTTPS only
+    .same_site(SameSite::Strict)
+    .max_age(Duration::hours(1))
+    .path("/")
+    .finish()
+```
+
+## Secrets Management
+
+```rust
+// Never log sensitive data
+tracing::info!(user_id = %user.id, "Login successful");
+// NOT: tracing::info!(password = %password, "Login attempt");
+
+// Use constant-time comparison for secrets
+use subtle::ConstantTimeEq;
+secret1.as_bytes().ct_eq(secret2.as_bytes()).into()
+```
+
+## Checklist
+
+- [ ] Use Argon2id for password hashing
+- [ ] JWT access tokens ≤ 15 minutes
+- [ ] RS256 algorithm in production
+- [ ] PKCE for OAuth2 public clients
+- [ ] Validate all user input
+- [ ] Set security headers
+- [ ] HttpOnly + Secure cookies
+- [ ] Never log sensitive data
+- [ ] Run `cargo audit` regularly

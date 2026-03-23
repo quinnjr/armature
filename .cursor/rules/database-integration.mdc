@@ -1,0 +1,215 @@
+---
+description: Database integration patterns for Armature applications
+globs: "**/repositories/**/*.rs, **/models/**/*.rs, **/migrations/**/*.rs"
+alwaysApply: false
+---
+
+# Database Integration
+
+Guidelines for database integration with Diesel or SeaORM.
+
+## Connection Pooling
+
+```rust
+use diesel::r2d2::{ConnectionManager, Pool};
+use diesel::PgConnection;
+
+pub type DbPool = Pool<ConnectionManager<PgConnection>>;
+
+pub fn create_pool(database_url: &str) -> DbPool {
+    let manager = ConnectionManager::<PgConnection>::new(database_url);
+    Pool::builder()
+        .max_size(10)
+        .min_idle(Some(2))
+        .connection_timeout(Duration::from_secs(5))
+        .build(manager)
+        .expect("Failed to create pool")
+}
+```
+
+## Repository Pattern
+
+```rust
+#[injectable]
+pub struct UserRepository {
+    pool: Arc<DbPool>,
+}
+
+impl UserRepository {
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, DbError> {
+        let conn = self.pool.get()?;
+
+        users::table
+            .find(id)
+            .first(&conn)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub async fn create(&self, new_user: NewUser) -> Result<User, DbError> {
+        let conn = self.pool.get()?;
+
+        diesel::insert_into(users::table)
+            .values(&new_user)
+            .get_result(&conn)
+            .map_err(Into::into)
+    }
+}
+```
+
+## Transactions
+
+```rust
+pub async fn transfer_funds(
+    &self,
+    from: Uuid,
+    to: Uuid,
+    amount: Decimal,
+) -> Result<(), DbError> {
+    let conn = self.pool.get()?;
+
+    conn.transaction(|conn| {
+        // Debit source account
+        diesel::update(accounts::table.find(from))
+            .set(accounts::balance.eq(accounts::balance - amount))
+            .execute(conn)?;
+
+        // Credit destination account
+        diesel::update(accounts::table.find(to))
+            .set(accounts::balance.eq(accounts::balance + amount))
+            .execute(conn)?;
+
+        Ok(())
+    })
+}
+```
+
+## Query Optimization
+
+```rust
+// Select only needed columns
+users::table
+    .select((users::id, users::name, users::email))
+    .load::<(Uuid, String, String)>(&conn)?;
+
+// Use joins instead of N+1 queries
+users::table
+    .inner_join(posts::table)
+    .filter(users::id.eq(user_id))
+    .select((users::all_columns, posts::all_columns))
+    .load::<(User, Post)>(&conn)?;
+
+// Paginate large result sets
+users::table
+    .order(users::created_at.desc())
+    .limit(20)
+    .offset(page * 20)
+    .load::<User>(&conn)?;
+```
+
+## Model Definitions
+
+```rust
+use diesel::prelude::*;
+
+#[derive(Queryable, Identifiable, Selectable)]
+#[diesel(table_name = users)]
+pub struct User {
+    pub id: Uuid,
+    pub name: String,
+    pub email: String,
+    pub password_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = users)]
+pub struct NewUser {
+    pub name: String,
+    pub email: String,
+    pub password_hash: String,
+}
+
+#[derive(AsChangeset)]
+#[diesel(table_name = users)]
+pub struct UpdateUser {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+```
+
+## Migrations
+
+```bash
+# Create migration
+diesel migration generate create_users
+
+# Run migrations
+diesel migration run
+
+# Revert last migration
+diesel migration revert
+```
+
+Migration file structure:
+
+```sql
+-- up.sql
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_email ON users(email);
+
+-- down.sql
+DROP TABLE users;
+```
+
+## Testing with Transactions
+
+```rust
+#[tokio::test]
+async fn test_user_creation() {
+    let pool = create_test_pool();
+    let conn = pool.get().unwrap();
+
+    // Wrap test in transaction that rolls back
+    conn.test_transaction(|conn| {
+        let repo = UserRepository::new(pool.clone());
+
+        let user = repo.create(NewUser {
+            name: "Test".into(),
+            email: "test@example.com".into(),
+            password_hash: "hash".into(),
+        })?;
+
+        assert_eq!(user.name, "Test");
+        Ok(())
+    });
+}
+```
+
+## Error Handling
+
+```rust
+#[derive(Error, Debug)]
+pub enum DbError {
+    #[error("Record not found")]
+    NotFound,
+
+    #[error("Duplicate key: {0}")]
+    Duplicate(String),
+
+    #[error("Connection error: {0}")]
+    Connection(#[from] r2d2::Error),
+
+    #[error("Query error: {0}")]
+    Query(#[from] diesel::result::Error),
+}
+```

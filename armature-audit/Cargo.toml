@@ -1,6 +1,6 @@
 [package]
 name = "armature-audit"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["audit", "logging", "compliance", "security"]
 categories = ["web-programming", "development-tools::debugging"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 tokio = { version = "1.35", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }

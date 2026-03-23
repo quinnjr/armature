@@ -1,0 +1,40 @@
+[package]
+name = "armature-admin"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Auto-generated CRUD admin dashboard for Armature framework"
+keywords = ["admin", "dashboard", "crud", "ui", "generator"]
+categories = ["web-programming", "gui"]
+
+[dependencies]
+armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-proc-macro = { path = "../armature-proc-macro", version = "0.1.0" }
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+thiserror = "2.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.0"
+parking_lot = "0.12"
+bytes = "1.5"
+
+# HTML templating
+askama = { version = "0.12", features = ["with-axum"] }
+
+# For form handling
+validator = { version = "0.19", features = ["derive"] }
+
+[features]
+default = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+

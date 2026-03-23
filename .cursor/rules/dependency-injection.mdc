@@ -1,0 +1,230 @@
+---
+description: Dependency injection patterns for Armature applications
+globs: armature-di/**/*.rs, "**/providers/**/*.rs, **/modules/**/*.rs"
+alwaysApply: false
+---
+
+# Dependency Injection
+
+Guidelines for using Armature's dependency injection system.
+
+## Injectable Services
+
+```rust
+use armature_di::injectable;
+
+#[injectable]
+pub struct UserService {
+    repository: Arc<dyn UserRepository>,
+    cache: Arc<dyn Cache>,
+}
+
+impl UserService {
+    pub fn new(
+        repository: Arc<dyn UserRepository>,
+        cache: Arc<dyn Cache>,
+    ) -> Self {
+        Self { repository, cache }
+    }
+
+    pub async fn get_user(&self, id: Uuid) -> Result<User, Error> {
+        // Check cache first
+        if let Some(user) = self.cache.get(&format!("user:{}", id)).await? {
+            return Ok(user);
+        }
+
+        // Fetch from repository
+        let user = self.repository.find_by_id(id).await?;
+
+        // Cache for future requests
+        self.cache.set(&format!("user:{}", id), &user, Duration::from_secs(300)).await?;
+
+        Ok(user)
+    }
+}
+```
+
+## Module Configuration
+
+```rust
+use armature_di::module;
+
+#[module]
+pub struct AppModule {
+    #[provider]
+    user_service: UserService,
+
+    #[provider]
+    post_service: PostService,
+
+    #[controller]
+    users_controller: UsersController,
+
+    #[controller]
+    posts_controller: PostsController,
+}
+
+impl AppModule {
+    pub fn new(config: &Config) -> Self {
+        // Configure module with dependencies
+    }
+}
+```
+
+## Provider Scopes
+
+```rust
+// Singleton - one instance for entire application
+#[injectable(scope = "singleton")]
+pub struct DatabasePool { }
+
+// Request - new instance per HTTP request
+#[injectable(scope = "request")]
+pub struct RequestContext { }
+
+// Transient - new instance every time (default)
+#[injectable]
+pub struct EmailSender { }
+```
+
+## Factory Providers
+
+```rust
+#[module]
+pub struct DatabaseModule;
+
+impl DatabaseModule {
+    #[provider]
+    fn provide_pool(config: &DatabaseConfig) -> DbPool {
+        create_pool(&config.url)
+    }
+
+    #[provider]
+    fn provide_user_repo(pool: Arc<DbPool>) -> Arc<dyn UserRepository> {
+        Arc::new(PgUserRepository::new(pool))
+    }
+}
+```
+
+## Interface Binding
+
+```rust
+// Define trait
+pub trait EmailSender: Send + Sync {
+    async fn send(&self, email: &Email) -> Result<(), Error>;
+}
+
+// Implement for production
+#[injectable(provides = "dyn EmailSender")]
+pub struct SmtpEmailSender {
+    config: SmtpConfig,
+}
+
+// Implement for testing
+pub struct MockEmailSender {
+    sent: Arc<Mutex<Vec<Email>>>,
+}
+
+// Register in module
+#[module]
+pub struct MailModule;
+
+impl MailModule {
+    #[provider]
+    fn provide_email_sender(config: &Config) -> Arc<dyn EmailSender> {
+        if config.is_test() {
+            Arc::new(MockEmailSender::new())
+        } else {
+            Arc::new(SmtpEmailSender::new(&config.smtp))
+        }
+    }
+}
+```
+
+## Resolving Dependencies
+
+```rust
+// In controllers - automatic injection
+#[controller("/users")]
+pub struct UsersController {
+    user_service: Arc<UserService>, // Automatically injected
+}
+
+// Manual resolution
+let user_service = container.resolve::<UserService>();
+let email_sender = container.resolve::<dyn EmailSender>();
+```
+
+## Lifecycle Hooks
+
+```rust
+#[injectable]
+pub struct CacheService {
+    client: RedisClient,
+}
+
+impl OnInit for CacheService {
+    async fn on_init(&self) -> Result<(), Error> {
+        // Run after construction
+        self.client.ping().await?;
+        tracing::info!("Cache service initialized");
+        Ok(())
+    }
+}
+
+impl OnDestroy for CacheService {
+    async fn on_destroy(&self) {
+        // Cleanup before shutdown
+        self.client.close().await;
+        tracing::info!("Cache service shutdown");
+    }
+}
+```
+
+## Testing with DI
+
+```rust
+#[tokio::test]
+async fn test_user_service() {
+    // Create test container with mocks
+    let container = Container::test()
+        .with::<dyn UserRepository>(Arc::new(MockUserRepository::new()))
+        .with::<dyn Cache>(Arc::new(MockCache::new()))
+        .build();
+
+    let service = container.resolve::<UserService>();
+
+    let result = service.get_user(Uuid::new_v4()).await;
+    assert!(result.is_ok());
+}
+```
+
+## Circular Dependency Prevention
+
+```rust
+// Bad - circular dependency
+#[injectable]
+pub struct ServiceA {
+    b: Arc<ServiceB>, // ServiceB also depends on ServiceA
+}
+
+// Good - use lazy resolution or events
+#[injectable]
+pub struct ServiceA {
+    container: Arc<Container>,
+}
+
+impl ServiceA {
+    fn get_b(&self) -> Arc<ServiceB> {
+        self.container.resolve::<ServiceB>()
+    }
+}
+```
+
+## Best Practices
+
+1. **Depend on abstractions** - Use `Arc<dyn Trait>` over concrete types
+2. **Constructor injection** - Prefer constructor over field injection
+3. **Small interfaces** - Keep traits focused (ISP)
+4. **Avoid service locator** - Don't pass Container everywhere
+5. **Test with mocks** - Use trait bounds for testability

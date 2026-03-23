@@ -114,10 +114,10 @@ impl<T: DatabaseTestHelper> TestFixture<T> {
         let result = test_fn().await;
 
         // Teardown (even if test failed)
-        if self.auto_cleanup
-            && let Err(e) = self.teardown().await
-        {
-            eprintln!("Warning: Teardown failed: {}", e);
+        if self.auto_cleanup {
+            if let Err(e) = self.teardown().await {
+                eprintln!("Warning: Teardown failed: {}", e);
+            }
         }
 
         result

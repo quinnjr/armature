@@ -1,0 +1,126 @@
+---
+description: Guidelines for creating new armature-* crates following framework conventions
+globs: armature-*/src/**/*.rs, armature-*/Cargo.toml
+alwaysApply: false
+---
+
+# Rust Module Creation
+
+When creating a new `armature-*` crate for the framework, follow these conventions.
+
+## Directory Structure
+
+```
+armature-<name>/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs          # Public API exports
+│   ├── config.rs       # Builder pattern configuration
+│   ├── error.rs        # thiserror-based error types
+│   └── <impl>.rs       # Implementation files
+└── tests/
+    └── integration.rs  # Integration tests
+```
+
+## Cargo.toml Template
+
+```toml
+[package]
+name = "armature-<name>"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Description of the module"
+
+[dependencies]
+armature-core = { path = "../armature-core", optional = true }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+di = ["armature-core"]
+```
+
+## Error Handling
+
+Use `thiserror` for all error types:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyModuleError {
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Connection failed: {0}")]
+    Connection(#[from] std::io::Error),
+}
+```
+
+## Configuration Builder Pattern
+
+```rust
+#[derive(Debug, Clone)]
+pub struct MyModuleConfig {
+    pub setting: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for MyModuleConfig {
+    fn default() -> Self {
+        Self {
+            setting: String::new(),
+            timeout_ms: 5000,
+        }
+    }
+}
+
+impl MyModuleConfig {
+    pub fn builder() -> MyModuleConfigBuilder {
+        MyModuleConfigBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct MyModuleConfigBuilder {
+    config: MyModuleConfig,
+}
+
+impl MyModuleConfigBuilder {
+    pub fn setting(mut self, value: impl Into<String>) -> Self {
+        self.config.setting = value.into();
+        self
+    }
+
+    pub fn build(self) -> MyModuleConfig {
+        self.config
+    }
+}
+```
+
+## Dependency Injection Integration
+
+When the `di` feature is enabled:
+
+```rust
+#[cfg(feature = "di")]
+use armature_core::injectable;
+
+#[cfg_attr(feature = "di", injectable)]
+pub struct MyService {
+    config: MyModuleConfig,
+}
+```
+
+## Checklist
+
+- [ ] Add crate to workspace members in root `Cargo.toml`
+- [ ] Implement `Default` for config structs
+- [ ] Use `thiserror` for error types
+- [ ] Add `#[injectable]` when `di` feature is enabled
+- [ ] Write doc comments with examples
+- [ ] Create integration tests

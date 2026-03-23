@@ -384,6 +384,8 @@ pub struct HttpResponse {
     pub status: u16,
     /// Response headers with lazy allocation.
     pub headers: LazyHeaders,
+    /// Set-Cookie headers (supports multiple cookies per response).
+    pub cookies: Vec<String>,
     /// Response body as raw bytes (legacy field for compatibility).
     pub body: Vec<u8>,
     /// Optional zero-copy body storage using Bytes.
@@ -405,6 +407,7 @@ impl HttpResponse {
         Self {
             status,
             headers: LazyHeaders::new(),
+            cookies: Vec::new(),
             body: Vec::new(),
             body_bytes: None,
         }
@@ -426,6 +429,7 @@ impl HttpResponse {
         Self {
             status,
             headers: LazyHeaders::with_capacity(8),
+            cookies: Vec::new(),
             body: Vec::with_capacity(capacity),
             body_bytes: None,
         }
@@ -592,6 +596,7 @@ impl HttpResponse {
         Self {
             status,
             headers: LazyHeaders::from(headers),
+            cookies: Vec::new(),
             body: Vec::new(),
             body_bytes: None,
         }
@@ -605,6 +610,7 @@ impl HttpResponse {
         Self {
             status,
             headers: LazyHeaders::from(headers),
+            cookies: Vec::new(),
             body,
             body_bytes: None,
         }
@@ -808,18 +814,35 @@ impl HttpResponse {
         self.cache_control("no-store, no-cache, must-revalidate")
     }
 
-    /// Set a cookie on the response.
+    /// Set a cookie on the response. Can be called multiple times to set
+    /// multiple cookies — each produces a separate `Set-Cookie` header.
     ///
     /// # Example
     /// ```
     /// use armature_core::HttpResponse;
-    /// let response = HttpResponse::ok().cookie("session", "abc123; HttpOnly; Secure");
+    /// let response = HttpResponse::ok()
+    ///     .cookie("session", "abc123; HttpOnly; Secure")
+    ///     .cookie("theme", "dark; Path=/");
     /// ```
-    pub fn cookie(self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.with_header(
-            "Set-Cookie".to_string(),
-            format!("{}={}", name.into(), value.into()),
-        )
+    pub fn cookie(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.cookies.push(format!("{}={}", name.into(), value.into()));
+        self
+    }
+
+    /// Clear a cookie by setting it with an expired Max-Age.
+    ///
+    /// # Example
+    /// ```
+    /// use armature_core::HttpResponse;
+    /// let response = HttpResponse::ok().clear_cookie("session", "/");
+    /// ```
+    pub fn clear_cookie(mut self, name: impl Into<String>, path: impl Into<String>) -> Self {
+        self.cookies.push(format!(
+            "{}=; Path={}; Max-Age=0",
+            name.into(),
+            path.into(),
+        ));
+        self
     }
 
     /// Get the response body as a string (lossy UTF-8 conversion).

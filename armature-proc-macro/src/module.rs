@@ -69,8 +69,19 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 type_id: std::any::TypeId::of::<#ty>(),
                 type_name: std::any::type_name::<#ty>(),
                 register_fn: |container| {
-                    let instance = #ty::default();
-                    container.register(instance);
+                    if container.has::<#ty>() {
+                        return;
+                    }
+                    match #ty::from_container(container) {
+                        Ok(instance) => container.register(instance),
+                        Err(e) => {
+                            tracing::debug!(
+                                "Could not resolve {} from container ({}), this provider must be registered manually",
+                                std::any::type_name::<#ty>(),
+                                e
+                            );
+                        }
+                    }
                 },
             }
         }
