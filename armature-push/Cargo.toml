@@ -21,7 +21,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "http2",
+] }
 
 # Error handling
 thiserror = "2.0"
@@ -51,4 +55,3 @@ web-push = ["dep:web-push"]
 fcm = ["jsonwebtoken"]
 apns = ["jsonwebtoken", "p256"]
 all = ["web-push", "fcm", "apns"]
-
