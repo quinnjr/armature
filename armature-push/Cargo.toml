@@ -33,7 +33,7 @@ base64 = "0.22"
 url = "2.5"
 
 # Web Push (VAPID)
-web-push = { version = "0.10", optional = true }
+web-push = { version = "0.11", optional = true }
 
 # JWT for FCM/APNS
 jsonwebtoken = { version = "9.3", optional = true }
