@@ -51,6 +51,16 @@ members = [
     "armature-i18n",
     "armature-diesel",
     "armature-seaorm",
+    "armature-websocket",
+    "armature-analytics",
+    "armature-files",
+    "armature-collab",
+    "armature-admin",
+    "armature-payments",
+    "armature-rhai",
+    "armature-siem",
+    "armature-app",
+    "armature-mcp",
 ]
 exclude = [
     "templates/*",
@@ -62,9 +72,9 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Pegasus Heavy Industries LLC"]
 license = "Apache-2.0"
 repository = "https://github.com/pegasusheavy/armature"
@@ -72,9 +82,9 @@ homepage = "https://pegasusheavy.github.io/armature"
 
 [package]
 name = "armature-framework"
-version = "0.1.1"
+version = "0.2.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 autobenches = false  # Disable auto-discovery, use explicit [[bench]] only
 authors = ["Pegasus Heavy Industries LLC"]
 license = "Apache-2.0"
@@ -105,24 +115,24 @@ name = "armature"
 path = "src/lib.rs"
 
 [dependencies]
-armature-core = { path = "armature-core", version = "0.1.0" }
-armature-proc-macro = { path = "armature-proc-macro", version = "0.1.0" }
-armature-graphql = { path = "armature-graphql", version = "0.1.0", optional = true }
-armature-config = { path = "armature-config", version = "0.1.0", optional = true }
-armature-jwt = { path = "armature-jwt", version = "0.1.0", optional = true }
-armature-auth = { path = "armature-auth", version = "0.1.0", optional = true }
-armature-testing = { path = "armature-testing", version = "0.1.0", optional = true }
-armature-validation = { path = "armature-validation", version = "0.1.0", optional = true }
-armature-openapi = { path = "armature-openapi", version = "0.1.0", optional = true }
+armature-core = { path = "armature-core", version = "0.2.2" }
+armature-proc-macro = { path = "armature-proc-macro", version = "0.1.3" }
+armature-graphql = { path = "armature-graphql", version = "0.2.0", optional = true }
+armature-config = { path = "armature-config", version = "0.1.1", optional = true }
+armature-jwt = { path = "armature-jwt", version = "0.1.1", optional = true }
+armature-auth = { path = "armature-auth", version = "0.1.1", optional = true }
+armature-testing = { path = "armature-testing", version = "0.1.1", optional = true }
+armature-validation = { path = "armature-validation", version = "0.1.1", optional = true }
+armature-openapi = { path = "armature-openapi", version = "0.1.1", optional = true }
 armature-cache = { path = "armature-cache", version = "0.1.0", optional = true }
-armature-cron = { path = "armature-cron", version = "0.1.0", optional = true }
-armature-queue = { path = "armature-queue", version = "0.1.0", optional = true }
-armature-opentelemetry = { path = "armature-opentelemetry", version = "0.1.0", optional = true }
-armature-security = { path = "armature-security", version = "0.1.0", optional = true }
-armature-acme = { path = "armature-acme", version = "0.1.0", optional = true }
-armature-ratelimit = { path = "armature-ratelimit", version = "0.1.0", optional = true }
-armature-compression = { path = "armature-compression", version = "0.1.0", optional = true }
-armature-webhooks = { path = "armature-webhooks", version = "0.1.0", optional = true }
+armature-cron = { path = "armature-cron", version = "0.1.1", optional = true }
+armature-queue = { path = "armature-queue", version = "0.1.1", optional = true }
+armature-opentelemetry = { path = "armature-opentelemetry", version = "0.1.1", optional = true }
+armature-security = { path = "armature-security", version = "0.1.1", optional = true }
+armature-acme = { path = "armature-acme", version = "0.1.1", optional = true }
+armature-ratelimit = { path = "armature-ratelimit", version = "0.1.1", optional = true }
+armature-compression = { path = "armature-compression", version = "0.1.1", optional = true }
+armature-webhooks = { path = "armature-webhooks", version = "0.1.1", optional = true }
 armature-messaging = { path = "armature-messaging", version = "0.1.0", optional = true }
 
 # Re-export core functionality
@@ -206,6 +216,13 @@ messaging-full = ["armature-messaging/full"]
 # Performance features
 simd-json = ["armature-core/simd-json"]
 
+# Memory profiling (for leak detection)
+memory-profiling = ["dhat"]
+
+[dependencies.dhat]
+version = "0.3"
+optional = true
+
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
@@ -214,6 +231,7 @@ cargo-husky = { version = "1.5", default-features = false, features = ["user-hoo
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json"] }
 ctrlc = "3.4"
+crossbeam = "0.8"  # Lock-free data structures for benchmarks
 
 # Unix-only profiling dependencies (pprof requires Unix-specific APIs)
 [target.'cfg(unix)'.dev-dependencies]
@@ -371,6 +389,9 @@ path = "armature-http-client"
 
 [dev-dependencies.armature-ferron]
 path = "armature-ferron"
+
+[dev-dependencies.armature-app]
+path = "armature-app"
 
 [dev-dependencies.fastrand]
 version = "2.3"
@@ -614,10 +635,26 @@ harness = false
 name = "database_benchmarks"
 harness = false
 
+[[bench]]
+name = "memory_benchmarks"
+harness = false
+
+[[bench]]
+name = "micro_benchmarks"
+harness = false
+
 # Benchmark Examples
 [[example]]
 name = "benchmark_server"
 path = "examples/benchmark_server.rs"
+
+[[example]]
+name = "memory_profile_server"
+path = "examples/memory_profile_server.rs"
+
+[[example]]
+name = "rhai_app"
+path = "examples/rhai_app.rs"
 
 # Benchmark Tools
 [[bin]]

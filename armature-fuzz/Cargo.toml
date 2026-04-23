@@ -2,7 +2,7 @@
 name = "armature-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
 # Armature crates to fuzz
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # Common dependencies for fuzzing
 bytes = "1"

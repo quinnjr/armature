@@ -410,18 +410,17 @@ impl CircuitBreaker {
         }
 
         if let Some(opened_at) = inner.opened_at
-            && opened_at.elapsed() >= self.config.reset_timeout
-        {
-            drop(inner); // Release read lock before acquiring write lock
+            && opened_at.elapsed() >= self.config.reset_timeout {
+                drop(inner); // Release read lock before acquiring write lock
 
-            let mut inner = self.inner.write();
-            if inner.state == CircuitState::Open {
-                debug!(name = %self.config.name, "Circuit breaker transitioning to HALF-OPEN");
-                inner.state = CircuitState::HalfOpen;
-                self.half_open_count.store(0, Ordering::SeqCst);
-                self.success_count.store(0, Ordering::SeqCst);
+                let mut inner = self.inner.write();
+                if inner.state == CircuitState::Open {
+                    debug!(name = %self.config.name, "Circuit breaker transitioning to HALF-OPEN");
+                    inner.state = CircuitState::HalfOpen;
+                    self.half_open_count.store(0, Ordering::SeqCst);
+                    self.success_count.store(0, Ordering::SeqCst);
+                }
             }
-        }
     }
 
     /// Manually reset the circuit breaker to closed state.

@@ -199,10 +199,9 @@ impl RuntimeConfig {
         };
 
         if let Some(threads) = self.worker_threads
-            && !self.current_thread
-        {
-            builder.worker_threads(threads);
-        }
+            && !self.current_thread {
+                builder.worker_threads(threads);
+            }
 
         builder.thread_name(&self.thread_name);
 

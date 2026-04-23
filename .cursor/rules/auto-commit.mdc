@@ -1,30 +1,13 @@
-# Auto-Commit After Work Completion
+---
+description: Commit message format and auto-commit policy
+alwaysApply: true
+---
 
-## Rule
+# Commit Message Convention
 
-The agent MUST commit changes after completing any task that modifies files.
+**ALWAYS** use the `type(scope): description` format for ALL commits.
 
-## When to Commit
-
-Commit after:
-- Implementing a feature
-- Fixing a bug
-- Refactoring code
-- Adding or updating documentation
-- Creating new files
-- Modifying configuration
-- Any other file changes
-
-## How to Commit
-
-1. Stage all changes: `git add -A`
-2. Write a descriptive commit message following conventional commits
-3. Commit the changes: `git commit -m "..."`
-4. Push to the current branch if appropriate
-
-## Commit Message Format
-
-Use conventional commits format:
+## Format (Required)
 
 ```
 <type>(<scope>): <description>
@@ -34,35 +17,99 @@ Use conventional commits format:
 [optional footer]
 ```
 
-### Types
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation changes
-- `refactor`: Code refactoring
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
-- `style`: Code style/formatting changes
-- `perf`: Performance improvements
+### Type (Required)
+
+| Type | Description |
+|------|-------------|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `docs` | Documentation changes |
+| `refactor` | Code refactoring |
+| `test` | Adding or updating tests |
+| `chore` | Maintenance tasks, dependencies |
+| `style` | Code style/formatting changes |
+| `perf` | Performance improvements |
+| `ci` | CI/CD configuration |
+| `build` | Build system changes |
+
+### Scope (Required)
+
+The scope indicates which part of the codebase is affected:
+
+| Scope | When to use |
+|-------|-------------|
+| `core` | armature-core crate |
+| `auth` | armature-auth, armature-oauth2, armature-saml |
+| `cache` | armature-cache, armature-redis |
+| `queue` | armature-queue |
+| `di` | armature-di |
+| `macros` | armature-proc-macro |
+| `cli` | armature-cli |
+| `ws` | armature-websocket |
+| `sse` | armature-sse |
+| `db` | armature-diesel, armature-seaorm |
+| `aws` | armature-aws |
+| `gcp` | armature-gcp |
+| `azure` | armature-azure |
+| `docs` | Documentation files |
+| `examples` | Example code |
+| `tests` | Test files |
+| `deps` | Dependency updates |
 
 ### Examples
 
 ```bash
+# Features
 git commit -m "feat(auth): add OAuth2 provider support"
+git commit -m "feat(queue): implement job retry with exponential backoff"
+git commit -m "feat(ws): add room-based message broadcasting"
+
+# Bug fixes
 git commit -m "fix(cache): resolve Redis connection timeout"
-git commit -m "docs: update SESSION_GUIDE.md with examples"
+git commit -m "fix(core): handle empty request body correctly"
+
+# Documentation
+git commit -m "docs(readme): update installation instructions"
+git commit -m "docs(auth): add JWT configuration examples"
+
+# Refactoring
 git commit -m "refactor(core): simplify error handling"
+git commit -m "refactor(macros): reduce code duplication in derive macros"
+
+# Tests
+git commit -m "test(auth): add integration tests for OAuth2 flow"
+
+# Chores
+git commit -m "chore(deps): update tokio to 1.35"
+
+# Breaking changes (add ! after scope)
+git commit -m "feat(api)!: change response format to camelCase"
 ```
 
-## Do NOT Commit When
+## Auto-Commit Policy
 
-- Changes are incomplete or broken
-- Tests are failing
-- The user explicitly asks not to commit
-- Only exploring or reading files (no modifications)
+Commit after completing tasks that modify files:
+- ✅ Implementing a feature
+- ✅ Fixing a bug
+- ✅ Refactoring code
+- ✅ Adding/updating documentation
+- ✅ Creating new files
+- ✅ Modifying configuration
 
-## Push Policy
+Do NOT commit when:
+- ❌ Changes are incomplete or broken
+- ❌ Tests are failing
+- ❌ User explicitly asks not to commit
+- ❌ Only reading files (no modifications)
 
-- Push to the current branch after committing unless:
-  - The user asks not to push
-  - There are merge conflicts
-  - The branch is protected and requires PR
+## Multi-File Commits
+
+When changes span multiple crates, use the most significant scope or `core`:
+
+```bash
+# Changes to multiple crates for a single feature
+git commit -m "feat(auth): add session management with Redis storage"
+
+# Dependency updates across workspace
+git commit -m "chore(deps): update workspace dependencies"
+```

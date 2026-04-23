@@ -333,12 +333,11 @@ impl<T> LocalStateCache<T> {
             let cached_version = *self.version.get();
 
             if cached_version == current_version
-                && let Some(ref value) = *self.value.get()
-            {
-                *self.hits.get() += 1;
-                LOCALITY_STATS.record_cache_hit();
-                return value;
-            }
+                && let Some(ref value) = *self.value.get() {
+                    *self.hits.get() += 1;
+                    LOCALITY_STATS.record_cache_hit();
+                    return value;
+                }
 
             // Cache miss - refresh
             *self.misses.get() += 1;

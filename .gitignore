@@ -14,7 +14,8 @@ Cargo.lock
 *.iml
 
 # Cursor
-.cursor/
+.cursor/*
+!.cursor/rules/
 
 # Build artifacts
 *.so

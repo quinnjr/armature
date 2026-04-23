@@ -104,12 +104,12 @@ async fn generate_project_files(
         _ => format!("{} - Built with Armature", names.pascal),
     };
 
-    let data = ProjectData {
-        name_pascal: names.pascal.clone(),
-        name_snake: names.snake.clone(),
-        name_kebab: names.kebab.clone(),
+    let data = ProjectData::new(
+        names.pascal.clone(),
+        names.snake.clone(),
+        names.kebab.clone(),
         description,
-    };
+    );
 
     // Generate Cargo.toml
     let cargo_toml = templates

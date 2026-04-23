@@ -155,7 +155,7 @@ impl QueryParams {
 
     /// Get all values for a key (for multi-value params like `?tag=a&tag=b`).
     #[inline]
-    pub fn get_all(&self, key: &str) -> impl Iterator<Item = &str> {
+    pub fn get_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> {
         self.inner
             .iter()
             .filter(move |(k, _)| k == key)

@@ -84,16 +84,16 @@ impl RedisConfig {
             builder = builder.url(url);
         }
 
-        if let Ok(pool_size) = std::env::var("REDIS_POOL_SIZE")
-            && let Ok(size) = pool_size.parse()
-        {
-            builder = builder.pool_size(size);
+        if let Ok(pool_size) = std::env::var("REDIS_POOL_SIZE") {
+            if let Ok(size) = pool_size.parse() {
+                builder = builder.pool_size(size);
+            }
         }
 
-        if let Ok(db) = std::env::var("REDIS_DATABASE")
-            && let Ok(db_num) = db.parse()
-        {
-            builder = builder.database(db_num);
+        if let Ok(db) = std::env::var("REDIS_DATABASE") {
+            if let Ok(db_num) = db.parse() {
+                builder = builder.database(db_num);
+            }
         }
 
         if let Ok(username) = std::env::var("REDIS_USERNAME") {
@@ -146,10 +146,10 @@ impl RedisConfig {
         }
 
         // Add database if provided
-        if let Some(db) = self.database
-            && (!url.contains('/') || url.ends_with(':'))
-        {
-            url = format!("{}/{}", url.trim_end_matches('/'), db);
+        if let Some(db) = self.database {
+            if !url.contains('/') || url.ends_with(':') {
+                url = format!("{}/{}", url.trim_end_matches('/'), db);
+            }
         }
 
         url

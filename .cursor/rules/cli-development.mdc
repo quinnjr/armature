@@ -1,0 +1,278 @@
+---
+description: Guidelines for developing the armature-cli tool
+globs: armature-cli/**/*.rs
+alwaysApply: false
+---
+
+# CLI Development
+
+Standards for developing the Armature CLI tool.
+
+## Command Structure
+
+```rust
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "armature")]
+#[command(about = "Armature Framework CLI")]
+#[command(version)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Create a new Armature project
+    New(NewCommand),
+
+    /// Generate code (controller, service, etc.)
+    Generate(GenerateCommand),
+
+    /// Start development server
+    Dev(DevCommand),
+
+    /// Build for production
+    Build(BuildCommand),
+}
+```
+
+## New Project Command
+
+```rust
+#[derive(Args)]
+pub struct NewCommand {
+    /// Project name
+    pub name: String,
+
+    /// Template to use
+    #[arg(short, long, default_value = "default")]
+    pub template: String,
+
+    /// Skip git initialization
+    #[arg(long)]
+    pub no_git: bool,
+}
+
+impl NewCommand {
+    pub async fn run(&self) -> Result<()> {
+        println!("Creating new project: {}", self.name);
+
+        // Create directory structure
+        create_project_structure(&self.name)?;
+
+        // Copy template files
+        copy_template(&self.template, &self.name)?;
+
+        // Initialize git
+        if !self.no_git {
+            init_git(&self.name)?;
+        }
+
+        println!("✅ Project created successfully!");
+        println!("\nNext steps:");
+        println!("  cd {}", self.name);
+        println!("  cargo run");
+
+        Ok(())
+    }
+}
+```
+
+## Code Generation
+
+```rust
+#[derive(Subcommand)]
+pub enum GenerateCommand {
+    /// Generate a controller
+    Controller(GenerateControllerArgs),
+
+    /// Generate a service
+    Service(GenerateServiceArgs),
+
+    /// Generate a module
+    Module(GenerateModuleArgs),
+
+    /// Generate a migration
+    Migration(GenerateMigrationArgs),
+}
+
+#[derive(Args)]
+pub struct GenerateControllerArgs {
+    /// Controller name (e.g., "users" or "api/v1/users")
+    pub name: String,
+
+    /// Generate CRUD endpoints
+    #[arg(long)]
+    pub crud: bool,
+}
+
+impl GenerateControllerArgs {
+    pub fn run(&self) -> Result<()> {
+        let template = if self.crud {
+            include_str!("templates/controller_crud.rs.tmpl")
+        } else {
+            include_str!("templates/controller.rs.tmpl")
+        };
+
+        let rendered = render_template(template, &self.context())?;
+
+        let path = format!("src/controllers/{}.rs", self.name.to_snake_case());
+        fs::write(&path, rendered)?;
+
+        println!("✅ Created {}", path);
+
+        // Update mod.rs
+        update_mod_file("src/controllers/mod.rs", &self.name)?;
+
+        Ok(())
+    }
+}
+```
+
+## Development Server
+
+```rust
+#[derive(Args)]
+pub struct DevCommand {
+    /// Port to listen on
+    #[arg(short, long, default_value = "3000")]
+    pub port: u16,
+
+    /// Host to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Enable hot reload
+    #[arg(long, default_value = "true")]
+    pub hot_reload: bool,
+}
+
+impl DevCommand {
+    pub async fn run(&self) -> Result<()> {
+        println!("🚀 Starting development server on {}:{}", self.host, self.port);
+
+        if self.hot_reload {
+            // Watch for file changes
+            let watcher = FileWatcher::new(vec!["src/**/*.rs"])?;
+
+            loop {
+                // Build and run
+                let child = Command::new("cargo")
+                    .args(["run"])
+                    .env("ARMATURE_PORT", self.port.to_string())
+                    .spawn()?;
+
+                // Wait for changes
+                watcher.wait_for_changes().await?;
+
+                // Restart
+                child.kill()?;
+                println!("🔄 Restarting...");
+            }
+        } else {
+            Command::new("cargo")
+                .args(["run"])
+                .status()?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+## Template Files
+
+Store templates in `armature-cli/templates/`:
+
+```rust
+// templates/controller.rs.tmpl
+use armature::prelude::*;
+
+#[controller("/{{path}}")]
+pub struct {{name}}Controller {
+    // Add dependencies here
+}
+
+#[get("")]
+async fn list(&self) -> Result<Json<Vec<{{model}}>>, Error> {
+    todo!()
+}
+
+#[get("/:id")]
+async fn get(&self, id: Path<Uuid>) -> Result<Json<{{model}}>, Error> {
+    todo!()
+}
+```
+
+## Output Formatting
+
+```rust
+use console::{style, Emoji};
+
+static SUCCESS: Emoji = Emoji("✅", "[OK]");
+static ERROR: Emoji = Emoji("❌", "[ERR]");
+static INFO: Emoji = Emoji("ℹ️", "[INFO]");
+
+fn print_success(msg: &str) {
+    println!("{} {}", SUCCESS, style(msg).green());
+}
+
+fn print_error(msg: &str) {
+    eprintln!("{} {}", ERROR, style(msg).red());
+}
+
+fn print_info(msg: &str) {
+    println!("{} {}", INFO, style(msg).cyan());
+}
+```
+
+## Error Handling
+
+```rust
+use miette::{Diagnostic, Result};
+use thiserror::Error;
+
+#[derive(Error, Diagnostic, Debug)]
+pub enum CliError {
+    #[error("Project '{0}' already exists")]
+    #[diagnostic(code(armature::project_exists))]
+    ProjectExists(String),
+
+    #[error("Template '{0}' not found")]
+    #[diagnostic(
+        code(armature::template_not_found),
+        help("Available templates: default, api, minimal")
+    )]
+    TemplateNotFound(String),
+
+    #[error("Invalid project name: {0}")]
+    #[diagnostic(code(armature::invalid_name))]
+    InvalidName(String),
+}
+```
+
+## Testing CLI Commands
+
+```rust
+#[test]
+fn test_new_command() {
+    let temp = tempdir().unwrap();
+
+    let cmd = NewCommand {
+        name: "test-project".into(),
+        template: "default".into(),
+        no_git: true,
+    };
+
+    std::env::set_current_dir(&temp).unwrap();
+    cmd.run().unwrap();
+
+    assert!(temp.path().join("test-project/Cargo.toml").exists());
+    assert!(temp.path().join("test-project/src/main.rs").exists());
+}
+```

@@ -204,7 +204,449 @@ pub async fn resource(name: &str, crud: bool) -> CliResult<()> {
     Ok(())
 }
 
-/// Generic component generator for middleware, guards, and services.
+/// Generate a repository.
+pub async fn repository(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("repository", name, skip_tests).await
+}
+
+/// Generate DTOs (Data Transfer Objects).
+pub async fn dto(name: &str) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let dto_dir = src_dir.join("dto");
+    ensure_dir(&dto_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates.render("dto", &data).map_err(CliError::Template)?;
+
+    let file_path = dto_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&dto_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        dto_dir.join("mod.rs").display()
+    );
+
+    println!("\n{} Generated {}Dto", "✓".green().bold(), names.pascal);
+    Ok(())
+}
+
+/// Generate a WebSocket handler.
+pub async fn websocket(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("websocket", name, skip_tests).await
+}
+
+/// Generate a GraphQL resolver.
+pub async fn graphql_resolver(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("graphql_resolver", name, skip_tests).await
+}
+
+/// Generate a background job.
+pub async fn job(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("job", name, skip_tests).await
+}
+
+/// Generate an event handler.
+pub async fn event_handler(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("event_handler", name, skip_tests).await
+}
+
+/// Generate an interceptor.
+pub async fn interceptor(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("interceptor", name, skip_tests).await
+}
+
+/// Generate a validation pipe.
+pub async fn pipe(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("pipe", name, skip_tests).await
+}
+
+/// Generate an exception filter.
+pub async fn exception_filter(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("exception_filter", name, skip_tests).await
+}
+
+/// Generate a configuration module.
+pub async fn config(name: &str) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let config_dir = src_dir.join("config");
+    ensure_dir(&config_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = crate::templates::ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates
+        .render("config", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = config_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&config_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        config_dir.join("mod.rs").display()
+    );
+
+    println!("\n{} Generated {}Config", "✓".green().bold(), names.pascal);
+    Ok(())
+}
+
+/// ORM type for entity generation.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum OrmType {
+    #[default]
+    Generic,
+    Diesel,
+    SeaOrm,
+    Prax,
+}
+
+impl std::str::FromStr for OrmType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "generic" | "none" => Ok(OrmType::Generic),
+            "diesel" => Ok(OrmType::Diesel),
+            "seaorm" | "sea-orm" | "sea_orm" => Ok(OrmType::SeaOrm),
+            "prax" | "prax-orm" | "prax_orm" => Ok(OrmType::Prax),
+            _ => Err(format!(
+                "Unknown ORM type: {}. Valid options: generic, diesel, seaorm, prax",
+                s
+            )),
+        }
+    }
+}
+
+/// Generate a database entity.
+pub async fn entity(name: &str) -> CliResult<()> {
+    entity_with_orm(name, OrmType::Generic).await
+}
+
+/// Generate a database entity with specific ORM support.
+pub async fn entity_with_orm(name: &str, orm: OrmType) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let entities_dir = src_dir.join("entities");
+    ensure_dir(&entities_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let template_name = match orm {
+        OrmType::Prax => "entity_prax",
+        _ => "entity",
+    };
+
+    let content = templates
+        .render(template_name, &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = entities_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&entities_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        entities_dir.join("mod.rs").display()
+    );
+
+    let orm_name = match orm {
+        OrmType::Generic => "generic",
+        OrmType::Diesel => "Diesel",
+        OrmType::SeaOrm => "SeaORM",
+        OrmType::Prax => "Prax",
+    };
+
+    println!(
+        "\n{} Generated {} entity ({})",
+        "✓".green().bold(),
+        names.pascal,
+        orm_name.cyan()
+    );
+    Ok(())
+}
+
+/// Generate a Prax ORM schema file.
+pub async fn prax_schema(name: &str) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let schema_dir = src_dir.parent().unwrap_or(&src_dir).to_path_buf();
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates
+        .render("prax_schema", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = schema_dir.join("schema.prax");
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+    println!(
+        "\n{} Generated Prax schema for {}",
+        "✓".green().bold(),
+        names.pascal
+    );
+    println!(
+        "  {} Run {} to generate Rust code",
+        "→".yellow(),
+        "prax generate".cyan()
+    );
+    Ok(())
+}
+
+/// Generate a Prax ORM repository.
+pub async fn prax_repository(name: &str, skip_tests: bool) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let repo_dir = src_dir.join("repositories");
+    ensure_dir(&repo_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    // Generate repository
+    let content = templates
+        .render("prax_repository", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = repo_dir.join(format!("{}_repository.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&repo_dir, &format!("{}_repository", names.snake))?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        repo_dir.join("mod.rs").display()
+    );
+
+    // Generate test file
+    if !skip_tests {
+        let test_content = templates
+            .render("prax_repository_test", &data)
+            .map_err(CliError::Template)?;
+
+        let tests_dir = repo_dir.join("tests");
+        ensure_dir(&tests_dir)?;
+
+        let test_file = tests_dir.join(format!("{}_repository_test.rs", names.snake));
+        write_file(&test_file, &test_content, false)?;
+
+        println!("  {} {}", "CREATE".green().bold(), test_file.display());
+    }
+
+    println!(
+        "\n{} Generated {}Repository (Prax ORM)",
+        "✓".green().bold(),
+        names.pascal
+    );
+    Ok(())
+}
+
+/// Generate a complete Prax ORM module with entity, repository, and service.
+pub async fn prax_module(name: &str) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    println!(
+        "  {} Generating Prax ORM module: {}",
+        "→".cyan().bold(),
+        name.cyan()
+    );
+    println!();
+
+    // 1. Generate schema file
+    println!("  {} Generating Prax schema...", "1/5".dimmed());
+    prax_schema(name).await?;
+    println!();
+
+    // 2. Generate entity
+    println!("  {} Generating entity...", "2/5".dimmed());
+    entity_with_orm(name, OrmType::Prax).await?;
+    println!();
+
+    // 3. Generate repository
+    println!("  {} Generating repository...", "3/5".dimmed());
+    prax_repository(name, false).await?;
+    println!();
+
+    // 4. Generate service
+    println!("  {} Generating service...", "4/5".dimmed());
+    service(name, false).await?;
+    println!();
+
+    // 5. Generate module file
+    println!("  {} Generating module...", "5/5".dimmed());
+    let module_dir = src_dir.join(&names.snake);
+    ensure_dir(&module_dir)?;
+
+    let module_content = templates
+        .render("prax_module", &data)
+        .map_err(CliError::Template)?;
+
+    let module_file = module_dir.join("mod.rs");
+    write_file(&module_file, &module_content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), module_file.display());
+
+    update_mod_file(&src_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        src_dir.join("mod.rs").display()
+    );
+
+    println!(
+        "\n{} Prax module {} generated successfully!",
+        "✓".green().bold(),
+        name.green()
+    );
+    println!();
+    println!("  {} Next steps:", "💡".yellow());
+    println!("    {} Add prax-armature to Cargo.toml:", "1.".dimmed());
+    println!("       {}", r#"prax-armature = "0.4""#.cyan());
+    println!("    {} Run Prax code generation:", "2.".dimmed());
+    println!("       {}", "prax generate".cyan());
+    println!("    {} Import the module in main.rs:", "3.".dimmed());
+    println!(
+        "       {}",
+        format!("use {}::{}Module;", names.snake, names.pascal).cyan()
+    );
+
+    Ok(())
+}
+
+/// Generate a scheduled task.
+pub async fn scheduler(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("scheduler", name, skip_tests).await
+}
+
+/// Generate a cache service.
+pub async fn cache_service(name: &str, skip_tests: bool) -> CliResult<()> {
+    generate_component("cache_service", name, skip_tests).await
+}
+
+/// Generate an API client.
+pub async fn api_client(name: &str) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let clients_dir = src_dir.join("clients");
+    ensure_dir(&clients_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates
+        .render("api_client", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = clients_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&clients_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        clients_dir.join("mod.rs").display()
+    );
+
+    println!("\n{} Generated {}Client", "✓".green().bold(), names.pascal);
+    Ok(())
+}
+
+/// Generate a health check controller.
+pub async fn health_controller() -> CliResult<()> {
+    let src_dir = get_src_dir()?;
+    let controllers_dir = src_dir.join("controllers");
+    ensure_dir(&controllers_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: "Health".to_string(),
+        name_snake: "health".to_string(),
+        name_kebab: "health".to_string(),
+    };
+
+    let content = templates
+        .render("health_controller", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = controllers_dir.join("health.rs");
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&controllers_dir, "health")?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        controllers_dir.join("mod.rs").display()
+    );
+
+    println!("\n{} Generated HealthController", "✓".green().bold());
+    Ok(())
+}
+
+/// Generic component generator for middleware, guards, services, and more.
 async fn generate_component(component_type: &str, name: &str, skip_tests: bool) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
@@ -213,6 +655,16 @@ async fn generate_component(component_type: &str, name: &str, skip_tests: bool) 
         "middleware" => "middleware",
         "guard" => "guards",
         "service" => "services",
+        "repository" => "repositories",
+        "websocket" => "websockets",
+        "graphql_resolver" => "graphql",
+        "job" => "jobs",
+        "event_handler" => "events",
+        "interceptor" => "interceptors",
+        "pipe" => "pipes",
+        "exception_filter" => "filters",
+        "scheduler" => "tasks",
+        "cache_service" => "cache",
         _ => {
             return Err(CliError::InvalidArgument(format!(
                 "Unknown component type: {}",
@@ -270,6 +722,16 @@ async fn generate_component(component_type: &str, name: &str, skip_tests: bool) 
         "middleware" => "Middleware",
         "guard" => "Guard",
         "service" => "Service",
+        "repository" => "Repository",
+        "websocket" => "WebSocket",
+        "graphql_resolver" => "Resolver",
+        "job" => "Job",
+        "event_handler" => "EventHandler",
+        "interceptor" => "Interceptor",
+        "pipe" => "Pipe",
+        "exception_filter" => "ExceptionFilter",
+        "scheduler" => "Task",
+        "cache_service" => "CacheService",
         _ => "Component",
     };
 

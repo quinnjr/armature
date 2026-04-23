@@ -548,10 +548,9 @@ impl Connection {
         }
 
         if let Some(idle_time) = self.idle_time()
-            && idle_time > idle_timeout
-        {
-            return true;
-        }
+            && idle_time > idle_timeout {
+                return true;
+            }
 
         false
     }
@@ -1233,10 +1232,9 @@ impl ConnectionRecycler {
 
         // Check age
         if let Some(age) = conn.inner().age()
-            && age > self.config.idle_timeout * 10
-        {
-            return false;
-        }
+            && age > self.config.idle_timeout * 10 {
+                return false;
+            }
 
         true
     }

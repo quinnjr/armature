@@ -18,6 +18,14 @@ rabbitmq = ["lapin"]
 kafka = ["rdkafka"]
 nats = ["async-nats"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
+# mq-bridge integration - provides unified messaging through mq-bridge crate
+mq-bridge = ["dep:mq-bridge", "dep:anyhow"]
+mq-bridge-kafka = ["mq-bridge", "mq-bridge/kafka"]
+mq-bridge-amqp = ["mq-bridge", "mq-bridge/amqp"]
+mq-bridge-nats = ["mq-bridge", "mq-bridge/nats"]
+mq-bridge-mqtt = ["mq-bridge", "mq-bridge/mqtt"]
+mq-bridge-http = ["mq-bridge", "mq-bridge/http"]
+mq-bridge-full = ["mq-bridge", "mq-bridge/full"]
 
 [dependencies]
 # Core
@@ -44,6 +52,10 @@ async-nats = { version = "0.45", optional = true }
 aws-config = { version = "1.5", optional = true }
 aws-sdk-sqs = { version = "1.50", optional = true }
 aws-sdk-sns = { version = "1.54", optional = true }
+
+# mq-bridge integration
+mq-bridge = { version = "0.1", optional = true }
+anyhow = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

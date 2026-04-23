@@ -1,6 +1,6 @@
 [package]
 name = "armature-webhooks"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,7 +13,7 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Core dependencies
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 async-trait = "0.1"
 thiserror = "2.0"
 tracing = "0.1"

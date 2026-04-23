@@ -1,0 +1,110 @@
+# Documentation Website Component Structure
+
+## Rule
+
+When creating or modifying Angular components for the documentation website (`web/src/app/pages/docs/`), **always use external HTML template files** instead of inline templates.
+
+## Structure
+
+Each documentation page component should have the following file structure:
+
+```
+web/src/app/pages/docs/pages/<component-name>/
+├── <component-name>.component.ts    # Component class with templateUrl
+├── <component-name>.component.html  # External HTML template
+└── <component-name>.component.scss  # Optional: Component-specific styles
+```
+
+## Component TypeScript Pattern
+
+```typescript
+import { Component } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { RouterModule } from '@angular/router';
+
+@Component({
+  selector: 'app-<component-name>',
+  standalone: true,
+  imports: [CommonModule, RouterModule],
+  templateUrl: './<component-name>.component.html',
+  styleUrls: ['./<component-name>.component.scss']  // Optional
+})
+export class <ComponentName>Component {
+  // Component logic
+}
+```
+
+## Why This Rule Exists
+
+1. **Readability** - HTML templates for documentation pages can be large; separating them improves maintainability
+2. **Editor Support** - External HTML files get better syntax highlighting and IntelliSense
+3. **Consistency** - All documentation components follow the same pattern
+4. **Diffing** - Easier to review changes when HTML is in separate files
+5. **Hot Reload** - Some Angular tooling handles external templates better for HMR
+
+## Exceptions
+
+- Small utility components with minimal templates (< 10 lines) may use inline templates
+- The `DocPageComponent` shared component uses inline template as it's a wrapper
+
+## Examples
+
+### ✅ Good - External Template
+
+```typescript
+// grafana-dashboards.component.ts
+@Component({
+  selector: 'app-grafana-dashboards',
+  standalone: true,
+  imports: [CommonModule, RouterModule],
+  templateUrl: './grafana-dashboards.component.html',
+  styleUrls: ['./grafana-dashboards.component.scss']
+})
+export class GrafanaDashboardsComponent {
+  // ...
+}
+```
+
+### ❌ Bad - Inline Template (for doc pages)
+
+```typescript
+// grafana-dashboards.component.ts
+@Component({
+  selector: 'app-grafana-dashboards',
+  standalone: true,
+  imports: [CommonModule, RouterModule],
+  template: `
+    <div class="doc-content">
+      <!-- Large HTML content here -->
+    </div>
+  `
+})
+export class GrafanaDashboardsComponent {
+  // ...
+}
+```
+
+## Shared Styles
+
+Documentation components should import the shared documentation styles:
+
+```scss
+// <component-name>.component.scss
+@use '../../_doc-content' as doc;
+
+// Component-specific styles here
+```
+
+## Adding New Documentation Pages
+
+When adding a new documentation page:
+
+1. Create the component directory: `web/src/app/pages/docs/pages/<name>/`
+2. Create `<name>.component.ts` with `templateUrl`
+3. Create `<name>.component.html` with the template
+4. Create `<name>.component.scss` importing shared styles
+5. Register in `docs.component.ts`:
+   - Import the component
+   - Add to `imports` array
+   - Add to `docs` array with `hasComponent: true`
+   - Add `@case` in the template switch

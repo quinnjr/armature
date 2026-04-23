@@ -11,6 +11,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-02-02
+
+Major release featuring Rust 2024 edition upgrade, new application builder, enhanced CLI, and HTTP handler improvements.
+
+### Added
+
+#### HTTP Handler Enhancements (`armature-core`, `armature-proc-macro`)
+- `#[options]` proc macro attribute for custom OPTIONS route handlers
+- `#[head]` proc macro attribute for HEAD request handlers
+- `Router::options()` and `Router::head()` fluent methods for programmatic routing
+- Full support for CORS preflight and resource metadata checks
+
+#### Application Builder (`armature-app`)
+- New `armature-app` crate with Rhai scripting support
+- Declarative application configuration via Rhai scripts
+- Dynamic route registration and middleware configuration
+- Hot-reload support for development
+
+#### CLI Enhancements (`armature-cli`)
+- Prax ORM support for code generation
+- Comprehensive code generation templates
+- Improved project scaffolding
+
+#### Messaging (`armature-messaging`)
+- MQ-Bridge integration for unified messaging across brokers
+- Support for RabbitMQ, Kafka, NATS, and Redis Streams
+
+#### Security
+- CodeQL security analysis workflow for automated vulnerability scanning
+
+### Changed
+
+- **Rust 2024 Edition** - Upgraded entire workspace to Rust 2024 edition
+- **MSRV** - Minimum supported Rust version updated to 1.89
+- Converted let-chains for Rust 2024 compatibility
+- Various dependency updates for compatibility
+
+### Fixed
+
+- Fixed clippy warnings for Rust 2024 edition compatibility
+- Fixed MSRV-related compilation issues
+
+---
+
 ## [0.1.0] - 2025-12-21
 
 Initial public release of the Armature framework - a high-performance, type-safe HTTP framework for Rust inspired by Angular and NestJS.
@@ -371,5 +415,6 @@ See [docs/migration.md](docs/migration.md) for detailed upgrade instructions bet
 
 ---
 
-[Unreleased]: https://github.com/PegasusHeavyIndustries/armature/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/PegasusHeavyIndustries/armature/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/PegasusHeavyIndustries/armature/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PegasusHeavyIndustries/armature/releases/tag/v0.1.0

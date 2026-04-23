@@ -34,7 +34,7 @@ mod generators;
 mod templates;
 mod watcher;
 
-use commands::{build, config, dev, generate, info, new, repl, routes};
+use commands::{build, config, dev, generate, info, mock, new, openapi, repl, routes, run};
 use error::{CliError, CliResult};
 
 /// Armature CLI - Modern Rust Web Framework Tools
@@ -161,6 +161,81 @@ enum Commands {
     /// Validate project setup and configuration
     #[command(alias = "check")]
     Validate(ValidateArgs),
+
+    /// OpenAPI tools (client generation, spec validation)
+    Openapi {
+        #[command(subcommand)]
+        command: OpenapiCommands,
+    },
+
+    /// Run mock server with fake data from OpenAPI spec
+    #[command(alias = "m")]
+    Mock(MockArgs),
+
+    /// Run a Rhai application script
+    Run(RunArgs),
+}
+
+// =============================================================================
+// MOCK ARGS
+// =============================================================================
+
+#[derive(Args)]
+struct MockArgs {
+    /// Path to OpenAPI spec (JSON or YAML)
+    #[arg(short, long, default_value = "openapi.yaml")]
+    spec: String,
+
+    /// Port to run mock server on
+    #[arg(short, long, default_value = "3000")]
+    port: u16,
+
+    /// Host to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Directory containing custom mock data files
+    #[arg(short, long)]
+    data: Option<String>,
+
+    /// Simulated response delay in milliseconds
+    #[arg(long, default_value = "0")]
+    delay: u64,
+
+    /// Enable CORS headers
+    #[arg(long, default_value = "true")]
+    cors: bool,
+
+    /// Seed for random data generation (for reproducibility)
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Watch spec file for changes
+    #[arg(short, long)]
+    watch: bool,
+}
+
+// =============================================================================
+// RUN COMMAND ARGS
+// =============================================================================
+
+#[derive(Args)]
+struct RunArgs {
+    /// Path to the Rhai application script
+    #[arg(default_value = "app.rhai")]
+    script: String,
+
+    /// Port to run the server on (overrides script-defined port)
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// Host to bind to (overrides script-defined host)
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Watch for script changes and restart
+    #[arg(short, long)]
+    watch: bool,
 }
 
 // =============================================================================
@@ -366,6 +441,145 @@ enum GeneratorType {
         #[arg(short, long)]
         fields: Option<String>,
     },
+
+    /// Generate a repository (data access layer)
+    #[command(alias = "repo")]
+    Repository {
+        /// Repository name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a WebSocket handler
+    #[command(alias = "ws")]
+    Websocket {
+        /// WebSocket handler name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a GraphQL resolver
+    #[command(alias = "gql")]
+    Graphql {
+        /// Resolver name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate an interceptor
+    Interceptor {
+        /// Interceptor name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a validation pipe
+    Pipe {
+        /// Pipe name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate an exception filter
+    #[command(alias = "filter")]
+    ExceptionFilter {
+        /// Filter name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a configuration module
+    #[command(alias = "cfg")]
+    Config {
+        /// Config module name
+        name: String,
+    },
+
+    /// Generate a database entity
+    #[command(alias = "ent")]
+    Entity {
+        /// Entity name
+        name: String,
+
+        /// ORM type (generic, diesel, seaorm, prax)
+        #[arg(long, short, default_value = "generic")]
+        orm: String,
+    },
+
+    /// Generate a Prax ORM schema file
+    #[command(alias = "prax-schema")]
+    PraxSchema {
+        /// Model name
+        name: String,
+    },
+
+    /// Generate a Prax ORM repository
+    #[command(alias = "prax-repo")]
+    PraxRepository {
+        /// Repository name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a complete Prax ORM module (schema + entity + repository + service)
+    #[command(alias = "prax")]
+    PraxModule {
+        /// Module name
+        name: String,
+    },
+
+    /// Generate a scheduled task
+    #[command(alias = "task", alias = "cron")]
+    Scheduler {
+        /// Task name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate a cache service
+    #[command(alias = "cache")]
+    CacheService {
+        /// Cache service name
+        name: String,
+
+        /// Skip test file generation
+        #[arg(long)]
+        skip_tests: bool,
+    },
+
+    /// Generate an API client
+    #[command(alias = "client")]
+    ApiClient {
+        /// Client name
+        name: String,
+    },
+
+    /// Generate a health check controller
+    Health,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -794,6 +1008,76 @@ struct ValidateArgs {
     /// Fix issues automatically where possible
     #[arg(long)]
     fix: bool,
+}
+
+// =============================================================================
+// OPENAPI COMMANDS
+// =============================================================================
+
+#[derive(Subcommand)]
+enum OpenapiCommands {
+    /// Generate HTTP client from OpenAPI spec
+    #[command(alias = "client")]
+    Client(OpenapiClientArgs),
+
+    /// Validate an OpenAPI spec
+    Validate {
+        /// Path to OpenAPI spec (JSON or YAML)
+        spec: String,
+    },
+
+    /// Generate OpenAPI spec from Armature routes
+    Generate {
+        /// Output file path
+        #[arg(short, long, default_value = "openapi.yaml")]
+        output: String,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "yaml")]
+        format: SpecFormat,
+    },
+}
+
+#[derive(Args)]
+struct OpenapiClientArgs {
+    /// Path to OpenAPI spec (JSON or YAML)
+    spec: String,
+
+    /// Output directory for generated client
+    #[arg(short, long, default_value = "generated-client")]
+    output: String,
+
+    /// Target language
+    #[arg(short, long, value_enum, default_value = "typescript")]
+    language: ClientLanguageArg,
+
+    /// Custom client class name
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Include request logging
+    #[arg(long)]
+    with_logging: bool,
+
+    /// Include retry logic
+    #[arg(long)]
+    with_retry: bool,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ClientLanguageArg {
+    /// TypeScript client
+    Typescript,
+    /// Rust client
+    Rust,
+    /// Both TypeScript and Rust
+    Both,
+}
+
+#[derive(Clone, ValueEnum)]
+enum SpecFormat {
+    Yaml,
+    Json,
 }
 
 // =============================================================================
@@ -1660,29 +1944,73 @@ async fn main() {
                 Ok(())
             }
 
-            GeneratorType::Job { name, job_type: _ } => {
-                info(&format!("Generating job: {}", name.cyan()));
-                warn("Job generation is coming soon!");
-                Ok(())
-            }
+            GeneratorType::Job { name, job_type: _ } => generate::job(&name, false).await,
 
-            GeneratorType::Event { name } => {
-                info(&format!("Generating event: {}", name.cyan()));
-                warn("Event generation is coming soon!");
-                Ok(())
-            }
+            GeneratorType::Event { name } => generate::event_handler(&name, false).await,
 
-            GeneratorType::Dto { name, fields: _ } => {
-                info(&format!("Generating DTO: {}", name.cyan()));
-                warn("DTO generation is coming soon!");
-                Ok(())
-            }
+            GeneratorType::Dto { name, fields: _ } => generate::dto(&name).await,
 
             GeneratorType::Scaffold { name, fields: _ } => {
-                info(&format!("Generating scaffold: {}", name.cyan()));
-                warn("Scaffold generation is coming soon!");
-                Ok(())
+                // Generate all layers: entity, repository, dto, service, controller
+                info(&format!("Generating full scaffold for: {}", name.cyan()));
+                async {
+                    generate::entity(&name).await?;
+                    generate::repository(&name, false).await?;
+                    generate::dto(&name).await?;
+                    generate::service(&name, false).await?;
+                    generate::controller(&name, true, false).await
+                }
+                .await
             }
+
+            GeneratorType::Repository { name, skip_tests } => {
+                generate::repository(&name, skip_tests).await
+            }
+
+            GeneratorType::Websocket { name, skip_tests } => {
+                generate::websocket(&name, skip_tests).await
+            }
+
+            GeneratorType::Graphql { name, skip_tests } => {
+                generate::graphql_resolver(&name, skip_tests).await
+            }
+
+            GeneratorType::Interceptor { name, skip_tests } => {
+                generate::interceptor(&name, skip_tests).await
+            }
+
+            GeneratorType::Pipe { name, skip_tests } => generate::pipe(&name, skip_tests).await,
+
+            GeneratorType::ExceptionFilter { name, skip_tests } => {
+                generate::exception_filter(&name, skip_tests).await
+            }
+
+            GeneratorType::Config { name } => generate::config(&name).await,
+
+            GeneratorType::Entity { name, orm } => match orm.parse::<generate::OrmType>() {
+                Ok(orm_type) => generate::entity_with_orm(&name, orm_type).await,
+                Err(e) => Err(crate::error::CliError::InvalidArgument(e)),
+            },
+
+            GeneratorType::PraxSchema { name } => generate::prax_schema(&name).await,
+
+            GeneratorType::PraxRepository { name, skip_tests } => {
+                generate::prax_repository(&name, skip_tests).await
+            }
+
+            GeneratorType::PraxModule { name } => generate::prax_module(&name).await,
+
+            GeneratorType::Scheduler { name, skip_tests } => {
+                generate::scheduler(&name, skip_tests).await
+            }
+
+            GeneratorType::CacheService { name, skip_tests } => {
+                generate::cache_service(&name, skip_tests).await
+            }
+
+            GeneratorType::ApiClient { name } => generate::api_client(&name).await,
+
+            GeneratorType::Health => generate::health_controller().await,
         },
 
         Commands::Dev(args) => dev::run(args.port, &args.host, &args.cargo_args).await,
@@ -1912,6 +2240,56 @@ async fn main() {
         Commands::Validate(args) => {
             print_mini_banner();
             run_validate_command(args).await
+        }
+
+        Commands::Openapi { command } => {
+            print_mini_banner();
+            match command {
+                OpenapiCommands::Client(args) => {
+                    let language = match args.language {
+                        ClientLanguageArg::Typescript => openapi::ClientLanguage::TypeScript,
+                        ClientLanguageArg::Rust => openapi::ClientLanguage::Rust,
+                        ClientLanguageArg::Both => openapi::ClientLanguage::Both,
+                    };
+                    let options = openapi::ClientOptions {
+                        base_url: None,
+                        async_client: true,
+                        with_logging: args.with_logging,
+                        with_retry: args.with_retry,
+                        client_name: args.name,
+                    };
+                    openapi::generate_client(&args.spec, &args.output, language, &options).await
+                }
+                OpenapiCommands::Validate { spec } => {
+                    info(&format!("Validating OpenAPI spec: {}", spec.cyan()));
+                    warn("OpenAPI validation is coming soon!");
+                    Ok(())
+                }
+                OpenapiCommands::Generate { output, format: _ } => {
+                    info(&format!("Generating OpenAPI spec to: {}", output.cyan()));
+                    warn("OpenAPI generation from routes is coming soon!");
+                    Ok(())
+                }
+            }
+        }
+
+        Commands::Mock(args) => {
+            print_mini_banner();
+            let mock_args = mock::MockArgs {
+                spec: args.spec,
+                port: args.port,
+                host: args.host,
+                data_dir: args.data,
+                delay_ms: args.delay,
+                cors: args.cors,
+                seed: args.seed,
+                watch: args.watch,
+            };
+            mock::run(mock_args).await
+        }
+
+        Commands::Run(args) => {
+            run::run(&args.script, args.port, args.host.as_deref(), args.watch).await
         }
     };
 

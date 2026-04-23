@@ -1,0 +1,48 @@
+# Alertmanager Configuration
+global:
+  resolve_timeout: 5m
+  # Uncomment to enable Slack notifications
+  # slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+
+route:
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "default"
+  routes:
+    - match:
+        severity: critical
+      receiver: "critical"
+      continue: true
+    - match:
+        severity: warning
+      receiver: "warning"
+
+receivers:
+  - name: "default"
+    # Webhook receiver (e.g., for PagerDuty, OpsGenie)
+    # webhook_configs:
+    #   - url: 'http://your-webhook-url/alert'
+
+  - name: "critical"
+    # Slack notification for critical alerts
+    # slack_configs:
+    #   - channel: '#alerts-critical'
+    #     title: '🚨 {{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+  - name: "warning"
+    # Slack notification for warnings
+    # slack_configs:
+    #   - channel: '#alerts-warning'
+    #     title: '⚠️ {{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+inhibit_rules:
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    equal: ["alertname"]
+

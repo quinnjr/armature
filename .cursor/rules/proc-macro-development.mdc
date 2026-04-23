@@ -1,0 +1,135 @@
+---
+description: Guidelines for developing procedural macros in armature-proc-macro
+globs: armature-proc-macro/**/*.rs
+alwaysApply: false
+---
+
+# Procedural Macro Development
+
+Standards for developing procedural macros in the Armature framework.
+
+## Core Principles
+
+1. **Use syn for parsing, quote for generation**
+2. **Preserve span information** for good error messages
+3. **Never panic** - use `syn::Error` for compile-time errors
+4. **Use fully qualified paths** to avoid conflicts
+
+## Error Handling
+
+```rust
+use syn::{Error, Result};
+
+fn validate_input(input: &DeriveInput) -> Result<()> {
+    if !matches!(input.data, Data::Struct(_)) {
+        return Err(Error::new_spanned(
+            input,
+            "#[injectable] can only be applied to structs"
+        ));
+    }
+    Ok(())
+}
+```
+
+## Span Preservation
+
+Always preserve spans for error messages:
+
+```rust
+// Good - preserves span
+let name = &input.ident;
+quote_spanned! {name.span()=>
+    impl #name { }
+}
+
+// Bad - loses span information
+let name_str = input.ident.to_string();
+let name = format_ident!("{}", name_str);
+```
+
+## Handling Generics
+
+```rust
+fn impl_trait(input: &DeriveInput) -> TokenStream {
+    let name = &input.ident;
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    quote! {
+        impl #impl_generics MyTrait for #name #ty_generics #where_clause {
+            // implementation
+        }
+    }
+}
+```
+
+## Hygiene
+
+Prefix generated identifiers to avoid conflicts:
+
+```rust
+let field_name = format_ident!("__armature_{}", field.ident.as_ref().unwrap());
+```
+
+## Fully Qualified Paths
+
+Always use full paths in generated code:
+
+```rust
+quote! {
+    // Good
+    ::std::result::Result::Ok(())
+    ::armature_core::Injectable
+
+    // Bad - could conflict with user's imports
+    Result::Ok(())
+    Injectable
+}
+```
+
+## Testing
+
+Use `trybuild` for compile-fail tests:
+
+```rust
+#[test]
+fn test_compile_errors() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/*.rs");
+}
+```
+
+Verify output with `cargo-expand`:
+
+```bash
+cargo expand --example my_example
+```
+
+## Main Macros Reference
+
+| Macro | Purpose |
+|-------|---------|
+| `#[injectable]` | Register type with DI container |
+| `#[controller]` | Define HTTP controller with route prefix |
+| `#[module]` | Define module with providers/controllers |
+| `#[get]`, `#[post]`, etc. | HTTP route handlers |
+| `#[guard]` | Authorization guard |
+| `#[interceptor]` | Request/response interceptor |
+
+## Minimal Generated Code
+
+Keep generated code minimal:
+
+```rust
+// Good - minimal wrapper
+quote! {
+    impl Injectable for #name {
+        fn create(container: &Container) -> Self {
+            Self::new(container.resolve())
+        }
+    }
+}
+
+// Bad - too much generated code
+// Move logic to runtime library instead
+```

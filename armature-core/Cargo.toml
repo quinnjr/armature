@@ -1,6 +1,6 @@
 [package]
 name = "armature-core"
-version = "0.1.0"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -25,7 +25,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-service = "0.3"
 bytes = "1.5"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
-compact_str = "0.8"
+compact_str = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -54,6 +54,9 @@ regex = "1.10"
 # Resilience patterns
 parking_lot = "0.12"
 
+# Bounded caches
+lru = "0.12"
+
 # Hot Module Reload (HMR)
 notify = "8.0"
 
@@ -68,6 +71,11 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2.0"
 rcgen = { version = "0.14", optional = true }
 
+# HTTP/3 (QUIC) support - optional
+quinn = { version = "0.11", optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+
 # Unix system calls (Linux, macOS, BSD)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -76,6 +84,10 @@ libc = "0.2"
 default = []
 self-signed-certs = ["rcgen"]
 simd-json = ["dep:simd-json"]
+
+# HTTP/3 (QUIC) support - next-gen protocol with multiplexing over UDP
+# Requires: quinn, h3, h3-quinn
+http3 = ["quinn", "h3", "h3-quinn"]
 
 # io_uring support for Linux (kernel 5.1+)
 # Provides 3-5% throughput improvement via reduced syscall overhead

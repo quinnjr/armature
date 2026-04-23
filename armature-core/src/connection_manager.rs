@@ -222,6 +222,9 @@ struct BufferHistory {
 }
 
 impl BufferHistory {
+    /// Maximum samples to retain (prevents unbounded growth under burst traffic)
+    const MAX_SAMPLES: usize = 1000;
+
     fn new(window: Duration, initial_size: usize) -> Self {
         Self {
             samples: Vec::with_capacity(1000),
@@ -233,9 +236,14 @@ impl BufferHistory {
     fn record(&mut self, size: usize, was_sufficient: bool) {
         let now = Instant::now();
 
-        // Prune old samples
+        // Prune old samples by time
         self.samples
             .retain(|s| now.duration_since(s.timestamp) < self.window);
+
+        // Prune by count if over capacity (prevents unbounded growth under burst)
+        while self.samples.len() >= Self::MAX_SAMPLES {
+            self.samples.remove(0);
+        }
 
         // Add new sample
         self.samples.push(BufferSample {
@@ -468,39 +476,35 @@ impl ConnectionManager {
     /// Mark a connection as active.
     pub fn mark_active(&self, id: ConnectionId) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
-        {
-            state.last_active = Instant::now();
-            state.requests += 1;
-        }
+            && let Some(state) = connections.get_mut(&id) {
+                state.last_active = Instant::now();
+                state.requests += 1;
+            }
         self.load.record_request();
     }
 
     /// Record bytes read on a connection.
     pub fn record_bytes_read(&self, id: ConnectionId, bytes: u64) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
-        {
-            state.bytes_read += bytes;
-        }
+            && let Some(state) = connections.get_mut(&id) {
+                state.bytes_read += bytes;
+            }
     }
 
     /// Record bytes written on a connection.
     pub fn record_bytes_written(&self, id: ConnectionId, bytes: u64) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
-        {
-            state.bytes_written += bytes;
-        }
+            && let Some(state) = connections.get_mut(&id) {
+                state.bytes_written += bytes;
+            }
     }
 
     /// Set connection keep-alive status.
     pub fn set_keep_alive(&self, id: ConnectionId, keep_alive: bool) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
-        {
-            state.is_keep_alive = keep_alive;
-        }
+            && let Some(state) = connections.get_mut(&id) {
+                state.is_keep_alive = keep_alive;
+            }
     }
 
     // ========================================================================
@@ -610,7 +614,7 @@ impl ConnectionManager {
                 .collect();
 
             // Sort by idle duration (longest first)
-            idle_connections.sort_by(|a, b| b.1.cmp(&a.1));
+            idle_connections.sort_by_key(|k| std::cmp::Reverse(k.1));
 
             // Take up to batch size, but keep min connections
             let max_cull = (current - self.config.min_connections).min(self.config.cull_batch_size);

@@ -1,5 +1,20 @@
 //! AWS services container with dynamic loading.
 
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "sqs",
+    feature = "sns",
+    feature = "ses",
+    feature = "lambda",
+    feature = "secrets-manager",
+    feature = "ssm",
+    feature = "cloudwatch",
+    feature = "kinesis",
+    feature = "kms",
+    feature = "cognito"
+))]
+use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::info;
 

@@ -1,0 +1,35 @@
+[package]
+name = "armature-analytics"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "API analytics and usage tracking for Armature framework"
+keywords = ["analytics", "metrics", "monitoring", "api", "observability"]
+categories = ["web-programming", "development-tools::profiling"]
+
+[dependencies]
+armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-log = { path = "../armature-log", version = "0.1.0" }
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+thiserror = "2.0"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.1"
+
+# Metrics backends (optional)
+prometheus = { version = "0.14", optional = true }
+
+[features]
+default = []
+prometheus = ["dep:prometheus"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+

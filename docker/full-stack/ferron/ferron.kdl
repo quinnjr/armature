@@ -1,0 +1,45 @@
+# Ferron Reverse Proxy Configuration for Armature
+# ================================================
+# Load balancing with health checks, rate limiting, and WebSocket support
+
+localhost {
+    # Compression
+    gzip level=6
+
+    # Global headers
+    header "X-Powered-By" "Armature/Ferron"
+    header "X-Frame-Options" "DENY"
+    header "X-Content-Type-Options" "nosniff"
+    header "X-XSS-Protection" "1; mode=block"
+
+    # Rate limiting (100 req/s per IP with burst of 50)
+    rate_limit key="ip" rate=100 burst=50
+
+    # Load balancing configuration
+    lb_method "least_conn"
+    proxy "http://api-1:3000" weight=5
+    proxy "http://api-2:3000" weight=5
+
+    # Health checks
+    lb_health_check interval=5 path="/health" threshold=3
+
+    # WebSocket support
+    location "/ws" {
+        proxy "http://api-1:3000"
+        websocket
+        timeout 86400
+    }
+
+    # API routes
+    location "/" {
+        proxy "http://api-1:3000"
+        header "X-Request-ID" "$request_id"
+    }
+
+    # Static files (if serving from proxy)
+    location "/static" {
+        root "/var/www/static"
+        header "Cache-Control" "public, max-age=2592000, immutable"
+    }
+}
+

@@ -120,6 +120,16 @@ impl CorsMiddleware {
         self
     }
 
+    pub fn allow_methods(mut self, methods: &str) -> Self {
+        self.allow_methods = methods.to_string();
+        self
+    }
+
+    pub fn allow_headers(mut self, headers: &str) -> Self {
+        self.allow_headers = headers.to_string();
+        self
+    }
+
     pub fn allow_credentials(mut self, allow: bool) -> Self {
         self.allow_credentials = allow;
         self

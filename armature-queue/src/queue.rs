@@ -164,21 +164,23 @@ impl Queue {
             // Pop the highest priority job
             let result: Option<Vec<String>> = conn.zpopmin(&queue_key, 1).await?;
 
-            if let Some(items) = result
-                && let Some(job_id_str) = items.first()
-                && let Ok(job_id) = job_id_str.parse::<JobId>()
-                && let Some(mut job) = self.get_job(job_id).await?
-            {
-                job.start_processing();
-                self.save_job(&job).await?;
+            if let Some(items) = result {
+                if let Some(job_id_str) = items.first() {
+                    if let Ok(job_id) = job_id_str.parse::<JobId>() {
+                        if let Some(mut job) = self.get_job(job_id).await? {
+                            job.start_processing();
+                            self.save_job(&job).await?;
 
-                // Add to processing set
-                let processing_key = self.config.key("processing");
-                let _: () = conn
-                    .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
-                    .await?;
+                            // Add to processing set
+                            let processing_key = self.config.key("processing");
+                            let _: () = conn
+                                .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
+                                .await?;
 
-                return Ok(Some(job));
+                            return Ok(Some(job));
+                        }
+                    }
+                }
             }
         }
 
@@ -285,17 +287,18 @@ impl Queue {
         let job_ids: Vec<String> = conn.zrangebyscore(&delayed_key, "-inf", now).await?;
 
         for job_id_str in job_ids {
-            if let Ok(job_id) = job_id_str.parse::<JobId>()
-                && let Some(job) = self.get_job(job_id).await?
-                && job.is_ready()
-            {
-                // Remove from delayed
-                let _: () = conn.zrem(&delayed_key, job_id.to_string()).await?;
+            if let Ok(job_id) = job_id_str.parse::<JobId>() {
+                if let Some(job) = self.get_job(job_id).await? {
+                    if job.is_ready() {
+                        // Remove from delayed
+                        let _: () = conn.zrem(&delayed_key, job_id.to_string()).await?;
 
-                // Add to priority queue
-                let queue_key = self.priority_queue_key(job.priority);
-                let score = -(job.priority as i64);
-                let _: () = conn.zadd(&queue_key, job_id.to_string(), score).await?;
+                        // Add to priority queue
+                        let queue_key = self.priority_queue_key(job.priority);
+                        let score = -(job.priority as i64);
+                        let _: () = conn.zadd(&queue_key, job_id.to_string(), score).await?;
+                    }
+                }
             }
         }
 

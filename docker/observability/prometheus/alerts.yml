@@ -1,0 +1,94 @@
+# Prometheus Alert Rules for Armature
+groups:
+  - name: armature-api
+    rules:
+      # High error rate
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+      # High latency
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency detected"
+          description: "p99 latency is {{ $value | humanizeDuration }}"
+
+      # API down
+      - alert: ApiDown
+        expr: up{job="armature-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Armature API is down"
+          description: "The API has been down for more than 1 minute"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: |
+          process_resident_memory_bytes{job="armature-api"}
+          / on() group_left node_memory_MemTotal_bytes > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "API memory usage is {{ $value | humanizePercentage }}"
+
+      # High CPU usage
+      - alert: HighCpuUsage
+        expr: |
+          rate(process_cpu_seconds_total{job="armature-api"}[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "API CPU usage is {{ $value | humanizePercentage }}"
+
+  - name: infrastructure
+    rules:
+      # Node down
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter down"
+          description: "Node exporter has been down for more than 1 minute"
+
+      # Disk space
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/"}
+          / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space"
+          description: "Available disk space is {{ $value | humanizePercentage }}"
+
+      # Container restarts
+      - alert: ContainerRestarting
+        expr: |
+          increase(container_restart_count[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container restarting frequently"
+          description: "Container {{ $labels.name }} has restarted {{ $value }} times in the last hour"
+

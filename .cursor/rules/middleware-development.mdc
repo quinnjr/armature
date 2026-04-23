@@ -1,0 +1,210 @@
+---
+description: Guidelines for creating middleware in Armature
+globs: "**/middleware/**/*.rs, **/interceptors/**/*.rs"
+alwaysApply: false
+---
+
+# Middleware Development
+
+Standards for creating middleware and interceptors in Armature.
+
+## Middleware Structure
+
+```rust
+use armature_core::{Middleware, Request, Response, Next};
+
+pub struct LoggingMiddleware {
+    logger: Arc<Logger>,
+}
+
+impl Middleware for LoggingMiddleware {
+    async fn handle(&self, req: Request, next: Next) -> Result<Response, Error> {
+        let start = Instant::now();
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+
+        // Before handler
+        tracing::info!(%method, %path, "Request started");
+
+        // Call next middleware/handler
+        let response = next.run(req).await?;
+
+        // After handler
+        let duration = start.elapsed();
+        tracing::info!(
+            %method,
+            %path,
+            status = %response.status(),
+            duration_ms = %duration.as_millis(),
+            "Request completed"
+        );
+
+        Ok(response)
+    }
+}
+```
+
+## Common Middleware Types
+
+### Request ID
+
+```rust
+pub struct RequestIdMiddleware;
+
+impl Middleware for RequestIdMiddleware {
+    async fn handle(&self, mut req: Request, next: Next) -> Result<Response, Error> {
+        let request_id = req
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        req.extensions_mut().insert(RequestId(request_id.clone()));
+
+        let mut response = next.run(req).await?;
+        response.headers_mut().insert(
+            "x-request-id",
+            HeaderValue::from_str(&request_id)?,
+        );
+
+        Ok(response)
+    }
+}
+```
+
+### Rate Limiting
+
+```rust
+pub struct RateLimitMiddleware {
+    limiter: Arc<RateLimiter>,
+}
+
+impl Middleware for RateLimitMiddleware {
+    async fn handle(&self, req: Request, next: Next) -> Result<Response, Error> {
+        let key = extract_client_key(&req);
+
+        if !self.limiter.check(&key).await {
+            return Err(Error::TooManyRequests);
+        }
+
+        next.run(req).await
+    }
+}
+```
+
+### CORS
+
+```rust
+pub struct CorsMiddleware {
+    config: CorsConfig,
+}
+
+impl Middleware for CorsMiddleware {
+    async fn handle(&self, req: Request, next: Next) -> Result<Response, Error> {
+        // Handle preflight
+        if req.method() == Method::OPTIONS {
+            return Ok(self.preflight_response(&req));
+        }
+
+        let mut response = next.run(req).await?;
+
+        // Add CORS headers
+        let headers = response.headers_mut();
+        headers.insert("access-control-allow-origin", self.config.origin.parse()?);
+        headers.insert("access-control-allow-methods", self.config.methods.parse()?);
+        headers.insert("access-control-allow-headers", self.config.headers.parse()?);
+
+        Ok(response)
+    }
+}
+```
+
+## Interceptors
+
+Interceptors wrap handlers with before/after logic:
+
+```rust
+#[interceptor]
+pub struct TimingInterceptor;
+
+impl Interceptor for TimingInterceptor {
+    async fn before(&self, ctx: &mut RequestContext) -> Result<(), Error> {
+        ctx.extensions_mut().insert(StartTime(Instant::now()));
+        Ok(())
+    }
+
+    async fn after(&self, ctx: &RequestContext, response: &mut Response) -> Result<(), Error> {
+        if let Some(StartTime(start)) = ctx.extensions().get::<StartTime>() {
+            let duration = start.elapsed();
+            response.headers_mut().insert(
+                "x-response-time",
+                HeaderValue::from_str(&format!("{}ms", duration.as_millis()))?,
+            );
+        }
+        Ok(())
+    }
+}
+```
+
+## Error Handling Middleware
+
+```rust
+pub struct ErrorHandlerMiddleware;
+
+impl Middleware for ErrorHandlerMiddleware {
+    async fn handle(&self, req: Request, next: Next) -> Result<Response, Error> {
+        match next.run(req).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                // Log the error
+                tracing::error!(?error, "Request failed");
+
+                // Convert to response
+                Ok(error.into_response())
+            }
+        }
+    }
+}
+```
+
+## Middleware Registration
+
+```rust
+let app = App::new()
+    .middleware(RequestIdMiddleware)
+    .middleware(LoggingMiddleware::new(logger))
+    .middleware(CorsMiddleware::new(cors_config))
+    .middleware(RateLimitMiddleware::new(limiter))
+    .middleware(ErrorHandlerMiddleware);
+```
+
+## Order Matters
+
+Middleware executes in registration order (outside-in):
+
+```
+Request  → RequestId → Logging → CORS → Handler
+Response ← RequestId ← Logging ← CORS ← Handler
+```
+
+## Testing Middleware
+
+```rust
+#[tokio::test]
+async fn test_request_id_middleware() {
+    let middleware = RequestIdMiddleware;
+
+    let req = Request::builder()
+        .uri("/test")
+        .body(Body::empty())?;
+
+    let next = Next::new(|req| async {
+        Ok(Response::new(Body::empty()))
+    });
+
+    let response = middleware.handle(req, next).await?;
+
+    assert!(response.headers().contains_key("x-request-id"));
+}
+```

@@ -167,10 +167,10 @@ impl LeaderElection {
                     error!("Leader election error: {}", e);
 
                     // If we were leader but encountered an error, we're no longer leader
-                    if self.is_leader.swap(false, Ordering::Release)
-                        && let Some(callback) = &self.on_revoked
-                    {
-                        callback().await;
+                    if self.is_leader.swap(false, Ordering::Release) {
+                        if let Some(callback) = &self.on_revoked {
+                            callback().await;
+                        }
                     }
                 }
             }

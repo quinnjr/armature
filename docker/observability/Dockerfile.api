@@ -1,0 +1,55 @@
+# Armature API Dockerfile with Metrics Support
+# Multi-stage build for minimal image size
+
+# Build stage
+FROM rust:1.83-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+# Copy Cargo files for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY armature-core/Cargo.toml armature-core/
+COPY armature-proc-macro/Cargo.toml armature-proc-macro/
+COPY armature-log/Cargo.toml armature-log/
+
+# Create dummy files for dependency compilation
+RUN mkdir -p armature-core/src armature-proc-macro/src armature-log/src && \
+    echo "fn main() {}" > armature-core/src/lib.rs && \
+    echo "fn main() {}" > armature-proc-macro/src/lib.rs && \
+    echo "fn main() {}" > armature-log/src/lib.rs
+
+# Build dependencies
+RUN cargo build --release 2>/dev/null || true
+
+# Copy actual source
+COPY . .
+
+# Build the metrics server example
+RUN cargo build --release --example metrics_example && \
+    strip /app/target/release/examples/metrics_example
+
+# Runtime stage
+FROM alpine:3.19
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates curl
+
+# Copy binary
+COPY --from=builder /app/target/release/examples/metrics_example /app/server
+
+# Create non-root user
+RUN adduser -D -u 1000 armature
+USER armature
+
+EXPOSE 3000 9100
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+ENTRYPOINT ["/app/server"]
+

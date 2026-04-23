@@ -1,0 +1,69 @@
+[package]
+name = "armature-websocket"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebSocket server and client support for Armature using tokio-tungstenite"
+keywords = ["websocket", "async", "realtime", "tokio", "tungstenite"]
+categories = ["network-programming", "asynchronous", "web-programming"]
+
+[dependencies]
+# Logging
+armature-log = { path = "../armature-log", version = "0.1.0" }
+
+# WebSocket
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tungstenite = "0.26"
+
+# Async runtime
+tokio = { version = "1.35", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# HTTP (for upgrade handling)
+http = "1.1"
+http-body = "1.0"
+http-body-util = "0.1"
+bytes = "1.5"
+hyper = { version = "1.4", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Tracing
+tracing = "0.1"
+
+# Utilities
+async-trait = "0.1"
+futures = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
+parking_lot = "0.12"
+dashmap = "6.0"
+uuid = { version = "1.0", features = ["v4"] }
+url = "2.5"
+
+# Optional: TLS support
+tokio-native-tls = { version = "0.3", optional = true }
+native-tls = { version = "0.2", optional = true }
+
+# Optional: Rustls support
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true }
+
+[features]
+default = ["native-tls"]
+native-tls = ["dep:tokio-native-tls", "dep:native-tls", "tokio-tungstenite/native-tls"]
+rustls-tls = ["dep:tokio-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio-test = "0.4"
+

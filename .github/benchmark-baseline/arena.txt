@@ -1,173 +1,274 @@
-[1m[92m   Compiling[0m armature-framework v0.1.1 (/home/runner/work/armature/armature)
-[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 14.57s
-[1m[92m     Running[0m benches/arena_benchmarks.rs (target/release/deps/arena_benchmarks-eba03a92b33ed7ac)
+[1m[33mwarning[0m[1m: struct `ScriptContextBuilder` is never constructed[0m
+  [1m[94m--> [0marmature-rhai/src/context.rs:82:12
+   [1m[94m|[0m
+[1m[94m82[0m [1m[94m|[0m pub struct ScriptContextBuilder {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: associated items `new`, `request`, `state`, `local`, and `build` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/context.rs:96:12
+    [1m[94m|[0m
+[1m[94m 94[0m [1m[94m|[0m impl ScriptContextBuilder {
+    [1m[94m|[0m [1m[94m-------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m 95[0m [1m[94m|[0m     /// Create a new builder.
+[1m[94m 96[0m [1m[94m|[0m     pub fn new() -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m105[0m [1m[94m|[0m     pub fn request(mut self, request: RequestBinding) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m111[0m [1m[94m|[0m     pub fn state(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m117[0m [1m[94m|[0m     pub fn local(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m123[0m [1m[94m|[0m     pub fn build(self) -> Option<ScriptContext> {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+
+[1m[33mwarning[0m[1m: type alias `ScriptHandlerFn` is never used[0m
+   [1m[94m--> [0marmature-rhai/src/handler.rs:206:10
+    [1m[94m|[0m
+[1m[94m206[0m [1m[94m|[0m pub type ScriptHandlerFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse> + Send + Sync>;
+    [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `script_handler` is never used[0m
+   [1m[94m--> [0marmature-rhai/src/handler.rs:209:8
+    [1m[94m|[0m
+[1m[94m209[0m [1m[94m|[0m pub fn script_handler(engine: Arc<RhaiEngine>, script_path: impl Into<PathBuf>) -> ScriptHandlerFn {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `ScriptRouterBuilder` is never constructed[0m
+   [1m[94m--> [0marmature-rhai/src/router.rs:306:12
+    [1m[94m|[0m
+[1m[94m306[0m [1m[94m|[0m pub struct ScriptRouterBuilder {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: associated items `new`, `auto_routes`, `build`, `discover_routes`, and `path_to_route` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/router.rs:314:12
+    [1m[94m|[0m
+[1m[94m312[0m [1m[94m|[0m impl ScriptRouterBuilder {
+    [1m[94m|[0m [1m[94m------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m313[0m [1m[94m|[0m     /// Create a new builder.
+[1m[94m314[0m [1m[94m|[0m     pub fn new(engine: RhaiEngine) -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m329[0m [1m[94m|[0m     pub fn auto_routes(mut self, dir: impl Into<PathBuf>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m336[0m [1m[94m|[0m     pub fn build(self) -> Result<ScriptRouter> {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m347[0m [1m[94m|[0m     fn discover_routes(&self, mut router: ScriptRouter) -> Result<ScriptRouter> {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m362[0m [1m[94m|[0m     fn path_to_route(&self, path: &Path) -> Result<String> {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `ConcurrentScriptCache` is never constructed[0m
+   [1m[94m--> [0marmature-rhai/src/script.rs:131:12
+    [1m[94m|[0m
+[1m[94m131[0m [1m[94m|[0m pub struct ConcurrentScriptCache {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: associated items `new`, `get`, `insert`, `remove`, and `clear` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/script.rs:145:12
+    [1m[94m|[0m
+[1m[94m143[0m [1m[94m|[0m impl ConcurrentScriptCache {
+    [1m[94m|[0m [1m[94m--------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m144[0m [1m[94m|[0m     /// Create a new concurrent cache.
+[1m[94m145[0m [1m[94m|[0m     pub fn new() -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m154[0m [1m[94m|[0m     pub fn get(&self, path: &Path) -> Option<Arc<CompiledScript>> {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m165[0m [1m[94m|[0m     pub fn insert(&self, path: PathBuf, script: Arc<CompiledScript>) {
+    [1m[94m|[0m            [1m[33m^^^^^^[0m
+[1m[94m...[0m
+[1m[94m170[0m [1m[94m|[0m     pub fn remove(&self, path: &Path) -> Option<Arc<CompiledScript>> {
+    [1m[94m|[0m            [1m[33m^^^^^^[0m
+[1m[94m...[0m
+[1m[94m175[0m [1m[94m|[0m     pub fn clear(&self) {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+
+[1m[33mwarning[0m: `armature-rhai` (lib) generated 8 warnings
+[1m[92m   Compiling[0m armature-framework v0.2.2 (/home/runner/work/armature/armature)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 14.15s
+[1m[92m     Running[0m benches/arena_benchmarks.rs (target/release/deps/arena_benchmarks-8e176bb8d4c6cd3c)
 Gnuplot not found, using plotters backend
 Benchmarking string_alloc/heap/single
 Benchmarking string_alloc/heap/single: Warming up for 3.0000 s
-Benchmarking string_alloc/heap/single: Collecting 100 samples in estimated 5.0000 s (374M iterations)
+Benchmarking string_alloc/heap/single: Collecting 100 samples in estimated 5.0000 s (373M iterations)
 Benchmarking string_alloc/heap/single: Analyzing
 string_alloc/heap/single
-                        time:   [13.378 ns 13.389 ns 13.402 ns]
-Found 10 outliers among 100 measurements (10.00%)
-  2 (2.00%) high mild
-  8 (8.00%) high severe
+                        time:   [13.392 ns 13.479 ns 13.605 ns]
+Found 20 outliers among 100 measurements (20.00%)
+  14 (14.00%) high mild
+  6 (6.00%) high severe
 Benchmarking string_alloc/arena/single
 Benchmarking string_alloc/arena/single: Warming up for 3.0000 s
 Benchmarking string_alloc/arena/single: Collecting 100 samples in estimated 5.0000 s (765M iterations)
 Benchmarking string_alloc/arena/single: Analyzing
 string_alloc/arena/single
-                        time:   [6.5318 ns 6.5377 ns 6.5459 ns]
-Found 9 outliers among 100 measurements (9.00%)
-  2 (2.00%) high mild
+                        time:   [6.5343 ns 6.5393 ns 6.5469 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
   7 (7.00%) high severe
 Benchmarking string_alloc/heap/multiple_10
 Benchmarking string_alloc/heap/multiple_10: Warming up for 3.0000 s
-Benchmarking string_alloc/heap/multiple_10: Collecting 100 samples in estimated 5.0001 s (12M iterations)
+Benchmarking string_alloc/heap/multiple_10: Collecting 100 samples in estimated 5.0016 s (11M iterations)
 Benchmarking string_alloc/heap/multiple_10: Analyzing
 string_alloc/heap/multiple_10
-                        time:   [408.60 ns 409.32 ns 410.05 ns]
-Found 3 outliers among 100 measurements (3.00%)
+                        time:   [464.55 ns 465.26 ns 465.93 ns]
+Found 4 outliers among 100 measurements (4.00%)
   1 (1.00%) low mild
+  1 (1.00%) high mild
   2 (2.00%) high severe
 Benchmarking string_alloc/arena/multiple_10
 Benchmarking string_alloc/arena/multiple_10: Warming up for 3.0000 s
-Benchmarking string_alloc/arena/multiple_10: Collecting 100 samples in estimated 5.0003 s (13M iterations)
+Benchmarking string_alloc/arena/multiple_10: Collecting 100 samples in estimated 5.0021 s (12M iterations)
 Benchmarking string_alloc/arena/multiple_10: Analyzing
 string_alloc/arena/multiple_10
-                        time:   [391.67 ns 392.02 ns 392.54 ns]
+                        time:   [431.98 ns 432.34 ns 432.90 ns]
 Found 10 outliers among 100 measurements (10.00%)
-  6 (6.00%) high mild
-  4 (4.00%) high severe
+  5 (5.00%) high mild
+  5 (5.00%) high severe
 
 Benchmarking map_alloc/hashmap/headers_16
 Benchmarking map_alloc/hashmap/headers_16: Warming up for 3.0000 s
-Benchmarking map_alloc/hashmap/headers_16: Collecting 100 samples in estimated 5.0004 s (8.3M iterations)
+Benchmarking map_alloc/hashmap/headers_16: Collecting 100 samples in estimated 5.0021 s (8.1M iterations)
 Benchmarking map_alloc/hashmap/headers_16: Analyzing
 map_alloc/hashmap/headers_16
-                        time:   [603.88 ns 604.74 ns 605.58 ns]
-Found 15 outliers among 100 measurements (15.00%)
-  3 (3.00%) low mild
-  9 (9.00%) high mild
-  3 (3.00%) high severe
-Benchmarking map_alloc/arenamap/headers_16
-Benchmarking map_alloc/arenamap/headers_16: Warming up for 3.0000 s
-Benchmarking map_alloc/arenamap/headers_16: Collecting 100 samples in estimated 5.0002 s (99M iterations)
-Benchmarking map_alloc/arenamap/headers_16: Analyzing
-map_alloc/arenamap/headers_16
-                        time:   [50.131 ns 50.188 ns 50.274 ns]
+                        time:   [615.03 ns 615.27 ns 615.54 ns]
 Found 6 outliers among 100 measurements (6.00%)
   2 (2.00%) high mild
   4 (4.00%) high severe
+Benchmarking map_alloc/arenamap/headers_16
+Benchmarking map_alloc/arenamap/headers_16: Warming up for 3.0000 s
+Benchmarking map_alloc/arenamap/headers_16: Collecting 100 samples in estimated 5.0000 s (99M iterations)
+Benchmarking map_alloc/arenamap/headers_16: Analyzing
+map_alloc/arenamap/headers_16
+                        time:   [50.605 ns 50.628 ns 50.653 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
 
 Benchmarking request_create/http_request/typical
 Benchmarking request_create/http_request/typical: Warming up for 3.0000 s
-Benchmarking request_create/http_request/typical: Collecting 100 samples in estimated 5.0028 s (7.6M iterations)
+Benchmarking request_create/http_request/typical: Collecting 100 samples in estimated 5.0022 s (8.2M iterations)
 Benchmarking request_create/http_request/typical: Analyzing
 request_create/http_request/typical
-                        time:   [629.22 ns 630.34 ns 631.32 ns]
-Found 3 outliers among 100 measurements (3.00%)
-  1 (1.00%) high mild
+                        time:   [603.41 ns 603.96 ns 604.55 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
   2 (2.00%) high severe
 Benchmarking request_create/arena_request/typical
 Benchmarking request_create/arena_request/typical: Warming up for 3.0000 s
-Benchmarking request_create/arena_request/typical: Collecting 100 samples in estimated 5.0004 s (66M iterations)
+Benchmarking request_create/arena_request/typical: Collecting 100 samples in estimated 5.0000 s (64M iterations)
 Benchmarking request_create/arena_request/typical: Analyzing
 request_create/arena_request/typical
-                        time:   [73.869 ns 73.950 ns 74.058 ns]
-Found 14 outliers among 100 measurements (14.00%)
-  12 (12.00%) high mild
-  2 (2.00%) high severe
+                        time:   [77.917 ns 78.006 ns 78.112 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
 Benchmarking request_create/http_request/many_headers
 Benchmarking request_create/http_request/many_headers: Warming up for 3.0000 s
-Benchmarking request_create/http_request/many_headers: Collecting 100 samples in estimated 5.0138 s (1.5M iterations)
+Benchmarking request_create/http_request/many_headers: Collecting 100 samples in estimated 5.0087 s (1.5M iterations)
 Benchmarking request_create/http_request/many_headers: Analyzing
 request_create/http_request/many_headers
-                        time:   [3.3726 µs 3.3887 µs 3.4126 µs]
-Found 5 outliers among 100 measurements (5.00%)
-  1 (1.00%) high mild
-  4 (4.00%) high severe
+                        time:   [3.4528 µs 3.4590 µs 3.4663 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
 Benchmarking request_create/arena_request/many_headers
 Benchmarking request_create/arena_request/many_headers: Warming up for 3.0000 s
-Benchmarking request_create/arena_request/many_headers: Collecting 100 samples in estimated 5.0068 s (2.4M iterations)
+Benchmarking request_create/arena_request/many_headers: Collecting 100 samples in estimated 5.0002 s (2.2M iterations)
 Benchmarking request_create/arena_request/many_headers: Analyzing
 request_create/arena_request/many_headers
-                        time:   [2.0694 µs 2.0715 µs 2.0743 µs]
-Found 7 outliers among 100 measurements (7.00%)
-  3 (3.00%) high mild
-  4 (4.00%) high severe
+                        time:   [2.2593 µs 2.2639 µs 2.2689 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high severe
 
 Benchmarking request_lifecycle/heap/full_cycle
 Benchmarking request_lifecycle/heap/full_cycle: Warming up for 3.0000 s
-Benchmarking request_lifecycle/heap/full_cycle: Collecting 100 samples in estimated 5.0017 s (15M iterations)
+Benchmarking request_lifecycle/heap/full_cycle: Collecting 100 samples in estimated 5.0014 s (16M iterations)
 Benchmarking request_lifecycle/heap/full_cycle: Analyzing
 request_lifecycle/heap/full_cycle
-                        time:   [338.49 ns 339.21 ns 339.97 ns]
-                        thrpt:  [2.9414 Melem/s 2.9480 Melem/s 2.9543 Melem/s]
-Found 6 outliers among 100 measurements (6.00%)
-  4 (4.00%) high mild
-  2 (2.00%) high severe
+                        time:   [314.47 ns 314.64 ns 314.87 ns]
+                        thrpt:  [3.1759 Melem/s 3.1782 Melem/s 3.1800 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
 Benchmarking request_lifecycle/arena/full_cycle
 Benchmarking request_lifecycle/arena/full_cycle: Warming up for 3.0000 s
-Benchmarking request_lifecycle/arena/full_cycle: Collecting 100 samples in estimated 5.0002 s (113M iterations)
+Benchmarking request_lifecycle/arena/full_cycle: Collecting 100 samples in estimated 5.0001 s (112M iterations)
 Benchmarking request_lifecycle/arena/full_cycle: Analyzing
 request_lifecycle/arena/full_cycle
-                        time:   [43.725 ns 43.757 ns 43.795 ns]
-                        thrpt:  [22.834 Melem/s 22.854 Melem/s 22.870 Melem/s]
+                        time:   [44.609 ns 44.639 ns 44.670 ns]
+                        thrpt:  [22.386 Melem/s 22.402 Melem/s 22.417 Melem/s]
 Found 7 outliers among 100 measurements (7.00%)
   4 (4.00%) high mild
   3 (3.00%) high severe
 Benchmarking request_lifecycle/heap/100_requests
 Benchmarking request_lifecycle/heap/100_requests: Warming up for 3.0000 s
-Benchmarking request_lifecycle/heap/100_requests: Collecting 100 samples in estimated 5.0587 s (252k iterations)
+Benchmarking request_lifecycle/heap/100_requests: Collecting 100 samples in estimated 5.0601 s (242k iterations)
 Benchmarking request_lifecycle/heap/100_requests: Analyzing
 request_lifecycle/heap/100_requests
-                        time:   [19.873 µs 19.886 µs 19.902 µs]
-                        thrpt:  [5.0247 Melem/s 5.0286 Melem/s 5.0320 Melem/s]
-Found 9 outliers among 100 measurements (9.00%)
-  4 (4.00%) high mild
+                        time:   [20.313 µs 20.356 µs 20.423 µs]
+                        thrpt:  [4.8964 Melem/s 4.9125 Melem/s 4.9231 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) high mild
   5 (5.00%) high severe
 Benchmarking request_lifecycle/arena/100_requests
 Benchmarking request_lifecycle/arena/100_requests: Warming up for 3.0000 s
-Benchmarking request_lifecycle/arena/100_requests: Collecting 100 samples in estimated 5.0284 s (843k iterations)
+Benchmarking request_lifecycle/arena/100_requests: Collecting 100 samples in estimated 5.0292 s (793k iterations)
 Benchmarking request_lifecycle/arena/100_requests: Analyzing
 request_lifecycle/arena/100_requests
-                        time:   [5.9098 µs 5.9145 µs 5.9194 µs]
-                        thrpt:  [16.894 Melem/s 16.908 Melem/s 16.921 Melem/s]
-Found 3 outliers among 100 measurements (3.00%)
-  1 (1.00%) high mild
-  2 (2.00%) high severe
+                        time:   [6.2861 µs 6.3204 µs 6.3773 µs]
+                        thrpt:  [15.681 Melem/s 15.822 Melem/s 15.908 Melem/s]
+Found 29 outliers among 100 measurements (29.00%)
+  3 (3.00%) low severe
+  16 (16.00%) low mild
+  5 (5.00%) high mild
+  5 (5.00%) high severe
 
 Benchmarking alloc_patterns/heap/many_small
 Benchmarking alloc_patterns/heap/many_small: Warming up for 3.0000 s
-Benchmarking alloc_patterns/heap/many_small: Collecting 100 samples in estimated 5.0162 s (843k iterations)
+Benchmarking alloc_patterns/heap/many_small: Collecting 100 samples in estimated 5.0255 s (793k iterations)
 Benchmarking alloc_patterns/heap/many_small: Analyzing
 alloc_patterns/heap/many_small
-                        time:   [5.9543 µs 5.9568 µs 5.9598 µs]
-Found 9 outliers among 100 measurements (9.00%)
-  5 (5.00%) high mild
-  4 (4.00%) high severe
+                        time:   [6.3486 µs 6.3532 µs 6.3591 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
 Benchmarking alloc_patterns/arena/many_small
 Benchmarking alloc_patterns/arena/many_small: Warming up for 3.0000 s
-Benchmarking alloc_patterns/arena/many_small: Collecting 100 samples in estimated 5.0029 s (1.3M iterations)
+Benchmarking alloc_patterns/arena/many_small: Collecting 100 samples in estimated 5.0198 s (1.2M iterations)
 Benchmarking alloc_patterns/arena/many_small: Analyzing
 alloc_patterns/arena/many_small
-                        time:   [3.9244 µs 3.9291 µs 3.9352 µs]
-Found 15 outliers among 100 measurements (15.00%)
-  10 (10.00%) high mild
+                        time:   [4.2447 µs 4.2483 µs 4.2537 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
   5 (5.00%) high severe
 Benchmarking alloc_patterns/heap/mixed_sizes
 Benchmarking alloc_patterns/heap/mixed_sizes: Warming up for 3.0000 s
-Benchmarking alloc_patterns/heap/mixed_sizes: Collecting 100 samples in estimated 5.0002 s (89M iterations)
+Benchmarking alloc_patterns/heap/mixed_sizes: Collecting 100 samples in estimated 5.0001 s (95M iterations)
 Benchmarking alloc_patterns/heap/mixed_sizes: Analyzing
 alloc_patterns/heap/mixed_sizes
-                        time:   [56.342 ns 56.473 ns 56.608 ns]
+                        time:   [52.811 ns 52.864 ns 52.919 ns]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
 Benchmarking alloc_patterns/arena/mixed_sizes
 Benchmarking alloc_patterns/arena/mixed_sizes: Warming up for 3.0000 s
-Benchmarking alloc_patterns/arena/mixed_sizes: Collecting 100 samples in estimated 5.0001 s (78M iterations)
+Benchmarking alloc_patterns/arena/mixed_sizes: Collecting 100 samples in estimated 5.0003 s (84M iterations)
 Benchmarking alloc_patterns/arena/mixed_sizes: Analyzing
 alloc_patterns/arena/mixed_sizes
-                        time:   [63.611 ns 63.698 ns 63.789 ns]
-Found 2 outliers among 100 measurements (2.00%)
-  1 (1.00%) high mild
+                        time:   [59.619 ns 59.664 ns 59.710 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
   1 (1.00%) high severe
 

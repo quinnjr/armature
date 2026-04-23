@@ -36,16 +36,16 @@ impl Address {
         let s = s.trim();
 
         // Check for "Name <email>" format
-        if let Some(start) = s.find('<')
-            && let Some(end) = s.find('>')
-        {
-            let name = s[..start].trim().trim_matches('"');
-            let email = s[start + 1..end].trim();
+        if let Some(start) = s.find('<') {
+            if let Some(end) = s.find('>') {
+                let name = s[..start].trim().trim_matches('"');
+                let email = s[start + 1..end].trim();
 
-            if name.is_empty() {
-                return Self::new(email);
-            } else {
-                return Self::with_name(email, name);
+                if name.is_empty() {
+                    return Self::new(email);
+                } else {
+                    return Self::with_name(email, name);
+                }
             }
         }
 

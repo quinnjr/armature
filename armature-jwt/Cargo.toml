@@ -1,6 +1,6 @@
 [package]
 name = "armature-jwt"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["jwt", "token", "authentication", "security"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.2.1" }
 armature-log = { path = "../armature-log", version = "0.1.0" }
 jsonwebtoken = { version = "10.2", features = ["rust_crypto"] }
 serde = { version = "1.0", features = ["derive"] }
