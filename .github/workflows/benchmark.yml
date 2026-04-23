@@ -123,7 +123,7 @@ jobs:
           echo "- Runner: \`${{ runner.os }}\`" >> benchmark-summary.md
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
@@ -256,7 +256,7 @@ jobs:
           fi
 
       - name: Upload regression report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: regression-report-${{ github.sha }}
           path: regression-report.md
@@ -350,7 +350,7 @@ jobs:
           echo "\`\`\`" >> PERFORMANCE_TRENDS.md
 
       - name: Upload trends report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: performance-trends-${{ github.run_id }}
           path: |
