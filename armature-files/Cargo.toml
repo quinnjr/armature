@@ -29,7 +29,7 @@ imageproc = { version = "0.25", optional = true }
 
 # PDF generation
 printpdf = { version = "0.8", optional = true }
-lopdf = { version = "0.36", optional = true }
+lopdf = { version = "0.40", optional = true }
 
 # Additional formats
 zip = { version = "2.2", optional = true }
