@@ -42,8 +42,8 @@ importers:
         specifier: ^1.5.0
         version: 1.5.0(tailwindcss@4.1.18)
       marked:
-        specifier: ^18.0.0
-        version: 18.0.0
+        specifier: ^18.0.2
+        version: 18.0.2
       rxjs:
         specifier: ~7.8.0
         version: 7.8.2
@@ -3190,8 +3190,8 @@ packages:
     resolution: {integrity: sha512-iyyEpDty1mwW3dGlYXAJqC/azFn5PPvgKVwXayOGBSmKLxhKZ9fg4qIan2ePpp1vJIwfFiO34LAPZgq9SZW9Aw==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  marked@18.0.0:
-    resolution: {integrity: sha512-2e7Qiv/HJSXj8rDEpgTvGKsP8yYtI9xXHKDnrftrmnrJPaFNM7VRb2YCzWaX4BP1iCJ/XPduzDJZMFoqTCcIMA==}
+  marked@18.0.2:
+    resolution: {integrity: sha512-NsmlUYBS/Zg57rgDWMYdnre6OTj4e+qq/JS2ot3KrYLSoHLw+sDu0Nm1ZGpRgYAq6c+b1ekaY5NzVchMCQnzcg==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -7002,7 +7002,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  marked@18.0.0: {}
+  marked@18.0.2: {}
 
   math-intrinsics@1.1.0: {}
 
