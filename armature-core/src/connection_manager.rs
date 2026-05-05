@@ -476,35 +476,39 @@ impl ConnectionManager {
     /// Mark a connection as active.
     pub fn mark_active(&self, id: ConnectionId) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id) {
-                state.last_active = Instant::now();
-                state.requests += 1;
-            }
+            && let Some(state) = connections.get_mut(&id)
+        {
+            state.last_active = Instant::now();
+            state.requests += 1;
+        }
         self.load.record_request();
     }
 
     /// Record bytes read on a connection.
     pub fn record_bytes_read(&self, id: ConnectionId, bytes: u64) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id) {
-                state.bytes_read += bytes;
-            }
+            && let Some(state) = connections.get_mut(&id)
+        {
+            state.bytes_read += bytes;
+        }
     }
 
     /// Record bytes written on a connection.
     pub fn record_bytes_written(&self, id: ConnectionId, bytes: u64) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id) {
-                state.bytes_written += bytes;
-            }
+            && let Some(state) = connections.get_mut(&id)
+        {
+            state.bytes_written += bytes;
+        }
     }
 
     /// Set connection keep-alive status.
     pub fn set_keep_alive(&self, id: ConnectionId, keep_alive: bool) {
         if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id) {
-                state.is_keep_alive = keep_alive;
-            }
+            && let Some(state) = connections.get_mut(&id)
+        {
+            state.is_keep_alive = keep_alive;
+        }
     }
 
     // ========================================================================

@@ -5,8 +5,9 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
+    Ident, ItemFn, LitStr, Token, Type,
     parse::{Parse, ParseStream},
-    parse_macro_input, Ident, ItemFn, LitStr, Token, Type,
+    parse_macro_input,
 };
 
 /// Arguments for the #[mcp] attribute
@@ -77,9 +78,7 @@ fn generate_schema_for_type(ty: &Type) -> String {
 
     match type_str.as_str() {
         "String" | "&str" => r#"{"type": "string"}"#.to_string(),
-        "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => {
-            r#"{"type": "integer"}"#.to_string()
-        }
+        "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => r#"{"type": "integer"}"#.to_string(),
         "f32" | "f64" => r#"{"type": "number"}"#.to_string(),
         "bool" => r#"{"type": "boolean"}"#.to_string(),
         "()" => r#"{"type": "object"}"#.to_string(),
@@ -323,9 +322,8 @@ impl Parse for McpResourceArgs {
             }
         }
 
-        let uri = uri.ok_or_else(|| {
-            syn::Error::new(proc_macro2::Span::call_site(), "uri is required")
-        })?;
+        let uri =
+            uri.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "uri is required"))?;
 
         Ok(McpResourceArgs {
             uri,

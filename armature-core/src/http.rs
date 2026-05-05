@@ -825,7 +825,8 @@ impl HttpResponse {
     ///     .cookie("theme", "dark; Path=/");
     /// ```
     pub fn cookie(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.cookies.push(format!("{}={}", name.into(), value.into()));
+        self.cookies
+            .push(format!("{}={}", name.into(), value.into()));
         self
     }
 
@@ -837,11 +838,8 @@ impl HttpResponse {
     /// let response = HttpResponse::ok().clear_cookie("session", "/");
     /// ```
     pub fn clear_cookie(mut self, name: impl Into<String>, path: impl Into<String>) -> Self {
-        self.cookies.push(format!(
-            "{}=; Path={}; Max-Age=0",
-            name.into(),
-            path.into(),
-        ));
+        self.cookies
+            .push(format!("{}=; Path={}; Max-Age=0", name.into(), path.into(),));
         self
     }
 

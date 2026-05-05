@@ -162,11 +162,12 @@ impl Bulkhead {
 
         // Check queue size limit
         if let Some(queue_size) = self.config.queue_size
-            && self.waiting_count.load(Ordering::SeqCst) >= queue_size {
-                self.total_rejections.fetch_add(1, Ordering::Relaxed);
-                debug!(name = %self.config.name, "Bulkhead queue full, rejecting request");
-                return Err(BulkheadError::Full);
-            }
+            && self.waiting_count.load(Ordering::SeqCst) >= queue_size
+        {
+            self.total_rejections.fetch_add(1, Ordering::Relaxed);
+            debug!(name = %self.config.name, "Bulkhead queue full, rejecting request");
+            return Err(BulkheadError::Full);
+        }
 
         self.waiting_count.fetch_add(1, Ordering::SeqCst);
 

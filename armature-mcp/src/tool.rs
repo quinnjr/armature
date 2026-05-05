@@ -100,7 +100,10 @@ impl McpToolRegistry {
 
     /// Get all registered tool definitions
     pub fn list_tools(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|entry| entry.to_definition()).collect()
+        self.tools
+            .values()
+            .map(|entry| entry.to_definition())
+            .collect()
     }
 
     /// Get a tool by name
@@ -189,8 +192,8 @@ mod tests {
     #[test]
     fn test_tool_registry_creation() {
         let registry = McpToolRegistry::new();
-        // No tools registered in test context without inventory
-        assert!(registry.is_empty() || registry.len() >= 0);
+        let _ = registry.is_empty();
+        let _ = registry.len();
     }
 
     #[test]

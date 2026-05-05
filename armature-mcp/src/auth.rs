@@ -296,7 +296,10 @@ impl McpAuthContext {
 #[async_trait]
 pub trait McpAuthenticator: Send + Sync {
     /// Authenticate a request and return the auth context
-    async fn authenticate(&self, headers: &std::collections::HashMap<String, String>) -> Result<McpAuthContext>;
+    async fn authenticate(
+        &self,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<McpAuthContext>;
 }
 
 /// MCP authentication configuration
@@ -411,7 +414,9 @@ fn authenticate_with_method<'a>(
                         Err(e) => last_error = Some(e),
                     }
                 }
-                Err(last_error.unwrap_or_else(|| McpError::InvalidRequest("No authentication methods configured".into())))
+                Err(last_error.unwrap_or_else(|| {
+                    McpError::InvalidRequest("No authentication methods configured".into())
+                }))
             }
 
             McpAuthMethod::Custom(authenticator) => authenticator.authenticate(headers).await,
@@ -436,7 +441,12 @@ async fn authenticate_api_token(
     } else {
         header_value
             .strip_prefix(&auth.token_prefix)
-            .ok_or_else(|| McpError::InvalidRequest(format!("Invalid token format, expected prefix: {}", auth.token_prefix)))?
+            .ok_or_else(|| {
+                McpError::InvalidRequest(format!(
+                    "Invalid token format, expected prefix: {}",
+                    auth.token_prefix
+                ))
+            })?
     };
 
     // Validate token
@@ -508,7 +518,9 @@ async fn authenticate_jwt(
     if let Some(expected_aud) = &auth.audience {
         let aud_valid = match claims.get("aud") {
             Some(serde_json::Value::String(s)) => s == expected_aud,
-            Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(expected_aud.as_str())),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .any(|v| v.as_str() == Some(expected_aud.as_str())),
             _ => false,
         };
         if !aud_valid {
@@ -561,7 +573,9 @@ async fn authenticate_oauth2(
         return validate_oauth2_via_introspection(introspection_url, token, auth).await;
     }
 
-    Err(McpError::InvalidRequest("OAuth2 validation endpoint not configured".into()))
+    Err(McpError::InvalidRequest(
+        "OAuth2 validation endpoint not configured".into(),
+    ))
 }
 
 async fn validate_oauth2_via_userinfo(
@@ -572,15 +586,16 @@ async fn validate_oauth2_via_userinfo(
     // Note: In production, use reqwest or similar HTTP client
     // This is a placeholder that would need actual HTTP implementation
     let _ = (url, token, auth);
-    
+
     // For now, return a placeholder - in real implementation:
     // 1. Make HTTP GET to user_info_url with Bearer token
     // 2. Parse response for user info
     // 3. Extract subject and scopes
-    
+
     Err(McpError::InvalidRequest(
         "OAuth2 user info validation requires HTTP client integration. \
-         Consider using armature-http-client or integrating with armature-auth OAuth2 provider.".into()
+         Consider using armature-http-client or integrating with armature-auth OAuth2 provider."
+            .into(),
     ))
 }
 
@@ -590,14 +605,15 @@ async fn validate_oauth2_via_introspection(
     auth: &OAuth2Auth,
 ) -> Result<McpAuthContext> {
     let _ = (url, token, auth);
-    
+
     // For now, return a placeholder - in real implementation:
     // 1. Make HTTP POST to introspection_url with token and client credentials
     // 2. Parse response for active status, subject, scopes
-    
+
     Err(McpError::InvalidRequest(
         "OAuth2 introspection validation requires HTTP client integration. \
-         Consider using armature-http-client or integrating with armature-auth OAuth2 provider.".into()
+         Consider using armature-http-client or integrating with armature-auth OAuth2 provider."
+            .into(),
     ))
 }
 
@@ -727,7 +743,10 @@ mod tests {
             .with_prefix("Bearer ");
 
         let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer valid-token-123".to_string());
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer valid-token-123".to_string(),
+        );
 
         let result = authenticate_api_token(&auth, &headers).await;
         assert!(result.is_ok());
@@ -736,11 +755,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_token_authentication_invalid() {
-        let auth = ApiTokenAuth::new()
-            .with_tokens(vec!["valid-token-123"]);
+        let auth = ApiTokenAuth::new().with_tokens(vec!["valid-token-123"]);
 
         let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer wrong-token".to_string());
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer wrong-token".to_string(),
+        );
 
         let result = authenticate_api_token(&auth, &headers).await;
         assert!(result.is_err());

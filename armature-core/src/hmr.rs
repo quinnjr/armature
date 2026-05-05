@@ -275,10 +275,11 @@ impl HmrManager {
 
         if let Some(last_time) = last_events_map.get(&path)
             && let Ok(duration) = now.duration_since(*last_time)
-                && duration.as_millis() < config.debounce_ms as u128 {
-                    // Too recent, skip
-                    return None;
-                }
+            && duration.as_millis() < config.debounce_ms as u128
+        {
+            // Too recent, skip
+            return None;
+        }
 
         // Update last event time
         last_events_map.insert(path.clone(), now);
