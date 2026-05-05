@@ -17,6 +17,12 @@ Cargo.lock
 .cursor/*
 !.cursor/rules/
 
+# Claude Code
+.claude/
+
+# Git worktrees
+.worktrees/
+
 # Build artifacts
 *.so
 *.dylib
