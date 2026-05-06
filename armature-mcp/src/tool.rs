@@ -14,7 +14,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Handler function type for MCP tools
+/// Fn-pointer form of an MCP tool handler. Const-evaluable, so it can
+/// sit inside `inventory::submit!`'s static initializer.
+pub type ToolHandlerFnPtr =
+    fn(Value) -> Pin<Box<dyn Future<Output = Result<ToolCallResult>> + Send>>;
+
+/// Runtime-callable form. Kept as a public alias for backwards
+/// compatibility, but the inventory entry no longer carries this
+/// directly. The registry wraps the fn pointer at call time.
 pub type ToolHandlerFn = Arc<
     dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<ToolCallResult>> + Send>> + Send + Sync,
 >;
@@ -27,8 +34,9 @@ pub struct McpToolEntry {
     pub description: Option<&'static str>,
     /// JSON Schema for input parameters (as JSON string)
     pub input_schema: &'static str,
-    /// The handler function
-    pub handler: ToolHandlerFn,
+    /// The handler function (fn pointer so the entry can be built in a
+    /// `static` context — see `register_mcp_tool!`).
+    pub handler: ToolHandlerFnPtr,
     /// Type ID of the struct this tool belongs to (for grouping)
     pub owner_type_id: TypeId,
 }
@@ -36,12 +44,15 @@ pub struct McpToolEntry {
 inventory::collect!(McpToolEntry);
 
 impl McpToolEntry {
-    /// Create a new tool entry
-    pub fn new<T: 'static>(
+    /// Create a new tool entry.
+    ///
+    /// `const fn` so the macro expansion can sit inside
+    /// `inventory::submit!`'s static initializer on Rust 2024.
+    pub const fn new<T: 'static>(
         name: &'static str,
         description: Option<&'static str>,
         input_schema: &'static str,
-        handler: ToolHandlerFn,
+        handler: ToolHandlerFnPtr,
     ) -> Self {
         Self {
             name,
@@ -64,7 +75,7 @@ impl McpToolEntry {
         }
     }
 
-    /// Call the tool with the given arguments
+    /// Call the tool with the given arguments. The returned future is `Send`.
     pub async fn call(&self, arguments: Value) -> Result<ToolCallResult> {
         (self.handler)(arguments).await
     }
@@ -163,11 +174,22 @@ macro_rules! register_mcp_tool {
         $crate::inventory::submit! {
             $crate::tool::McpToolEntry::new::<$owner>(
                 $name,
-                Some($description),
+                ::core::option::Option::Some($description),
                 $schema,
-                std::sync::Arc::new(move |args| {
-                    Box::pin($handler(args))
-                }),
+                {
+                    fn __wrap(args: ::serde_json::Value)
+                        -> ::std::pin::Pin<
+                            ::std::boxed::Box<
+                                dyn ::std::future::Future<
+                                    Output = $crate::error::Result<$crate::types::ToolCallResult>,
+                                > + ::std::marker::Send,
+                            >,
+                        >
+                    {
+                        ::std::boxed::Box::pin($handler(args))
+                    }
+                    __wrap as $crate::tool::ToolHandlerFnPtr
+                },
             )
         }
     };
@@ -175,11 +197,22 @@ macro_rules! register_mcp_tool {
         $crate::inventory::submit! {
             $crate::tool::McpToolEntry::new::<$owner>(
                 $name,
-                None,
+                ::core::option::Option::None,
                 $schema,
-                std::sync::Arc::new(move |args| {
-                    Box::pin($handler(args))
-                }),
+                {
+                    fn __wrap(args: ::serde_json::Value)
+                        -> ::std::pin::Pin<
+                            ::std::boxed::Box<
+                                dyn ::std::future::Future<
+                                    Output = $crate::error::Result<$crate::types::ToolCallResult>,
+                                > + ::std::marker::Send,
+                            >,
+                        >
+                    {
+                        ::std::boxed::Box::pin($handler(args))
+                    }
+                    __wrap as $crate::tool::ToolHandlerFnPtr
+                },
             )
         }
     };
@@ -202,11 +235,17 @@ mod tests {
     fn test_tool_definition_conversion() {
         struct TestOwner;
 
+        fn test_handler(
+            _args: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<ToolCallResult>> + Send>> {
+            Box::pin(async { Ok(ToolCallResult::text("test")) })
+        }
+
         let entry = McpToolEntry::new::<TestOwner>(
             "test_tool",
             Some("A test tool"),
             r#"{"type": "object", "properties": {"input": {"type": "string"}}}"#,
-            Arc::new(|_| Box::pin(async { Ok(ToolCallResult::text("test")) })),
+            test_handler as ToolHandlerFnPtr,
         );
 
         let def = entry.to_definition();
