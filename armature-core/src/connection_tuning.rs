@@ -785,15 +785,17 @@ impl ConnectionTracker {
 
         // Check max requests
         if let Some(max) = config.max_requests
-            && self.requests >= max {
-                return false;
-            }
+            && self.requests >= max
+        {
+            return false;
+        }
 
         // Check max age
         if let Some(max_age) = config.max_age
-            && self.age() > max_age {
-                return false;
-            }
+            && self.age() > max_age
+        {
+            return false;
+        }
 
         true
     }

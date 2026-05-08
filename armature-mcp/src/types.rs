@@ -312,7 +312,11 @@ impl ResourceContent {
         }
     }
 
-    pub fn binary(uri: impl Into<String>, mime_type: impl Into<String>, blob: impl Into<String>) -> Self {
+    pub fn binary(
+        uri: impl Into<String>,
+        mime_type: impl Into<String>,
+        blob: impl Into<String>,
+    ) -> Self {
         Self {
             uri: uri.into(),
             mime_type: Some(mime_type.into()),

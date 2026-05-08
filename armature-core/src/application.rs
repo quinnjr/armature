@@ -514,9 +514,10 @@ impl Application {
 
             // Apply TCP_NODELAY if configured
             if pipeline_builder.config().tcp_nodelay
-                && let Err(e) = stream.set_nodelay(true) {
-                    trace!(error = %e, "Failed to set TCP_NODELAY");
-                }
+                && let Err(e) = stream.set_nodelay(true)
+            {
+                trace!(error = %e, "Failed to set TCP_NODELAY");
+            }
 
             let io = TokioIo::new(stream);
             let router = router.clone();
@@ -598,9 +599,10 @@ impl Application {
 
             // Apply TCP_NODELAY if configured
             if pipeline_builder.config().tcp_nodelay
-                && let Err(e) = stream.set_nodelay(true) {
-                    trace!(error = %e, "Failed to set TCP_NODELAY");
-                }
+                && let Err(e) = stream.set_nodelay(true)
+            {
+                trace!(error = %e, "Failed to set TCP_NODELAY");
+            }
 
             let acceptor = acceptor.clone();
             let router = router.clone();
@@ -1090,18 +1092,18 @@ async fn handle_request(
 
     trace!(method = %method, path = %path, "Incoming request");
 
-    if method == "OPTIONS" {
-        if let Some(ref cors) = cors {
-            let mut builder = Response::builder().status(204);
-            builder = builder.header("Access-Control-Allow-Origin", &cors.allow_origin);
-            builder = builder.header("Access-Control-Allow-Methods", &cors.allow_methods);
-            builder = builder.header("Access-Control-Allow-Headers", &cors.allow_headers);
-            builder = builder.header("Access-Control-Max-Age", cors.max_age.to_string());
-            if cors.allow_credentials {
-                builder = builder.header("Access-Control-Allow-Credentials", "true");
-            }
-            return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
+    if method == "OPTIONS"
+        && let Some(ref cors) = cors
+    {
+        let mut builder = Response::builder().status(204);
+        builder = builder.header("Access-Control-Allow-Origin", &cors.allow_origin);
+        builder = builder.header("Access-Control-Allow-Methods", &cors.allow_methods);
+        builder = builder.header("Access-Control-Allow-Headers", &cors.allow_headers);
+        builder = builder.header("Access-Control-Max-Age", cors.max_age.to_string());
+        if cors.allow_credentials {
+            builder = builder.header("Access-Control-Allow-Credentials", "true");
         }
+        return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
     }
 
     let mut armature_req = HttpRequest::new(method.clone(), path.clone());

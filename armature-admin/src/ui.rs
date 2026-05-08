@@ -27,7 +27,7 @@ pub struct Pagination {
 impl Pagination {
     /// Create pagination info
     pub fn new(page: usize, per_page: usize, total_items: usize) -> Self {
-        let total_pages = (total_items + per_page - 1) / per_page;
+        let total_pages = total_items.div_ceil(per_page);
         let page = page.min(total_pages).max(1);
         let start_item = (page - 1) * per_page + 1;
         let end_item = (start_item + per_page - 1).min(total_items);
@@ -48,7 +48,7 @@ impl Pagination {
     pub fn page_numbers(&self, window: usize) -> Vec<PageNumber> {
         let mut pages = Vec::new();
 
-        if self.total_pages <= 0 {
+        if self.total_pages == 0 {
             return pages;
         }
 

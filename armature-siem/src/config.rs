@@ -90,6 +90,7 @@ pub enum Transport {
 /// Syslog facility
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum SyslogFacility {
     Kern = 0,
     User = 1,
@@ -103,6 +104,7 @@ pub enum SyslogFacility {
     Cron = 9,
     Authpriv = 10,
     Ftp = 11,
+    #[default]
     Local0 = 16,
     Local1 = 17,
     Local2 = 18,
@@ -111,12 +113,6 @@ pub enum SyslogFacility {
     Local5 = 21,
     Local6 = 22,
     Local7 = 23,
-}
-
-impl Default for SyslogFacility {
-    fn default() -> Self {
-        SyslogFacility::Local0
-    }
 }
 
 /// SIEM client configuration

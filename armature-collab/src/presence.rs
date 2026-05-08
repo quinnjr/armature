@@ -99,9 +99,10 @@ impl UserPresence {
 }
 
 /// User presence status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PresenceStatus {
     /// User is actively editing
+    #[default]
     Active,
     /// User is viewing but not editing
     Viewing,
@@ -111,12 +112,6 @@ pub enum PresenceStatus {
     Away,
     /// User is offline
     Offline,
-}
-
-impl Default for PresenceStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// Cursor position in a document

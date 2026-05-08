@@ -101,11 +101,14 @@ impl LambdaRequest {
             })
             .unwrap_or_default();
 
-        // Convert body
+        // Convert body. lambda_http::Body is #[non_exhaustive] so we
+        // need a wildcard arm — fall back to an empty body on any
+        // future variant rather than panicking.
         let body_bytes = match body {
             lambda_http::Body::Empty => Bytes::new(),
             lambda_http::Body::Text(s) => Bytes::from(s),
             lambda_http::Body::Binary(b) => Bytes::from(b),
+            _ => Bytes::new(),
         };
 
         Self {

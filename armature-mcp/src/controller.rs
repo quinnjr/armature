@@ -108,7 +108,11 @@ impl McpController {
 
         Ok(HttpResponse::ok()
             .with_header("Content-Type".to_string(), "application/json".to_string())
-            .with_body(serde_json::to_string_pretty(&response).unwrap().into_bytes()))
+            .with_body(
+                serde_json::to_string_pretty(&response)
+                    .unwrap()
+                    .into_bytes(),
+            ))
     }
 
     /// Handle GET /mcp/resources - List all available resources
@@ -121,7 +125,11 @@ impl McpController {
 
         Ok(HttpResponse::ok()
             .with_header("Content-Type".to_string(), "application/json".to_string())
-            .with_body(serde_json::to_string_pretty(&response).unwrap().into_bytes()))
+            .with_body(
+                serde_json::to_string_pretty(&response)
+                    .unwrap()
+                    .into_bytes(),
+            ))
     }
 }
 

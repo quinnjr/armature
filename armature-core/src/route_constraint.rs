@@ -272,14 +272,16 @@ impl RouteConstraint for LengthConstraint {
         let len = value.len();
 
         if let Some(min) = self.min
-            && len < min {
-                return Err(format!("'{}' must be at least {} characters", value, min));
-            }
+            && len < min
+        {
+            return Err(format!("'{}' must be at least {} characters", value, min));
+        }
 
         if let Some(max) = self.max
-            && len > max {
-                return Err(format!("'{}' must be at most {} characters", value, max));
-            }
+            && len > max
+        {
+            return Err(format!("'{}' must be at most {} characters", value, max));
+        }
 
         Ok(())
     }
@@ -347,14 +349,16 @@ impl RouteConstraint for RangeConstraint {
             .map_err(|_| format!("'{}' is not a valid number", value))?;
 
         if let Some(min) = self.min
-            && num < min {
-                return Err(format!("'{}' must be at least {}", value, min));
-            }
+            && num < min
+        {
+            return Err(format!("'{}' must be at least {}", value, min));
+        }
 
         if let Some(max) = self.max
-            && num > max {
-                return Err(format!("'{}' must be at most {}", value, max));
-            }
+            && num > max
+        {
+            return Err(format!("'{}' must be at most {}", value, max));
+        }
 
         Ok(())
     }

@@ -203,9 +203,10 @@ impl NumaNode {
             for line in content.lines() {
                 if line.contains("MemTotal:")
                     && let Some(kb_str) = line.split_whitespace().nth(3)
-                        && let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb * 1024;
-                        }
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    return kb * 1024;
+                }
             }
         }
         0
@@ -231,9 +232,10 @@ impl NumaNode {
             for line in content.lines() {
                 if line.contains("MemFree:")
                     && let Some(kb_str) = line.split_whitespace().nth(3)
-                        && let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb * 1024;
-                        }
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    return kb * 1024;
+                }
             }
         }
         0
@@ -260,9 +262,10 @@ impl NumaNode {
         let path = format!("/sys/devices/system/node/node{}/distance", self.id);
         if let Ok(content) = std::fs::read_to_string(&path)
             && let Some(dist_str) = content.split_whitespace().nth(other.id)
-                && let Ok(dist) = dist_str.parse::<u32>() {
-                    return dist;
-                }
+            && let Ok(dist) = dist_str.parse::<u32>()
+        {
+            return dist;
+        }
         if self.id == other.id { 10 } else { 20 }
     }
 }
@@ -289,9 +292,10 @@ fn current_numa_node_linux() -> usize {
         // Field 39 (0-indexed 38) is the processor number
         let fields: Vec<&str> = content.split_whitespace().collect();
         if fields.len() > 38
-            && let Ok(cpu) = fields[38].parse::<usize>() {
-                return cpu_to_numa_node(cpu);
-            }
+            && let Ok(cpu) = fields[38].parse::<usize>()
+        {
+            return cpu_to_numa_node(cpu);
+        }
     }
     0
 }

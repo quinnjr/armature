@@ -16,7 +16,7 @@ categories = ["network-programming", "asynchronous"]
 armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # gRPC
-tonic = { version = "0.13", features = ["gzip", "zstd"] }
+tonic = { version = "0.14", features = ["gzip", "zstd"] }
 prost = "0.13"
 prost-types = "0.13"
 
@@ -52,7 +52,7 @@ futures = "0.3"
 parking_lot = "0.12"
 
 # Optional: Reflection
-tonic-reflection = { version = "0.13", optional = true }
+tonic-reflection = { version = "0.14", optional = true }
 
 # Optional: Health checking
 tonic-health = { version = "0.14", optional = true }

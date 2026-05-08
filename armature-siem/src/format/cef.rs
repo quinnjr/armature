@@ -18,8 +18,7 @@ impl CefFormatter {
     fn escape_header(s: &str) -> String {
         s.replace('\\', "\\\\")
             .replace('|', "\\|")
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
     }
 
     /// Escape special characters in CEF extension values

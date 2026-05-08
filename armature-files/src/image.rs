@@ -14,7 +14,7 @@ use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader, Rgba, imag
 use std::io::Cursor;
 
 /// Image resize filter quality
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResizeFilter {
     /// Fastest, lowest quality
     Nearest,
@@ -23,6 +23,7 @@ pub enum ResizeFilter {
     /// Good balance
     CatmullRom,
     /// Best quality, slowest
+    #[default]
     Lanczos3,
 }
 
@@ -34,12 +35,6 @@ impl ResizeFilter {
             Self::CatmullRom => FilterType::CatmullRom,
             Self::Lanczos3 => FilterType::Lanczos3,
         }
-    }
-}
-
-impl Default for ResizeFilter {
-    fn default() -> Self {
-        Self::Lanczos3
     }
 }
 

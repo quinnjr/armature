@@ -8,8 +8,10 @@ use uuid::Uuid;
 /// Severity level for SIEM events
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum SiemSeverity {
     /// Unknown severity (0)
+    #[default]
     Unknown = 0,
     /// Low severity (1-3)
     Low = 1,
@@ -45,33 +47,24 @@ impl SiemSeverity {
     }
 }
 
-impl Default for SiemSeverity {
-    fn default() -> Self {
-        SiemSeverity::Unknown
-    }
-}
-
 /// Event outcome
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EventOutcome {
     /// Operation succeeded
     Success,
     /// Operation failed
     Failure,
     /// Outcome unknown
+    #[default]
     Unknown,
-}
-
-impl Default for EventOutcome {
-    fn default() -> Self {
-        EventOutcome::Unknown
-    }
 }
 
 /// Event category (aligned with ECS categories)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EventCategory {
     /// Authentication events
     Authentication,
@@ -106,15 +99,10 @@ pub enum EventCategory {
     /// Vulnerability
     Vulnerability,
     /// Web activity
+    #[default]
     Web,
     /// Custom category
     Custom(String),
-}
-
-impl Default for EventCategory {
-    fn default() -> Self {
-        EventCategory::Web
-    }
 }
 
 impl std::fmt::Display for EventCategory {
