@@ -190,7 +190,12 @@ impl ResponseChunks {
         Self::with_cookies(status, headers, &[], body)
     }
 
-    pub fn with_cookies(status: u16, headers: &HashMap<String, String>, cookies: &[String], body: Bytes) -> Self {
+    pub fn with_cookies(
+        status: u16,
+        headers: &HashMap<String, String>,
+        cookies: &[String],
+        body: Bytes,
+    ) -> Self {
         // Status line
         let status_line = if has_precomputed_status(status) {
             StatusLine::Static(status_line(status))

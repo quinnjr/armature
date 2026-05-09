@@ -125,14 +125,12 @@ impl ModelRegistry {
             // Add ungrouped models
             for name in &self.order {
                 let in_group = self.groups.values().any(|g| g.contains(name));
-                if !in_group {
-                    if let Some(model) = self.models.get(name) {
-                        ungrouped.push(SidebarItem::Model {
-                            name: model.name.clone(),
-                            label: model.verbose_name.clone(),
-                            icon: model.icon.clone(),
-                        });
-                    }
+                if !in_group && let Some(model) = self.models.get(name) {
+                    ungrouped.push(SidebarItem::Model {
+                        name: model.name.clone(),
+                        label: model.verbose_name.clone(),
+                        icon: model.icon.clone(),
+                    });
                 }
             }
 

@@ -171,7 +171,7 @@ impl DetailView {
             title: format!("{} #{}", model.verbose_name_singular, id),
             breadcrumbs: vec![
                 Breadcrumb::new("Dashboard").url("/admin"),
-                Breadcrumb::new(&model.verbose_name).url(&format!("/admin/{}", model.name)),
+                Breadcrumb::new(&model.verbose_name).url(format!("/admin/{}", model.name)),
                 Breadcrumb::new(&id),
             ],
             id: id.clone(),
@@ -242,7 +242,7 @@ impl CreateView {
             title: format!("Add {}", model.verbose_name_singular),
             breadcrumbs: vec![
                 Breadcrumb::new("Dashboard").url("/admin"),
-                Breadcrumb::new(&model.verbose_name).url(&format!("/admin/{}", model.name)),
+                Breadcrumb::new(&model.verbose_name).url(format!("/admin/{}", model.name)),
                 Breadcrumb::new("Add"),
             ],
             fields,

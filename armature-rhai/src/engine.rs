@@ -113,10 +113,10 @@ impl RhaiEngine {
         let full_path = self.loader.resolve_path(path);
 
         // Check cache first (unless hot reload is enabled)
-        if !self.config.hot_reload {
-            if let Some(script) = self.cache.read().get(&full_path) {
-                return Ok(script);
-            }
+        if !self.config.hot_reload
+            && let Some(script) = self.cache.read().get(&full_path)
+        {
+            return Ok(script);
         }
 
         // Load and compile

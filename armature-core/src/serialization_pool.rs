@@ -29,8 +29,6 @@
 //! ```
 
 use crate::buffer_pool::{BufferSize, PooledBuffer, acquire_buffer};
-#[cfg(feature = "simd-json")]
-use crate::json::Json;
 use bytes::Bytes;
 use lru::LruCache;
 use serde::Serialize;
@@ -164,7 +162,7 @@ pub fn serialize_json_simd_with_size<T: Serialize>(
 ) -> Result<Bytes, SerializationError> {
     SERIALIZATION_STATS.record_serialization();
 
-    let vec = Json::to_vec(value)?;
+    let vec = crate::json::to_vec(value).map_err(|e| SerializationError::Json(e.to_string()))?;
     SERIALIZATION_STATS.record_bytes(vec.len());
 
     Ok(Bytes::from(vec))

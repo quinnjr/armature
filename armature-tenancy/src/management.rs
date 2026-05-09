@@ -883,7 +883,7 @@ impl ManagedTenantStore for InMemoryManagedTenantStore {
             .collect();
 
         // Sort by created_at descending
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.sort_by_key(|r| std::cmp::Reverse(r.created_at));
 
         // Apply pagination
         let start = filter.offset as usize;

@@ -60,7 +60,7 @@ fn bench_string_allocations(c: &mut Criterion) {
 
     // String join
     group.bench_function("string_join", |b| {
-        let parts = vec!["one", "two", "three", "four", "five"];
+        let parts = ["one", "two", "three", "four", "five"];
         b.iter(|| {
             let s = parts.join(", ");
             black_box(s)
@@ -346,11 +346,7 @@ impl<T: Default> MutexPool<T> {
     }
 
     fn get(&self) -> T {
-        self.available
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(T::default)
+        self.available.lock().unwrap().pop().unwrap_or_default()
     }
 
     fn put(&self, item: T) {

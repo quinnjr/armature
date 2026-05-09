@@ -43,10 +43,10 @@ impl CompiledScript {
 
     /// Check if the script is stale (source file modified).
     pub fn is_stale(&self) -> bool {
-        if let Ok(metadata) = fs::metadata(&self.path) {
-            if let Ok(modified) = metadata.modified() {
-                return modified > self.compiled_at;
-            }
+        if let Ok(metadata) = fs::metadata(&self.path)
+            && let Ok(modified) = metadata.modified()
+        {
+            return modified > self.compiled_at;
         }
         false
     }

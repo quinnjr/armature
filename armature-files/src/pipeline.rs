@@ -190,13 +190,13 @@ impl Pipeline {
             .ok_or_else(|| FileError::Pipeline("No metadata available".into()))?;
 
         // Check max size
-        if let Some(max) = self.max_size {
-            if data.len() as u64 > max {
-                return Err(FileError::FileTooLarge {
-                    size: data.len() as u64,
-                    max,
-                });
-            }
+        if let Some(max) = self.max_size
+            && data.len() as u64 > max
+        {
+            return Err(FileError::FileTooLarge {
+                size: data.len() as u64,
+                max,
+            });
         }
 
         let mut operation_names = Vec::new();

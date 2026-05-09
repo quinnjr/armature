@@ -214,10 +214,8 @@ impl KeyExtractorBuilder {
             }
 
             // Fallback to IP if enabled
-            if fallback_to_ip {
-                if let Some(ip) = info.ip {
-                    return Some(ip.to_string());
-                }
+            if fallback_to_ip && let Some(ip) = info.ip {
+                return Some(ip.to_string());
             }
 
             None

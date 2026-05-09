@@ -259,13 +259,13 @@ fn dynamic_to_response(val: Dynamic) -> HttpResponse {
     }
 
     // Map or Array — return as JSON
-    if val.is_map() || val.is_array() {
-        if let Ok(json) = serde_json::to_string(&rhai_to_json(val)) {
-            let mut resp = HttpResponse::new(200);
-            resp.headers
-                .insert("content-type".to_string(), "application/json".to_string());
-            return resp.with_body(json.into_bytes());
-        }
+    if (val.is_map() || val.is_array())
+        && let Ok(json) = serde_json::to_string(&rhai_to_json(val))
+    {
+        let mut resp = HttpResponse::new(200);
+        resp.headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        return resp.with_body(json.into_bytes());
     }
 
     // Unit or unknown — empty 200

@@ -13,9 +13,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// Handler function type for MCP resource reads
-pub type ResourceHandlerFn = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = Result<ResourceContent>> + Send>> + Send + Sync,
->;
+pub type ResourceHandlerFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<ResourceContent>> + Send>> + Send + Sync>;
 
 /// An MCP resource entry registered at compile time
 pub struct McpResourceEntry {

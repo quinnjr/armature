@@ -219,9 +219,7 @@ impl AdminRoutes {
 
     /// Handle create request
     pub async fn create(&self, model_name: &str) -> Option<CreateView> {
-        self.admin
-            .get_model(model_name)
-            .map(|model| CreateView::new(model))
+        self.admin.get_model(model_name).map(CreateView::new)
     }
 }
 

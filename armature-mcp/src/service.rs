@@ -2,7 +2,7 @@
 //!
 //! Handles JSON-RPC 2.0 requests for the Model Context Protocol.
 
-use crate::auth::{authenticate, McpAuthConfig, McpAuthContext};
+use crate::auth::{McpAuthConfig, McpAuthContext, authenticate};
 use crate::error::{McpError, Result};
 use crate::resource::McpResourceRegistry;
 use crate::tool::McpToolRegistry;
@@ -114,15 +114,21 @@ impl McpService {
     }
 
     /// Handle a JSON-RPC request and return a response
-    pub async fn handle_request(&self, request: JsonRpcRequest, headers: &HashMap<String, String>) -> JsonRpcResponse {
+    pub async fn handle_request(
+        &self,
+        request: JsonRpcRequest,
+        headers: &HashMap<String, String>,
+    ) -> JsonRpcResponse {
         let id = request.id.clone();
 
-        match self.dispatch_method(&request.method, request.params, headers).await {
+        match self
+            .dispatch_method(&request.method, request.params, headers)
+            .await
+        {
             Ok(result) => JsonRpcResponse::success(id, result),
-            Err(e) => JsonRpcResponse::error(
-                id,
-                JsonRpcError::new(e.to_error_code(), e.to_string()),
-            ),
+            Err(e) => {
+                JsonRpcResponse::error(id, JsonRpcError::new(e.to_error_code(), e.to_string()))
+            }
         }
     }
 
@@ -132,10 +138,7 @@ impl McpService {
 
         let response = match request {
             Ok(req) => self.handle_request(req, headers).await,
-            Err(e) => JsonRpcResponse::error(
-                None,
-                JsonRpcError::parse_error(e.to_string()),
-            ),
+            Err(e) => JsonRpcResponse::error(None, JsonRpcError::parse_error(e.to_string())),
         };
 
         serde_json::to_string(&response).unwrap_or_else(|_| {
@@ -149,7 +152,12 @@ impl McpService {
     }
 
     /// Dispatch a method call to the appropriate handler
-    async fn dispatch_method(&self, method: &str, params: Option<Value>, headers: &HashMap<String, String>) -> Result<Value> {
+    async fn dispatch_method(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        headers: &HashMap<String, String>,
+    ) -> Result<Value> {
         // Authenticate the request
         let _auth_context = authenticate(&self.config.auth, headers, method).await?;
 
@@ -165,7 +173,11 @@ impl McpService {
     }
 
     /// Get the authentication context for a request (for custom handling)
-    pub async fn authenticate(&self, headers: &HashMap<String, String>, method: &str) -> Result<McpAuthContext> {
+    pub async fn authenticate(
+        &self,
+        headers: &HashMap<String, String>,
+        method: &str,
+    ) -> Result<McpAuthContext> {
         authenticate(&self.config.auth, headers, method).await
     }
 
@@ -174,7 +186,9 @@ impl McpService {
         let mut capabilities = ServerCapabilities::default();
 
         if self.config.enable_tools {
-            capabilities.tools = Some(ToolsCapability { list_changed: false });
+            capabilities.tools = Some(ToolsCapability {
+                list_changed: false,
+            });
         }
 
         if self.config.enable_resources {
@@ -185,7 +199,9 @@ impl McpService {
         }
 
         if self.config.enable_prompts {
-            capabilities.prompts = Some(PromptsCapability { list_changed: false });
+            capabilities.prompts = Some(PromptsCapability {
+                list_changed: false,
+            });
         }
 
         let result = InitializeResult {
@@ -216,9 +232,14 @@ impl McpService {
     async fn handle_tools_call(&self, params: Option<Value>) -> Result<Value> {
         let params: ToolCallParams = params
             .ok_or_else(|| McpError::InvalidParams("Missing params".to_string()))
-            .and_then(|v| serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string())))?;
+            .and_then(|v| {
+                serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
+            })?;
 
-        let result = self.tool_registry.call_tool(&params.name, params.arguments).await?;
+        let result = self
+            .tool_registry
+            .call_tool(&params.name, params.arguments)
+            .await?;
 
         serde_json::to_value(result).map_err(McpError::from)
     }
@@ -239,7 +260,9 @@ impl McpService {
     async fn handle_resources_read(&self, params: Option<Value>) -> Result<Value> {
         let params: ResourceReadParams = params
             .ok_or_else(|| McpError::InvalidParams("Missing params".to_string()))
-            .and_then(|v| serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string())))?;
+            .and_then(|v| {
+                serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
+            })?;
 
         let content = self.resource_registry.read_resource(&params.uri).await?;
 
@@ -290,8 +313,7 @@ mod tests {
         assert!(response.error.is_none());
         assert!(response.result.is_some());
 
-        let result: InitializeResult =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+        let result: InitializeResult = serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(result.protocol_version, MCP_PROTOCOL_VERSION);
     }
 
