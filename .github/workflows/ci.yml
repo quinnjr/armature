@@ -219,7 +219,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: |
