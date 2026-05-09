@@ -27,7 +27,7 @@ google-cloud-bigquery = { version = "0.15", optional = true }
 
 # Firestore uses tonic-based client
 google-cloud-googleapis = { version = "0.15", optional = true }
-tonic = { version = "0.12", optional = true }
+tonic = { version = "0.14", optional = true }
 
 # HTTP client for REST APIs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
