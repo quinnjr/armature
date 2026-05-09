@@ -195,8 +195,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(unstable_name_collisions)]
     fn test_duration_ext() {
         let duration = Duration::from_millis(150);
-        assert_eq!(duration.as_millis_f64(), 150.0);
+        assert_eq!(DurationExt::as_millis_f64(&duration), 150.0);
     }
 }

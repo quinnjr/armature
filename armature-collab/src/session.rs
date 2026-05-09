@@ -406,10 +406,10 @@ impl SessionManager {
     pub fn get_or_create(&self, document: Document) -> Arc<CollabSession> {
         let doc_id = document.id().to_string();
 
-        if let Some(session_id) = self.doc_sessions.get(&doc_id) {
-            if let Some(session) = self.sessions.get(&session_id) {
-                return Arc::clone(&session);
-            }
+        if let Some(session_id) = self.doc_sessions.get(&doc_id)
+            && let Some(session) = self.sessions.get(&session_id)
+        {
+            return Arc::clone(&session);
         }
 
         self.create(document)
@@ -491,7 +491,7 @@ mod tests {
         let session1 = manager.create(doc1);
 
         let doc2 = Document::new("doc2");
-        let session2 = manager.create(doc2);
+        let _session2 = manager.create(doc2);
 
         assert_eq!(manager.count(), 2);
         assert!(manager.get(&session1.id()).is_some());

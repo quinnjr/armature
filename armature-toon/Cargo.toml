@@ -22,7 +22,7 @@ streaming = []
 serde = { version = "1.0", features = ["derive"] }
 serde_toon = "0.2"
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # Optional dependencies

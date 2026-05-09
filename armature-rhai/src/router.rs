@@ -191,10 +191,10 @@ impl ScriptRouter {
 
         for route in &self.routes {
             // Check method if specified
-            if let Some(route_method) = &route.method {
-                if route_method.as_str() != method_str {
-                    continue;
-                }
+            if let Some(route_method) = &route.method
+                && route_method.as_str() != method_str
+            {
+                continue;
             }
 
             // Check pattern

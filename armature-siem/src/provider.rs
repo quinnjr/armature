@@ -68,6 +68,7 @@ impl ElasticConfig {
     ///     .build()
     ///     .unwrap();
     /// ```
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(endpoint: impl Into<String>) -> SiemConfigBuilder {
         SiemConfig::builder()
             .provider(SiemProvider::Elastic)
@@ -138,6 +139,7 @@ impl SentinelConfig {
     ///     "shared-key"
     /// ).build().unwrap();
     /// ```
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         workspace_id: impl Into<String>,
         shared_key: impl Into<String>,
@@ -196,6 +198,7 @@ impl DatadogConfig {
     ///     .build()
     ///     .unwrap();
     /// ```
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(api_key: impl Into<String>) -> SiemConfigBuilder {
         SiemConfig::builder()
             .provider(SiemProvider::Datadog)

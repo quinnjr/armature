@@ -16,12 +16,12 @@ categories = ["web-programming", "network-programming"]
 tokio = { version = "1.0", features = ["full", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 async-trait = "0.1"
 
 # Configuration generation
-kdl = "4.0"
+kdl = "6.5"
 
 # Process management
 nix = { version = "0.27", features = ["signal", "process"] }
@@ -33,7 +33,7 @@ reqwest = { version = "0.11", features = ["json"], default-features = false }
 notify = "6.0"
 
 # Template rendering
-handlebars = "4.0"
+handlebars = "6.3"
 
 # URL parsing
 url = "2.0"

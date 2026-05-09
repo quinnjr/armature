@@ -133,8 +133,8 @@ pub use auth::{
 pub use controller::{McpController, McpRouterExt};
 pub use error::{McpError, Result};
 pub use resource::{McpResourceEntry, McpResourceProvider, McpResourceRegistry};
-pub use service::{McpConfig, McpService, MCP_PROTOCOL_VERSION};
-pub use tool::{McpToolEntry, McpToolProvider, McpToolRegistry, ToolHandlerFn};
+pub use service::{MCP_PROTOCOL_VERSION, McpConfig, McpService};
+pub use tool::{McpToolEntry, McpToolProvider, McpToolRegistry, ToolHandlerFn, ToolHandlerFnPtr};
 pub use types::*;
 
 /// Prelude module for convenient imports

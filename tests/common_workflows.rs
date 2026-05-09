@@ -82,9 +82,12 @@ fn test_http_response_convenience_methods() {
             .contains("no-store")
     );
 
-    // Test cookie
+    // Test cookie — armature-core 0.2.3 introduced multi-cookie support,
+    // which moved Set-Cookie out of the headers map and into a dedicated
+    // `cookies` Vec so multiple cookies can be emitted on one response.
     let response = HttpResponse::ok().cookie("session", "abc123; HttpOnly");
-    assert!(response.headers.get("Set-Cookie").is_some());
+    assert_eq!(response.cookies.len(), 1);
+    assert!(response.cookies[0].starts_with("session=abc123"));
 
     // Test status checks
     let ok = HttpResponse::ok();

@@ -235,7 +235,7 @@ crossbeam = "0.8"  # Lock-free data structures for benchmarks
 
 # Unix-only profiling dependencies (pprof requires Unix-specific APIs)
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", features = ["flamegraph", "criterion", "prost-codec"] }
+pprof = { version = "0.15", features = ["flamegraph", "criterion", "prost-codec"] }
 inferno = "0.12"
 
 # =============================================================================

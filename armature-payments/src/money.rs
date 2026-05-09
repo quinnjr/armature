@@ -8,7 +8,9 @@ use std::ops::{Add, Mul, Sub};
 /// Currency codes (ISO 4217)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Currency {
+    #[default]
     USD,
     EUR,
     GBP,
@@ -115,12 +117,6 @@ impl Currency {
             "KRW" => Some(Self::KRW),
             _ => None,
         }
-    }
-}
-
-impl Default for Currency {
-    fn default() -> Self {
-        Self::USD
     }
 }
 
