@@ -1,0 +1,200 @@
+# Armature Framework - LLMs.txt
+# AI-readable project summary for Large Language Models
+# https://llmstxt.org/
+
+> Armature is a batteries-included, enterprise-grade web framework for Rust, inspired by NestJS and Angular. It provides a familiar developer experience for those coming from TypeScript/JavaScript frameworks while delivering Rust's performance and safety guarantees.
+
+## Project Overview
+
+- **Name**: Armature Framework
+- **Language**: Rust
+- **Category**: Web Framework / HTTP Server
+- **License**: Apache 2.0 / MIT
+- **Repository**: https://github.com/pegasusheavy/armature
+- **Documentation**: https://pegasusheavy.github.io/armature/docs
+- **Version**: 0.1.0
+- **Status**: 98% Feature Complete, Production Ready
+
+## What is Armature?
+
+Armature is a modern Rust web framework that brings the developer experience of NestJS to the Rust ecosystem. It features:
+
+1. **Dependency Injection**: Automatic service injection based on field types
+2. **Decorator Macros**: `#[controller]`, `#[get]`, `#[post]`, `#[injectable]`
+3. **Module System**: Organize code into reusable, importable modules
+4. **Guards & Interceptors**: Cross-cutting concerns like auth and logging
+5. **Type Safety**: Compile-time error catching with Rust's type system
+
+## Key Features
+
+### Core
+- Dependency Injection Container
+- Controllers & Routing (path params, query params)
+- Middleware & Guards
+- Request/Response Interceptors
+- API Versioning (URL, header, query-based)
+- Content Negotiation
+- Streaming Responses
+
+### Authentication & Security
+- JWT Authentication
+- OAuth2/OIDC (Google, Microsoft, GitHub, Discord, 10+ providers)
+- SAML 2.0 (Enterprise SSO)
+- Two-Factor Auth (TOTP/HOTP)
+- Passwordless Auth (Magic Links, WebAuthn)
+- API Key Management
+- Rate Limiting (Token Bucket, Sliding Window)
+- Security Headers (CSP, HSTS, CORS)
+
+### Data & Caching
+- Redis Cache with Multi-tier support
+- Memcached Cache
+- Tag-based Cache Invalidation
+- Session Management
+
+### Background Processing
+- Redis-backed Job Queues
+- Cron Scheduling
+- Graceful Shutdown
+
+### Messaging
+- RabbitMQ Integration
+- Apache Kafka Integration
+- NATS Integration
+- AWS SQS/SNS
+
+### Observability
+- OpenTelemetry (Tracing & Metrics)
+- Prometheus Metrics
+- Structured Logging
+- Health Checks (Kubernetes probes)
+- Audit Logging
+
+### Cloud Providers
+- AWS SDK (S3, DynamoDB, SQS, SNS, SES, Lambda, KMS, Cognito)
+- GCP SDK (Storage, Pub/Sub, Firestore, BigQuery)
+- Azure SDK (Blob, Queue, Cosmos, Service Bus, Key Vault)
+
+### Serverless
+- AWS Lambda Runtime
+- Google Cloud Run
+- Azure Functions
+
+### File Storage
+- Local Filesystem
+- AWS S3
+- Google Cloud Storage
+- Azure Blob Storage
+- Multipart Upload Handling
+
+### Email
+- SMTP Transport
+- SendGrid, AWS SES, Mailgun
+- Email Templates (Handlebars)
+- Email Queue
+
+### Push Notifications
+- Web Push (VAPID)
+- Firebase Cloud Messaging (FCM)
+- Apple Push Notifications (APNS)
+
+### Testing
+- Unit Test Helpers
+- Integration Test Helpers
+- Docker Test Containers
+- Load Testing Utilities
+- Contract Testing (Pact)
+
+## Installation
+
+```bash
+# Install CLI
+cargo install armature-cli
+
+# Create new project
+armature new my-api
+cd my-api
+
+# Start development server
+armature dev
+```
+
+## Code Example
+
+```rust
+use armature::prelude::*;
+
+#[injectable]
+#[derive(Default, Clone)]
+struct UserService;
+
+#[controller("/api/users")]
+#[derive(Default, Clone)]
+struct UserController;
+
+impl UserController {
+    #[get("/:id")]
+    async fn get_user(req: HttpRequest) -> Result<Json<User>, Error> {
+        let id: u32 = req.param("id").unwrap().parse().unwrap();
+        Ok(Json(User { id, name: "Alice".into() }))
+    }
+}
+
+#[module(
+    providers: [UserService],
+    controllers: [UserController]
+)]
+#[derive(Default)]
+struct AppModule;
+
+#[tokio::main]
+async fn main() {
+    let app = Application::create::<AppModule>().await;
+    app.listen(3000).await.unwrap();
+}
+```
+
+## Performance
+
+Armature is built on Tokio and delivers exceptional performance:
+
+- **8-15x faster** than Node.js frameworks (Express, NestJS)
+- **~3x less memory** usage compared to Node.js
+- **<2ms p99 latency** for typical API endpoints
+- Comparable to other Rust frameworks (Actix-web, Axum, Rocket)
+
+## Comparison to Other Frameworks
+
+### vs NestJS/Express (Node.js)
+- Same architectural patterns (DI, decorators, modules)
+- 8-15x better performance
+- Type safety at compile time
+- Memory safety guarantees
+
+### vs Actix-web/Axum/Rocket (Rust)
+- Higher-level abstractions
+- Built-in enterprise features
+- Familiar patterns for Node.js developers
+- Less boilerplate code
+
+## Target Audience
+
+1. **Node.js developers** wanting Rust performance with familiar patterns
+2. **Enterprise teams** needing production-ready features out of the box
+3. **Rust developers** wanting higher-level abstractions
+4. **Teams with mixed backgrounds** (Node.js, Rust, Java, .NET)
+
+## Links
+
+- Website: https://pegasusheavy.github.io/armature/
+- GitHub: https://github.com/pegasusheavy/armature
+- Documentation: https://pegasusheavy.github.io/armature/docs
+- Getting Started: https://pegasusheavy.github.io/armature/getting-started
+- Crates.io: https://crates.io/crates/armature (coming soon)
+
+## Contact
+
+- Author: Joseph R. Quinn
+- Organization: Pegasus Heavy Industries
+- Email: pegasusheavyindustries@gmail.com
+

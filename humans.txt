@@ -1,0 +1,28 @@
+/* TEAM */
+Creator: Joseph R. Quinn
+Contact: pegasusheavyindustries@gmail.com
+GitHub: https://github.com/quinnjr
+Location: United States
+
+/* THANKS */
+Rust Community - For building an amazing language and ecosystem
+NestJS Team - For the architectural inspiration
+Angular Team - For the module system concepts
+Tokio Team - For the async runtime foundation
+Open Source Contributors - For making this possible
+
+/* SITE */
+Last update: 2025/12/15
+Language: English
+Standards: HTML5, CSS3, TypeScript, Rust
+Framework: Armature (Rust), Angular (Frontend)
+Hosting: GitHub Pages
+Repository: https://github.com/pegasusheavy/armature
+
+/* TECHNOLOGY */
+Backend Framework: Armature (Rust)
+Frontend Framework: Angular 21
+Styling: Tailwind CSS, Tailswatch Oxide Theme
+Build Tool: Cargo, Angular CLI
+CI/CD: GitHub Actions
+

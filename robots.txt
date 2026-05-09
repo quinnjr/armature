@@ -1,0 +1,97 @@
+# =============================================================================
+# Armature Framework - robots.txt
+# https://pegasusheavy.github.io/armature/
+# =============================================================================
+
+# Allow all search engines to crawl the site
+User-agent: *
+Allow: /
+Crawl-delay: 1
+
+# Sitemap location
+Sitemap: https://pegasusheavy.github.io/armature/sitemap.xml
+
+# =============================================================================
+# AI Crawlers & LLM Bots
+# =============================================================================
+# We welcome AI crawlers to help users discover Armature
+
+# OpenAI
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+# Anthropic
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+# Google AI
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+# Microsoft/Bing AI
+User-agent: Bingbot
+Allow: /
+
+User-agent: BingPreview
+Allow: /
+
+# Common Crawl (used for AI training)
+User-agent: CCBot
+Allow: /
+
+# Perplexity AI
+User-agent: PerplexityBot
+Allow: /
+
+# You.com
+User-agent: YouBot
+Allow: /
+
+# Cohere
+User-agent: cohere-ai
+Allow: /
+
+# Meta AI
+User-agent: FacebookBot
+Allow: /
+
+User-agent: Meta-ExternalAgent
+Allow: /
+
+# Apple
+User-agent: Applebot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+# Other AI/ML crawlers
+User-agent: Diffbot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: PetalBot
+Allow: /
+
+# =============================================================================
+# Additional Resources for AI
+# =============================================================================
+# LLMs.txt - AI-readable project summary
+# https://pegasusheavy.github.io/armature/llms.txt
+
+# AI.txt - AI crawler guidelines
+# https://pegasusheavy.github.io/armature/ai.txt

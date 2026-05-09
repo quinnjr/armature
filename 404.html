@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en" data-beasties-container>
+  <head>
+    <meta charset="utf-8">
+    <title>Armature Framework - Enterprise Rust Web Framework | NestJS Alternative</title>
+    <base href="/armature/">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <!-- Primary Meta Tags -->
+    <meta name="title" content="Armature Framework - Enterprise Rust Web Framework | NestJS Alternative">
+    <meta name="description" content="Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Build production-ready APIs with dependency injection, decorators, JWT/OAuth2 auth, and 150+ features. 8-15x faster than Node.js.">
+    <meta name="keywords" content="rust web framework, nestjs rust, nestjs alternative, express rust alternative, rust http server, async rust framework, dependency injection rust, rust api framework, type-safe rust, rust backend, rust microservices, actix-web alternative, axum alternative, rocket alternative, rust enterprise framework, rust production framework">
+    <meta name="author" content="Joseph R. Quinn">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="language" content="English">
+    <meta name="revisit-after" content="7 days">
+    <meta name="rating" content="General">
+    <meta name="distribution" content="global">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://pegasusheavy.github.io/armature/">
+    <meta property="og:title" content="Armature Framework - Enterprise Rust Web Framework">
+    <meta property="og:description" content="Batteries-included Rust web framework with NestJS-style architecture. Dependency injection, decorators, JWT/OAuth2, GraphQL, and 150+ enterprise features. 8-15x faster than Node.js.">
+    <meta property="og:image" content="https://pegasusheavy.github.io/armature/og-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework">
+    <meta property="og:site_name" content="Armature Framework">
+    <meta property="og:locale" content="en_US">
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:url" content="https://pegasusheavy.github.io/armature/">
+    <meta name="twitter:title" content="Armature Framework - Enterprise Rust Web Framework">
+    <meta name="twitter:description" content="Batteries-included Rust web framework with NestJS-style architecture. 8-15x faster than Node.js with 150+ enterprise features.">
+    <meta name="twitter:image" content="https://pegasusheavy.github.io/armature/og-image.png">
+    <meta name="twitter:creator" content="@quinnjr">
+
+    <!-- Canonical URL -->
+    <link rel="canonical" href="https://pegasusheavy.github.io/armature/">
+
+    <!-- Alternate Languages (if applicable) -->
+    <link rel="alternate" hreflang="en" href="https://pegasusheavy.github.io/armature/">
+    <link rel="alternate" hreflang="x-default" href="https://pegasusheavy.github.io/armature/">
+
+    <!-- Favicon and Icons -->
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#CE422B">
+    <meta name="msapplication-TileColor" content="#CE422B">
+
+    <!-- Preconnect for Performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="dns-prefetch" href="https://github.com">
+
+    <!-- Google Fonts - Inter & Fira Code -->
+    <style>@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0NSDulI.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh2dSDulI.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0dSDulI.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3tSDulI.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bhZ_Wmh2uX.woff2) format('woff2');unicode-range:U+2000-2001, U+2004-2008, U+200A, U+23B8-23BD, U+2500-259F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh09SDulI.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3dSD.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0NSDulI.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh2dSDulI.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0dSDulI.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3tSDulI.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bhZ_Wmh2uX.woff2) format('woff2');unicode-range:U+2000-2001, U+2004-2008, U+200A, U+23B8-23BD, U+2500-259F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh09SDulI.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3dSD.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0NSDulI.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh2dSDulI.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh0dSDulI.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3tSDulI.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bhZ_Wmh2uX.woff2) format('woff2');unicode-range:U+2000-2001, U+2004-2008, U+200A, U+23B8-23BD, U+2500-259F;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh09SDulI.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Fira Code';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/firacode/v27/uU9NCBsR6Z2vfE9aq3bh3dSD.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:300;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7SUc.woff2) format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2) format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7SUc.woff2) format('woff2');unicode-range:U+1F00-1FFF;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7SUc.woff2) format('woff2');unicode-range:U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7SUc.woff2) format('woff2');unicode-range:U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7SUc.woff2) format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;}@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url(https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}</style>
+
+    <!-- Structured Data / JSON-LD for Search Engines and LLMs -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Armature Framework",
+        "alternateName": ["Armature", "armature-rs"],
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "Web Framework",
+        "operatingSystem": "Linux, macOS, Windows",
+        "programmingLanguage": {
+          "@type": "ComputerLanguage",
+          "name": "Rust",
+          "url": "https://www.rust-lang.org/"
+        },
+        "description": "Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Features dependency injection, decorators, middleware, JWT/OAuth2/SAML authentication, validation, caching, job queues, GraphQL, and 150+ enterprise features.",
+        "url": "https://pegasusheavy.github.io/armature/",
+        "softwareVersion": "0.1.0",
+        "releaseNotes": "https://github.com/pegasusheavy/armature/releases",
+        "license": "https://opensource.org/licenses/Apache-2.0",
+        "author": {
+          "@type": "Person",
+          "name": "Joseph R. Quinn",
+          "email": "pegasusheavyindustries@gmail.com",
+          "url": "https://github.com/quinnjr"
+        },
+        "publisher": {
+          "@type": "Organization",
+          "name": "Pegasus Heavy Industries",
+          "url": "https://github.com/pegasusheavy"
+        },
+        "codeRepository": "https://github.com/pegasusheavy/armature",
+        "downloadUrl": "https://crates.io/crates/armature",
+        "installUrl": "https://pegasusheavy.github.io/armature/getting-started",
+        "softwareHelp": "https://pegasusheavy.github.io/armature/docs",
+        "programmingModel": "Async/Await",
+        "runtimePlatform": "Tokio",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "aggregateRating": {
+          "@type": "AggregateRating",
+          "ratingValue": "5",
+          "ratingCount": "1",
+          "bestRating": "5",
+          "worstRating": "1"
+        },
+        "keywords": "rust, web framework, http server, nestjs alternative, express alternative, actix-web, rocket, axum, dependency injection, async rust, type-safe, middleware, jwt, oauth2, saml, graphql, openapi, swagger, enterprise, production-ready",
+        "featureList": [
+          "Dependency Injection Container",
+          "Decorator-based routing (#[controller], #[get], #[post])",
+          "Module system for code organization",
+          "Guards and Interceptors",
+          "JWT Authentication",
+          "OAuth2/OIDC (10+ providers)",
+          "SAML 2.0 Enterprise SSO",
+          "Two-Factor Authentication (TOTP/HOTP)",
+          "Passwordless Auth (Magic Links, WebAuthn)",
+          "API Key Management",
+          "Rate Limiting (Token Bucket, Sliding Window)",
+          "Data Validation Framework",
+          "OpenAPI/Swagger Integration",
+          "GraphQL Support",
+          "WebSocket and Server-Sent Events",
+          "Background Job Queues (Redis)",
+          "Cron Scheduling",
+          "Multi-tier Caching (Redis, Memcached)",
+          "OpenTelemetry Observability",
+          "Prometheus Metrics",
+          "Health Checks (Kubernetes probes)",
+          "AWS SDK Integration",
+          "GCP SDK Integration",
+          "Azure SDK Integration",
+          "Serverless (Lambda, Cloud Run, Azure Functions)",
+          "File Storage (S3, GCS, Azure Blob)",
+          "Email (SMTP, SendGrid, SES, Mailgun)",
+          "Push Notifications (Web Push, FCM, APNS)",
+          "Security Headers (CSP, HSTS, CORS)"
+        ],
+        "sameAs": [
+          "https://github.com/pegasusheavy/armature",
+          "https://crates.io/crates/armature"
+        ]
+      }
+    </script>
+
+    <!-- Organization Schema -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Pegasus Heavy Industries",
+        "url": "https://github.com/pegasusheavy",
+        "logo": "https://pegasusheavy.github.io/armature/assets/armature-logo.svg",
+        "sameAs": [
+          "https://github.com/pegasusheavy"
+        ]
+      }
+    </script>
+
+    <!-- WebSite Schema with SearchAction -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Armature Framework",
+        "url": "https://pegasusheavy.github.io/armature/",
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": "https://pegasusheavy.github.io/armature/docs?q={search_term_string}",
+          "query-input": "required name=search_term_string"
+        }
+      }
+    </script>
+
+    <!-- FAQ Schema -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Is Armature a good NestJS alternative for Rust?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes! Armature is specifically designed to bring NestJS's architectural patterns to Rust. It features dependency injection, decorators (via Rust macros), modules, guards, interceptors, and pipes - all concepts familiar to NestJS developers."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does Armature compare to Express or Koa?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Armature provides Express's simplicity and Koa's async/await patterns, but adds type safety, dependency injection, and compile-time error catching. The middleware system will feel familiar, but you get Rust's performance (8-15x faster) and memory safety guarantees."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Why choose Armature over Actix-web, Rocket, or Axum?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Armature focuses on enterprise features and developer experience. While Actix-web, Rocket, and Axum are excellent low-level frameworks, Armature provides built-in authentication (JWT, OAuth2, SAML), validation, caching, job queues, and OpenAPI generation - reducing the need for external crates."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How fast is Armature compared to Node.js?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Armature is 8-15x faster than Node.js frameworks like Express and NestJS, with ~3x less memory usage and sub-2ms p99 latency for typical API endpoints."
+            }
+          }
+        ]
+      }
+    </script>
+
+    <!-- BreadcrumbList Schema -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://pegasusheavy.github.io/armature/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Documentation",
+            "item": "https://pegasusheavy.github.io/armature/docs"
+          },
+          {
+            "@type": "ListItem",
+            "position": 3,
+            "name": "Getting Started",
+            "item": "https://pegasusheavy.github.io/armature/getting-started"
+          }
+        ]
+      }
+    </script>
+  <style>@layer properties;@layer theme,base,components,utilities;@layer theme{:root{--font-sans:var(--font-sans);--font-mono:var(--font-mono);--color-red-400:oklch(70.4% .191 22.216);--color-red-500:oklch(63.7% .237 25.331);--color-red-600:oklch(57.7% .245 27.325);--color-red-800:oklch(44.4% .177 26.899);--color-red-900:oklch(39.6% .141 25.723);--color-red-950:oklch(25.8% .092 26.042);--color-orange-300:oklch(83.7% .128 66.29);--color-orange-400:oklch(75% .183 55.934);--color-orange-500:oklch(70.5% .213 47.604);--color-orange-600:oklch(64.6% .222 41.116);--color-orange-800:oklch(47% .157 37.304);--color-orange-900:oklch(40.8% .123 38.172);--color-orange-950:oklch(26.6% .079 36.259);--color-amber-400:oklch(82.8% .189 84.429);--color-amber-500:oklch(76.9% .188 70.08);--color-amber-600:oklch(66.6% .179 58.318);--color-amber-800:oklch(47.3% .137 46.201);--color-amber-900:oklch(41.4% .112 45.904);--color-yellow-300:oklch(90.5% .182 98.111);--color-yellow-400:oklch(85.2% .199 91.936);--color-yellow-500:oklch(79.5% .184 86.047);--color-yellow-800:oklch(47.6% .114 61.907);--color-yellow-900:oklch(42.1% .095 57.708);--color-green-300:oklch(87.1% .15 154.449);--color-green-400:oklch(79.2% .209 151.711);--color-green-500:oklch(72.3% .219 149.579);--color-green-800:oklch(44.8% .119 151.328);--color-green-900:oklch(39.3% .095 152.535);--color-emerald-400:oklch(76.5% .177 163.223);--color-emerald-500:oklch(69.6% .17 162.48);--color-emerald-600:oklch(59.6% .145 163.225);--color-emerald-800:oklch(43.2% .095 166.913);--color-emerald-900:oklch(37.8% .077 168.94);--color-emerald-950:oklch(26.2% .051 172.552);--color-teal-400:oklch(77.7% .152 181.912);--color-teal-600:oklch(60% .118 184.704);--color-teal-900:oklch(38.6% .063 188.416);--color-cyan-500:oklch(71.5% .143 215.221);--color-cyan-600:oklch(60.9% .126 221.723);--color-cyan-800:oklch(45% .085 224.283);--color-cyan-900:oklch(39.8% .07 227.392);--color-blue-800:oklch(42.4% .199 265.638);--color-blue-900:oklch(37.9% .146 265.522);--color-indigo-900:oklch(35.9% .144 278.697);--color-purple-400:oklch(71.4% .203 305.504);--color-purple-500:oklch(62.7% .265 303.9);--color-purple-600:oklch(55.8% .288 302.321);--color-purple-800:oklch(43.8% .218 303.724);--color-purple-900:oklch(38.1% .176 304.987);--color-pink-800:oklch(45.9% .187 3.815);--color-pink-900:oklch(40.8% .153 2.432);--color-rose-400:oklch(71.2% .194 13.428);--color-rose-600:oklch(58.6% .253 17.585);--color-rose-900:oklch(41% .159 10.272);--color-stone-200:var(--stone-200);--color-stone-300:var(--stone-300);--color-stone-400:var(--stone-400);--color-stone-500:var(--stone-500);--color-stone-600:var(--stone-600);--color-stone-700:var(--stone-700);--color-stone-800:var(--stone-800);--color-stone-900:var(--stone-900);--color-stone-950:var(--stone-950);--color-white:#fff;--spacing:.25rem;--container-xl:36rem;--container-2xl:42rem;--container-3xl:48rem;--container-4xl:56rem;--container-5xl:64rem;--container-6xl:72rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-base:1rem;--text-base--line-height:1.5 ;--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-xl:1.25rem;--text-xl--line-height:calc(1.75 / 1.25);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--text-3xl:1.875rem;--text-3xl--line-height:1.2 ;--text-4xl:2.25rem;--text-4xl--line-height:calc(2.5 / 2.25);--text-5xl:3rem;--text-5xl--line-height:1;--text-6xl:3.75rem;--text-6xl--line-height:1;--font-weight-medium:500;--font-weight-semibold:600;--font-weight-bold:700;--tracking-tight:-.025em;--tracking-wide:.025em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--radius-2xl:1rem;--shadow-lg:0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);--blur-sm:8px;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--font-heading:var(--font-heading);--color-primary-50:var(--color-primary-50);--color-primary-100:var(--color-primary-100);--color-primary-200:var(--color-primary-200);--color-primary-300:var(--color-primary-300);--color-primary-400:var(--color-primary-400);--color-primary-500:var(--color-primary-500);--color-primary-600:var(--color-primary-600);--color-primary-700:var(--color-primary-700);--color-primary-800:var(--color-primary-800);--color-primary-900:var(--color-primary-900);--color-primary-950:var(--color-primary-950);--color-secondary-50:var(--color-secondary-50);--color-secondary-100:var(--color-secondary-100);--color-secondary-200:var(--color-secondary-200);--color-secondary-300:var(--color-secondary-300);--color-secondary-400:var(--color-secondary-400);--color-secondary-500:var(--color-secondary-500);--color-secondary-600:var(--color-secondary-600);--color-secondary-700:var(--color-secondary-700);--color-secondary-800:var(--color-secondary-800);--color-secondary-900:var(--color-secondary-900);--color-secondary-950:var(--color-secondary-950);--color-accent-50:var(--color-accent-50);--color-accent-100:var(--color-accent-100);--color-accent-200:var(--color-accent-200);--color-accent-300:var(--color-accent-300);--color-accent-400:var(--color-accent-400);--color-accent-500:var(--color-accent-500);--color-accent-600:var(--color-accent-600);--color-accent-700:var(--color-accent-700);--color-accent-800:var(--color-accent-800);--color-accent-900:var(--color-accent-900);--color-accent-950:var(--color-accent-950);--color-success-500:var(--color-success-500);--color-warning-500:var(--color-warning-500);--color-error-500:var(--color-error-500);--color-info-500:var(--color-info-500);--color-background:var(--color-background);--color-foreground:var(--color-foreground);--color-surface:var(--color-surface);--color-border:var(--color-border);--color-text:var(--color-text);--color-text-muted:var(--color-text-muted);--color-rust-300:var(--rust-300);--color-rust-400:var(--rust-400);--color-rust-500:var(--rust-500);--color-rust-600:var(--rust-600);--color-rust-700:var(--rust-700);--color-rust-800:var(--rust-800);--color-rust-900:var(--rust-900)}}@layer base{*,:after,:before{box-sizing:border-box;margin:0;padding:0;border:0 solid}html{line-height:1.5;-webkit-text-size-adjust:100%;tab-size:4;font-family:var(--default-font-family, ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings, normal);font-variation-settings:var(--default-font-variation-settings, normal);-webkit-tap-highlight-color:transparent}a{color:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}}@layer utilities{}:root{--font-sans:"Fira Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;--font-heading:"Fira Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;--font-mono:"Fira Code", "JetBrains Mono", ui-monospace, monospace;--color-primary-50:#fff3e0;--color-primary-100:#ffe0b2;--color-primary-200:#ffcc80;--color-primary-300:#ffb74d;--color-primary-400:#ffa726;--color-primary-500:#ff9800;--color-primary-600:#f57c00;--color-primary-700:#e65100;--color-primary-800:#d84315;--color-primary-900:#bf360c;--color-primary-950:#8c2703;--color-secondary-50:#f5f5f5;--color-secondary-100:#e0e0e0;--color-secondary-200:#bdbdbd;--color-secondary-300:#9e9e9e;--color-secondary-400:#757575;--color-secondary-500:#616161;--color-secondary-600:#4a4a4a;--color-secondary-700:#3a3a3a;--color-secondary-800:#2d2d2d;--color-secondary-900:#1a1a1a;--color-secondary-950:#0d0d0d;--color-accent-50:#fdf2e6;--color-accent-100:#f9dfc4;--color-accent-200:#f3c89e;--color-accent-300:#ecb178;--color-accent-400:#e49a5a;--color-accent-500:#d98543;--color-accent-600:#c47536;--color-accent-700:#a86230;--color-accent-800:#8c5028;--color-accent-900:#703e20;--color-accent-950:#432512;--color-success-50:#e0f2f1;--color-success-100:#b2dfdb;--color-success-200:#80cbc4;--color-success-300:#4db6ac;--color-success-400:#26a69a;--color-success-500:#009688;--color-success-600:#00897b;--color-success-700:#00796b;--color-success-800:#00695c;--color-success-900:#004d40;--color-success-950:#002e26;--color-warning-50:#fff8e1;--color-warning-100:#ffecb3;--color-warning-200:#ffe082;--color-warning-300:#ffd54f;--color-warning-400:#ffca28;--color-warning-500:#ffc107;--color-warning-600:#ffb300;--color-warning-700:#ffa000;--color-warning-800:#ff8f00;--color-warning-900:#ff6f00;--color-warning-950:#e65100;--color-error-50:#ffebee;--color-error-100:#ffcdd2;--color-error-200:#ef9a9a;--color-error-300:#e57373;--color-error-400:#ef5350;--color-error-500:#f44336;--color-error-600:#e53935;--color-error-700:#d32f2f;--color-error-800:#c62828;--color-error-900:#b71c1c;--color-error-950:#7f0000;--color-info-50:#e3f2fd;--color-info-100:#bbdefb;--color-info-200:#90caf9;--color-info-300:#64b5f6;--color-info-400:#42a5f5;--color-info-500:#2196f3;--color-info-600:#1e88e5;--color-info-700:#1976d2;--color-info-800:#1565c0;--color-info-900:#0d47a1;--color-info-950:#082f6a;--color-background:#1a1410;--color-foreground:#f5f0eb;--color-surface:#241e19;--color-surface-elevated:#2e2620;--color-surface-muted:#1f1914;--color-border:#3d352d;--color-border-muted:#302822;--color-text:#f5f0eb;--color-text-muted:#a89c90;--color-text-subtle:#7a7068;--color-text-inverse:#1a1410;--radius-sm:.125rem;--radius-default:.25rem;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.625rem;--shadow-sm:0 1px 2px 0 rgb(0 0 0 / .5);--shadow-default:0 1px 3px 0 rgb(0 0 0 / .6);--shadow-md:0 4px 6px -1px rgb(0 0 0 / .6);--shadow-lg:0 10px 15px -3px rgb(0 0 0 / .6);color-scheme:dark}body{background-color:var(--color-background);color:var(--color-text)}:root{--rust-50:var(--color-primary-50);--rust-100:var(--color-primary-100);--rust-200:var(--color-primary-200);--rust-300:var(--color-primary-300);--rust-400:var(--color-primary-400);--rust-500:var(--color-primary-500);--rust-600:var(--color-primary-600);--rust-700:var(--color-primary-700);--rust-800:var(--color-primary-800);--rust-900:var(--color-primary-900);--rust-950:var(--color-primary-950);--stone-50:#fafaf9;--stone-100:#f5f5f4;--stone-200:#e7e5e4;--stone-300:#d6d3d1;--stone-400:#a8a29e;--stone-500:#78716c;--stone-600:#57534e;--stone-700:#44403c;--stone-800:#292524;--stone-900:#1c1917;--stone-950:#0c0a09}:root{--code-bg:#1e1e1e;--code-text:#d4d4d4;--code-keyword:var(--color-primary-500);--code-function:#dcdcaa;--code-string:#ce9178;--code-comment:#6a9955;--code-type:#4ec9b0;--code-number:#b5cea8;--code-attribute:#9cdcfe;--code-macro:#c586c0}html,body{height:100%;font-family:Inter,system-ui,-apple-system,sans-serif;background-color:var(--color-background);color:var(--color-foreground)}a{color:var(--color-primary-400);transition:color .2s ease}a:hover{color:var(--color-primary-300)}*:focus-visible{outline:2px solid var(--color-primary-500);outline-offset:2px}@property --tw-rotate-x{syntax:"*";inherits:false;}@property --tw-rotate-y{syntax:"*";inherits:false;}@property --tw-rotate-z{syntax:"*";inherits:false;}@property --tw-skew-x{syntax:"*";inherits:false;}@property --tw-skew-y{syntax:"*";inherits:false;}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0;}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0;}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid;}@property --tw-gradient-position{syntax:"*";inherits:false;}@property --tw-gradient-from{syntax:"<color>";inherits:false;initial-value:#0000;}@property --tw-gradient-via{syntax:"<color>";inherits:false;initial-value:#0000;}@property --tw-gradient-to{syntax:"<color>";inherits:false;initial-value:#0000;}@property --tw-gradient-stops{syntax:"*";inherits:false;}@property --tw-gradient-via-stops{syntax:"*";inherits:false;}@property --tw-gradient-from-position{syntax:"<length-percentage>";inherits:false;initial-value:0%;}@property --tw-gradient-via-position{syntax:"<length-percentage>";inherits:false;initial-value:50%;}@property --tw-gradient-to-position{syntax:"<length-percentage>";inherits:false;initial-value:100%;}@property --tw-leading{syntax:"*";inherits:false;}@property --tw-font-weight{syntax:"*";inherits:false;}@property --tw-tracking{syntax:"*";inherits:false;}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000;}@property --tw-shadow-color{syntax:"*";inherits:false;}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%;}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000;}@property --tw-inset-shadow-color{syntax:"*";inherits:false;}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%;}@property --tw-ring-color{syntax:"*";inherits:false;}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000;}@property --tw-inset-ring-color{syntax:"*";inherits:false;}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000;}@property --tw-ring-inset{syntax:"*";inherits:false;}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0px;}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff;}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000;}@property --tw-blur{syntax:"*";inherits:false;}@property --tw-brightness{syntax:"*";inherits:false;}@property --tw-contrast{syntax:"*";inherits:false;}@property --tw-grayscale{syntax:"*";inherits:false;}@property --tw-hue-rotate{syntax:"*";inherits:false;}@property --tw-invert{syntax:"*";inherits:false;}@property --tw-opacity{syntax:"*";inherits:false;}@property --tw-saturate{syntax:"*";inherits:false;}@property --tw-sepia{syntax:"*";inherits:false;}@property --tw-drop-shadow{syntax:"*";inherits:false;}@property --tw-drop-shadow-color{syntax:"*";inherits:false;}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%;}@property --tw-drop-shadow-size{syntax:"*";inherits:false;}@property --tw-backdrop-blur{syntax:"*";inherits:false;}@property --tw-backdrop-brightness{syntax:"*";inherits:false;}@property --tw-backdrop-contrast{syntax:"*";inherits:false;}@property --tw-backdrop-grayscale{syntax:"*";inherits:false;}@property --tw-backdrop-hue-rotate{syntax:"*";inherits:false;}@property --tw-backdrop-invert{syntax:"*";inherits:false;}@property --tw-backdrop-opacity{syntax:"*";inherits:false;}@property --tw-backdrop-saturate{syntax:"*";inherits:false;}@property --tw-backdrop-sepia{syntax:"*";inherits:false;}@property --tw-duration{syntax:"*";inherits:false;}@layer properties{@supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))){*,:before,:after{--tw-rotate-x:initial;--tw-rotate-y:initial;--tw-rotate-z:initial;--tw-skew-x:initial;--tw-skew-y:initial;--tw-space-y-reverse:0;--tw-divide-y-reverse:0;--tw-border-style:solid;--tw-gradient-position:initial;--tw-gradient-from:#0000;--tw-gradient-via:#0000;--tw-gradient-to:#0000;--tw-gradient-stops:initial;--tw-gradient-via-stops:initial;--tw-gradient-from-position:0%;--tw-gradient-via-position:50%;--tw-gradient-to-position:100%;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-backdrop-blur:initial;--tw-backdrop-brightness:initial;--tw-backdrop-contrast:initial;--tw-backdrop-grayscale:initial;--tw-backdrop-hue-rotate:initial;--tw-backdrop-invert:initial;--tw-backdrop-opacity:initial;--tw-backdrop-saturate:initial;--tw-backdrop-sepia:initial;--tw-duration:initial}}}</style><link rel="stylesheet" href="styles-AOELTQXT.css" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="styles-AOELTQXT.css"></noscript></head>
+  <body>
+    <app-root></app-root>
+    <noscript>
+      <p>Armature Framework documentation requires JavaScript to be enabled.</p>
+      <p>Visit our <a href="https://github.com/pegasusheavy/armature">GitHub repository</a> for documentation.</p>
+    </noscript>
+  <script src="main-25D3NIR7.js" type="module"></script></body>
+</html>

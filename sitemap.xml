@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"
+        xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9
+        http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+
+  <!-- ========================================
+       Main Pages
+       ======================================== -->
+
+  <!-- Homepage -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+
+  <!-- Getting Started -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/getting-started</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.95</priority>
+  </url>
+
+  <!-- Documentation Overview -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.95</priority>
+  </url>
+
+  <!-- Framework Comparisons -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/comparisons</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- Roadmap -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/roadmap</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- FAQ -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/faq</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.75</priority>
+  </url>
+
+  <!-- ========================================
+       Documentation Pages
+       ======================================== -->
+
+  <!-- Core Guides -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/di-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.90</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/config-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/lifecycle-hooks</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/macro-overview</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- Authentication & Security -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/auth-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.90</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/oauth2-providers</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/security-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/session-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/rate-limiting</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- Routing & Controllers -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/route-groups</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/guards-interceptors</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/request-extractors</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- API Features -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/api-versioning</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/pagination-filtering</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- Real-Time -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/websocket-sse</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- GraphQL & OpenAPI -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/graphql-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/openapi-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- Background Processing -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/queue-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/cron-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- Caching & Data -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/cache-improvements</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/redis-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- Cloud Providers -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/cloud-providers</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.90</priority>
+  </url>
+
+  <!-- Observability -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/logging-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/opentelemetry-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/metrics-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/health-check</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- Testing -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/testing-guide</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.85</priority>
+  </url>
+
+  <!-- Benchmarks -->
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/armature-vs-nodejs</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <url>
+    <loc>https://pegasusheavy.github.io/armature/docs/armature-vs-nextjs</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.80</priority>
+  </url>
+
+  <!-- ========================================
+       External Resources
+       ======================================== -->
+
+  <!-- GitHub Repository -->
+  <url>
+    <loc>https://github.com/pegasusheavy/armature</loc>
+    <lastmod>2025-12-15</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.90</priority>
+  </url>
+
+</urlset>
