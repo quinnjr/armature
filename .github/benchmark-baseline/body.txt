@@ -95,201 +95,198 @@
 
 [1m[33mwarning[0m: `armature-rhai` (lib) generated 8 warnings
 [1m[92m   Compiling[0m armature-framework v0.2.2 (/home/runner/work/armature/armature)
-[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 15.41s
-[1m[92m     Running[0m benches/body_benchmarks.rs (target/release/deps/body_benchmarks-a181565dd77290b8)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 14.68s
+[1m[92m     Running[0m benches/body_benchmarks.rs (target/release/deps/body_benchmarks-76d9b9b8b79a01b8)
 Gnuplot not found, using plotters backend
 Benchmarking request_body_create/from_slice_1kb
 Benchmarking request_body_create/from_slice_1kb: Warming up for 3.0000 s
 Benchmarking request_body_create/from_slice_1kb: Collecting 100 samples in estimated 5.0001 s (195M iterations)
 Benchmarking request_body_create/from_slice_1kb: Analyzing
 request_body_create/from_slice_1kb
-                        time:   [25.519 ns 25.587 ns 25.690 ns]
-                        thrpt:  [37.122 GiB/s 37.271 GiB/s 37.370 GiB/s]
-Found 3 outliers among 100 measurements (3.00%)
-  1 (1.00%) low mild
-  2 (2.00%) high severe
-Benchmarking request_body_create/from_vec_1kb
-Benchmarking request_body_create/from_vec_1kb: Warming up for 3.0000 s
-Benchmarking request_body_create/from_vec_1kb: Collecting 100 samples in estimated 5.0001 s (90M iterations)
-Benchmarking request_body_create/from_vec_1kb: Analyzing
-request_body_create/from_vec_1kb
-                        time:   [56.057 ns 56.216 ns 56.409 ns]
-                        thrpt:  [16.906 GiB/s 16.964 GiB/s 17.013 GiB/s]
+                        time:   [25.754 ns 25.809 ns 25.878 ns]
+                        thrpt:  [36.852 GiB/s 36.951 GiB/s 37.030 GiB/s]
 Found 3 outliers among 100 measurements (3.00%)
   1 (1.00%) high mild
   2 (2.00%) high severe
+Benchmarking request_body_create/from_vec_1kb
+Benchmarking request_body_create/from_vec_1kb: Warming up for 3.0000 s
+Benchmarking request_body_create/from_vec_1kb: Collecting 100 samples in estimated 5.0001 s (91M iterations)
+Benchmarking request_body_create/from_vec_1kb: Analyzing
+request_body_create/from_vec_1kb
+                        time:   [55.237 ns 55.272 ns 55.308 ns]
+                        thrpt:  [17.243 GiB/s 17.254 GiB/s 17.265 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  1 (1.00%) high severe
 Benchmarking request_body_create/from_bytes_1kb
 Benchmarking request_body_create/from_bytes_1kb: Warming up for 3.0000 s
-Benchmarking request_body_create/from_bytes_1kb: Collecting 100 samples in estimated 5.0000 s (281M iterations)
+Benchmarking request_body_create/from_bytes_1kb: Collecting 100 samples in estimated 5.0000 s (282M iterations)
 Benchmarking request_body_create/from_bytes_1kb: Analyzing
 request_body_create/from_bytes_1kb
-                        time:   [17.753 ns 17.768 ns 17.784 ns]
-                        thrpt:  [53.625 GiB/s 53.673 GiB/s 53.719 GiB/s]
-Found 3 outliers among 100 measurements (3.00%)
-  3 (3.00%) high mild
+                        time:   [17.723 ns 17.755 ns 17.803 ns]
+                        thrpt:  [53.569 GiB/s 53.713 GiB/s 53.810 GiB/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
 Benchmarking request_body_create/from_static_1kb
 Benchmarking request_body_create/from_static_1kb: Warming up for 3.0000 s
 Benchmarking request_body_create/from_static_1kb: Collecting 100 samples in estimated 5.0000 s (3.6B iterations)
 Benchmarking request_body_create/from_static_1kb: Analyzing
 request_body_create/from_static_1kb
-                        time:   [1.4055 ns 1.4078 ns 1.4124 ns]
-                        thrpt:  [675.20 GiB/s 677.42 GiB/s 678.53 GiB/s]
-Found 13 outliers among 100 measurements (13.00%)
-  1 (1.00%) low mild
-  7 (7.00%) high mild
-  5 (5.00%) high severe
+                        time:   [1.4054 ns 1.4057 ns 1.4061 ns]
+                        thrpt:  [678.25 GiB/s 678.45 GiB/s 678.60 GiB/s]
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) high mild
+  6 (6.00%) high severe
 
 Benchmarking response_body_create/from_vec_1kb
 Benchmarking response_body_create/from_vec_1kb: Warming up for 3.0000 s
-Benchmarking response_body_create/from_vec_1kb: Collecting 100 samples in estimated 5.0002 s (125M iterations)
+Benchmarking response_body_create/from_vec_1kb: Collecting 100 samples in estimated 5.0000 s (125M iterations)
 Benchmarking response_body_create/from_vec_1kb: Analyzing
 response_body_create/from_vec_1kb
-                        time:   [40.590 ns 40.793 ns 41.068 ns]
-                        thrpt:  [23.222 GiB/s 23.379 GiB/s 23.495 GiB/s]
-Found 2 outliers among 100 measurements (2.00%)
-  1 (1.00%) high mild
-  1 (1.00%) high severe
+                        time:   [40.054 ns 40.099 ns 40.156 ns]
+                        thrpt:  [23.749 GiB/s 23.783 GiB/s 23.810 GiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  5 (5.00%) high severe
 Benchmarking response_body_create/from_bytes_1kb
 Benchmarking response_body_create/from_bytes_1kb: Warming up for 3.0000 s
 Benchmarking response_body_create/from_bytes_1kb: Collecting 100 samples in estimated 5.0000 s (282M iterations)
 Benchmarking response_body_create/from_bytes_1kb: Analyzing
 response_body_create/from_bytes_1kb
-                        time:   [17.761 ns 17.798 ns 17.841 ns]
-                        thrpt:  [53.455 GiB/s 53.582 GiB/s 53.696 GiB/s]
-Found 3 outliers among 100 measurements (3.00%)
-  2 (2.00%) high mild
-  1 (1.00%) high severe
+                        time:   [17.722 ns 17.730 ns 17.739 ns]
+                        thrpt:  [53.763 GiB/s 53.787 GiB/s 53.812 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
 Benchmarking response_body_create/from_json
 Benchmarking response_body_create/from_json: Warming up for 3.0000 s
-Benchmarking response_body_create/from_json: Collecting 100 samples in estimated 5.0004 s (36M iterations)
+Benchmarking response_body_create/from_json: Collecting 100 samples in estimated 5.0002 s (36M iterations)
 Benchmarking response_body_create/from_json: Analyzing
 response_body_create/from_json
-                        time:   [141.01 ns 141.60 ns 142.57 ns]
-                        thrpt:  [6.6890 GiB/s 6.7348 GiB/s 6.7632 GiB/s]
-Found 8 outliers among 100 measurements (8.00%)
-  4 (4.00%) high mild
-  4 (4.00%) high severe
+                        time:   [133.58 ns 134.15 ns 134.86 ns]
+                        thrpt:  [7.0718 GiB/s 7.1092 GiB/s 7.1393 GiB/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
 
 Benchmarking http_request_body/legacy_vec_assignment
 Benchmarking http_request_body/legacy_vec_assignment: Warming up for 3.0000 s
-Benchmarking http_request_body/legacy_vec_assignment: Collecting 100 samples in estimated 5.0005 s (52M iterations)
+Benchmarking http_request_body/legacy_vec_assignment: Collecting 100 samples in estimated 5.0001 s (53M iterations)
 Benchmarking http_request_body/legacy_vec_assignment: Analyzing
 http_request_body/legacy_vec_assignment
-                        time:   [96.327 ns 96.624 ns 96.868 ns]
+                        time:   [94.962 ns 95.017 ns 95.070 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
 Benchmarking http_request_body/bytes_assignment
 Benchmarking http_request_body/bytes_assignment: Warming up for 3.0000 s
 Benchmarking http_request_body/bytes_assignment: Collecting 100 samples in estimated 5.0002 s (101M iterations)
 Benchmarking http_request_body/bytes_assignment: Analyzing
 http_request_body/bytes_assignment
-                        time:   [50.139 ns 50.180 ns 50.227 ns]
-Found 4 outliers among 100 measurements (4.00%)
-  3 (3.00%) high mild
+                        time:   [49.851 ns 49.870 ns 49.891 ns]
+Found 14 outliers among 100 measurements (14.00%)
+  1 (1.00%) low severe
+  10 (10.00%) low mild
+  2 (2.00%) high mild
   1 (1.00%) high severe
 Benchmarking http_request_body/constructor_with_bytes
 Benchmarking http_request_body/constructor_with_bytes: Warming up for 3.0000 s
-Benchmarking http_request_body/constructor_with_bytes: Collecting 100 samples in estimated 5.0000 s (110M iterations)
+Benchmarking http_request_body/constructor_with_bytes: Collecting 100 samples in estimated 5.0002 s (110M iterations)
 Benchmarking http_request_body/constructor_with_bytes: Analyzing
 http_request_body/constructor_with_bytes
-                        time:   [45.180 ns 45.459 ns 45.858 ns]
-Found 9 outliers among 100 measurements (9.00%)
+                        time:   [45.436 ns 45.522 ns 45.613 ns]
+Found 2 outliers among 100 measurements (2.00%)
   1 (1.00%) high mild
-  8 (8.00%) high severe
+  1 (1.00%) high severe
 
 Benchmarking http_response_body/legacy_with_body
 Benchmarking http_response_body/legacy_with_body: Warming up for 3.0000 s
-Benchmarking http_response_body/legacy_with_body: Collecting 100 samples in estimated 5.0001 s (89M iterations)
+Benchmarking http_response_body/legacy_with_body: Collecting 100 samples in estimated 5.0003 s (77M iterations)
 Benchmarking http_response_body/legacy_with_body: Analyzing
 http_response_body/legacy_with_body
-                        time:   [56.382 ns 56.434 ns 56.491 ns]
-Found 3 outliers among 100 measurements (3.00%)
-  1 (1.00%) high mild
-  2 (2.00%) high severe
+                        time:   [65.147 ns 65.277 ns 65.463 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
 Benchmarking http_response_body/with_bytes_body
 Benchmarking http_response_body/with_bytes_body: Warming up for 3.0000 s
-Benchmarking http_response_body/with_bytes_body: Collecting 100 samples in estimated 5.0001 s (144M iterations)
+Benchmarking http_response_body/with_bytes_body: Collecting 100 samples in estimated 5.0000 s (143M iterations)
 Benchmarking http_response_body/with_bytes_body: Analyzing
 http_response_body/with_bytes_body
-                        time:   [36.148 ns 36.669 ns 37.161 ns]
+                        time:   [36.550 ns 36.981 ns 37.395 ns]
 Benchmarking http_response_body/with_json
 Benchmarking http_response_body/with_json: Warming up for 3.0000 s
-Benchmarking http_response_body/with_json: Collecting 100 samples in estimated 5.0006 s (30M iterations)
+Benchmarking http_response_body/with_json: Collecting 100 samples in estimated 5.0001 s (28M iterations)
 Benchmarking http_response_body/with_json: Analyzing
 http_response_body/with_json
-                        time:   [167.55 ns 168.38 ns 169.24 ns]
-Found 4 outliers among 100 measurements (4.00%)
-  1 (1.00%) high mild
-  3 (3.00%) high severe
+                        time:   [176.57 ns 177.37 ns 178.34 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
 Benchmarking http_response_body/with_static_body
 Benchmarking http_response_body/with_static_body: Warming up for 3.0000 s
-Benchmarking http_response_body/with_static_body: Collecting 100 samples in estimated 5.0000 s (711M iterations)
+Benchmarking http_response_body/with_static_body: Collecting 100 samples in estimated 5.0000 s (707M iterations)
 Benchmarking http_response_body/with_static_body: Analyzing
 http_response_body/with_static_body
-                        time:   [7.0725 ns 7.1063 ns 7.1478 ns]
-Found 20 outliers among 100 measurements (20.00%)
-  20 (20.00%) high severe
+                        time:   [7.1388 ns 7.1861 ns 7.2309 ns]
 
 Benchmarking hyper_passthrough/legacy_vec_to_bytes
 Benchmarking hyper_passthrough/legacy_vec_to_bytes: Warming up for 3.0000 s
-Benchmarking hyper_passthrough/legacy_vec_to_bytes: Collecting 100 samples in estimated 5.0000 s (65M iterations)
+Benchmarking hyper_passthrough/legacy_vec_to_bytes: Collecting 100 samples in estimated 5.0002 s (65M iterations)
 Benchmarking hyper_passthrough/legacy_vec_to_bytes: Analyzing
 hyper_passthrough/legacy_vec_to_bytes
-                        time:   [77.347 ns 77.418 ns 77.521 ns]
-Found 7 outliers among 100 measurements (7.00%)
-  2 (2.00%) low mild
-  1 (1.00%) high mild
-  4 (4.00%) high severe
+                        time:   [77.553 ns 77.632 ns 77.719 ns]
+Found 18 outliers among 100 measurements (18.00%)
+  16 (16.00%) high mild
+  2 (2.00%) high severe
 Benchmarking hyper_passthrough/zero_copy_bytes
 Benchmarking hyper_passthrough/zero_copy_bytes: Warming up for 3.0000 s
-Benchmarking hyper_passthrough/zero_copy_bytes: Collecting 100 samples in estimated 5.0001 s (120M iterations)
+Benchmarking hyper_passthrough/zero_copy_bytes: Collecting 100 samples in estimated 5.0002 s (124M iterations)
 Benchmarking hyper_passthrough/zero_copy_bytes: Analyzing
 hyper_passthrough/zero_copy_bytes
-                        time:   [42.860 ns 43.288 ns 43.692 ns]
+                        time:   [42.059 ns 42.475 ns 42.869 ns]
 Benchmarking hyper_passthrough/json_to_hyper_body
 Benchmarking hyper_passthrough/json_to_hyper_body: Warming up for 3.0000 s
-Benchmarking hyper_passthrough/json_to_hyper_body: Collecting 100 samples in estimated 5.0004 s (34M iterations)
+Benchmarking hyper_passthrough/json_to_hyper_body: Collecting 100 samples in estimated 5.0001 s (33M iterations)
 Benchmarking hyper_passthrough/json_to_hyper_body: Analyzing
 hyper_passthrough/json_to_hyper_body
-                        time:   [145.37 ns 145.72 ns 146.02 ns]
-Found 18 outliers among 100 measurements (18.00%)
-  17 (17.00%) high mild
+                        time:   [154.31 ns 154.84 ns 155.30 ns]
+Found 1 outliers among 100 measurements (1.00%)
   1 (1.00%) high severe
 
 Benchmarking body_clone/vec_clone_4kb
 Benchmarking body_clone/vec_clone_4kb: Warming up for 3.0000 s
-Benchmarking body_clone/vec_clone_4kb: Collecting 100 samples in estimated 5.0008 s (30M iterations)
+Benchmarking body_clone/vec_clone_4kb: Collecting 100 samples in estimated 5.0001 s (30M iterations)
 Benchmarking body_clone/vec_clone_4kb: Analyzing
 body_clone/vec_clone_4kb
-                        time:   [169.21 ns 169.29 ns 169.38 ns]
-Found 7 outliers among 100 measurements (7.00%)
-  6 (6.00%) high mild
-  1 (1.00%) high severe
+                        time:   [168.44 ns 168.57 ns 168.77 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
 Benchmarking body_clone/bytes_clone_4kb
 Benchmarking body_clone/bytes_clone_4kb: Warming up for 3.0000 s
 Benchmarking body_clone/bytes_clone_4kb: Collecting 100 samples in estimated 5.0000 s (1.0B iterations)
 Benchmarking body_clone/bytes_clone_4kb: Analyzing
 body_clone/bytes_clone_4kb
-                        time:   [4.8702 ns 4.8882 ns 4.9143 ns]
+                        time:   [4.8745 ns 4.8849 ns 4.8988 ns]
 Found 5 outliers among 100 measurements (5.00%)
-  1 (1.00%) low mild
   1 (1.00%) high mild
-  3 (3.00%) high severe
+  4 (4.00%) high severe
 Benchmarking body_clone/request_body_clone_4kb
 Benchmarking body_clone/request_body_clone_4kb: Warming up for 3.0000 s
 Benchmarking body_clone/request_body_clone_4kb: Collecting 100 samples in estimated 5.0000 s (1.0B iterations)
 Benchmarking body_clone/request_body_clone_4kb: Analyzing
 body_clone/request_body_clone_4kb
-                        time:   [4.8732 ns 4.8801 ns 4.8873 ns]
-Found 9 outliers among 100 measurements (9.00%)
-  2 (2.00%) low mild
-  5 (5.00%) high mild
-  2 (2.00%) high severe
+                        time:   [4.8677 ns 4.8729 ns 4.8787 ns]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
 Benchmarking body_clone/response_body_clone_4kb
 Benchmarking body_clone/response_body_clone_4kb: Warming up for 3.0000 s
 Benchmarking body_clone/response_body_clone_4kb: Collecting 100 samples in estimated 5.0000 s (1.0B iterations)
 Benchmarking body_clone/response_body_clone_4kb: Analyzing
 body_clone/response_body_clone_4kb
-                        time:   [4.8620 ns 4.8694 ns 4.8774 ns]
-Found 5 outliers among 100 measurements (5.00%)
-  1 (1.00%) high mild
-  4 (4.00%) high severe
+                        time:   [4.8682 ns 4.8739 ns 4.8806 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
 

@@ -32,12 +32,12 @@ uuid = { version = "1.11", features = ["v4"] }
 base64 = "0.22"
 url = "2.5"
 
-# Web Push (VAPID). Default-disabled because web-push 0.10's
-# default-features pull `isahc` which links curl-sys, and curl-sys
-# requires the libcurl C headers at build time. Callers who need web
-# push opt in via `features = ["web-push"]` and should arrange for the
-# libcurl-dev / libssl-dev system packages on their build host.
-web-push = { version = "0.10", optional = true }
+# Web Push (VAPID). Default-disabled — historically web-push 0.10's
+# default-features pulled `isahc` → curl-sys → libcurl C headers at
+# build time. Callers who need web push opt in via
+# `features = ["web-push"]` and should arrange for libcurl-dev /
+# libssl-dev on their build host.
+web-push = { version = "0.11", optional = true }
 
 # JWT for FCM/APNS
 jsonwebtoken = { version = "9.3", optional = true }
