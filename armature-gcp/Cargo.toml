@@ -20,7 +20,7 @@ async-trait = "0.1"
 gcp_auth = { version = "0.12", optional = true }
 
 # GCP services (all optional)
-google-cloud-storage = { version = "0.22", optional = true }
+google-cloud-storage = { version = "1.5", optional = true }
 google-cloud-pubsub = { version = "0.28", optional = true }
 google-cloud-spanner = { version = "0.33", optional = true }
 google-cloud-bigquery = { version = "0.15", optional = true }

@@ -75,13 +75,12 @@ impl LinkedInProvider {
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await
+            && let Ok(email_data) = email_resp.json::<EmailResponse>().await
         {
-            if let Ok(email_data) = email_resp.json::<EmailResponse>().await {
-                user.email = email_data
-                    .elements
-                    .first()
-                    .map(|e| e.handle.email_address.clone());
-            }
+            user.email = email_data
+                .elements
+                .first()
+                .map(|e| e.handle.email_address.clone());
         }
 
         Ok(user)

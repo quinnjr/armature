@@ -149,16 +149,16 @@ impl ScriptMiddleware {
         let result = self.engine.eval(&script, &mut scope)?;
 
         // Check if middleware wants to short-circuit
-        if let Some(should_continue) = scope.get_value::<bool>("continue") {
-            if !should_continue {
-                // Middleware wants to return early
-                if result.is::<ResponseBinding>() {
-                    let response: ResponseBinding = result.cast();
-                    return Ok(Some(response.into_http_response()));
-                }
-                if let Some(response) = scope.get_value::<ResponseBinding>("response") {
-                    return Ok(Some(response.into_http_response()));
-                }
+        if let Some(should_continue) = scope.get_value::<bool>("continue")
+            && !should_continue
+        {
+            // Middleware wants to return early
+            if result.is::<ResponseBinding>() {
+                let response: ResponseBinding = result.cast();
+                return Ok(Some(response.into_http_response()));
+            }
+            if let Some(response) = scope.get_value::<ResponseBinding>("response") {
+                return Ok(Some(response.into_http_response()));
             }
         }
 

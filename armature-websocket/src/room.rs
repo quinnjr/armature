@@ -176,10 +176,10 @@ impl RoomManager {
 
         let mut sent_count = 0;
         for member_id in room.members() {
-            if let Some(conn) = self.connections.get(&member_id) {
-                if conn.send(message.clone()).is_ok() {
-                    sent_count += 1;
-                }
+            if let Some(conn) = self.connections.get(&member_id)
+                && conn.send(message.clone()).is_ok()
+            {
+                sent_count += 1;
             }
         }
 
@@ -200,12 +200,11 @@ impl RoomManager {
 
         let mut sent_count = 0;
         for member_id in room.members() {
-            if member_id != except_id {
-                if let Some(conn) = self.connections.get(&member_id) {
-                    if conn.send(message.clone()).is_ok() {
-                        sent_count += 1;
-                    }
-                }
+            if member_id != except_id
+                && let Some(conn) = self.connections.get(&member_id)
+                && conn.send(message.clone()).is_ok()
+            {
+                sent_count += 1;
             }
         }
 

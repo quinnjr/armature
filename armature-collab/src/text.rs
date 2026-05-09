@@ -160,6 +160,7 @@ impl RgaText {
     }
 
     /// Get the current text as a string
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         self.sequence
             .iter()
@@ -278,22 +279,22 @@ impl RgaText {
 
         let mut visible_count = 0;
         for id in &self.sequence {
-            if let Some(node) = self.nodes.get(id) {
-                if node.value.is_some() {
-                    visible_count += 1;
-                    if visible_count == pos {
-                        return *id;
-                    }
+            if let Some(node) = self.nodes.get(id)
+                && node.value.is_some()
+            {
+                visible_count += 1;
+                if visible_count == pos {
+                    return *id;
                 }
             }
         }
 
         // If position is past the end, return the last visible ID
         for id in self.sequence.iter().rev() {
-            if let Some(node) = self.nodes.get(id) {
-                if node.value.is_some() {
-                    return *id;
-                }
+            if let Some(node) = self.nodes.get(id)
+                && node.value.is_some()
+            {
+                return *id;
             }
         }
 
@@ -304,13 +305,13 @@ impl RgaText {
     fn visible_id_at_position(&self, pos: usize) -> Option<CharId> {
         let mut visible_count = 0;
         for id in &self.sequence {
-            if let Some(node) = self.nodes.get(id) {
-                if node.value.is_some() {
-                    if visible_count == pos {
-                        return Some(*id);
-                    }
-                    visible_count += 1;
+            if let Some(node) = self.nodes.get(id)
+                && node.value.is_some()
+            {
+                if visible_count == pos {
+                    return Some(*id);
                 }
+                visible_count += 1;
             }
         }
         None
@@ -388,10 +389,10 @@ impl Crdt for RgaText {
             }
 
             // Apply tombstones
-            if node.is_deleted() {
-                if let Some(our_node) = self.nodes.get_mut(id) {
-                    our_node.delete();
-                }
+            if node.is_deleted()
+                && let Some(our_node) = self.nodes.get_mut(id)
+            {
+                our_node.delete();
             }
         }
     }

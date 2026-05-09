@@ -16,8 +16,8 @@ categories = ["web-programming", "asynchronous"]
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # AWS Lambda runtime
-lambda_http = "0.13"
-lambda_runtime = "0.13"
+lambda_http = "1.0"
+lambda_runtime = "1.0"
 
 # AWS SDK (optional, for AWS service access)
 armature-aws = { path = "../armature-aws", version = "0.1.1", optional = true }

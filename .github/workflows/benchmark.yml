@@ -123,7 +123,7 @@ jobs:
           echo "- Runner: \`${{ runner.os }}\`" >> benchmark-summary.md
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
@@ -137,7 +137,7 @@ jobs:
 
       - name: Comment benchmark results on PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
@@ -201,7 +201,7 @@ jobs:
           shared-key: "benchmark"
 
       - name: Download PR benchmark results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: pr-results
@@ -256,7 +256,7 @@ jobs:
           fi
 
       - name: Upload regression report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: regression-report-${{ github.sha }}
           path: regression-report.md
@@ -286,7 +286,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download benchmark results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: benchmark-results
@@ -350,7 +350,7 @@ jobs:
           echo "\`\`\`" >> PERFORMANCE_TRENDS.md
 
       - name: Upload trends report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: performance-trends-${{ github.run_id }}
           path: |

@@ -157,10 +157,7 @@ impl MetricsCollector {
         // Record endpoint metrics
         let endpoint_key = format!("{} {}", record.method, record.path);
         if self.endpoint_metrics.len() < self.max_endpoints {
-            let endpoint = self
-                .endpoint_metrics
-                .entry(endpoint_key)
-                .or_insert_with(EndpointData::default);
+            let endpoint = self.endpoint_metrics.entry(endpoint_key).or_default();
 
             endpoint.requests.fetch_add(1, Ordering::Relaxed);
             if !record.is_success() {
@@ -396,7 +393,7 @@ impl MetricsCollector {
             .map(|entry| entry.value().clone())
             .collect();
 
-        top_limited.sort_by(|a, b| b.times_limited.cmp(&a.times_limited));
+        top_limited.sort_by_key(|e| std::cmp::Reverse(e.times_limited));
         top_limited.truncate(10);
 
         let avg_utilization = if total_checks > 0 {
@@ -482,11 +479,10 @@ impl MetricsCollector {
             peak_rps: *self.peak_rps.read(),
             avg_response_size: {
                 let total = self.total_requests.load(Ordering::Relaxed);
-                if total > 0 {
-                    self.total_response_bytes.load(Ordering::Relaxed) / total
-                } else {
-                    0
-                }
+                self.total_response_bytes
+                    .load(Ordering::Relaxed)
+                    .checked_div(total)
+                    .unwrap_or(0)
             },
             total_bytes_transferred: self.total_response_bytes.load(Ordering::Relaxed),
         }

@@ -205,17 +205,35 @@ impl RateLimiter {
             .token_bucket_check(key, capacity, refill_rate)
             .await?;
 
-        let reset_at = std::time::SystemTime::now()
+        let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs()
-            + (capacity as f64 / refill_rate) as u64;
+            .as_secs();
+        // Guard against `refill_rate <= 0`: a zero rate means tokens
+        // never refill, so reset_at is effectively never (use u64::MAX
+        // as the sentinel) and retry_after collapses to a very long
+        // duration. Without these guards, `1.0 / 0.0 = inf` cascades
+        // into `inf as u64` (saturated) and `Duration::from_secs_f64`
+        // panics on its own NaN/inf inputs.
+        let reset_at = if refill_rate > 0.0 && refill_rate.is_finite() {
+            let secs_to_full = (capacity as f64 / refill_rate).clamp(0.0, u64::MAX as f64) as u64;
+            now_secs.saturating_add(secs_to_full)
+        } else {
+            u64::MAX
+        };
 
         if result.0 {
             debug!(key = %key, remaining = result.1, "Token bucket: request allowed");
             Ok(RateLimitCheckResult::allowed(result.1, capacity, reset_at))
         } else {
-            let retry_after = Duration::from_secs_f64(1.0 / refill_rate);
+            let retry_after = if refill_rate > 0.0 && refill_rate.is_finite() {
+                let secs = (1.0 / refill_rate).clamp(0.0, u64::MAX as f64);
+                Duration::from_secs_f64(secs)
+            } else {
+                // Sentinel — caller treats this as "retry indefinitely
+                // postponed" the same way it treats an open-ended reset_at.
+                Duration::from_secs(u64::MAX)
+            };
             warn!(key = %key, retry_after = ?retry_after, "Token bucket: request denied");
             Ok(RateLimitCheckResult::denied(
                 capacity,
@@ -414,5 +432,53 @@ mod tests {
         limiter.reset("test_key").await.unwrap();
         let result = limiter.check("test_key").await.unwrap();
         assert!(result.allowed);
+    }
+
+    /// Regression: token-bucket with refill_rate == 0.0 used to panic
+    /// in `check_token_bucket` (divide-by-zero in the reset_at and
+    /// retry_after calculations). The builder now rejects it before
+    /// any runtime divide can happen.
+    #[tokio::test]
+    async fn test_token_bucket_zero_refill_rate_rejected_at_build() {
+        let result = RateLimiter::builder()
+            .algorithm(Algorithm::TokenBucket {
+                capacity: 2,
+                refill_rate: 0.0,
+            })
+            .build()
+            .await;
+        assert!(result.is_err(), "build should reject refill_rate == 0.0");
+    }
+
+    /// Regression: NaN refill_rate poisons the in-memory bucket
+    /// (`tokens + NaN = NaN`, `NaN.min(capacity) = capacity`) so the
+    /// limiter would never deny. Now rejected at build time.
+    #[tokio::test]
+    async fn test_token_bucket_nan_refill_rate_rejected_at_build() {
+        let result = RateLimiter::builder()
+            .algorithm(Algorithm::TokenBucket {
+                capacity: 1,
+                refill_rate: f64::NAN,
+            })
+            .build()
+            .await;
+        assert!(result.is_err(), "build should reject NaN refill_rate");
+    }
+
+    /// Boundary: a tiny but finite positive rate should still build
+    /// cleanly and behave sensibly (refills are effectively zero on
+    /// human timescales but the divide-by-zero path is not hit).
+    #[tokio::test]
+    async fn test_token_bucket_tiny_positive_rate_is_accepted() {
+        let limiter = RateLimiter::builder()
+            .algorithm(Algorithm::TokenBucket {
+                capacity: 1,
+                refill_rate: f64::EPSILON,
+            })
+            .build()
+            .await
+            .expect("tiny positive rate should build");
+        assert!(limiter.check("k").await.unwrap().allowed);
+        assert!(!limiter.check("k").await.unwrap().allowed);
     }
 }

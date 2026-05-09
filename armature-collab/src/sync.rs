@@ -153,8 +153,7 @@ impl OperationBuffer {
     pub fn add(&mut self, op: PendingOp) -> bool {
         if self.pending.len() >= self.max_size {
             // Remove oldest operations
-            self.pending
-                .sort_by(|a, b| a.received_at.cmp(&b.received_at));
+            self.pending.sort_by_key(|a| a.received_at);
             self.pending.truncate(self.max_size / 2);
         }
 

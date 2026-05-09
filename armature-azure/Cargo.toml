@@ -19,13 +19,13 @@ futures = "0.3"
 
 # Azure SDK core
 azure_core = { version = "0.21", optional = true }
-azure_identity = { version = "0.21", optional = true }
+azure_identity = { version = "0.30", optional = true }
 
 # Azure services (all optional)
 azure_storage = { version = "0.21", optional = true }
 azure_storage_blobs = { version = "0.21", optional = true }
 azure_storage_queues = { version = "0.21", optional = true }
-azure_data_cosmos = { version = "0.21", optional = true }
+azure_data_cosmos = { version = "0.29", optional = true }
 azure_messaging_servicebus = { version = "0.21", optional = true }
 azure_security_keyvault = { version = "0.21", optional = true }
 

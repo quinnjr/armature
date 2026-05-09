@@ -8,6 +8,47 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
+/// Validate an algorithm's parameters before constructing the limiter.
+/// Catches inputs that would otherwise produce arithmetic NaN or
+/// inf inside the runtime check path. `refill_rate <= 0` and non-finite
+/// rates are explicitly rejected; if a deployment legitimately wants a
+/// "never refills" policy it should set `refill_rate` to a tiny positive
+/// number (e.g. `f64::EPSILON`) and the bucket will treat refills as
+/// effectively zero without exposing the divide-by-zero edge.
+fn validate_algorithm(algorithm: &Algorithm) -> RateLimitResult<()> {
+    match algorithm {
+        Algorithm::TokenBucket {
+            capacity,
+            refill_rate,
+        } => {
+            if *capacity == 0 {
+                return Err(RateLimitError::config("TokenBucket capacity must be > 0"));
+            }
+            if !refill_rate.is_finite() || *refill_rate <= 0.0 {
+                return Err(RateLimitError::config(
+                    "TokenBucket refill_rate must be finite and > 0",
+                ));
+            }
+        }
+        Algorithm::SlidingWindowLog {
+            max_requests,
+            window,
+        }
+        | Algorithm::FixedWindow {
+            max_requests,
+            window,
+        } => {
+            if *max_requests == 0 {
+                return Err(RateLimitError::config("max_requests must be > 0"));
+            }
+            if window.is_zero() {
+                return Err(RateLimitError::config("window must be > 0"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Configuration for the rate limiter
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
@@ -173,6 +214,7 @@ impl RateLimiterBuilder {
         let algorithm = self
             .algorithm
             .ok_or_else(|| RateLimitError::config("Algorithm must be specified"))?;
+        validate_algorithm(&algorithm)?;
 
         debug!(
             algorithm = ?algorithm,
