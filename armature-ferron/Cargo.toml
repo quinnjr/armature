@@ -30,7 +30,7 @@ nix = { version = "0.27", features = ["signal", "process"] }
 reqwest = { version = "0.11", features = ["json"], default-features = false }
 
 # File watching for config reload
-notify = "6.0"
+notify = "8.2"
 
 # Template rendering
 handlebars = "6.3"
