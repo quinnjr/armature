@@ -71,6 +71,6 @@
     "prettier": "^3.7.4",
     "tailwindcss": "^4.1.18",
     "typescript": "~5.9.2",
-    "vitest": "^4.0.16"
+    "vitest": "^4.1.0"
   }
 }
