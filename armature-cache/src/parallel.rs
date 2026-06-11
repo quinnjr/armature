@@ -418,7 +418,7 @@ pub async fn get_many_as_map<S: CacheStore, T: DeserializeOwned>(
 
     let map: HashMap<String, T> = keys
         .iter()
-        .zip(values.into_iter())
+        .zip(values)
         .filter_map(|(key, opt_value)| opt_value.map(|value| (key.to_string(), value)))
         .collect();
 
