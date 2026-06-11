@@ -1,10 +1,222 @@
-[1m[92m    Updating[0m crates.io index
-[1m[91merror[0m: failed to select a version for `reqwest`.
-    ... required by package `armature-push v0.1.1 (/home/runner/work/armature/armature/armature-push)`
-versions that meet the requirements `^0.13` are: 0.13.4, 0.13.3, 0.13.2, 0.13.1, 0.13.0
+[1m[33mwarning[0m[1m: struct `ScriptContextBuilder` is never constructed[0m
+  [1m[94m--> [0marmature-rhai/src/context.rs:82:12
+   [1m[94m|[0m
+[1m[94m82[0m [1m[94m|[0m pub struct ScriptContextBuilder {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-package `armature-push` depends on `reqwest` with feature `rustls-tls` but `reqwest` does not have that feature.
-help: available features: __native-tls, __native-tls-alpn, __rustls, __rustls-aws-lc-rs, __tls, blocking, brotli, charset, cookies, default, default-tls, deflate, form, gzip, h2, hickory-dns, http2, http3, json, multipart, native-tls, native-tls-no-alpn, native-tls-vendored, native-tls-vendored-no-alpn, query, rustls, rustls-native-certs, rustls-no-provider, socks, stream, system-proxy, webpki-roots, zstd
+[1m[33mwarning[0m[1m: associated items `new`, `request`, `state`, `local`, and `build` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/context.rs:96:12
+    [1m[94m|[0m
+[1m[94m 94[0m [1m[94m|[0m impl ScriptContextBuilder {
+    [1m[94m|[0m [1m[94m-------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m 95[0m [1m[94m|[0m     /// Create a new builder.
+[1m[94m 96[0m [1m[94m|[0m     pub fn new() -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m105[0m [1m[94m|[0m     pub fn request(mut self, request: RequestBinding) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m111[0m [1m[94m|[0m     pub fn state(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m117[0m [1m[94m|[0m     pub fn local(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m123[0m [1m[94m|[0m     pub fn build(self) -> Option<ScriptContext> {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
 
+[1m[33mwarning[0m[1m: type alias `ScriptHandlerFn` is never used[0m
+   [1m[94m--> [0marmature-rhai/src/handler.rs:206:10
+    [1m[94m|[0m
+[1m[94m206[0m [1m[94m|[0m pub type ScriptHandlerFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse> + Send + Sync>;
+    [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^[0m
 
-failed to select a version for `reqwest` which could resolve this conflict
+[1m[33mwarning[0m[1m: function `script_handler` is never used[0m
+   [1m[94m--> [0marmature-rhai/src/handler.rs:209:8
+    [1m[94m|[0m
+[1m[94m209[0m [1m[94m|[0m pub fn script_handler(engine: Arc<RhaiEngine>, script_path: impl Into<PathBuf>) -> ScriptHandlerFn {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `ScriptRouterBuilder` is never constructed[0m
+   [1m[94m--> [0marmature-rhai/src/router.rs:306:12
+    [1m[94m|[0m
+[1m[94m306[0m [1m[94m|[0m pub struct ScriptRouterBuilder {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: associated items `new`, `auto_routes`, `build`, `discover_routes`, and `path_to_route` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/router.rs:314:12
+    [1m[94m|[0m
+[1m[94m312[0m [1m[94m|[0m impl ScriptRouterBuilder {
+    [1m[94m|[0m [1m[94m------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m313[0m [1m[94m|[0m     /// Create a new builder.
+[1m[94m314[0m [1m[94m|[0m     pub fn new(engine: RhaiEngine) -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m329[0m [1m[94m|[0m     pub fn auto_routes(mut self, dir: impl Into<PathBuf>) -> Self {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m336[0m [1m[94m|[0m     pub fn build(self) -> Result<ScriptRouter> {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+[1m[94m...[0m
+[1m[94m347[0m [1m[94m|[0m     fn discover_routes(&self, mut router: ScriptRouter) -> Result<ScriptRouter> {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m362[0m [1m[94m|[0m     fn path_to_route(&self, path: &Path) -> Result<String> {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: struct `ConcurrentScriptCache` is never constructed[0m
+   [1m[94m--> [0marmature-rhai/src/script.rs:131:12
+    [1m[94m|[0m
+[1m[94m131[0m [1m[94m|[0m pub struct ConcurrentScriptCache {
+    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: associated items `new`, `get`, `insert`, `remove`, and `clear` are never used[0m
+   [1m[94m--> [0marmature-rhai/src/script.rs:145:12
+    [1m[94m|[0m
+[1m[94m143[0m [1m[94m|[0m impl ConcurrentScriptCache {
+    [1m[94m|[0m [1m[94m--------------------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m144[0m [1m[94m|[0m     /// Create a new concurrent cache.
+[1m[94m145[0m [1m[94m|[0m     pub fn new() -> Self {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m154[0m [1m[94m|[0m     pub fn get(&self, path: &Path) -> Option<Arc<CompiledScript>> {
+    [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m165[0m [1m[94m|[0m     pub fn insert(&self, path: PathBuf, script: Arc<CompiledScript>) {
+    [1m[94m|[0m            [1m[33m^^^^^^[0m
+[1m[94m...[0m
+[1m[94m170[0m [1m[94m|[0m     pub fn remove(&self, path: &Path) -> Option<Arc<CompiledScript>> {
+    [1m[94m|[0m            [1m[33m^^^^^^[0m
+[1m[94m...[0m
+[1m[94m175[0m [1m[94m|[0m     pub fn clear(&self) {
+    [1m[94m|[0m            [1m[33m^^^^^[0m
+
+[1m[33mwarning[0m: `armature-rhai` (lib) generated 8 warnings
+[1m[92m   Compiling[0m armature-framework v0.2.2 (/home/runner/work/armature/armature)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 15.84s
+[1m[92m     Running[0m benches/json_benchmarks.rs (target/release/deps/json_benchmarks-6ca0c9b5fd81b7eb)
+Gnuplot not found, using plotters backend
+
+===========================================
+JSON Library: serde_json
+SIMD Enabled: false
+===========================================
+
+Benchmarking json_info/library_check
+Benchmarking json_info/library_check: Warming up for 3.0000 s
+Benchmarking json_info/library_check: Collecting 100 samples in estimated 5.0000 s (16B iterations)
+Benchmarking json_info/library_check: Analyzing
+json_info/library_check time:   [311.34 ps 312.02 ps 313.40 ps]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking json_serialize/small
+Benchmarking json_serialize/small: Warming up for 3.0000 s
+Benchmarking json_serialize/small: Collecting 100 samples in estimated 5.0000 s (68M iterations)
+Benchmarking json_serialize/small: Analyzing
+json_serialize/small    time:   [73.387 ns 73.584 ns 73.931 ns]
+                        thrpt:  [567.58 MiB/s 570.26 MiB/s 571.79 MiB/s]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking json_serialize/medium
+Benchmarking json_serialize/medium: Warming up for 3.0000 s
+Benchmarking json_serialize/medium: Collecting 100 samples in estimated 5.0010 s (14M iterations)
+Benchmarking json_serialize/medium: Analyzing
+json_serialize/medium   time:   [418.29 ns 421.96 ns 426.17 ns]
+                        thrpt:  [523.64 MiB/s 528.87 MiB/s 533.50 MiB/s]
+Benchmarking json_serialize/large
+Benchmarking json_serialize/large: Warming up for 3.0000 s
+Benchmarking json_serialize/large: Collecting 100 samples in estimated 5.0160 s (1.1M iterations)
+Benchmarking json_serialize/large: Analyzing
+json_serialize/large    time:   [4.5173 µs 4.5419 µs 4.5794 µs]
+                        thrpt:  [744.29 MiB/s 750.45 MiB/s 754.53 MiB/s]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking json_deserialize/small
+Benchmarking json_deserialize/small: Warming up for 3.0000 s
+Benchmarking json_deserialize/small: Collecting 100 samples in estimated 5.0003 s (42M iterations)
+Benchmarking json_deserialize/small: Analyzing
+json_deserialize/small  time:   [119.56 ns 119.86 ns 120.21 ns]
+                        thrpt:  [349.06 MiB/s 350.09 MiB/s 350.98 MiB/s]
+Found 19 outliers among 100 measurements (19.00%)
+  2 (2.00%) high mild
+  17 (17.00%) high severe
+Benchmarking json_deserialize/medium
+Benchmarking json_deserialize/medium: Warming up for 3.0000 s
+Benchmarking json_deserialize/medium: Collecting 100 samples in estimated 5.0047 s (4.8M iterations)
+Benchmarking json_deserialize/medium: Analyzing
+json_deserialize/medium time:   [968.04 ns 968.97 ns 970.05 ns]
+                        thrpt:  [230.05 MiB/s 230.31 MiB/s 230.53 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking json_deserialize/large
+Benchmarking json_deserialize/large: Warming up for 3.0000 s
+Benchmarking json_deserialize/large: Collecting 100 samples in estimated 5.0280 s (545k iterations)
+Benchmarking json_deserialize/large: Analyzing
+json_deserialize/large  time:   [9.2063 µs 9.2144 µs 9.2225 µs]
+                        thrpt:  [369.58 MiB/s 369.90 MiB/s 370.23 MiB/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking json_roundtrip/small
+Benchmarking json_roundtrip/small: Warming up for 3.0000 s
+Benchmarking json_roundtrip/small: Collecting 100 samples in estimated 5.0004 s (25M iterations)
+Benchmarking json_roundtrip/small: Analyzing
+json_roundtrip/small    time:   [197.35 ns 197.67 ns 198.05 ns]
+                        thrpt:  [423.74 MiB/s 424.57 MiB/s 425.26 MiB/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking json_roundtrip/medium
+Benchmarking json_roundtrip/medium: Warming up for 3.0000 s
+Benchmarking json_roundtrip/medium: Collecting 100 samples in estimated 5.0052 s (3.6M iterations)
+Benchmarking json_roundtrip/medium: Analyzing
+json_roundtrip/medium   time:   [1.3878 µs 1.3950 µs 1.4057 µs]
+                        thrpt:  [317.52 MiB/s 319.94 MiB/s 321.60 MiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking json_roundtrip/large
+Benchmarking json_roundtrip/large: Warming up for 3.0000 s
+Benchmarking json_roundtrip/large: Collecting 100 samples in estimated 5.0095 s (323k iterations)
+Benchmarking json_roundtrip/large: Analyzing
+json_roundtrip/large    time:   [15.445 µs 15.465 µs 15.488 µs]
+                        thrpt:  [440.15 MiB/s 440.78 MiB/s 441.36 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking http_json/request_parse
+Benchmarking http_json/request_parse: Warming up for 3.0000 s
+Benchmarking http_json/request_parse: Collecting 100 samples in estimated 5.0023 s (4.7M iterations)
+Benchmarking http_json/request_parse: Analyzing
+http_json/request_parse time:   [1.0573 µs 1.0584 µs 1.0596 µs]
+                        thrpt:  [210.60 MiB/s 210.85 MiB/s 211.07 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking http_json/response_json
+Benchmarking http_json/response_json: Warming up for 3.0000 s
+Benchmarking http_json/response_json: Collecting 100 samples in estimated 5.0019 s (11M iterations)
+Benchmarking http_json/response_json: Analyzing
+http_json/response_json time:   [470.53 ns 477.38 ns 485.20 ns]
+                        thrpt:  [459.93 MiB/s 467.46 MiB/s 474.27 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high severe
+Benchmarking http_json/full_cycle
+Benchmarking http_json/full_cycle: Warming up for 3.0000 s
+Benchmarking http_json/full_cycle: Collecting 100 samples in estimated 5.0054 s (2.6M iterations)
+Benchmarking http_json/full_cycle: Analyzing
+http_json/full_cycle    time:   [1.9591 µs 1.9632 µs 1.9670 µs]
+                        thrpt:  [113.45 MiB/s 113.67 MiB/s 113.91 MiB/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
