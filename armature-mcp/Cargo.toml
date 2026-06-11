@@ -8,7 +8,7 @@ edition.workspace = true
 # requires `TypeId::of` in const context — stable since Rust 1.91.
 # Using this crate on an older toolchain will produce a clear compile
 # error at the macro site.
-rust-version = "1.91"
+rust-version = "1.95"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
