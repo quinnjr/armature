@@ -26,6 +26,21 @@ ignore = [
     # Action: Will address when upgrading opentelemetry ecosystem to 0.31.x
     "RUSTSEC-2024-0437",
 
+    # RUSTSEC-2026-0049 / 0098 / 0099 / 0104: rustls-webpki < 0.103.x - CRL
+    # parsing panics and related certificate-verification issues.
+    # Status: Old webpki versions are pinned by external optional integrations:
+    #   - rustls 0.21 via mq-bridge's internal aws-config (default features)
+    #   - rustls 0.22 via rumqttc 0.25 (latest release; no fixed version exists)
+    # First-party AWS crates now use default-https-client (rustls 0.23 /
+    # webpki 0.103, which is patched). The vulnerable versions only enter
+    # builds that opt into the mq-bridge/mqtt integrations.
+    # Action: Re-check when mq-bridge updates its aws-config defaults and
+    # rumqttc releases a rustls >= 0.23 version.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
     #
     # === UNMAINTAINED CRATE WARNINGS ===
     #
