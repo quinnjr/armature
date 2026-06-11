@@ -43,8 +43,8 @@ use crate::{
 use async_trait::async_trait;
 use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::{create_consumer_from_route, create_publisher_from_route};
-use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use mq_bridge::traits::{Handler, MessageConsumer, MessagePublisher};
+use mq_bridge::models::{Endpoint, EndpointType, FileConfig, MemoryConfig, Route, RouteOptions};
+use mq_bridge::traits::{Handler, MessageConsumer, MessageDisposition, MessagePublisher};
 use mq_bridge::{Handled, HandlerError};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -165,20 +165,18 @@ impl MqBridgeConfig {
     /// Build an mq-bridge Endpoint from this config
     pub fn build_endpoint(&self) -> Endpoint {
         match self.endpoint_type {
-            MqEndpointType::Memory => Endpoint::new(EndpointType::Memory(MemoryConfig {
-                topic: self.topic.clone(),
-                capacity: Some(self.buffer_size),
-            })),
+            MqEndpointType::Memory => Endpoint::new(EndpointType::Memory(MemoryConfig::new(
+                self.topic.clone(),
+                Some(self.buffer_size),
+            ))),
             #[cfg(feature = "mq-bridge-kafka")]
             MqEndpointType::Kafka => {
-                use mq_bridge::models::{KafkaConfig, KafkaEndpoint};
-                Endpoint::new(EndpointType::Kafka(KafkaEndpoint {
+                use mq_bridge::models::KafkaConfig;
+                Endpoint::new(EndpointType::Kafka(KafkaConfig {
+                    url: self.url.clone(),
                     topic: Some(self.topic.clone()),
-                    config: KafkaConfig {
-                        brokers: self.url.clone(),
-                        group_id: self.options.get("group_id").cloned(),
-                        ..Default::default()
-                    },
+                    group_id: self.options.get("group_id").cloned(),
+                    ..Default::default()
                 }))
             }
             #[cfg(not(feature = "mq-bridge-kafka"))]
@@ -187,14 +185,12 @@ impl MqBridgeConfig {
             }
             #[cfg(feature = "mq-bridge-amqp")]
             MqEndpointType::Amqp => {
-                use mq_bridge::models::{AmqpConfig, AmqpEndpoint};
-                Endpoint::new(EndpointType::Amqp(AmqpEndpoint {
+                use mq_bridge::models::AmqpConfig;
+                Endpoint::new(EndpointType::Amqp(AmqpConfig {
+                    url: self.url.clone(),
                     queue: Some(self.topic.clone()),
-                    config: AmqpConfig {
-                        url: self.url.clone(),
-                        exchange: self.options.get("exchange").cloned(),
-                        ..Default::default()
-                    },
+                    exchange: self.options.get("exchange").cloned(),
+                    ..Default::default()
                 }))
             }
             #[cfg(not(feature = "mq-bridge-amqp"))]
@@ -203,14 +199,12 @@ impl MqBridgeConfig {
             }
             #[cfg(feature = "mq-bridge-nats")]
             MqEndpointType::Nats => {
-                use mq_bridge::models::{NatsConfig, NatsEndpoint};
-                Endpoint::new(EndpointType::Nats(NatsEndpoint {
+                use mq_bridge::models::NatsConfig;
+                Endpoint::new(EndpointType::Nats(NatsConfig {
+                    url: self.url.clone(),
                     subject: Some(self.topic.clone()),
                     stream: self.options.get("stream").cloned(),
-                    config: NatsConfig {
-                        url: self.url.clone(),
-                        ..Default::default()
-                    },
+                    ..Default::default()
                 }))
             }
             #[cfg(not(feature = "mq-bridge-nats"))]
@@ -219,13 +213,11 @@ impl MqBridgeConfig {
             }
             #[cfg(feature = "mq-bridge-mqtt")]
             MqEndpointType::Mqtt => {
-                use mq_bridge::models::{MqttConfig, MqttEndpoint};
-                Endpoint::new(EndpointType::Mqtt(MqttEndpoint {
+                use mq_bridge::models::MqttConfig;
+                Endpoint::new(EndpointType::Mqtt(MqttConfig {
+                    url: self.url.clone(),
                     topic: Some(self.topic.clone()),
-                    config: MqttConfig {
-                        url: self.url.clone(),
-                        ..Default::default()
-                    },
+                    ..Default::default()
                 }))
             }
             #[cfg(not(feature = "mq-bridge-mqtt"))]
@@ -234,19 +226,19 @@ impl MqBridgeConfig {
             }
             #[cfg(feature = "mq-bridge-http")]
             MqEndpointType::Http => {
-                use mq_bridge::models::{HttpConfig, HttpEndpoint};
-                Endpoint::new(EndpointType::Http(HttpEndpoint {
-                    config: HttpConfig {
-                        url: Some(self.url.clone()),
-                        ..Default::default()
-                    },
+                use mq_bridge::models::HttpConfig;
+                Endpoint::new(EndpointType::Http(HttpConfig {
+                    url: self.url.clone(),
+                    ..Default::default()
                 }))
             }
             #[cfg(not(feature = "mq-bridge-http"))]
             MqEndpointType::Http => {
                 panic!("HTTP support requires 'mq-bridge-http' feature")
             }
-            MqEndpointType::File => Endpoint::new(EndpointType::File(self.topic.clone())),
+            MqEndpointType::File => {
+                Endpoint::new(EndpointType::File(FileConfig::new(self.topic.clone())))
+            }
         }
     }
 }
@@ -561,10 +553,10 @@ impl MessageBroker for MqBridgeBroker {
                                 let msg = received.message;
                                 match adapter.handle(msg).await {
                                     Ok(Handled::Ack) => {
-                                        (received.commit)(None).await;
+                                        (received.commit)(MessageDisposition::Ack).await;
                                     }
                                     Ok(Handled::Publish(response)) => {
-                                        (received.commit)(Some(response)).await;
+                                        (received.commit)(MessageDisposition::Reply(response)).await;
                                     }
                                     Err(_) => {
                                         // Error - don't commit, message will be redelivered
@@ -632,19 +624,19 @@ impl MqBridgeRoute {
 
     /// Set input from memory channel
     pub fn from_memory(mut self, topic: impl Into<String>, buffer_size: usize) -> Self {
-        self.input = Some(Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: topic.into(),
-            capacity: Some(buffer_size),
-        })));
+        self.input = Some(Endpoint::new(EndpointType::Memory(MemoryConfig::new(
+            topic.into(),
+            Some(buffer_size),
+        ))));
         self
     }
 
     /// Set output to memory channel
     pub fn to_memory(mut self, topic: impl Into<String>, buffer_size: usize) -> Self {
-        self.output = Some(Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: topic.into(),
-            capacity: Some(buffer_size),
-        })));
+        self.output = Some(Endpoint::new(EndpointType::Memory(MemoryConfig::new(
+            topic.into(),
+            Some(buffer_size),
+        ))));
         self
     }
 
@@ -674,8 +666,11 @@ impl MqBridgeRoute {
         Ok(Route {
             input,
             output,
-            concurrency: 1,
-            batch_size: 128,
+            options: RouteOptions {
+                concurrency: 1,
+                batch_size: 128,
+                ..Default::default()
+            },
         })
     }
 
