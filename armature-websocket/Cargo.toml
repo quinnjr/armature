@@ -17,7 +17,7 @@ armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # WebSocket
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-tungstenite = "0.26"
+tungstenite = "0.29"
 
 # Async runtime
 tokio = { version = "1.35", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
