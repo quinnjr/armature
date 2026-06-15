@@ -37,7 +37,7 @@ thiserror = "2.0"
 # Utilities
 tracing = "0.1"
 uuid = { version = "1.11", features = ["v4"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 pin-project-lite = "0.2"
 tempfile = "3.8"
