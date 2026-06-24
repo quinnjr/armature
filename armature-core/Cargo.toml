@@ -46,7 +46,7 @@ flate2 = "1.0.17"
 brotli = "8.0"
 uuid = { version = "1.11", features = ["v4"] }
 thiserror = "2.0"
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 tokio-stream = "0.1"
 regex = "1.10"
