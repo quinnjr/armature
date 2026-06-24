@@ -9,7 +9,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sha2::Sha256;
