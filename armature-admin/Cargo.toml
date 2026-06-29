@@ -30,7 +30,7 @@ bytes = "1.5"
 askama = { version = "0.12", features = ["with-axum"] }
 
 # For form handling
-validator = { version = "0.19", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 [features]
 default = []
