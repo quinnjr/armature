@@ -376,7 +376,10 @@ mod gateway {
     pub struct FederationGateway {
         subgraphs: HashMap<String, SubgraphConfig>,
         client: Client,
+        // Configured via the builder; not yet consumed by the gateway runtime.
+        #[allow(dead_code)]
         enable_introspection: bool,
+        #[allow(dead_code)]
         enable_playground: bool,
     }
 

@@ -40,7 +40,10 @@ mime_guess = "2.0"
 uuid = { version = "1.23", features = ["v4"] }
 
 # HTTP client for API providers
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"], optional = true }
+
+# Base64 encoding for provider attachments
+base64 = { version = "0.22", optional = true }
 
 # AWS SES
 aws-sdk-sesv2 = { version = "1.112", optional = true }
@@ -62,7 +65,7 @@ default = ["handlebars"]
 handlebars = ["dep:handlebars"]
 tera = ["dep:tera"]
 minijinja = ["dep:minijinja"]
-sendgrid = ["reqwest"]
+sendgrid = ["reqwest", "dep:base64"]
 mailgun = ["reqwest"]
 ses = ["aws-sdk-sesv2", "aws-config"]
 queue = ["chrono"]

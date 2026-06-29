@@ -20,7 +20,7 @@ use lopdf::dictionary;
 use lopdf::{Document, Object, Stream, StringFormat};
 
 /// Font sizes for PDF text
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FontSize {
     /// Heading 1 (24pt)
     H1,
@@ -29,6 +29,7 @@ pub enum FontSize {
     /// Heading 3 (16pt)
     H3,
     /// Normal text (12pt)
+    #[default]
     Normal,
     /// Small text (10pt)
     Small,
@@ -58,12 +59,6 @@ impl FontSize {
     }
 }
 
-impl Default for FontSize {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
 /// Text alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
@@ -74,9 +69,10 @@ pub enum TextAlign {
 }
 
 /// Page size presets
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PageSize {
     /// A4 (210 × 297 mm = 595 × 842 points)
+    #[default]
     A4,
     /// Letter (8.5 × 11 in = 612 × 792 points)
     Letter,
@@ -95,12 +91,6 @@ impl PageSize {
             Self::Legal => (612.0, 1008.0),
             Self::Custom { width, height } => (*width, *height),
         }
-    }
-}
-
-impl Default for PageSize {
-    fn default() -> Self {
-        Self::A4
     }
 }
 

@@ -102,14 +102,19 @@ impl GcpServices {
     async fn init_storage(&self) -> Result<()> {
         use google_cloud_storage::client::Storage;
 
+        if self.storage.read().is_some() {
+            return Ok(());
+        }
+
+        // The builder uses Application Default Credentials by default.
+        // Build the client without holding the lock across the await.
+        let storage_client = Storage::builder()
+            .build()
+            .await
+            .map_err(|e| GcpError::Auth(e.to_string()))?;
+
         let mut client = self.storage.write();
         if client.is_none() {
-            // The builder uses Application Default Credentials by default.
-            let storage_client = Storage::builder()
-                .build()
-                .await
-                .map_err(|e| GcpError::Auth(e.to_string()))?;
-
             *client = Some(storage_client);
             info!("Cloud Storage client initialized");
         }
@@ -120,20 +125,25 @@ impl GcpServices {
     async fn init_pubsub(&self) -> Result<()> {
         use google_cloud_pubsub::client::TopicAdmin;
 
+        if self.pubsub.read().is_some() {
+            return Ok(());
+        }
+
+        let project_id = self
+            .config
+            .project_id
+            .as_ref()
+            .ok_or(GcpError::ProjectNotSpecified)?;
+
+        // The builder uses Application Default Credentials by default.
+        // Build the client without holding the lock across the await.
+        let pubsub_client = TopicAdmin::builder()
+            .build()
+            .await
+            .map_err(|e| GcpError::Auth(e.to_string()))?;
+
         let mut client = self.pubsub.write();
         if client.is_none() {
-            let project_id = self
-                .config
-                .project_id
-                .as_ref()
-                .ok_or(GcpError::ProjectNotSpecified)?;
-
-            // The builder uses Application Default Credentials by default.
-            let pubsub_client = TopicAdmin::builder()
-                .build()
-                .await
-                .map_err(|e| GcpError::Auth(e.to_string()))?;
-
             *client = Some(pubsub_client);
             info!(project = %project_id, "Pub/Sub client initialized");
         }
@@ -144,24 +154,29 @@ impl GcpServices {
     async fn init_spanner(&self) -> Result<()> {
         use google_cloud_spanner::client::{Client, ClientConfig};
 
+        if self.spanner.read().is_some() {
+            return Ok(());
+        }
+
+        let project_id = self
+            .config
+            .project_id
+            .as_ref()
+            .ok_or(GcpError::ProjectNotSpecified)?;
+
+        // Build the client without holding the lock across the await.
+        let config = ClientConfig::default()
+            .with_auth()
+            .await
+            .map_err(|e| GcpError::Auth(e.to_string()))?;
+
+        let spanner_client = Client::new(project_id, config)
+            .await
+            .map_err(|e| GcpError::Service(e.to_string()))?;
+
         let mut client = self.spanner.write();
         if client.is_none() {
-            let project_id = self
-                .config
-                .project_id
-                .as_ref()
-                .ok_or(GcpError::ProjectNotSpecified)?;
-
-            let config = ClientConfig::default()
-                .with_auth()
-                .await
-                .map_err(|e| GcpError::Auth(e.to_string()))?;
-
-            *client = Some(
-                Client::new(project_id, config)
-                    .await
-                    .map_err(|e| GcpError::Service(e.to_string()))?,
-            );
+            *client = Some(spanner_client);
             info!(project = %project_id, "Spanner client initialized");
         }
         Ok(())
@@ -171,23 +186,28 @@ impl GcpServices {
     async fn init_bigquery(&self) -> Result<()> {
         use gcloud_bigquery::client::{Client, ClientConfig};
 
+        if self.bigquery.read().is_some() {
+            return Ok(());
+        }
+
+        let project_id = self
+            .config
+            .project_id
+            .as_ref()
+            .ok_or(GcpError::ProjectNotSpecified)?;
+
+        // Build the client without holding the lock across the await.
+        let (config, _) = ClientConfig::new_with_auth()
+            .await
+            .map_err(|e| GcpError::Auth(e.to_string()))?;
+
+        let bigquery_client = Client::new(config)
+            .await
+            .map_err(|e| GcpError::Service(e.to_string()))?;
+
         let mut client = self.bigquery.write();
         if client.is_none() {
-            let project_id = self
-                .config
-                .project_id
-                .as_ref()
-                .ok_or(GcpError::ProjectNotSpecified)?;
-
-            let (config, _) = ClientConfig::new_with_auth()
-                .await
-                .map_err(|e| GcpError::Auth(e.to_string()))?;
-
-            *client = Some(
-                Client::new(config)
-                    .await
-                    .map_err(|e| GcpError::Service(e.to_string()))?,
-            );
+            *client = Some(bigquery_client);
             info!(project = %project_id, "BigQuery client initialized");
         }
         Ok(())

@@ -60,6 +60,7 @@ impl QueryBuilder {
 /// Query types supported by OpenSearch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Query {
     /// Match all documents.
     MatchAll,

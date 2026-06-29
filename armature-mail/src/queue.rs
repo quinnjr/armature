@@ -28,7 +28,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -261,11 +260,11 @@ impl EmailQueueBackend for InMemoryBackend {
 
         let mut i = 0;
         while i < queue.len() && jobs.len() < count {
-            if let Some(next_retry) = queue[i].next_retry_at {
-                if next_retry > now {
-                    i += 1;
-                    continue;
-                }
+            if let Some(next_retry) = queue[i].next_retry_at
+                && next_retry > now
+            {
+                i += 1;
+                continue;
             }
             if let Some(job) = queue.remove(i) {
                 jobs.push(job);
@@ -300,10 +299,10 @@ impl EmailQueueBackend for InMemoryBackend {
         let now = chrono_now_ms();
 
         let (pending, retrying) = queue.iter().fold((0, 0), |(p, r), job| {
-            if let Some(next_retry) = job.next_retry_at {
-                if next_retry > now {
-                    return (p, r + 1);
-                }
+            if let Some(next_retry) = job.next_retry_at
+                && next_retry > now
+            {
+                return (p, r + 1);
             }
             (p + 1, r)
         });
@@ -368,7 +367,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Store job data
         redis::cmd("SET")
-            .arg(&self.job_key(&job.id))
+            .arg(self.job_key(&job.id))
             .arg(&job_json)
             .query_async::<()>(&mut *conn)
             .await
@@ -376,7 +375,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Add to pending sorted set
         redis::cmd("ZADD")
-            .arg(&self.pending_key())
+            .arg(self.pending_key())
             .arg(score)
             .arg(&job.id)
             .query_async::<()>(&mut *conn)
@@ -397,7 +396,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Get job IDs from pending queue
         let job_ids: Vec<String> = redis::cmd("ZPOPMIN")
-            .arg(&self.pending_key())
+            .arg(self.pending_key())
             .arg(count)
             .query_async(&mut *conn)
             .await
@@ -405,7 +404,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Also check retry queue for jobs ready to retry
         let retry_ids: Vec<String> = redis::cmd("ZRANGEBYSCORE")
-            .arg(&self.retry_key())
+            .arg(self.retry_key())
             .arg(0.0)
             .arg(now)
             .arg("LIMIT")
@@ -418,7 +417,7 @@ impl EmailQueueBackend for RedisBackend {
         // Remove from retry queue
         if !retry_ids.is_empty() {
             redis::cmd("ZREM")
-                .arg(&self.retry_key())
+                .arg(self.retry_key())
                 .arg(&retry_ids)
                 .query_async::<()>(&mut *conn)
                 .await
@@ -429,7 +428,7 @@ impl EmailQueueBackend for RedisBackend {
 
         for id in job_ids.into_iter().chain(retry_ids.into_iter()) {
             let job_json: Option<String> = redis::cmd("GET")
-                .arg(&self.job_key(&id))
+                .arg(self.job_key(&id))
                 .query_async(&mut *conn)
                 .await
                 .map_err(|e| MailError::Queue(e.to_string()))?;
@@ -454,14 +453,14 @@ impl EmailQueueBackend for RedisBackend {
 
         // Remove job data
         redis::cmd("DEL")
-            .arg(&self.job_key(job_id))
+            .arg(self.job_key(job_id))
             .query_async::<()>(&mut *conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         // Increment processed count
         redis::cmd("HINCRBY")
-            .arg(&self.stats_key())
+            .arg(self.stats_key())
             .arg("processed")
             .arg(1)
             .query_async::<()>(&mut *conn)
@@ -484,7 +483,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Update job data
         redis::cmd("SET")
-            .arg(&self.job_key(&job.id))
+            .arg(self.job_key(&job.id))
             .arg(&job_json)
             .query_async::<()>(&mut *conn)
             .await
@@ -493,7 +492,7 @@ impl EmailQueueBackend for RedisBackend {
         // Add to retry queue with next retry timestamp
         let score = job.next_retry_at.unwrap_or_else(chrono_now_ms) as f64;
         redis::cmd("ZADD")
-            .arg(&self.retry_key())
+            .arg(self.retry_key())
             .arg(score)
             .arg(&job.id)
             .query_async::<()>(&mut *conn)
@@ -514,7 +513,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Add to dead letter list
         redis::cmd("LPUSH")
-            .arg(&self.dead_letter_key())
+            .arg(self.dead_letter_key())
             .arg(&job_json)
             .query_async::<()>(&mut *conn)
             .await
@@ -522,7 +521,7 @@ impl EmailQueueBackend for RedisBackend {
 
         // Remove job data
         redis::cmd("DEL")
-            .arg(&self.job_key(&job.id))
+            .arg(self.job_key(&job.id))
             .query_async::<()>(&mut *conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
@@ -539,25 +538,25 @@ impl EmailQueueBackend for RedisBackend {
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         let pending: u64 = redis::cmd("ZCARD")
-            .arg(&self.pending_key())
+            .arg(self.pending_key())
             .query_async(&mut *conn)
             .await
             .unwrap_or(0);
 
         let retrying: u64 = redis::cmd("ZCARD")
-            .arg(&self.retry_key())
+            .arg(self.retry_key())
             .query_async(&mut *conn)
             .await
             .unwrap_or(0);
 
         let dead_letter: u64 = redis::cmd("LLEN")
-            .arg(&self.dead_letter_key())
+            .arg(self.dead_letter_key())
             .query_async(&mut *conn)
             .await
             .unwrap_or(0);
 
         let processed: u64 = redis::cmd("HGET")
-            .arg(&self.stats_key())
+            .arg(self.stats_key())
             .arg("processed")
             .query_async(&mut *conn)
             .await
@@ -690,11 +689,11 @@ impl EmailQueueWorker {
 
         // Main loop: fetch jobs and distribute to workers
         loop {
-            if let Some(ref mut shutdown) = self.shutdown {
-                if shutdown.try_recv().is_ok() {
-                    info!("Email queue worker shutting down");
-                    break;
-                }
+            if let Some(ref mut shutdown) = self.shutdown
+                && shutdown.try_recv().is_ok()
+            {
+                info!("Email queue worker shutting down");
+                break;
             }
 
             match self.queue.pop(self.config.batch_size).await {

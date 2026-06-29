@@ -158,7 +158,7 @@ pub fn serialize_json_simd<T: Serialize>(value: &T) -> Result<Bytes, Serializati
 #[cfg(feature = "simd-json")]
 pub fn serialize_json_simd_with_size<T: Serialize>(
     value: &T,
-    size: SerializationSize,
+    _size: SerializationSize,
 ) -> Result<Bytes, SerializationError> {
     SERIALIZATION_STATS.record_serialization();
 

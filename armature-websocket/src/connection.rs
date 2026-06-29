@@ -97,6 +97,7 @@ impl Connection {
     }
 
     /// Set the connection state (internal use).
+    #[allow(dead_code)]
     pub(crate) fn set_state(&self, state: ConnectionState) {
         *self.state.write() = state;
     }

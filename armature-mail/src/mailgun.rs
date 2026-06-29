@@ -18,18 +18,13 @@ pub struct MailgunConfig {
 }
 
 /// Mailgun API region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MailgunRegion {
     /// US region (default).
+    #[default]
     Us,
     /// EU region.
     Eu,
-}
-
-impl Default for MailgunRegion {
-    fn default() -> Self {
-        Self::Us
-    }
 }
 
 impl MailgunConfig {
@@ -142,7 +137,7 @@ impl Transport for MailgunTransport {
         // Send request
         let response = self
             .client
-            .post(&self.config.endpoint())
+            .post(self.config.endpoint())
             .basic_auth("api", Some(&self.config.api_key))
             .multipart(form)
             .send()

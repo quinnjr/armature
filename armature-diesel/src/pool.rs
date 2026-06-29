@@ -155,6 +155,7 @@ impl PgPoolBb8 {
 #[cfg(all(feature = "mysql", feature = "deadpool"))]
 pub struct MysqlPool {
     pool: DeadpoolPool<AsyncMysqlConnection>,
+    #[allow(dead_code)] // kept for API symmetry with PgPool; not yet read on the mysql path
     config: Arc<DieselConfig>,
 }
 
@@ -196,7 +197,7 @@ impl MysqlPool {
         let status = self.pool.status();
         PoolStatus {
             size: status.size,
-            available: status.available as usize,
+            available: status.available,
             waiting: status.waiting,
             max_size: status.max_size,
         }

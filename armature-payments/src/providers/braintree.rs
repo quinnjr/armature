@@ -74,7 +74,7 @@ impl BraintreeProvider {
     /// Make an authenticated API request
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.client
-            .request(method, &format!("{}{}", self.base_url(), path))
+            .request(method, format!("{}{}", self.base_url(), path))
             .header("Authorization", self.auth_header())
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")

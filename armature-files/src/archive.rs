@@ -9,19 +9,21 @@ use std::path::Path;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 /// Compression level for archives
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionLevel {
     /// No compression (store only)
     None,
     /// Fast compression
     Fast,
     /// Default compression
+    #[default]
     Default,
     /// Best compression (slowest)
     Best,
 }
 
 impl CompressionLevel {
+    #[allow(clippy::wrong_self_convention)]
     fn to_options(&self) -> SimpleFileOptions {
         match self {
             Self::None => {
@@ -37,12 +39,6 @@ impl CompressionLevel {
                 .compression_method(CompressionMethod::Deflated)
                 .compression_level(Some(9)),
         }
-    }
-}
-
-impl Default for CompressionLevel {
-    fn default() -> Self {
-        Self::Default
     }
 }
 

@@ -13,3 +13,6 @@
 
 // TODO: Implement Tera template engine for emails
 // This is a placeholder for future Tera integration
+
+/// Tera template engine for email rendering.
+pub struct TeraEngine;

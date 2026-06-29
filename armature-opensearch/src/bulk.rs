@@ -1,9 +1,6 @@
 //! Bulk operations with streaming support.
 
-use crate::{
-    document::Document,
-    error::{OpenSearchError, Result},
-};
+use crate::{document::Document, error::Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

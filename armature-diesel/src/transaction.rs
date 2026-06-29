@@ -160,7 +160,7 @@ impl TransactionExt for crate::MysqlPool {
         use diesel_async::AsyncConnection;
 
         let mut conn = self.get().await?;
-        let conn: &mut AsyncMysqlConnection = &mut *conn;
+        let conn: &mut AsyncMysqlConnection = &mut conn;
 
         conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
             .await
@@ -180,7 +180,7 @@ impl TransactionExt for crate::MysqlPool {
         use diesel_async::{AsyncConnection, RunQueryDsl};
 
         let mut conn = self.get().await?;
-        let conn: &mut AsyncMysqlConnection = &mut *conn;
+        let conn: &mut AsyncMysqlConnection = &mut conn;
 
         // Set isolation level
         diesel::sql_query(format!(

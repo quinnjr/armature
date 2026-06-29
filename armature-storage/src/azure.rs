@@ -259,13 +259,13 @@ impl Storage for AzureBlobStorage {
         content_type: &str,
     ) -> Result<StorageMetadata> {
         // Check size limit
-        if let Some(max_size) = self.config.storage.max_file_size {
-            if data.len() as u64 > max_size {
-                return Err(StorageError::TooLarge {
-                    size: data.len() as u64,
-                    limit: max_size,
-                });
-            }
+        if let Some(max_size) = self.config.storage.max_file_size
+            && data.len() as u64 > max_size
+        {
+            return Err(StorageError::TooLarge {
+                size: data.len() as u64,
+                limit: max_size,
+            });
         }
 
         let size = data.len() as u64;

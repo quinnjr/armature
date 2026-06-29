@@ -204,13 +204,13 @@ impl StorageTrait for GcsStorage {
         content_type: &str,
     ) -> Result<StorageMetadata> {
         // Check size limit
-        if let Some(max_size) = self.config.storage.max_file_size {
-            if data.len() as u64 > max_size {
-                return Err(StorageError::TooLarge {
-                    size: data.len() as u64,
-                    limit: max_size,
-                });
-            }
+        if let Some(max_size) = self.config.storage.max_file_size
+            && data.len() as u64 > max_size
+        {
+            return Err(StorageError::TooLarge {
+                size: data.len() as u64,
+                limit: max_size,
+            });
         }
 
         let full_key = self.full_key(key);
@@ -307,10 +307,10 @@ impl StorageTrait for GcsStorage {
             metadata = metadata.with_content_type(&object.content_type);
         }
 
-        if let Some(checksums) = &object.checksums {
-            if !checksums.md5_hash.is_empty() {
-                metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
-            }
+        if let Some(checksums) = &object.checksums
+            && !checksums.md5_hash.is_empty()
+        {
+            metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
         }
 
         Ok(metadata)
@@ -387,10 +387,10 @@ impl StorageTrait for GcsStorage {
                 metadata = metadata.with_content_type(&object.content_type);
             }
 
-            if let Some(checksums) = &object.checksums {
-                if !checksums.md5_hash.is_empty() {
-                    metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
-                }
+            if let Some(checksums) = &object.checksums
+                && !checksums.md5_hash.is_empty()
+            {
+                metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
             }
 
             results.push(metadata);

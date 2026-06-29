@@ -10,11 +10,12 @@ use tracing::debug;
 use crate::{Notification, Platform, Priority, PushError, PushProvider, Result};
 
 /// APNS environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApnsEnvironment {
     /// Development/sandbox environment.
     Development,
     /// Production environment.
+    #[default]
     Production,
 }
 
@@ -24,12 +25,6 @@ impl ApnsEnvironment {
             Self::Development => "https://api.sandbox.push.apple.com",
             Self::Production => "https://api.push.apple.com",
         }
-    }
-}
-
-impl Default for ApnsEnvironment {
-    fn default() -> Self {
-        Self::Production
     }
 }
 

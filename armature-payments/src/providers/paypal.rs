@@ -70,10 +70,10 @@ impl PayPalProvider {
         // Check if we have a valid token
         {
             let token = self.access_token.read().await;
-            if let Some(ref t) = *token {
-                if t.expires_at > Utc::now() {
-                    return Ok(t.token.clone());
-                }
+            if let Some(ref t) = *token
+                && t.expires_at > Utc::now()
+            {
+                return Ok(t.token.clone());
             }
         }
 
@@ -86,7 +86,7 @@ impl PayPalProvider {
 
         let response = self
             .client
-            .post(&format!("{}/v1/oauth2/token", self.base_url()))
+            .post(format!("{}/v1/oauth2/token", self.base_url()))
             .header("Authorization", format!("Basic {}", credentials))
             .form(&[("grant_type", "client_credentials")])
             .send()
@@ -120,7 +120,7 @@ impl PayPalProvider {
         let token = self.get_token().await?;
         Ok(self
             .client
-            .request(method, &format!("{}{}", self.base_url(), path))
+            .request(method, format!("{}{}", self.base_url(), path))
             .bearer_auth(token))
     }
 }

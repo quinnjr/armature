@@ -86,15 +86,15 @@ mod script;
 mod watcher;
 
 pub use bindings::{RequestBinding, ResponseBinding, register_armature_api};
-pub use context::ScriptContext;
+pub use context::{ScriptContext, ScriptContextBuilder};
 pub use engine::{RhaiEngine, RhaiEngineBuilder};
 pub use error::{Result, RhaiError};
-pub use handler::{ScriptHandler, ScriptMiddleware};
-pub use router::ScriptRouter;
-pub use script::{CompiledScript, ScriptCache, ScriptLoader};
+pub use handler::{ScriptHandler, ScriptHandlerFn, ScriptMiddleware, script_handler};
+pub use router::{ScriptRouter, ScriptRouterBuilder};
+pub use script::{CompiledScript, ConcurrentScriptCache, ScriptCache, ScriptLoader};
 
 #[cfg(feature = "hot-reload")]
-pub use watcher::ScriptWatcher;
+pub use watcher::{HotReloadExt, ScriptWatcher};
 
 // Re-export rhai for advanced usage
 pub use rhai;

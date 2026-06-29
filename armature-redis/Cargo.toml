@@ -44,7 +44,7 @@ default = []
 # Cluster support
 cluster = []
 # TLS support
-tls = ["redis/tls-rustls"]
+tls = ["redis/tokio-rustls-comp"]
 # Sentinel support
 sentinel = []
 # All features

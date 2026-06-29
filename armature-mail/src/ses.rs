@@ -10,21 +10,12 @@ use tracing::debug;
 use crate::{Email, MailError, Result, Transport};
 
 /// AWS SES configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SesConfig {
     /// AWS region.
     pub region: Option<String>,
     /// Configuration set name (optional).
     pub configuration_set: Option<String>,
-}
-
-impl Default for SesConfig {
-    fn default() -> Self {
-        Self {
-            region: None,
-            configuration_set: None,
-        }
-    }
 }
 
 impl SesConfig {

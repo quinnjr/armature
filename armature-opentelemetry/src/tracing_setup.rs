@@ -57,6 +57,8 @@ pub async fn init_tracing(config: &TelemetryConfig) -> TelemetryResult<SdkTracer
         }
 
         #[cfg(feature = "zipkin")]
+        #[allow(deprecated)]
+        // upstream deprecated the Zipkin exporter; kept while the feature exists
         TracingExporter::Zipkin => {
             use opentelemetry_zipkin::ZipkinExporter;
 

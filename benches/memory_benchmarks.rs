@@ -196,6 +196,7 @@ fn bench_smart_pointer_allocations(c: &mut Criterion) {
 
     // Box with large struct
     #[derive(Clone)]
+    #[allow(dead_code)] // fields exist to occupy memory for the benchmark
     struct LargeStruct {
         data: [u8; 1024],
     }
@@ -240,6 +241,7 @@ fn bench_smart_pointer_allocations(c: &mut Criterion) {
 // ============================================================================
 
 #[derive(Clone)]
+#[allow(dead_code)] // fields exist to occupy memory for the benchmark
 struct SimulatedRequest {
     method: String,
     path: String,
@@ -248,6 +250,7 @@ struct SimulatedRequest {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // fields exist to occupy memory for the benchmark
 struct SimulatedResponse {
     status: u16,
     headers: Vec<(String, String)>,
@@ -384,6 +387,7 @@ fn bench_object_pool(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory/object_pool");
 
     #[derive(Default, Clone)]
+    #[allow(dead_code)] // field exists to occupy memory for the benchmark
     struct PooledObject {
         data: Vec<u8>,
     }
