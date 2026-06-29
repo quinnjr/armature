@@ -25,7 +25,7 @@ mime_guess = "2.0"
 
 # Image processing
 image = { version = "0.25", optional = true }
-imageproc = { version = "0.25", optional = true }
+imageproc = { version = "0.27", optional = true }
 
 # PDF generation
 printpdf = { version = "0.8", optional = true }
