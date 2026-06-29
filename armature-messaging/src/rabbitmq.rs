@@ -57,7 +57,7 @@ impl RabbitMqBroker {
         options: QueueDeclareOptions,
     ) -> Result<(), MessagingError> {
         self.publish_channel
-            .queue_declare(name, options, FieldTable::default())
+            .queue_declare(name.into(), options, FieldTable::default())
             .await?;
         debug!(queue = name, "Queue declared");
         Ok(())
@@ -71,7 +71,7 @@ impl RabbitMqBroker {
         options: ExchangeDeclareOptions,
     ) -> Result<(), MessagingError> {
         self.publish_channel
-            .exchange_declare(name, kind, options, FieldTable::default())
+            .exchange_declare(name.into(), kind, options, FieldTable::default())
             .await?;
         debug!(exchange = name, "Exchange declared");
         Ok(())
@@ -86,9 +86,9 @@ impl RabbitMqBroker {
     ) -> Result<(), MessagingError> {
         self.publish_channel
             .queue_bind(
-                queue,
-                exchange,
-                routing_key,
+                queue.into(),
+                exchange.into(),
+                routing_key.into(),
                 QueueBindOptions::default(),
                 FieldTable::default(),
             )
@@ -176,8 +176,8 @@ impl MessageBroker for RabbitMqBroker {
         let confirm = self
             .publish_channel
             .basic_publish(
-                exchange,
-                routing_key,
+                exchange.into(),
+                routing_key.into(),
                 BasicPublishOptions::default(),
                 &message.payload,
                 props,
@@ -221,7 +221,7 @@ impl MessageBroker for RabbitMqBroker {
         // Declare the queue
         channel
             .queue_declare(
-                topic,
+                topic.into(),
                 QueueDeclareOptions {
                     durable: true,
                     ..Default::default()
@@ -236,8 +236,8 @@ impl MessageBroker for RabbitMqBroker {
 
         let consumer = channel
             .basic_consume(
-                topic,
-                &consumer_tag,
+                topic.into(),
+                consumer_tag.as_str().into(),
                 BasicConsumeOptions {
                     no_ack: options.ack_mode == AckMode::None,
                     ..Default::default()
@@ -279,14 +279,14 @@ impl MessageBroker for RabbitMqBroker {
         // Close all channels
         let channels = self.channels.read().await;
         for channel in channels.iter() {
-            if let Err(e) = channel.close(200, "Normal shutdown").await {
+            if let Err(e) = channel.close(200, "Normal shutdown".into()).await {
                 warn!(error = %e, "Error closing channel");
             }
         }
 
         // Close connection
         self.connection
-            .close(200, "Normal shutdown")
+            .close(200, "Normal shutdown".into())
             .await
             .map_err(|e| MessagingError::Connection(e.to_string()))?;
 
@@ -427,7 +427,10 @@ impl Subscription for RabbitMqSubscription {
     async fn unsubscribe(&self) -> Result<(), MessagingError> {
         self.active.store(false, Ordering::SeqCst);
         self.channel
-            .basic_cancel(&self.consumer_tag, BasicCancelOptions::default())
+            .basic_cancel(
+                self.consumer_tag.as_str().into(),
+                BasicCancelOptions::default(),
+            )
             .await?;
         info!(consumer_tag = %self.consumer_tag, "Unsubscribed from queue");
         Ok(())

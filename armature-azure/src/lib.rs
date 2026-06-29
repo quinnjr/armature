@@ -69,10 +69,10 @@ pub use azure_core;
 pub use azure_identity;
 
 #[cfg(feature = "blob")]
-pub use azure_storage_blobs;
+pub use azure_storage_blob;
 
 #[cfg(feature = "queue")]
-pub use azure_storage_queues;
+pub use azure_storage_queue;
 
 #[cfg(feature = "cosmos")]
 pub use azure_data_cosmos;
@@ -81,4 +81,4 @@ pub use azure_data_cosmos;
 pub use azure_messaging_servicebus;
 
 #[cfg(feature = "keyvault")]
-pub use azure_security_keyvault;
+pub use azure_security_keyvault_secrets;

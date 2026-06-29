@@ -18,13 +18,13 @@ armature-log = { path = "../armature-log", version = "0.1.0" }
 # Core dependencies
 async-trait = "0.1"
 thiserror = "2.0"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 chrono = "0.4"
-cron = "0.15"
+cron = "0.17"
 
 # DI integration
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 

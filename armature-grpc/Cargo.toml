@@ -17,11 +17,11 @@ armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # gRPC
 tonic = { version = "0.14", features = ["gzip", "zstd"] }
-prost = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-types = "0.14"
 
 # Async runtime
-tokio = { version = "1.35", features = ["rt-multi-thread", "net", "sync", "time"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # Tower (middleware)
@@ -29,11 +29,11 @@ tower = { version = "0.5", features = ["timeout", "limit", "load-shed"] }
 tower-service = "0.3"
 
 # HTTP
-http = "1.1"
+http = "1.4"
 http-body = "1.0"
 http-body-util = "0.1"
-bytes = "1.5"
-hyper = { version = "1.4", features = ["server", "http2"] }
+bytes = "1.12"
+hyper = { version = "1.10", features = ["server", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 # Serialization
@@ -66,6 +66,6 @@ health = ["tonic-health"]
 reflection = ["tonic-reflection"]
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 tokio-test = "0.4"
 

@@ -1,10 +1,21 @@
 //! Azure Blob Storage backend.
+//!
+//! Migrated to the new Azure SDK (`azure_storage_blob` 1.0 on `azure_core` 1.0 +
+//! `azure_identity` 1.0). The new SDK is endpoint-URL + AAD (Entra ID) token
+//! credential based; connection-string and shared-key (account key) auth modes
+//! are no longer supported by the SDK.
 
 use async_trait::async_trait;
-use azure_storage::prelude::*;
-use azure_storage_blobs::prelude::*;
+use azure_core::credentials::TokenCredential;
+use azure_core::http::{NoFormat, RequestContent, Url};
+use azure_storage_blob::models::{
+    BlobClientGetPropertiesResultHeaders, BlobClientUploadOptions,
+    BlobContainerClientListBlobsOptions,
+};
+use azure_storage_blob::{BlobClient, BlobContainerClient, BlobServiceClient};
+use base64::Engine;
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::TryStreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -99,44 +110,59 @@ impl AzureBlobConfig {
 
 /// Azure Blob Storage backend.
 pub struct AzureBlobStorage {
-    container_client: ContainerClient,
+    container_client: BlobContainerClient,
     config: AzureBlobConfig,
 }
 
 impl AzureBlobStorage {
     /// Create a new Azure Blob storage backend.
+    ///
+    /// The new Azure SDK authenticates with AAD (Entra ID) token credentials.
+    /// Connection-string and shared-key (account key) authentication are no
+    /// longer supported by the SDK and will return a configuration error.
     pub async fn new(config: AzureBlobConfig) -> Result<Self> {
-        let storage_credentials = if config.use_emulator {
-            // Azurite default credentials
-            StorageCredentials::access_key(
-                "devstoreaccount1",
-                "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
-            )
-        } else if let Some(conn_str) = &config.connection_string {
-            StorageCredentials::connection_string(conn_str)
-                .map_err(|e| StorageError::Config(e.to_string()))?
-        } else if let Some(key) = &config.access_key {
-            StorageCredentials::access_key(&config.account, key)
-        } else {
-            // Use default Azure credential
-            StorageCredentials::token_credential(Arc::new(
-                azure_identity::DefaultAzureCredential::default(),
-            ))
-        };
-
         let blob_service = if config.use_emulator {
-            BlobServiceClient::builder(&config.account, storage_credentials)
-                .blob_service_url("http://127.0.0.1:10000/devstoreaccount1")
-                .build()
-        } else if let Some(endpoint) = &config.endpoint {
-            BlobServiceClient::builder(&config.account, storage_credentials)
-                .blob_service_url(endpoint)
-                .build()
+            // Azurite emulator: HTTP endpoint, unauthenticated pipeline.
+            let endpoint = config
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:10000/devstoreaccount1".to_string());
+            let service_url =
+                Url::parse(&endpoint).map_err(|e| StorageError::Config(e.to_string()))?;
+            BlobServiceClient::new(service_url, None, None)
+                .map_err(|e| StorageError::Config(e.to_string()))?
+        } else if config.connection_string.is_some() {
+            return Err(StorageError::Config(
+                "azure_storage_blob 1.0 requires AAD (Entra ID) token credentials; \
+                 connection-string authentication is no longer supported by the new \
+                 Azure SDK. Use default Azure credentials instead."
+                    .to_string(),
+            ));
+        } else if config.access_key.is_some() {
+            return Err(StorageError::Config(
+                "azure_storage_blob 1.0 requires AAD (Entra ID) token credentials; \
+                 shared-key (storage account key) authentication is no longer supported \
+                 by the new Azure SDK. Use default Azure credentials instead."
+                    .to_string(),
+            ));
         } else {
-            BlobServiceClient::new(&config.account, storage_credentials)
+            let endpoint = config
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| format!("https://{}.blob.core.windows.net/", config.account));
+            let service_url =
+                Url::parse(&endpoint).map_err(|e| StorageError::Config(e.to_string()))?;
+
+            // Default credential chain (Azure CLI, environment, managed identity, ...).
+            let credential: Arc<dyn TokenCredential> =
+                azure_identity::DeveloperToolsCredential::new(None)
+                    .map_err(|e| StorageError::Config(e.to_string()))?;
+
+            BlobServiceClient::new(service_url, Some(credential), None)
+                .map_err(|e| StorageError::Config(e.to_string()))?
         };
 
-        let container_client = blob_service.container_client(&config.container);
+        let container_client = blob_service.blob_container_client(&config.container);
 
         info!(
             account = %config.account,
@@ -158,7 +184,7 @@ impl AzureBlobStorage {
         let blob_service = services
             .blob_service()
             .map_err(|e| StorageError::Config(e.to_string()))?;
-        let container_client = blob_service.container_client(&config.container);
+        let container_client = blob_service.blob_container_client(&config.container);
 
         Ok(Self {
             container_client,
@@ -209,6 +235,16 @@ impl AzureBlobStorage {
     }
 }
 
+/// Translate an Azure error into a [`StorageError`], mapping not-found responses.
+fn map_blob_error(err: azure_core::Error, key: &str) -> StorageError {
+    let err_str = err.to_string();
+    if err_str.contains("BlobNotFound") || err_str.contains("404") {
+        StorageError::NotFound(key.to_string())
+    } else {
+        StorageError::Storage(err_str)
+    }
+}
+
 #[async_trait]
 impl Storage for AzureBlobStorage {
     async fn put(&self, key: &str, data: Bytes) -> Result<StorageMetadata> {
@@ -241,12 +277,18 @@ impl Storage for AzureBlobStorage {
             None
         };
 
-        // Upload blob
+        // Upload blob (overwrites by default).
         let blob_client = self.blob_client(key);
+        let options = BlobClientUploadOptions {
+            blob_content_type: Some(content_type.to_string()),
+            ..Default::default()
+        };
 
         blob_client
-            .put_block_blob(data)
-            .content_type(content_type)
+            .upload(
+                <RequestContent<Bytes, NoFormat> as From<Bytes>>::from(data),
+                Some(options),
+            )
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -289,42 +331,47 @@ impl Storage for AzureBlobStorage {
     async fn get(&self, key: &str) -> Result<Bytes> {
         let blob_client = self.blob_client(key);
 
-        let response = blob_client.get_content().await.map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("BlobNotFound") || err_str.contains("404") {
-                StorageError::NotFound(key.to_string())
-            } else {
-                StorageError::Storage(err_str)
-            }
-        })?;
+        let response = blob_client
+            .download(None)
+            .await
+            .map_err(|e| map_blob_error(e, key))?;
 
-        Ok(Bytes::from(response))
+        let data = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| map_blob_error(e, key))?;
+
+        Ok(data)
     }
 
     async fn head(&self, key: &str) -> Result<StorageMetadata> {
         let blob_client = self.blob_client(key);
 
-        let properties = blob_client.get_properties().await.map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("BlobNotFound") || err_str.contains("404") {
-                StorageError::NotFound(key.to_string())
-            } else {
-                StorageError::Storage(err_str)
-            }
-        })?;
+        let properties = blob_client
+            .get_properties(None)
+            .await
+            .map_err(|e| map_blob_error(e, key))?;
 
-        let size = properties.blob.properties.content_length;
+        let size = properties
+            .content_length()
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+            .unwrap_or(0);
         let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key));
 
-        if let Some(ct) = &properties.blob.properties.content_type {
-            metadata = metadata.with_content_type(ct);
+        if let Some(ct) = properties
+            .content_type()
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+        {
+            metadata = metadata.with_content_type(&ct);
         }
 
-        if let Some(md5) = &properties.blob.properties.content_md5 {
-            metadata = metadata.with_checksum(&base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                md5.as_slice(),
-            ));
+        if let Some(md5) = properties
+            .content_md5()
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+        {
+            metadata = metadata
+                .with_checksum(base64::engine::general_purpose::STANDARD.encode(md5.as_slice()));
         }
 
         Ok(metadata)
@@ -334,7 +381,7 @@ impl Storage for AzureBlobStorage {
         let blob_client = self.blob_client(key);
 
         blob_client
-            .delete()
+            .delete(None)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -364,44 +411,49 @@ impl Storage for AzureBlobStorage {
             full_prefix.push_str(p);
         }
 
+        let options = BlobContainerClientListBlobsOptions {
+            prefix: Some(full_prefix),
+            ..Default::default()
+        };
+
         let mut results = Vec::new();
-        let mut stream = self
+        let mut blobs = self
             .container_client
-            .list_blobs()
-            .prefix(&full_prefix)
-            .into_stream();
+            .list_blobs(Some(options))
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        while let Some(response) = stream.next().await {
-            let response = response.map_err(|e| StorageError::Storage(e.to_string()))?;
+        while let Some(blob) = blobs
+            .try_next()
+            .await
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+        {
+            let name = blob.name.unwrap_or_default();
 
-            for blob in response.blobs.blobs() {
-                // Remove prefix to get the relative key
-                let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                    blob.name
-                        .strip_prefix(&format!("{}/", p))
-                        .unwrap_or(&blob.name)
-                        .to_string()
-                } else {
-                    blob.name.clone()
-                };
+            // Remove prefix to get the relative key
+            let relative_key = if let Some(p) = &self.config.storage.path_prefix {
+                name.strip_prefix(&format!("{}/", p))
+                    .unwrap_or(&name)
+                    .to_string()
+            } else {
+                name.clone()
+            };
 
-                let size = blob.properties.content_length;
-                let mut metadata = StorageMetadata::new(&relative_key, size)
-                    .with_url(self.public_url(&relative_key));
+            let properties = blob.properties.unwrap_or_default();
+            let size = properties.content_length.unwrap_or(0);
+            let mut metadata =
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
 
-                if let Some(ct) = &blob.properties.content_type {
-                    metadata = metadata.with_content_type(ct);
-                }
-
-                if let Some(md5) = &blob.properties.content_md5 {
-                    metadata = metadata.with_checksum(&base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        md5.as_slice(),
-                    ));
-                }
-
-                results.push(metadata);
+            if let Some(ct) = &properties.content_type {
+                metadata = metadata.with_content_type(ct);
             }
+
+            if let Some(md5) = &properties.content_md5 {
+                metadata = metadata.with_checksum(
+                    base64::engine::general_purpose::STANDARD.encode(md5.as_slice()),
+                );
+            }
+
+            results.push(metadata);
         }
 
         Ok(results)
@@ -411,12 +463,13 @@ impl Storage for AzureBlobStorage {
         let from_client = self.blob_client(from);
         let to_client = self.blob_client(to);
 
-        let source_url = from_client
-            .url()
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+        let source_url = from_client.url().to_string();
 
+        // The new SDK performs a server-side copy via "upload from URL" on the
+        // destination block blob (sets the `x-ms-copy-source` header).
         to_client
-            .copy(&source_url)
+            .block_blob_client()
+            .upload_blob_from_url(source_url, None)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -427,10 +480,10 @@ impl Storage for AzureBlobStorage {
         Ok(Some(self.public_url(key)))
     }
 
-    async fn temporary_url(&self, key: &str, expires_in: Duration) -> Result<Option<String>> {
-        // Azure SAS token generation requires account key
-        // For now, return the public URL
-        // Full SAS implementation would require storing the account key
-        Ok(Some(self.public_url(key)))
+    async fn temporary_url(&self, _key: &str, _expires_in: Duration) -> Result<Option<String>> {
+        // Azure SAS token generation requires an account key or a user-delegation
+        // key. The new azure_storage_blob 1.0 SDK does not yet expose SAS
+        // generation, so we return the (non-signed) public URL.
+        Ok(Some(self.public_url(_key)))
     }
 }

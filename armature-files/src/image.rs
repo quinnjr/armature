@@ -193,7 +193,9 @@ fn apply_operation(img: DynamicImage, op: &ImageOp) -> FileResult<DynamicImage> 
                             &rgba,
                             degrees.to_radians(),
                             imageproc::geometric_transformations::Interpolation::Bilinear,
-                            Rgba([0, 0, 0, 0]),
+                            imageproc::geometric_transformations::Border::Constant(Rgba([
+                                0, 0, 0, 0,
+                            ])),
                         );
                         Ok(DynamicImage::ImageRgba8(rotated))
                     }

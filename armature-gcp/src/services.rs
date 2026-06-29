@@ -16,16 +16,19 @@ pub struct GcpServices {
     config: GcpConfig,
 
     #[cfg(feature = "storage")]
-    storage: RwLock<Option<google_cloud_storage::client::Client>>,
+    storage: RwLock<Option<google_cloud_storage::client::Storage>>,
 
+    // The new Pub/Sub SDK splits the old unified client into purpose-specific
+    // clients (TopicAdmin, SubscriptionAdmin, Publisher, Subscriber). We keep the
+    // topic-administration client as the general-purpose handle.
     #[cfg(feature = "pubsub")]
-    pubsub: RwLock<Option<google_cloud_pubsub::client::Client>>,
+    pubsub: RwLock<Option<google_cloud_pubsub::client::TopicAdmin>>,
 
     #[cfg(feature = "spanner")]
     spanner: RwLock<Option<google_cloud_spanner::client::Client>>,
 
     #[cfg(feature = "bigquery")]
-    bigquery: RwLock<Option<google_cloud_bigquery::client::Client>>,
+    bigquery: RwLock<Option<gcloud_bigquery::client::Client>>,
 }
 
 impl GcpServices {
@@ -97,16 +100,17 @@ impl GcpServices {
 
     #[cfg(feature = "storage")]
     async fn init_storage(&self) -> Result<()> {
-        use google_cloud_storage::client::{Client, ClientConfig};
+        use google_cloud_storage::client::Storage;
 
         let mut client = self.storage.write();
         if client.is_none() {
-            let config = ClientConfig::default()
-                .with_auth()
+            // The builder uses Application Default Credentials by default.
+            let storage_client = Storage::builder()
+                .build()
                 .await
                 .map_err(|e| GcpError::Auth(e.to_string()))?;
 
-            *client = Some(Client::new(config));
+            *client = Some(storage_client);
             info!("Cloud Storage client initialized");
         }
         Ok(())
@@ -114,7 +118,7 @@ impl GcpServices {
 
     #[cfg(feature = "pubsub")]
     async fn init_pubsub(&self) -> Result<()> {
-        use google_cloud_pubsub::client::{Client, ClientConfig};
+        use google_cloud_pubsub::client::TopicAdmin;
 
         let mut client = self.pubsub.write();
         if client.is_none() {
@@ -124,16 +128,13 @@ impl GcpServices {
                 .as_ref()
                 .ok_or(GcpError::ProjectNotSpecified)?;
 
-            let config = ClientConfig::default()
-                .with_auth()
+            // The builder uses Application Default Credentials by default.
+            let pubsub_client = TopicAdmin::builder()
+                .build()
                 .await
                 .map_err(|e| GcpError::Auth(e.to_string()))?;
 
-            *client = Some(
-                Client::new(config)
-                    .await
-                    .map_err(|e| GcpError::Service(e.to_string()))?,
-            );
+            *client = Some(pubsub_client);
             info!(project = %project_id, "Pub/Sub client initialized");
         }
         Ok(())
@@ -168,7 +169,7 @@ impl GcpServices {
 
     #[cfg(feature = "bigquery")]
     async fn init_bigquery(&self) -> Result<()> {
-        use google_cloud_bigquery::client::{Client, ClientConfig};
+        use gcloud_bigquery::client::{Client, ClientConfig};
 
         let mut client = self.bigquery.write();
         if client.is_none() {
@@ -178,8 +179,7 @@ impl GcpServices {
                 .as_ref()
                 .ok_or(GcpError::ProjectNotSpecified)?;
 
-            let config = ClientConfig::default()
-                .with_auth()
+            let (config, _) = ClientConfig::new_with_auth()
                 .await
                 .map_err(|e| GcpError::Auth(e.to_string()))?;
 
@@ -197,7 +197,7 @@ impl GcpServices {
 
     /// Get the Cloud Storage client.
     #[cfg(feature = "storage")]
-    pub fn storage(&self) -> Result<google_cloud_storage::client::Client> {
+    pub fn storage(&self) -> Result<google_cloud_storage::client::Storage> {
         if !self.config.is_enabled("storage") {
             return Err(GcpError::not_configured("storage"));
         }
@@ -215,7 +215,7 @@ impl GcpServices {
 
     /// Get the Pub/Sub client.
     #[cfg(feature = "pubsub")]
-    pub fn pubsub(&self) -> Result<google_cloud_pubsub::client::Client> {
+    pub fn pubsub(&self) -> Result<google_cloud_pubsub::client::TopicAdmin> {
         if !self.config.is_enabled("pubsub") {
             return Err(GcpError::not_configured("pubsub"));
         }
@@ -251,7 +251,7 @@ impl GcpServices {
 
     /// Get the BigQuery client.
     #[cfg(feature = "bigquery")]
-    pub fn bigquery(&self) -> Result<google_cloud_bigquery::client::Client> {
+    pub fn bigquery(&self) -> Result<gcloud_bigquery::client::Client> {
         if !self.config.is_enabled("bigquery") {
             return Err(GcpError::not_configured("bigquery"));
         }

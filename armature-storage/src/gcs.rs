@@ -1,21 +1,21 @@
 //! Google Cloud Storage backend.
+//!
+//! Migrated to the new official `google-cloud-storage` 1.15 SDK. The data-plane
+//! [`Storage`] client handles object reads/writes; the control-plane
+//! [`StorageControl`] client handles metadata, listing, deletion and rewrite
+//! (server-side copy). The control client is built lazily on first use so the
+//! synchronous constructors (`from_client`, `from_gcp_services`) keep working.
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use google_cloud_storage::client::Client;
-use google_cloud_storage::http::objects::{
-    delete::DeleteObjectRequest,
-    download::Range,
-    get::GetObjectRequest,
-    list::ListObjectsRequest,
-    upload::{Media, UploadObjectRequest, UploadType},
-};
+use google_cloud_storage::client::{Storage, StorageControl};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 use tracing::{debug, info};
 
 use crate::{
-    Result, Storage, StorageConfig, StorageError, StorageMetadata, UploadedFile,
+    Result, Storage as StorageTrait, StorageConfig, StorageError, StorageMetadata, UploadedFile,
     calculate_checksum, generate_unique_key,
 };
 
@@ -91,30 +91,40 @@ impl GcsConfig {
 
 /// Google Cloud Storage backend.
 pub struct GcsStorage {
-    client: Client,
+    /// Data-plane client (object uploads/downloads).
+    client: Storage,
+    /// Control-plane client (metadata/list/delete/rewrite), built lazily.
+    control: OnceCell<StorageControl>,
     config: GcsConfig,
 }
 
 impl GcsStorage {
     /// Create a new GCS storage backend.
+    ///
+    /// Builds the data-plane [`Storage`] client using Application Default
+    /// Credentials. The control-plane client is initialized lazily on first use.
     pub async fn new(config: GcsConfig) -> Result<Self> {
-        use google_cloud_storage::client::ClientConfig;
-
-        let client_config = ClientConfig::default()
-            .with_auth()
+        let client = Storage::builder()
+            .build()
             .await
             .map_err(|e| StorageError::Config(e.to_string()))?;
 
-        let client = Client::new(client_config);
-
         info!(bucket = %config.bucket, "Initialized GCS storage");
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            control: OnceCell::new(),
+            config,
+        })
     }
 
-    /// Create from an existing GCP client.
-    pub fn from_client(client: Client, config: GcsConfig) -> Self {
-        Self { client, config }
+    /// Create from an existing GCS data-plane client.
+    pub fn from_client(client: Storage, config: GcsConfig) -> Self {
+        Self {
+            client,
+            control: OnceCell::new(),
+            config,
+        }
     }
 
     /// Create from armature-gcp services.
@@ -125,7 +135,29 @@ impl GcsStorage {
         let client = services
             .storage()
             .map_err(|e| StorageError::Config(e.to_string()))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            control: OnceCell::new(),
+            config,
+        })
+    }
+
+    /// Get (lazily initializing) the control-plane client.
+    async fn control(&self) -> Result<&StorageControl> {
+        self.control
+            .get_or_try_init(|| async {
+                StorageControl::builder()
+                    .build()
+                    .await
+                    .map_err(|e| StorageError::Config(e.to_string()))
+            })
+            .await
+    }
+
+    /// Bucket resource name in `projects/_/buckets/{bucket}` form, as required
+    /// by the GCS v2 API surface.
+    fn bucket_resource(&self) -> String {
+        format!("projects/_/buckets/{}", self.config.bucket)
     }
 
     /// Get the full GCS object name for a path.
@@ -159,7 +191,7 @@ impl GcsStorage {
 }
 
 #[async_trait]
-impl Storage for GcsStorage {
+impl StorageTrait for GcsStorage {
     async fn put(&self, key: &str, data: Bytes) -> Result<StorageMetadata> {
         self.put_with_content_type(key, data, "application/octet-stream")
             .await
@@ -191,15 +223,11 @@ impl Storage for GcsStorage {
             None
         };
 
-        // Upload object
-        let upload_type = UploadType::Simple(Media::new(full_key.clone()));
-        let request = UploadObjectRequest {
-            bucket: self.config.bucket.clone(),
-            ..Default::default()
-        };
-
+        // Upload object (in-memory Bytes are seekable, so an unbuffered upload works).
         self.client
-            .upload_object(&request, data.to_vec(), &upload_type)
+            .write_object(self.bucket_resource(), full_key.clone(), data)
+            .set_content_type(content_type)
+            .send_unbuffered()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -237,58 +265,52 @@ impl Storage for GcsStorage {
     async fn get(&self, key: &str) -> Result<Bytes> {
         let full_key = self.full_key(key);
 
-        let data = self
+        let mut response = self
             .client
-            .download_object(
-                &GetObjectRequest {
-                    bucket: self.config.bucket.clone(),
-                    object: full_key.clone(),
-                    ..Default::default()
-                },
-                &Range::default(),
-            )
+            .read_object(self.bucket_resource(), full_key.clone())
+            .send()
             .await
-            .map_err(|e| {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("not found") {
-                    StorageError::NotFound(key.to_string())
-                } else {
-                    StorageError::Storage(err_str)
-                }
-            })?;
+            .map_err(|e| map_object_error(e, key))?;
 
-        Ok(Bytes::from(data))
+        let mut contents = Vec::new();
+        while let Some(chunk) = response.next().await.transpose().map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("404") || err_str.contains("not found") {
+                StorageError::NotFound(key.to_string())
+            } else {
+                StorageError::Storage(err_str)
+            }
+        })? {
+            contents.extend_from_slice(&chunk);
+        }
+
+        Ok(Bytes::from(contents))
     }
 
     async fn head(&self, key: &str) -> Result<StorageMetadata> {
         let full_key = self.full_key(key);
 
         let object = self
-            .client
-            .get_object(&GetObjectRequest {
-                bucket: self.config.bucket.clone(),
-                object: full_key.clone(),
-                ..Default::default()
-            })
+            .control()
+            .await?
+            .get_object()
+            .set_bucket(self.bucket_resource())
+            .set_object(full_key.clone())
+            .send()
             .await
-            .map_err(|e| {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("not found") {
-                    StorageError::NotFound(key.to_string())
-                } else {
-                    StorageError::Storage(err_str)
-                }
-            })?;
+            .map_err(|e| map_object_error(e, key))?;
 
         let size = object.size as u64;
         let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key));
 
-        if let Some(ct) = &object.content_type {
-            metadata = metadata.with_content_type(ct);
+        if !object.content_type.is_empty() {
+            metadata = metadata.with_content_type(&object.content_type);
         }
 
-        if let Some(md5) = &object.md5_hash {
-            metadata = metadata.with_checksum(md5);
+        if let Some(checksums) = &object.checksums {
+            if !checksums.md5_hash.is_empty() {
+                metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
+            }
         }
 
         Ok(metadata)
@@ -297,12 +319,12 @@ impl Storage for GcsStorage {
     async fn delete(&self, key: &str) -> Result<()> {
         let full_key = self.full_key(key);
 
-        self.client
-            .delete_object(&DeleteObjectRequest {
-                bucket: self.config.bucket.clone(),
-                object: full_key.clone(),
-                ..Default::default()
-            })
+        self.control()
+            .await?
+            .delete_object()
+            .set_bucket(self.bucket_resource())
+            .set_object(full_key.clone())
+            .send()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -319,6 +341,8 @@ impl Storage for GcsStorage {
     }
 
     async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>> {
+        use google_cloud_gax::paginator::ItemPaginator;
+
         let mut full_prefix = String::new();
         if let Some(p) = &self.config.storage.path_prefix {
             full_prefix.push_str(p);
@@ -328,25 +352,22 @@ impl Storage for GcsStorage {
             full_prefix.push_str(p);
         }
 
-        let request = ListObjectsRequest {
-            bucket: self.config.bucket.clone(),
-            prefix: if full_prefix.is_empty() {
-                None
-            } else {
-                Some(full_prefix.clone())
-            },
-            ..Default::default()
-        };
-
-        let response = self
-            .client
-            .list_objects(&request)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+        let mut items = self
+            .control()
+            .await?
+            .list_objects()
+            .set_parent(self.bucket_resource())
+            .set_prefix(full_prefix)
+            .by_item();
 
         let mut results = Vec::new();
 
-        for object in response.items.unwrap_or_default() {
+        while let Some(object) = items
+            .next()
+            .await
+            .transpose()
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+        {
             // Remove prefix to get the relative key
             let relative_key = if let Some(p) = &self.config.storage.path_prefix {
                 object
@@ -362,12 +383,14 @@ impl Storage for GcsStorage {
             let mut metadata =
                 StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
 
-            if let Some(ct) = &object.content_type {
-                metadata = metadata.with_content_type(ct);
+            if !object.content_type.is_empty() {
+                metadata = metadata.with_content_type(&object.content_type);
             }
 
-            if let Some(md5) = &object.md5_hash {
-                metadata = metadata.with_checksum(md5);
+            if let Some(checksums) = &object.checksums {
+                if !checksums.md5_hash.is_empty() {
+                    metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
+                }
             }
 
             results.push(metadata);
@@ -380,16 +403,15 @@ impl Storage for GcsStorage {
         let from_key = self.full_key(from);
         let to_key = self.full_key(to);
 
-        use google_cloud_storage::http::objects::copy::CopyObjectRequest;
-
-        self.client
-            .copy_object(&CopyObjectRequest {
-                source_bucket: self.config.bucket.clone(),
-                source_object: from_key,
-                destination_bucket: self.config.bucket.clone(),
-                destination_object: to_key,
-                ..Default::default()
-            })
+        // Server-side copy is performed via the rewrite operation in the new SDK.
+        self.control()
+            .await?
+            .rewrite_object()
+            .set_source_bucket(self.bucket_resource())
+            .set_source_object(from_key)
+            .set_destination_bucket(self.bucket_resource())
+            .set_destination_name(to_key)
+            .send()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -401,26 +423,34 @@ impl Storage for GcsStorage {
     }
 
     async fn temporary_url(&self, key: &str, expires_in: Duration) -> Result<Option<String>> {
+        use google_cloud_auth::credentials::Builder as CredentialsBuilder;
+        use google_cloud_storage::builder::storage::SignedUrlBuilder;
+
         let full_key = self.full_key(key);
 
-        use google_cloud_storage::sign::{SignedURLMethod, SignedURLOptions};
+        // The new SDK signs V4 URLs locally using a `Signer` derived from the
+        // ambient credentials (Application Default Credentials).
+        let signer = CredentialsBuilder::default()
+            .build_signer()
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        let url = self
-            .client
-            .signed_url(
-                &self.config.bucket,
-                &full_key,
-                None,
-                None,
-                SignedURLOptions {
-                    method: SignedURLMethod::GET,
-                    expires: expires_in,
-                    ..Default::default()
-                },
-            )
+        let url = SignedUrlBuilder::for_object(self.bucket_resource(), full_key)
+            .with_method(http::Method::GET)
+            .with_expiration(expires_in)
+            .sign_with(&signer)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
         Ok(Some(url))
+    }
+}
+
+/// Map a GCS error to a [`StorageError`], translating not-found responses.
+fn map_object_error(err: google_cloud_storage::Error, key: &str) -> StorageError {
+    let err_str = err.to_string();
+    if err_str.contains("404") || err_str.contains("not found") || err_str.contains("NOT_FOUND") {
+        StorageError::NotFound(key.to_string())
+    } else {
+        StorageError::Storage(err_str)
     }
 }

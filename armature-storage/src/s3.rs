@@ -220,16 +220,13 @@ impl Storage for S3Storage {
 
         // Set ACL if configured
         if let Some(acl) = &self.config.default_acl {
-            if let Ok(acl) = acl.parse::<ObjectCannedAcl>() {
-                request = request.acl(acl);
-            }
+            request = request.acl(ObjectCannedAcl::from(acl.as_str()));
         }
 
         // Set encryption if configured
         if let Some(encryption) = &self.config.server_side_encryption {
-            if let Ok(sse) = encryption.parse::<ServerSideEncryption>() {
-                request = request.server_side_encryption(sse);
-            }
+            request =
+                request.server_side_encryption(ServerSideEncryption::from(encryption.as_str()));
         }
 
         // Execute upload
@@ -376,28 +373,26 @@ impl Storage for S3Storage {
 
         let mut results = Vec::new();
 
-        if let Some(contents) = response.contents() {
-            for object in contents {
-                if let Some(key) = object.key() {
-                    // Remove prefix to get the relative key
-                    let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                        key.strip_prefix(&format!("{}/", p))
-                            .unwrap_or(key)
-                            .to_string()
-                    } else {
-                        key.to_string()
-                    };
+        for object in response.contents() {
+            if let Some(key) = object.key() {
+                // Remove prefix to get the relative key
+                let relative_key = if let Some(p) = &self.config.storage.path_prefix {
+                    key.strip_prefix(&format!("{}/", p))
+                        .unwrap_or(key)
+                        .to_string()
+                } else {
+                    key.to_string()
+                };
 
-                    let size = object.size().unwrap_or(0) as u64;
-                    let mut metadata = StorageMetadata::new(&relative_key, size)
-                        .with_url(self.public_url(&relative_key));
+                let size = object.size().unwrap_or(0) as u64;
+                let mut metadata = StorageMetadata::new(&relative_key, size)
+                    .with_url(self.public_url(&relative_key));
 
-                    if let Some(etag) = object.e_tag() {
-                        metadata = metadata.with_checksum(etag.trim_matches('"'));
-                    }
-
-                    results.push(metadata);
+                if let Some(etag) = object.e_tag() {
+                    metadata = metadata.with_checksum(etag.trim_matches('"'));
                 }
+
+                results.push(metadata);
             }
         }
 

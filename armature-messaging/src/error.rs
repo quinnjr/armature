@@ -109,13 +109,16 @@ impl MessagingError {
 #[cfg(feature = "rabbitmq")]
 impl From<lapin::Error> for MessagingError {
     fn from(err: lapin::Error) -> Self {
-        match &err {
-            lapin::Error::IOError(_) => MessagingError::Connection(err.to_string()),
-            lapin::Error::ChannelsLimitReached => {
-                MessagingError::ResourceExhausted(err.to_string())
+        use lapin::ErrorKind;
+        match err.kind() {
+            ErrorKind::IOError(_) | ErrorKind::RuntimeShutdownError(_) => {
+                MessagingError::Connection(err.to_string())
             }
-            lapin::Error::InvalidChannelState(_) => MessagingError::ChannelClosed(err.to_string()),
-            lapin::Error::InvalidConnectionState(_) => MessagingError::Connection(err.to_string()),
+            ErrorKind::ChannelsLimitReached => MessagingError::ResourceExhausted(err.to_string()),
+            ErrorKind::InvalidChannel(_) | ErrorKind::InvalidChannelState(..) => {
+                MessagingError::ChannelClosed(err.to_string())
+            }
+            ErrorKind::InvalidConnectionState(_) => MessagingError::Connection(err.to_string()),
             _ => MessagingError::BrokerError(err.to_string()),
         }
     }

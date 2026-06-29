@@ -6,7 +6,10 @@ use sea_orm::{ConnectionTrait, DatabaseConnection};
 use std::sync::Arc;
 
 /// Database wrapper providing connection management.
-#[derive(Clone)]
+///
+/// `Clone` is implemented unless the `mock` feature is enabled, mirroring
+/// SeaORM's own `DatabaseConnection`, which is not `Clone` under `mock`.
+#[cfg_attr(not(feature = "mock"), derive(Clone))]
 pub struct Database {
     conn: DatabaseConnection,
     config: Arc<DatabaseConfig>,

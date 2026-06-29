@@ -38,9 +38,9 @@ use data_encoding::BASE32_NOPAD;
 #[cfg(feature = "two-factor")]
 use qrcode::{QrCode, render::svg};
 #[cfg(feature = "two-factor")]
-use totp_lite::{DEFAULT_STEP, Sha1, totp_custom};
+use totp_lite::{Sha1, totp_custom};
 
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -79,7 +79,7 @@ impl TotpSecret {
     /// println!("Secret: {}", secret.to_base32());
     /// ```
     pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let bytes: Vec<u8> = (0..20).map(|_| rng.random()).collect();
 
         #[cfg(feature = "two-factor")]
@@ -112,12 +112,12 @@ impl TotpSecret {
     ///
     /// let secret = TotpSecret::generate();
     /// # #[cfg(feature = "two-factor")]
-    /// let code = secret.generate(30).unwrap();
+    /// let code = secret.generate_code(30).unwrap();
     /// # #[cfg(feature = "two-factor")]
     /// println!("Current TOTP: {}", code);
     /// ```
     #[cfg(feature = "two-factor")]
-    pub fn generate(&self, time_step: u64) -> Result<String, TwoFactorError> {
+    pub fn generate_code(&self, time_step: u64) -> Result<String, TwoFactorError> {
         let secret_bytes = BASE32_NOPAD
             .decode(self.secret.as_bytes())
             .map_err(|_| TwoFactorError::InvalidSecret)?;
@@ -127,12 +127,13 @@ impl TotpSecret {
             .unwrap()
             .as_secs();
 
+        // totp-lite returns the code already zero-padded to the requested digit count.
         let code = totp_custom::<Sha1>(time_step, 6, &secret_bytes, timestamp);
-        Ok(format!("{:06}", code))
+        Ok(code)
     }
 
     #[cfg(not(feature = "two-factor"))]
-    pub fn generate(&self, _time_step: u64) -> Result<String, TwoFactorError> {
+    pub fn generate_code(&self, _time_step: u64) -> Result<String, TwoFactorError> {
         Err(TwoFactorError::FeatureNotEnabled("two-factor"))
     }
 
@@ -148,7 +149,7 @@ impl TotpSecret {
     /// # #[cfg(feature = "two-factor")]
     /// # fn example() -> Result<(), TwoFactorError> {
     /// let secret = TotpSecret::generate();
-    /// let code = secret.generate(30)?;
+    /// let code = secret.generate_code(30)?;
     ///
     /// // Verify the code
     /// assert!(secret.verify(&code, 30)?);
@@ -161,8 +162,6 @@ impl TotpSecret {
             .decode(self.secret.as_bytes())
             .map_err(|_| TwoFactorError::InvalidSecret)?;
 
-        let user_code: u32 = code.parse().map_err(|_| TwoFactorError::InvalidCode)?;
-
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -173,7 +172,7 @@ impl TotpSecret {
             let check_time = ((timestamp as i64) + (offset * time_step as i64)) as u64;
             let expected_code = totp_custom::<Sha1>(time_step, 6, &secret_bytes, check_time);
 
-            if expected_code == user_code {
+            if expected_code == code {
                 return Ok(true);
             }
         }
@@ -255,7 +254,7 @@ impl BackupCodes {
     /// }
     /// ```
     pub fn generate(count: usize) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let codes = (0..count)
             .map(|_| {
                 let bytes: Vec<u8> = (0..8).map(|_| rng.random()).collect();
@@ -299,7 +298,7 @@ mod tests {
     #[cfg(feature = "two-factor")]
     fn test_generate_and_verify_totp() {
         let secret = TotpSecret::generate();
-        let code = secret.generate(30).unwrap();
+        let code = secret.generate_code(30).unwrap();
         assert!(secret.verify(&code, 30).unwrap());
     }
 

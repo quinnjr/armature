@@ -168,7 +168,8 @@ impl ZipBuilder {
         }
 
         if let Some(comment) = &self.comment {
-            zip.set_comment(comment.as_str());
+            zip.set_comment(comment.as_str())
+                .map_err(|e| FileError::Archive(format!("Failed to set comment: {}", e)))?;
         }
 
         zip.finish()

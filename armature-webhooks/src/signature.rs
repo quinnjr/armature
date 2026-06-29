@@ -1,7 +1,7 @@
 //! Webhook signature generation and verification
 
 use crate::{Result, WebhookError};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha512};
 
 type HmacSha256 = Hmac<Sha256>;

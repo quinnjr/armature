@@ -18,7 +18,7 @@ postgres = ["diesel/postgres", "diesel-async/postgres"]
 mysql = ["diesel/mysql", "diesel-async/mysql"]
 # Connection pools
 deadpool = ["diesel-async/deadpool"]
-bb8 = ["diesel-async/bb8"]
+bb8 = ["diesel-async/bb8", "dep:bb8"]
 mobc = ["diesel-async/mobc"]
 # Extras
 r2d2 = ["diesel/r2d2"]
@@ -27,9 +27,10 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 # Diesel
-diesel = { version = "2.2", default-features = false }
-diesel-async = { version = "0.7", default-features = false }
-diesel_migrations = { version = "2.2", optional = true }
+diesel = { version = "2.3", default-features = false }
+diesel-async = { version = "0.9", default-features = false }
+diesel_migrations = { version = "2.3", optional = true }
+bb8 = { version = "0.9", optional = true }
 
 # Async
 tokio = { version = "1", features = ["sync"] }

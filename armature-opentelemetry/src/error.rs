@@ -10,7 +10,7 @@ pub type TelemetryResult<T> = Result<T, TelemetryError>;
 pub enum TelemetryError {
     /// Trace error
     #[error("Trace error: {0}")]
-    Trace(#[from] opentelemetry_sdk::trace::TraceError),
+    Trace(#[from] opentelemetry_sdk::error::OTelSdkError),
 
     /// Metrics error
     #[error("Metrics error: {0}")]

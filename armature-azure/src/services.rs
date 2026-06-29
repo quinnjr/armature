@@ -17,19 +17,19 @@ pub struct AzureServices {
     config: AzureConfig,
 
     #[cfg(feature = "auth")]
-    credential: Arc<dyn azure_core::auth::TokenCredential>,
+    credential: Arc<dyn azure_core::credentials::TokenCredential>,
 
     #[cfg(feature = "blob")]
-    blob_service: RwLock<Option<azure_storage_blobs::prelude::BlobServiceClient>>,
+    blob_service: RwLock<Option<Arc<azure_storage_blob::BlobServiceClient>>>,
 
     #[cfg(feature = "queue")]
-    queue_service: RwLock<Option<azure_storage_queues::QueueServiceClient>>,
+    queue_service: RwLock<Option<Arc<azure_storage_queue::QueueServiceClient>>>,
 
     #[cfg(feature = "cosmos")]
     cosmos: RwLock<Option<azure_data_cosmos::CosmosClient>>,
 
     #[cfg(feature = "keyvault")]
-    keyvault: RwLock<Option<azure_security_keyvault::SecretClient>>,
+    keyvault: RwLock<Option<Arc<azure_security_keyvault_secrets::SecretClient>>>,
 }
 
 impl AzureServices {
@@ -70,32 +70,45 @@ impl AzureServices {
     #[cfg(feature = "auth")]
     async fn build_credential(
         config: &AzureConfig,
-    ) -> Result<Arc<dyn azure_core::auth::TokenCredential>> {
+    ) -> Result<Arc<dyn azure_core::credentials::TokenCredential>> {
         use azure_identity::*;
 
-        match &config.credentials {
-            CredentialsSource::DefaultCredential => Ok(Arc::new(DefaultAzureCredential::default())),
-            CredentialsSource::Environment => Ok(Arc::new(EnvironmentCredential::default())),
-            CredentialsSource::ManagedIdentity => {
-                Ok(Arc::new(ImdsManagedIdentityCredential::default()))
-            }
-            CredentialsSource::AzureCli => Ok(Arc::new(AzureCliCredential::new())),
-            CredentialsSource::ServicePrincipal {
-                tenant_id,
-                client_id,
-                client_secret,
-            } => Ok(Arc::new(ClientSecretCredential::new(
-                azure_identity::TokenCredentialOptions::default(),
-                tenant_id.clone(),
-                client_id.clone(),
-                client_secret.clone(),
-            ))),
-            CredentialsSource::ConnectionString(_)
-            | CredentialsSource::StorageAccountKey { .. } => {
-                // For storage-specific auth, we'll handle it at the client level
-                Ok(Arc::new(DefaultAzureCredential::default()))
-            }
-        }
+        // The azure_identity 1.0 line removed the old `DefaultAzureCredential`,
+        // `EnvironmentCredential` and `ImdsManagedIdentityCredential` types and
+        // reworked the remaining constructors to return `Result<Arc<Self>>`.
+        // `DeveloperToolsCredential` is the closest replacement for the previous
+        // default credential chain.
+        let credential: Arc<dyn azure_core::credentials::TokenCredential> =
+            match &config.credentials {
+                CredentialsSource::DefaultCredential => DeveloperToolsCredential::new(None)
+                    .map_err(|e| AzureError::Auth(e.to_string()))?,
+                CredentialsSource::Environment => DeveloperToolsCredential::new(None)
+                    .map_err(|e| AzureError::Auth(e.to_string()))?,
+                CredentialsSource::ManagedIdentity => ManagedIdentityCredential::new(None)
+                    .map_err(|e| AzureError::Auth(e.to_string()))?,
+                CredentialsSource::AzureCli => {
+                    AzureCliCredential::new(None).map_err(|e| AzureError::Auth(e.to_string()))?
+                }
+                CredentialsSource::ServicePrincipal {
+                    tenant_id,
+                    client_id,
+                    client_secret,
+                } => ClientSecretCredential::new(
+                    tenant_id.as_str(),
+                    client_id.clone(),
+                    client_secret.clone().into(),
+                    None,
+                )
+                .map_err(|e| AzureError::Auth(e.to_string()))?,
+                CredentialsSource::ConnectionString(_)
+                | CredentialsSource::StorageAccountKey { .. } => {
+                    // For storage-specific auth, we'll handle it at the client level.
+                    DeveloperToolsCredential::new(None)
+                        .map_err(|e| AzureError::Auth(e.to_string()))?
+                }
+            };
+
+        Ok(credential)
     }
 
     /// Initialize all enabled services.
@@ -112,7 +125,7 @@ impl AzureServices {
                 }
                 #[cfg(feature = "cosmos")]
                 "cosmos" => {
-                    self.init_cosmos()?;
+                    self.init_cosmos().await?;
                 }
                 #[cfg(feature = "keyvault")]
                 "keyvault" => {
@@ -133,8 +146,8 @@ impl AzureServices {
 
     #[cfg(feature = "blob")]
     fn init_blob(&self) -> Result<()> {
-        use azure_storage::prelude::*;
-        use azure_storage_blobs::prelude::*;
+        use azure_core::http::Url;
+        use azure_storage_blob::BlobServiceClient;
 
         let mut client = self.blob_service.write();
         if client.is_none() {
@@ -144,31 +157,47 @@ impl AzureServices {
                 .as_ref()
                 .ok_or(AzureError::StorageAccountNotSpecified)?;
 
-            let storage_credentials = match &self.config.credentials {
-                CredentialsSource::ConnectionString(conn_str) => {
-                    StorageCredentials::connection_string(conn_str)
-                        .map_err(|e| AzureError::Config(e.to_string()))?
-                }
-                CredentialsSource::StorageAccountKey {
-                    account_name: _,
-                    account_key,
-                } => StorageCredentials::access_key(account.clone(), account_key.clone()),
-                _ => {
-                    // Use token credential
-                    StorageCredentials::token_credential(self.credential.clone())
-                }
-            };
-
+            // The new SDK (azure_storage_blob 1.0) is endpoint-URL + AAD-credential
+            // based. It builds clients from a service URL plus an optional
+            // `Arc<dyn TokenCredential>`; the old connection-string and shared-key
+            // (account-key) authentication modes are no longer supported.
             let blob_client = if self.config.use_emulator {
-                // Azurite emulator
-                BlobServiceClient::builder(account, storage_credentials)
-                    .blob_service_url(format!("http://127.0.0.1:10000/{}", account))
-                    .build()
+                // Azurite emulator: HTTP endpoint, unauthenticated pipeline.
+                let endpoint = Url::parse(&format!("http://127.0.0.1:10000/{account}"))
+                    .map_err(|e| AzureError::Config(e.to_string()))?;
+                BlobServiceClient::new(endpoint, None, None)
+                    .map_err(|e| AzureError::Service(e.to_string()))?
             } else {
-                BlobServiceClient::new(account, storage_credentials)
+                match &self.config.credentials {
+                    CredentialsSource::ConnectionString(_) => {
+                        return Err(AzureError::Config(
+                            "azure_storage_blob 1.0 requires AAD (Entra ID) token \
+                             credentials; connection-string authentication is no longer \
+                             supported by the new Azure SDK. Use a token credential source \
+                             (DefaultCredential, ManagedIdentity, AzureCli, ServicePrincipal)."
+                                .to_string(),
+                        ));
+                    }
+                    CredentialsSource::StorageAccountKey { .. } => {
+                        return Err(AzureError::Config(
+                            "azure_storage_blob 1.0 requires AAD (Entra ID) token \
+                             credentials; shared-key (storage account key) authentication is \
+                             no longer supported by the new Azure SDK. Use a token credential \
+                             source instead."
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        let endpoint =
+                            Url::parse(&format!("https://{account}.blob.core.windows.net/"))
+                                .map_err(|e| AzureError::Config(e.to_string()))?;
+                        BlobServiceClient::new(endpoint, Some(self.credential.clone()), None)
+                            .map_err(|e| AzureError::Service(e.to_string()))?
+                    }
+                }
             };
 
-            *client = Some(blob_client);
+            *client = Some(Arc::new(blob_client));
             info!(account = %account, "Blob Storage client initialized");
         }
         Ok(())
@@ -176,8 +205,8 @@ impl AzureServices {
 
     #[cfg(feature = "queue")]
     fn init_queue(&self) -> Result<()> {
-        use azure_storage::prelude::*;
-        use azure_storage_queues::*;
+        use azure_core::http::Url;
+        use azure_storage_queue::QueueServiceClient;
 
         let mut client = self.queue_service.write();
         if client.is_none() {
@@ -187,38 +216,83 @@ impl AzureServices {
                 .as_ref()
                 .ok_or(AzureError::StorageAccountNotSpecified)?;
 
-            let storage_credentials = match &self.config.credentials {
-                CredentialsSource::ConnectionString(conn_str) => {
-                    StorageCredentials::connection_string(conn_str)
-                        .map_err(|e| AzureError::Config(e.to_string()))?
+            // The new SDK (azure_storage_queue 1.0) is endpoint-URL + AAD-credential
+            // based; the old connection-string and shared-key (account-key) auth modes
+            // are no longer supported.
+            let queue_client = if self.config.use_emulator {
+                // Azurite emulator: HTTP endpoint, unauthenticated pipeline.
+                let endpoint = Url::parse(&format!("http://127.0.0.1:10001/{account}"))
+                    .map_err(|e| AzureError::Config(e.to_string()))?;
+                QueueServiceClient::new(endpoint, None, None)
+                    .map_err(|e| AzureError::Service(e.to_string()))?
+            } else {
+                match &self.config.credentials {
+                    CredentialsSource::ConnectionString(_) => {
+                        return Err(AzureError::Config(
+                            "azure_storage_queue 1.0 requires AAD (Entra ID) token \
+                             credentials; connection-string authentication is no longer \
+                             supported by the new Azure SDK. Use a token credential source \
+                             (DefaultCredential, ManagedIdentity, AzureCli, ServicePrincipal)."
+                                .to_string(),
+                        ));
+                    }
+                    CredentialsSource::StorageAccountKey { .. } => {
+                        return Err(AzureError::Config(
+                            "azure_storage_queue 1.0 requires AAD (Entra ID) token \
+                             credentials; shared-key (storage account key) authentication is \
+                             no longer supported by the new Azure SDK. Use a token credential \
+                             source instead."
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        let endpoint =
+                            Url::parse(&format!("https://{account}.queue.core.windows.net/"))
+                                .map_err(|e| AzureError::Config(e.to_string()))?;
+                        QueueServiceClient::new(endpoint, Some(self.credential.clone()), None)
+                            .map_err(|e| AzureError::Service(e.to_string()))?
+                    }
                 }
-                CredentialsSource::StorageAccountKey {
-                    account_name: _,
-                    account_key,
-                } => StorageCredentials::access_key(account.clone(), account_key.clone()),
-                _ => StorageCredentials::token_credential(self.credential.clone()),
             };
 
-            let queue_client = QueueServiceClient::new(account, storage_credentials);
-            *client = Some(queue_client);
+            *client = Some(Arc::new(queue_client));
             info!(account = %account, "Queue Storage client initialized");
         }
         Ok(())
     }
 
     #[cfg(feature = "cosmos")]
-    fn init_cosmos(&self) -> Result<()> {
-        use azure_data_cosmos::prelude::*;
+    async fn init_cosmos(&self) -> Result<()> {
+        use azure_data_cosmos::{AccountEndpoint, AccountReference, CosmosClient, RoutingStrategy};
 
-        let mut client = self.cosmos.write();
-        if client.is_none() {
-            let endpoint = self.config.cosmos_endpoint.as_ref().ok_or_else(|| {
+        // Fast path: already initialized. The lock guard is intentionally dropped
+        // before the `.await` below so the non-Send `parking_lot` guard is never
+        // held across a suspension point.
+        if self.cosmos.read().is_some() {
+            return Ok(());
+        }
+
+        let endpoint =
+            self.config.cosmos_endpoint.as_ref().ok_or_else(|| {
                 AzureError::Config("Cosmos DB endpoint not specified".to_string())
             })?;
 
-            let cosmos_client =
-                CosmosClient::new(endpoint, self.credential.clone(), CosmosOptions::default());
+        // azure_data_cosmos 0.36 replaced `CosmosClient::new(...)` with a builder
+        // that takes an `AccountReference` (endpoint + credential) and an explicit
+        // `RoutingStrategy`. An empty preferred-region list defers region selection
+        // to the account's default, preserving the previous endpoint-only behavior.
+        let account_endpoint: AccountEndpoint = endpoint
+            .parse()
+            .map_err(|e: azure_data_cosmos::CosmosError| AzureError::Config(e.to_string()))?;
+        let account = AccountReference::with_credential(account_endpoint, self.credential.clone());
 
+        let cosmos_client = CosmosClient::builder()
+            .build(account, RoutingStrategy::PreferredRegions(Vec::new()))
+            .await
+            .map_err(|e| AzureError::Service(e.to_string()))?;
+
+        let mut client = self.cosmos.write();
+        if client.is_none() {
             *client = Some(cosmos_client);
             info!(endpoint = %endpoint, "Cosmos DB client initialized");
         }
@@ -227,7 +301,7 @@ impl AzureServices {
 
     #[cfg(feature = "keyvault")]
     fn init_keyvault(&self) -> Result<()> {
-        use azure_security_keyvault::prelude::*;
+        use azure_security_keyvault_secrets::SecretClient;
 
         let mut client = self.keyvault.write();
         if client.is_none() {
@@ -237,10 +311,13 @@ impl AzureServices {
                 .as_ref()
                 .ok_or_else(|| AzureError::Config("Key Vault URL not specified".to_string()))?;
 
-            let kv_client = SecretClient::new(vault_url, self.credential.clone())
+            // Key Vault has always used AAD credentials; the new SDK
+            // (azure_security_keyvault_secrets 1.0) takes the vault endpoint plus an
+            // `Arc<dyn TokenCredential>` and an optional options argument.
+            let kv_client = SecretClient::new(vault_url, self.credential.clone(), None)
                 .map_err(|e| AzureError::Config(e.to_string()))?;
 
-            *client = Some(kv_client);
+            *client = Some(Arc::new(kv_client));
             info!(vault = %vault_url, "Key Vault client initialized");
         }
         Ok(())
@@ -250,7 +327,7 @@ impl AzureServices {
 
     /// Get the Blob Service client.
     #[cfg(feature = "blob")]
-    pub fn blob_service(&self) -> Result<azure_storage_blobs::prelude::BlobServiceClient> {
+    pub fn blob_service(&self) -> Result<Arc<azure_storage_blob::BlobServiceClient>> {
         if !self.config.is_enabled("blob") {
             return Err(AzureError::not_configured("blob"));
         }
@@ -268,7 +345,7 @@ impl AzureServices {
 
     /// Get the Queue Service client.
     #[cfg(feature = "queue")]
-    pub fn queue_service(&self) -> Result<azure_storage_queues::QueueServiceClient> {
+    pub fn queue_service(&self) -> Result<Arc<azure_storage_queue::QueueServiceClient>> {
         if !self.config.is_enabled("queue") {
             return Err(AzureError::not_configured("queue"));
         }
@@ -304,7 +381,7 @@ impl AzureServices {
 
     /// Get the Key Vault client.
     #[cfg(feature = "keyvault")]
-    pub fn keyvault(&self) -> Result<azure_security_keyvault::SecretClient> {
+    pub fn keyvault(&self) -> Result<Arc<azure_security_keyvault_secrets::SecretClient>> {
         if !self.config.is_enabled("keyvault") {
             return Err(AzureError::not_configured("keyvault"));
         }

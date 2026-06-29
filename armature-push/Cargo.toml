@@ -13,7 +13,7 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["sync", "time"] }
+tokio = { version = "1.52", features = ["sync", "time"] }
 async-trait = "0.1"
 
 # Serialization
@@ -21,14 +21,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 
 # Error handling
 thiserror = "2.0"
 
 # Utilities
 tracing = "0.1"
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 url = "2.5"
 
@@ -40,13 +40,13 @@ url = "2.5"
 web-push = { version = "0.11", optional = true }
 
 # JWT for FCM/APNS
-jsonwebtoken = { version = "9.3", optional = true }
+jsonwebtoken = { version = "10.4", optional = true }
 
 # Cryptography for APNS
 p256 = { version = "0.13", features = ["ecdsa", "pem"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 tokio-test = "0.4"
 
 [features]

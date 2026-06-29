@@ -19,31 +19,31 @@ thiserror = "2.0"
 tracing = "0.1"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 futures = "0.3"
 
 # HTTP client for outgoing webhooks
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Cryptographic signatures
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
 # Unique identifiers
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 # URL parsing
 url = "2.5"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 wiremock = "0.6"
 

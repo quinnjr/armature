@@ -119,12 +119,9 @@ impl WebPushProvider {
         );
 
         // Build VAPID signature
-        let mut sig_builder = VapidSignatureBuilder::from_base64(
-            &self.config.private_key,
-            web_push::URL_SAFE_NO_PAD,
-            &subscription_info,
-        )
-        .map_err(|e: web_push::WebPushError| PushError::Config(e.to_string()))?;
+        let mut sig_builder =
+            VapidSignatureBuilder::from_base64(&self.config.private_key, &subscription_info)
+                .map_err(|e: web_push::WebPushError| PushError::Config(e.to_string()))?;
 
         sig_builder.add_claim(
             "sub",

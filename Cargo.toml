@@ -136,7 +136,7 @@ armature-webhooks = { path = "armature-webhooks", version = "0.1.1", optional = 
 armature-messaging = { path = "armature-messaging", version = "0.1.0", optional = true }
 
 # Re-export core functionality
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
@@ -225,12 +225,15 @@ optional = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Needed by graphql examples: async-graphql's derive macros emit absolute
+# `::async_graphql` paths, so the crate must be directly nameable here.
+async-graphql = "7.2"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
-regex = "1.10"
+regex = "1.12"
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks"] }
-rand = "0.9"
-reqwest = { version = "0.12", features = ["json"] }
-ctrlc = "3.4"
+rand = "0.10"
+reqwest = { version = "0.13", features = ["json"] }
+ctrlc = "3.5"
 crossbeam = "0.8"  # Lock-free data structures for benchmarks
 
 # Unix-only profiling dependencies (pprof requires Unix-specific APIs)
@@ -394,17 +397,17 @@ path = "armature-ferron"
 path = "armature-app"
 
 [dev-dependencies.fastrand]
-version = "2.3"
+version = "2.4"
 
 [dev-dependencies.jsonwebtoken]
-version = "10.2"
+version = "10.4"
 features = ["rust_crypto"]
 
 [dev-dependencies.handlebars]
-version = "6.3"
+version = "6.4"
 
 [dev-dependencies.bytes]
-version = "1.5"
+version = "1.12"
 
 # Database ORMs for examples - using rustls instead of native-tls to avoid openssl
 [dev-dependencies.sqlx]
@@ -412,7 +415,7 @@ version = "0.8"
 features = ["runtime-tokio-rustls", "postgres", "chrono"]
 
 [dev-dependencies.diesel]
-version = "2.2"
+version = "2.3"
 features = ["postgres", "r2d2", "chrono"]
 
 [dev-dependencies.sea-orm]
@@ -423,7 +426,7 @@ features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"]
 version = "0.4"
 
 [dev-dependencies.uuid]
-version = "1.11"
+version = "1.23"
 features = ["v4"]
 
 [dev-dependencies.tracing]

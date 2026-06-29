@@ -14,20 +14,20 @@ categories = ["web-programming", "api-bindings"]
 [dependencies]
 armature-core = { path = "../armature-core", version = "0.2.1" }
 armature-log = { path = "../armature-log", version = "0.1.0" }
-tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 thiserror = "2.0"
-uuid = { version = "1.8", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "form"] }
 url = "2.5"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 base64 = "0.22"
-rust_decimal = { version = "1.35", features = ["serde"] }
+rust_decimal = { version = "1.42", features = ["serde"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 [features]

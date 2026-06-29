@@ -103,12 +103,11 @@ impl TransactionExt for crate::PgPool {
         T: Send,
     {
         use diesel_async::AsyncConnection;
-        use diesel_async::scoped_futures::ScopedFutureExt;
 
         let mut conn = self.get().await?;
         let conn: &mut AsyncPgConnection = &mut conn;
 
-        conn.transaction(|conn| async move { f(conn).await }.scope_boxed())
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
             .await
             .map_err(|e| DieselError::Transaction(e.to_string()))
     }
@@ -123,7 +122,6 @@ impl TransactionExt for crate::PgPool {
         Fut: Future<Output = Result<T, diesel::result::Error>> + Send,
         T: Send,
     {
-        use diesel_async::scoped_futures::ScopedFutureExt;
         use diesel_async::{AsyncConnection, RunQueryDsl};
 
         let mut conn = self.get().await?;
@@ -138,7 +136,7 @@ impl TransactionExt for crate::PgPool {
         .await
         .map_err(|e| DieselError::Transaction(e.to_string()))?;
 
-        conn.transaction(|conn| async move { f(conn).await }.scope_boxed())
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
             .await
             .map_err(|e| DieselError::Transaction(e.to_string()))
     }
@@ -160,12 +158,11 @@ impl TransactionExt for crate::MysqlPool {
         T: Send,
     {
         use diesel_async::AsyncConnection;
-        use diesel_async::scoped_futures::ScopedFutureExt;
 
         let mut conn = self.get().await?;
         let conn: &mut AsyncMysqlConnection = &mut *conn;
 
-        conn.transaction(|conn| async move { f(conn).await }.scope_boxed())
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
             .await
             .map_err(|e| DieselError::Transaction(e.to_string()))
     }
@@ -180,7 +177,6 @@ impl TransactionExt for crate::MysqlPool {
         Fut: Future<Output = Result<T, diesel::result::Error>> + Send,
         T: Send,
     {
-        use diesel_async::scoped_futures::ScopedFutureExt;
         use diesel_async::{AsyncConnection, RunQueryDsl};
 
         let mut conn = self.get().await?;
@@ -195,7 +191,7 @@ impl TransactionExt for crate::MysqlPool {
         .await
         .map_err(|e| DieselError::Transaction(e.to_string()))?;
 
-        conn.transaction(|conn| async move { f(conn).await }.scope_boxed())
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
             .await
             .map_err(|e| DieselError::Transaction(e.to_string()))
     }

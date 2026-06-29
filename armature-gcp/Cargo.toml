@@ -13,24 +13,24 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["sync"] }
+tokio = { version = "1.52", features = ["sync"] }
 async-trait = "0.1"
 
 # GCP authentication
 gcp_auth = { version = "0.12", optional = true }
 
 # GCP services (all optional)
-google-cloud-storage = { version = "1.5", optional = true }
-google-cloud-pubsub = { version = "0.30", optional = true }
+google-cloud-storage = { version = "1.15", optional = true }
+google-cloud-pubsub = { version = "1.1", optional = true }
 google-cloud-spanner = { version = "0.33", optional = true }
-google-cloud-bigquery = { version = "0.15", optional = true }
+gcloud-bigquery = { version = "1.7", optional = true }
 
 # Firestore uses tonic-based client
-google-cloud-googleapis = { version = "0.15", optional = true }
-tonic = { version = "0.12", optional = true }
+google-cloud-googleapis = { version = "0.16", optional = true }
+tonic = { version = "0.14", optional = true }
 
 # HTTP client for REST APIs
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -42,10 +42,10 @@ thiserror = "2.0"
 # Utilities
 tracing = "0.1"
 parking_lot = "0.12"
-jsonwebtoken = { version = "9.3", optional = true }
+jsonwebtoken = { version = "10.4", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 
 [features]
 default = []
@@ -55,7 +55,7 @@ auth = ["gcp_auth"]
 storage = ["google-cloud-storage", "auth"]
 pubsub = ["google-cloud-pubsub", "auth"]
 spanner = ["google-cloud-spanner", "auth"]
-bigquery = ["google-cloud-bigquery", "auth"]
+bigquery = ["gcloud-bigquery", "auth"]
 firestore = ["google-cloud-googleapis", "tonic", "auth"]
 # REST-based services (use HTTP client)
 cloud-run = ["reqwest", "jsonwebtoken", "auth"]

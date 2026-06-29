@@ -72,4 +72,4 @@ pub use google_cloud_pubsub;
 pub use google_cloud_spanner;
 
 #[cfg(feature = "bigquery")]
-pub use google_cloud_bigquery;
+pub use gcloud_bigquery;
