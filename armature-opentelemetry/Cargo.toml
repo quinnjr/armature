@@ -15,7 +15,7 @@ categories = ["development-tools::profiling", "web-programming"]
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # OpenTelemetry core (all versions must match)
-opentelemetry = "0.31"
+opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = "0.31"
 
