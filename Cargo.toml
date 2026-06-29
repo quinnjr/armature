@@ -411,7 +411,7 @@ version = "1.5"
 
 # Database ORMs for examples - using rustls instead of native-tls to avoid openssl
 [dev-dependencies.sqlx]
-version = "0.8"
+version = "0.9"
 features = ["runtime-tokio-rustls", "postgres", "chrono"]
 
 [dev-dependencies.diesel]
