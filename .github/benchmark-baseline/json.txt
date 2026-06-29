@@ -1,102 +1,6 @@
-[1m[33mwarning[0m[1m: struct `ScriptContextBuilder` is never constructed[0m
-  [1m[94m--> [0marmature-rhai/src/context.rs:82:12
-   [1m[94m|[0m
-[1m[94m82[0m [1m[94m|[0m pub struct ScriptContextBuilder {
-   [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
-   [1m[94m|[0m
-   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[33mwarning[0m[1m: associated items `new`, `request`, `state`, `local`, and `build` are never used[0m
-   [1m[94m--> [0marmature-rhai/src/context.rs:96:12
-    [1m[94m|[0m
-[1m[94m 94[0m [1m[94m|[0m impl ScriptContextBuilder {
-    [1m[94m|[0m [1m[94m-------------------------[0m [1m[94massociated items in this implementation[0m
-[1m[94m 95[0m [1m[94m|[0m     /// Create a new builder.
-[1m[94m 96[0m [1m[94m|[0m     pub fn new() -> Self {
-    [1m[94m|[0m            [1m[33m^^^[0m
-[1m[94m...[0m
-[1m[94m105[0m [1m[94m|[0m     pub fn request(mut self, request: RequestBinding) -> Self {
-    [1m[94m|[0m            [1m[33m^^^^^^^[0m
-[1m[94m...[0m
-[1m[94m111[0m [1m[94m|[0m     pub fn state(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
-    [1m[94m|[0m            [1m[33m^^^^^[0m
-[1m[94m...[0m
-[1m[94m117[0m [1m[94m|[0m     pub fn local(mut self, key: impl Into<String>, value: impl Into<Dynamic>) -> Self {
-    [1m[94m|[0m            [1m[33m^^^^^[0m
-[1m[94m...[0m
-[1m[94m123[0m [1m[94m|[0m     pub fn build(self) -> Option<ScriptContext> {
-    [1m[94m|[0m            [1m[33m^^^^^[0m
-
-[1m[33mwarning[0m[1m: type alias `ScriptHandlerFn` is never used[0m
-   [1m[94m--> [0marmature-rhai/src/handler.rs:206:10
-    [1m[94m|[0m
-[1m[94m206[0m [1m[94m|[0m pub type ScriptHandlerFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse> + Send + Sync>;
-    [1m[94m|[0m          [1m[33m^^^^^^^^^^^^^^^[0m
-
-[1m[33mwarning[0m[1m: function `script_handler` is never used[0m
-   [1m[94m--> [0marmature-rhai/src/handler.rs:209:8
-    [1m[94m|[0m
-[1m[94m209[0m [1m[94m|[0m pub fn script_handler(engine: Arc<RhaiEngine>, script_path: impl Into<PathBuf>) -> ScriptHandlerFn {
-    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^[0m
-
-[1m[33mwarning[0m[1m: struct `ScriptRouterBuilder` is never constructed[0m
-   [1m[94m--> [0marmature-rhai/src/router.rs:306:12
-    [1m[94m|[0m
-[1m[94m306[0m [1m[94m|[0m pub struct ScriptRouterBuilder {
-    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^[0m
-
-[1m[33mwarning[0m[1m: associated items `new`, `auto_routes`, `build`, `discover_routes`, and `path_to_route` are never used[0m
-   [1m[94m--> [0marmature-rhai/src/router.rs:314:12
-    [1m[94m|[0m
-[1m[94m312[0m [1m[94m|[0m impl ScriptRouterBuilder {
-    [1m[94m|[0m [1m[94m------------------------[0m [1m[94massociated items in this implementation[0m
-[1m[94m313[0m [1m[94m|[0m     /// Create a new builder.
-[1m[94m314[0m [1m[94m|[0m     pub fn new(engine: RhaiEngine) -> Self {
-    [1m[94m|[0m            [1m[33m^^^[0m
-[1m[94m...[0m
-[1m[94m329[0m [1m[94m|[0m     pub fn auto_routes(mut self, dir: impl Into<PathBuf>) -> Self {
-    [1m[94m|[0m            [1m[33m^^^^^^^^^^^[0m
-[1m[94m...[0m
-[1m[94m336[0m [1m[94m|[0m     pub fn build(self) -> Result<ScriptRouter> {
-    [1m[94m|[0m            [1m[33m^^^^^[0m
-[1m[94m...[0m
-[1m[94m347[0m [1m[94m|[0m     fn discover_routes(&self, mut router: ScriptRouter) -> Result<ScriptRouter> {
-    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^[0m
-[1m[94m...[0m
-[1m[94m362[0m [1m[94m|[0m     fn path_to_route(&self, path: &Path) -> Result<String> {
-    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^[0m
-
-[1m[33mwarning[0m[1m: struct `ConcurrentScriptCache` is never constructed[0m
-   [1m[94m--> [0marmature-rhai/src/script.rs:131:12
-    [1m[94m|[0m
-[1m[94m131[0m [1m[94m|[0m pub struct ConcurrentScriptCache {
-    [1m[94m|[0m            [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
-
-[1m[33mwarning[0m[1m: associated items `new`, `get`, `insert`, `remove`, and `clear` are never used[0m
-   [1m[94m--> [0marmature-rhai/src/script.rs:145:12
-    [1m[94m|[0m
-[1m[94m143[0m [1m[94m|[0m impl ConcurrentScriptCache {
-    [1m[94m|[0m [1m[94m--------------------------[0m [1m[94massociated items in this implementation[0m
-[1m[94m144[0m [1m[94m|[0m     /// Create a new concurrent cache.
-[1m[94m145[0m [1m[94m|[0m     pub fn new() -> Self {
-    [1m[94m|[0m            [1m[33m^^^[0m
-[1m[94m...[0m
-[1m[94m154[0m [1m[94m|[0m     pub fn get(&self, path: &Path) -> Option<Arc<CompiledScript>> {
-    [1m[94m|[0m            [1m[33m^^^[0m
-[1m[94m...[0m
-[1m[94m165[0m [1m[94m|[0m     pub fn insert(&self, path: PathBuf, script: Arc<CompiledScript>) {
-    [1m[94m|[0m            [1m[33m^^^^^^[0m
-[1m[94m...[0m
-[1m[94m170[0m [1m[94m|[0m     pub fn remove(&self, path: &Path) -> Option<Arc<CompiledScript>> {
-    [1m[94m|[0m            [1m[33m^^^^^^[0m
-[1m[94m...[0m
-[1m[94m175[0m [1m[94m|[0m     pub fn clear(&self) {
-    [1m[94m|[0m            [1m[33m^^^^^[0m
-
-[1m[33mwarning[0m: `armature-rhai` (lib) generated 8 warnings
 [1m[92m   Compiling[0m armature-framework v0.2.2 (/home/runner/work/armature/armature)
-[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 15.61s
-[1m[92m     Running[0m benches/json_benchmarks.rs (target/release/deps/json_benchmarks-7c3d1ce1542ed099)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 15.31s
+[1m[92m     Running[0m benches/json_benchmarks.rs (target/release/deps/json_benchmarks-af973a0f458a6712)
 Gnuplot not found, using plotters backend
 
 ===========================================
@@ -108,120 +12,121 @@ Benchmarking json_info/library_check
 Benchmarking json_info/library_check: Warming up for 3.0000 s
 Benchmarking json_info/library_check: Collecting 100 samples in estimated 5.0000 s (16B iterations)
 Benchmarking json_info/library_check: Analyzing
-json_info/library_check time:   [311.45 ps 311.58 ps 311.73 ps]
-Found 8 outliers among 100 measurements (8.00%)
-  5 (5.00%) high mild
-  3 (3.00%) high severe
+json_info/library_check time:   [300.66 ps 302.87 ps 305.21 ps]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
 
 Benchmarking json_serialize/small
 Benchmarking json_serialize/small: Warming up for 3.0000 s
-Benchmarking json_serialize/small: Collecting 100 samples in estimated 5.0002 s (61M iterations)
+Benchmarking json_serialize/small: Collecting 100 samples in estimated 5.0002 s (71M iterations)
 Benchmarking json_serialize/small: Analyzing
-json_serialize/small    time:   [71.531 ns 71.624 ns 71.726 ns]
-                        thrpt:  [585.03 MiB/s 585.86 MiB/s 586.62 MiB/s]
-Found 2 outliers among 100 measurements (2.00%)
+json_serialize/small    time:   [70.587 ns 70.759 ns 70.967 ns]
+                        thrpt:  [591.28 MiB/s 593.02 MiB/s 594.47 MiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
   1 (1.00%) high mild
-  1 (1.00%) high severe
+  2 (2.00%) high severe
 Benchmarking json_serialize/medium
 Benchmarking json_serialize/medium: Warming up for 3.0000 s
-Benchmarking json_serialize/medium: Collecting 100 samples in estimated 5.0012 s (13M iterations)
+Benchmarking json_serialize/medium: Collecting 100 samples in estimated 5.0007 s (14M iterations)
 Benchmarking json_serialize/medium: Analyzing
-json_serialize/medium   time:   [364.77 ns 365.01 ns 365.31 ns]
-                        thrpt:  [610.88 MiB/s 611.38 MiB/s 611.78 MiB/s]
-Found 18 outliers among 100 measurements (18.00%)
-  14 (14.00%) high mild
-  4 (4.00%) high severe
+json_serialize/medium   time:   [354.08 ns 354.62 ns 355.17 ns]
+                        thrpt:  [628.32 MiB/s 629.29 MiB/s 630.25 MiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
 Benchmarking json_serialize/large
 Benchmarking json_serialize/large: Warming up for 3.0000 s
-Benchmarking json_serialize/large: Collecting 100 samples in estimated 5.0095 s (1.1M iterations)
+Benchmarking json_serialize/large: Collecting 100 samples in estimated 5.0026 s (1.1M iterations)
 Benchmarking json_serialize/large: Analyzing
-json_serialize/large    time:   [4.4051 µs 4.4083 µs 4.4118 µs]
-                        thrpt:  [772.57 MiB/s 773.19 MiB/s 773.74 MiB/s]
-Found 4 outliers among 100 measurements (4.00%)
-  3 (3.00%) high mild
-  1 (1.00%) high severe
+json_serialize/large    time:   [4.4709 µs 4.4918 µs 4.5149 µs]
+                        thrpt:  [754.93 MiB/s 758.81 MiB/s 762.36 MiB/s]
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) high mild
+  14 (14.00%) high severe
 
 Benchmarking json_deserialize/small
 Benchmarking json_deserialize/small: Warming up for 3.0000 s
-Benchmarking json_deserialize/small: Collecting 100 samples in estimated 5.0005 s (36M iterations)
+Benchmarking json_deserialize/small: Collecting 100 samples in estimated 5.0000 s (42M iterations)
 Benchmarking json_deserialize/small: Analyzing
-json_deserialize/small  time:   [140.60 ns 140.77 ns 140.94 ns]
-                        thrpt:  [297.73 MiB/s 298.09 MiB/s 298.45 MiB/s]
-Found 10 outliers among 100 measurements (10.00%)
-  1 (1.00%) low mild
-  8 (8.00%) high mild
-  1 (1.00%) high severe
+json_deserialize/small  time:   [118.39 ns 118.58 ns 118.80 ns]
+                        thrpt:  [353.21 MiB/s 353.88 MiB/s 354.42 MiB/s]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
 Benchmarking json_deserialize/medium
 Benchmarking json_deserialize/medium: Warming up for 3.0000 s
-Benchmarking json_deserialize/medium: Collecting 100 samples in estimated 5.0022 s (4.8M iterations)
+Benchmarking json_deserialize/medium: Collecting 100 samples in estimated 5.0031 s (5.1M iterations)
 Benchmarking json_deserialize/medium: Analyzing
-json_deserialize/medium time:   [1.0450 µs 1.0470 µs 1.0493 µs]
-                        thrpt:  [212.68 MiB/s 213.14 MiB/s 213.55 MiB/s]
-Found 1 outliers among 100 measurements (1.00%)
-  1 (1.00%) high severe
+json_deserialize/medium time:   [971.41 ns 972.79 ns 974.39 ns]
+                        thrpt:  [229.02 MiB/s 229.40 MiB/s 229.73 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
 Benchmarking json_deserialize/large
 Benchmarking json_deserialize/large: Warming up for 3.0000 s
-Benchmarking json_deserialize/large: Collecting 100 samples in estimated 5.0362 s (510k iterations)
+Benchmarking json_deserialize/large: Collecting 100 samples in estimated 5.0410 s (545k iterations)
 Benchmarking json_deserialize/large: Analyzing
-json_deserialize/large  time:   [9.9046 µs 9.9141 µs 9.9243 µs]
-                        thrpt:  [343.44 MiB/s 343.80 MiB/s 344.13 MiB/s]
-Found 3 outliers among 100 measurements (3.00%)
-  1 (1.00%) high mild
-  2 (2.00%) high severe
-
-Benchmarking json_roundtrip/small
-Benchmarking json_roundtrip/small: Warming up for 3.0000 s
-Benchmarking json_roundtrip/small: Collecting 100 samples in estimated 5.0006 s (23M iterations)
-Benchmarking json_roundtrip/small: Analyzing
-json_roundtrip/small    time:   [213.77 ns 213.90 ns 214.05 ns]
-                        thrpt:  [392.08 MiB/s 392.35 MiB/s 392.59 MiB/s]
-Found 7 outliers among 100 measurements (7.00%)
-  5 (5.00%) high mild
-  2 (2.00%) high severe
-Benchmarking json_roundtrip/medium
-Benchmarking json_roundtrip/medium: Warming up for 3.0000 s
-Benchmarking json_roundtrip/medium: Collecting 100 samples in estimated 5.0030 s (3.4M iterations)
-Benchmarking json_roundtrip/medium: Analyzing
-json_roundtrip/medium   time:   [1.4674 µs 1.4798 µs 1.5035 µs]
-                        thrpt:  [296.85 MiB/s 301.61 MiB/s 304.15 MiB/s]
-Found 5 outliers among 100 measurements (5.00%)
-  1 (1.00%) high mild
-  4 (4.00%) high severe
-Benchmarking json_roundtrip/large
-Benchmarking json_roundtrip/large: Warming up for 3.0000 s
-Benchmarking json_roundtrip/large: Collecting 100 samples in estimated 5.0806 s (318k iterations)
-Benchmarking json_roundtrip/large: Analyzing
-json_roundtrip/large    time:   [16.189 µs 16.206 µs 16.223 µs]
-                        thrpt:  [420.21 MiB/s 420.63 MiB/s 421.09 MiB/s]
-Found 1 outliers among 100 measurements (1.00%)
-  1 (1.00%) high severe
-
-Benchmarking http_json/request_parse
-Benchmarking http_json/request_parse: Warming up for 3.0000 s
-Benchmarking http_json/request_parse: Collecting 100 samples in estimated 5.0047 s (4.4M iterations)
-Benchmarking http_json/request_parse: Analyzing
-http_json/request_parse time:   [1.1030 µs 1.1044 µs 1.1059 µs]
-                        thrpt:  [201.80 MiB/s 202.07 MiB/s 202.33 MiB/s]
+json_deserialize/large  time:   [9.2816 µs 9.2898 µs 9.2989 µs]
+                        thrpt:  [366.54 MiB/s 366.90 MiB/s 367.22 MiB/s]
 Found 2 outliers among 100 measurements (2.00%)
   1 (1.00%) high mild
   1 (1.00%) high severe
+
+Benchmarking json_roundtrip/small
+Benchmarking json_roundtrip/small: Warming up for 3.0000 s
+Benchmarking json_roundtrip/small: Collecting 100 samples in estimated 5.0007 s (24M iterations)
+Benchmarking json_roundtrip/small: Analyzing
+json_roundtrip/small    time:   [191.30 ns 191.55 ns 191.87 ns]
+                        thrpt:  [437.39 MiB/s 438.12 MiB/s 438.71 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking json_roundtrip/medium
+Benchmarking json_roundtrip/medium: Warming up for 3.0000 s
+Benchmarking json_roundtrip/medium: Collecting 100 samples in estimated 5.0012 s (3.6M iterations)
+Benchmarking json_roundtrip/medium: Analyzing
+json_roundtrip/medium   time:   [1.3830 µs 1.3845 µs 1.3864 µs]
+                        thrpt:  [321.93 MiB/s 322.37 MiB/s 322.71 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking json_roundtrip/large
+Benchmarking json_roundtrip/large: Warming up for 3.0000 s
+Benchmarking json_roundtrip/large: Collecting 100 samples in estimated 5.0747 s (328k iterations)
+Benchmarking json_roundtrip/large: Analyzing
+json_roundtrip/large    time:   [15.542 µs 15.552 µs 15.564 µs]
+                        thrpt:  [437.98 MiB/s 438.32 MiB/s 438.60 MiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking http_json/request_parse
+Benchmarking http_json/request_parse: Warming up for 3.0000 s
+Benchmarking http_json/request_parse: Collecting 100 samples in estimated 5.0020 s (4.7M iterations)
+Benchmarking http_json/request_parse: Analyzing
+http_json/request_parse time:   [1.0653 µs 1.0661 µs 1.0670 µs]
+                        thrpt:  [209.15 MiB/s 209.32 MiB/s 209.49 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
 Benchmarking http_json/response_json
 Benchmarking http_json/response_json: Warming up for 3.0000 s
-Benchmarking http_json/response_json: Collecting 100 samples in estimated 5.0013 s (11M iterations)
+Benchmarking http_json/response_json: Collecting 100 samples in estimated 5.0016 s (11M iterations)
 Benchmarking http_json/response_json: Analyzing
-http_json/response_json time:   [461.17 ns 461.51 ns 461.93 ns]
-                        thrpt:  [483.11 MiB/s 483.54 MiB/s 483.90 MiB/s]
+http_json/response_json time:   [471.30 ns 471.69 ns 472.09 ns]
+                        thrpt:  [472.71 MiB/s 473.11 MiB/s 473.50 MiB/s]
 Found 5 outliers among 100 measurements (5.00%)
-  3 (3.00%) high mild
-  2 (2.00%) high severe
+  4 (4.00%) high mild
+  1 (1.00%) high severe
 Benchmarking http_json/full_cycle
 Benchmarking http_json/full_cycle: Warming up for 3.0000 s
-Benchmarking http_json/full_cycle: Collecting 100 samples in estimated 5.0012 s (2.4M iterations)
+Benchmarking http_json/full_cycle: Collecting 100 samples in estimated 5.0077 s (2.6M iterations)
 Benchmarking http_json/full_cycle: Analyzing
-http_json/full_cycle    time:   [2.0491 µs 2.0509 µs 2.0527 µs]
-                        thrpt:  [108.72 MiB/s 108.81 MiB/s 108.91 MiB/s]
-Found 7 outliers among 100 measurements (7.00%)
-  5 (5.00%) low mild
-  1 (1.00%) high mild
-  1 (1.00%) high severe
+http_json/full_cycle    time:   [1.9577 µs 1.9674 µs 1.9816 µs]
+                        thrpt:  [112.62 MiB/s 113.43 MiB/s 113.99 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
 
