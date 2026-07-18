@@ -14,6 +14,7 @@
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -81,7 +82,14 @@ pub struct Params<'a> {
     /// Parameters stored inline for typical routes.
     params: SmallVec<[BorrowedParam<'a>; INLINE_PARAM_COUNT]>,
     /// Wildcard capture (if any).
-    wildcard: Option<&'a str>,
+    ///
+    /// A catch-all captures a *joined* value (e.g. `docs/readme.md`) that does
+    /// not exist as a contiguous slice of the source path, so it is owned via
+    /// `Cow`. Static/param values still borrow the path with zero allocation.
+    wildcard: Option<Cow<'a, str>>,
+    /// Name of the catch-all parameter (e.g. `path` for `*path`), if the
+    /// wildcard value should also be retrievable by name via [`get`](Self::get).
+    catch_all_name: Option<&'a str>,
 }
 
 impl<'a> Params<'a> {
@@ -91,6 +99,7 @@ impl<'a> Params<'a> {
         Self {
             params: SmallVec::new(),
             wildcard: None,
+            catch_all_name: None,
         }
     }
 
@@ -100,6 +109,7 @@ impl<'a> Params<'a> {
         Self {
             params: SmallVec::with_capacity(capacity),
             wildcard: None,
+            catch_all_name: None,
         }
     }
 
@@ -111,15 +121,34 @@ impl<'a> Params<'a> {
     }
 
     /// Set wildcard value.
+    ///
+    /// Accepts either a borrowed slice of the path or an owned/joined value
+    /// (`String`), so catch-all captures no longer need to leak memory.
     #[inline]
-    pub fn set_wildcard(&mut self, value: &'a str) {
-        self.wildcard = Some(value);
+    pub fn set_wildcard(&mut self, value: impl Into<Cow<'a, str>>) {
+        self.wildcard = Some(value.into());
+    }
+
+    /// Set a named catch-all value.
+    ///
+    /// Stores the (owned) joined value as the wildcard and records `name` so it
+    /// can also be retrieved via [`get`](Self::get).
+    #[inline]
+    pub fn set_catch_all(&mut self, name: &'a str, value: impl Into<Cow<'a, str>>) {
+        self.wildcard = Some(value.into());
+        self.catch_all_name = Some(name);
     }
 
     /// Get parameter by name.
     #[inline]
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.iter().find(|p| p.name == name).map(|p| p.value)
+        if let Some(p) = self.params.iter().find(|p| p.name == name) {
+            return Some(p.value);
+        }
+        if self.catch_all_name == Some(name) {
+            return self.wildcard.as_deref();
+        }
+        None
     }
 
     /// Get parameter and parse as type T.
@@ -131,7 +160,7 @@ impl<'a> Params<'a> {
     /// Get wildcard capture.
     #[inline]
     pub fn wildcard(&self) -> Option<&str> {
-        self.wildcard
+        self.wildcard.as_deref()
     }
 
     /// Get number of parameters.
@@ -164,7 +193,11 @@ impl<'a> Params<'a> {
         for param in &self.params {
             map.insert(param.name.to_string(), param.value.to_string());
         }
-        if let Some(wildcard) = self.wildcard {
+        if let Some(ref wildcard) = self.wildcard {
+            // Named catch-all is retrievable by its name as well as under "*".
+            if let Some(name) = self.catch_all_name {
+                map.insert(name.to_string(), wildcard.to_string());
+            }
             map.insert("*".to_string(), wildcard.to_string());
         }
         map
@@ -288,13 +321,25 @@ impl<'a> PatternSegment<'a> {
     }
 }
 
+/// An owned, pre-parsed pattern segment.
+///
+/// Unlike [`PatternSegment`], this owns its value so it can live inside a
+/// [`CompiledPattern`] without borrowing (or leaking) the pattern string.
+#[derive(Debug, Clone)]
+pub struct OwnedPatternSegment {
+    /// Segment type.
+    pub segment_type: SegmentType,
+    /// Static value or parameter name (owned).
+    pub value: CompactString,
+}
+
 /// Pre-compiled route pattern for fast matching.
 #[derive(Debug, Clone)]
 pub struct CompiledPattern {
     /// Original pattern string.
     pub pattern: String,
-    /// Parsed segments.
-    pub segments: SmallVec<[PatternSegment<'static>; INLINE_SEGMENT_COUNT]>,
+    /// Parsed segments (owned; no leaking or self-borrow of `pattern`).
+    pub segments: SmallVec<[OwnedPatternSegment; INLINE_SEGMENT_COUNT]>,
     /// Index of catch-all segment (-1 if none).
     pub catch_all_index: Option<usize>,
     /// Number of required segments (before catch-all).
@@ -307,13 +352,14 @@ impl CompiledPattern {
     /// Compile a pattern string.
     pub fn new(pattern: impl Into<String>) -> Self {
         let pattern = pattern.into();
-        let leaked: &'static str = Box::leak(pattern.clone().into_boxed_str());
 
         let mut segments = SmallVec::new();
         let mut catch_all_index = None;
         let mut is_static = true;
 
-        for (i, part) in leaked.split('/').filter(|s| !s.is_empty()).enumerate() {
+        // Parse borrowing the owned `pattern` locally, copying each segment's
+        // value into owned storage. No `Box::leak` / `'static` needed.
+        for (i, part) in pattern.split('/').filter(|s| !s.is_empty()).enumerate() {
             let segment = PatternSegment::parse(part);
 
             if segment.segment_type == SegmentType::CatchAll {
@@ -324,7 +370,10 @@ impl CompiledPattern {
                 is_static = false;
             }
 
-            segments.push(segment);
+            segments.push(OwnedPatternSegment {
+                segment_type: segment.segment_type,
+                value: CompactString::new(segment.value),
+            });
         }
 
         let required_segments = catch_all_index.unwrap_or(segments.len());
@@ -339,7 +388,11 @@ impl CompiledPattern {
     }
 
     /// Match against a path.
-    pub fn match_path<'a>(&self, path: &'a str) -> MatchResult<'a> {
+    ///
+    /// Parameter *names* borrow from the compiled pattern (`&'a self`) and
+    /// *values* borrow from the path; the joined catch-all value is owned, so
+    /// no per-request memory is leaked.
+    pub fn match_path<'a>(&'a self, path: &'a str) -> MatchResult<'a> {
         PARAMS_STATS.record_match_attempt();
 
         // Split path into segments
@@ -360,7 +413,7 @@ impl CompiledPattern {
         for (i, pattern_seg) in self.segments.iter().enumerate() {
             match pattern_seg.segment_type {
                 SegmentType::Static => {
-                    if i >= path_segments.len() || path_segments[i] != pattern_seg.value {
+                    if i >= path_segments.len() || path_segments[i] != pattern_seg.value.as_str() {
                         return MatchResult::NoMatch;
                     }
                 }
@@ -368,28 +421,26 @@ impl CompiledPattern {
                     if i >= path_segments.len() {
                         return MatchResult::NoMatch;
                     }
-                    params.push(pattern_seg.value, path_segments[i]);
+                    params.push(pattern_seg.value.as_str(), path_segments[i]);
                 }
                 SegmentType::Wildcard => {
                     if i >= path_segments.len() {
                         return MatchResult::NoMatch;
                     }
-                    params.push(pattern_seg.value, path_segments[i]);
+                    params.push(pattern_seg.value.as_str(), path_segments[i]);
                 }
                 SegmentType::CatchAll => {
-                    // Capture remaining segments
+                    // Capture remaining segments. The joined value is owned by
+                    // the returned `Params` (via `Cow::Owned`) — no leak.
                     let remaining = &path_segments[i..];
                     if remaining.is_empty() {
                         params.set_wildcard("");
                     } else {
-                        // Join remaining segments
                         let wildcard_value = remaining.join("/");
-                        // We need to store this - use leaked string for now
-                        // In practice, you'd use an arena or owned storage
-                        let leaked: &'static str = Box::leak(wildcard_value.into_boxed_str());
-                        params.set_wildcard(leaked);
-                        if pattern_seg.value != "*" {
-                            params.push(pattern_seg.value, leaked);
+                        if pattern_seg.value.as_str() != "*" {
+                            params.set_catch_all(pattern_seg.value.as_str(), wildcard_value);
+                        } else {
+                            params.set_wildcard(wildcard_value);
                         }
                     }
                     break;
@@ -458,11 +509,10 @@ where
             }
             params.push("*", path_parts[i]);
         } else if let Some(name) = pattern_part.strip_prefix('*') {
-            // Catch-all (e.g., *path, *rest)
+            // Catch-all (e.g., *path, *rest). The joined value is owned by the
+            // returned `Params` (via `Cow::Owned`) — no leak.
             let remaining: String = path_parts[i..].join("/");
-            let leaked: &'static str = Box::leak(remaining.into_boxed_str());
-            params.push(name, leaked);
-            params.set_wildcard(leaked);
+            params.set_catch_all(name, remaining);
             break;
         } else if i >= path_parts.len() || *pattern_part != path_parts[i] {
             // Static mismatch
@@ -772,6 +822,52 @@ mod tests {
         let map = params.to_hash_map();
         assert_eq!(map.get("id"), Some(&"123".to_string()));
         assert_eq!(map.get("name"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn test_catch_all_value_owned_no_leak() {
+        // Compile once, match many times. Each catch-all match produces an
+        // owned (non-leaked) joined value; the returned `Params` owns it.
+        let pattern = CompiledPattern::new("/files/*path");
+
+        for n in 0..1000 {
+            let path = format!("/files/dir{n}/sub/readme.md");
+            let params = pattern.match_path(&path).params().unwrap();
+            // Named catch-all is retrievable by name...
+            assert_eq!(
+                params.get("path"),
+                Some(format!("dir{n}/sub/readme.md").as_str())
+            );
+            // ...and via the wildcard accessor.
+            assert_eq!(
+                params.wildcard(),
+                Some(format!("dir{n}/sub/readme.md").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn test_catch_all_owns_beyond_path_lifetime() {
+        // The joined catch-all value must remain valid after the source path
+        // string is dropped — proving it is owned, not borrowed/leaked.
+        let pattern = CompiledPattern::new("/files/*path");
+        let owned_map = {
+            let path = String::from("/files/docs/guide/intro.md");
+            let params = pattern.match_path(&path).params().unwrap();
+            params.to_hash_map()
+        };
+        assert_eq!(
+            owned_map.get("path"),
+            Some(&"docs/guide/intro.md".to_string())
+        );
+        assert_eq!(owned_map.get("*"), Some(&"docs/guide/intro.md".to_string()));
+    }
+
+    #[test]
+    fn test_zero_alloc_catch_all_named_get() {
+        let params = match_path_zero_alloc("/assets/*rest", "/assets/css/app.css").unwrap();
+        assert_eq!(params.get("rest"), Some("css/app.css"));
+        assert_eq!(params.wildcard(), Some("css/app.css"));
     }
 
     #[test]

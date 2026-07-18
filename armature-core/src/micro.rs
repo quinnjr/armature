@@ -47,6 +47,7 @@
 //! ```
 
 use crate::handler::{BoxedHandler, IntoHandler};
+use crate::route_cache::OptimizedRouter;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse, Router};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -203,11 +204,10 @@ impl App {
     ///     )
     /// ```
     pub fn service(mut self, scope: Scope) -> Self {
-        for route in scope.routes {
-            let full_path = format!("{}{}", scope.prefix, route.path);
+        for route in scope.into_routes() {
             self.router.add_route(crate::routing::Route {
                 method: route.method,
-                path: full_path,
+                path: route.path,
                 handler: route.handler,
                 constraints: route.constraints,
             });
@@ -233,7 +233,7 @@ impl App {
         })?;
 
         let app = Arc::new(BuiltApp {
-            router: self.router,
+            router: Arc::new(OptimizedRouter::from_router(&self.router)),
             middleware: self.middleware,
             state: self.state,
             default_service: self.default_service,
@@ -245,7 +245,7 @@ impl App {
     /// Build the application into an immutable form
     pub fn build(self) -> BuiltApp {
         BuiltApp {
-            router: self.router,
+            router: Arc::new(OptimizedRouter::from_router(&self.router)),
             middleware: self.middleware,
             state: self.state,
             default_service: self.default_service,
@@ -260,8 +260,11 @@ impl Default for App {
 }
 
 /// Built application ready to handle requests
+///
+/// Routing dispatches through the O(1) [`OptimizedRouter`], compiled once from
+/// the builder's linear [`Router`] in [`App::build`]/[`App::run`].
 pub struct BuiltApp {
-    router: Router,
+    router: Arc<OptimizedRouter>,
     middleware: Vec<Arc<dyn Middleware>>,
     state: AppState,
     default_service: Option<BoxedHandler>,
@@ -379,6 +382,15 @@ impl RouteBuilder {
     {
         self.with_method(HttpMethod::OPTIONS, handler)
     }
+
+    /// Add a QUERY handler (safe query with a request body,
+    /// draft-ietf-httpbis-safe-method-w-body)
+    pub fn query<H, Args>(self, handler: H) -> Self
+    where
+        H: IntoHandler<Args>,
+    {
+        self.with_method(HttpMethod::QUERY, handler)
+    }
 }
 
 /// Create a GET route
@@ -435,6 +447,15 @@ where
     H: IntoHandler<Args>,
 {
     RouteBuilder::new().options(handler)
+}
+
+/// Create a QUERY route (safe query with a request body,
+/// draft-ietf-httpbis-safe-method-w-body)
+pub fn query<H, Args>(handler: H) -> RouteBuilder
+where
+    H: IntoHandler<Args>,
+{
+    RouteBuilder::new().query(handler)
 }
 
 /// Create a route that matches any HTTP method
@@ -495,18 +516,55 @@ impl Scope {
     }
 
     /// Nest another scope
+    ///
+    /// The inner scope's middleware is applied to its routes immediately;
+    /// this scope's middleware wraps them (and all other routes) when the
+    /// scope itself is registered, so nested scopes inherit parent middleware.
     pub fn service(mut self, inner: Scope) -> Self {
-        for route in inner.routes {
-            let full_path = format!("{}{}", inner.prefix, route.path);
-            self.routes.push(ScopeRoute {
-                method: route.method,
-                path: full_path,
-                handler: route.handler,
-                constraints: route.constraints,
-            });
-        }
+        self.routes.extend(inner.into_routes());
         self
     }
+
+    /// Consume the scope, prefixing route paths and applying the scope's
+    /// middleware to each route handler (first added = outermost).
+    fn into_routes(self) -> Vec<ScopeRoute> {
+        let Self {
+            prefix,
+            routes,
+            middleware,
+        } = self;
+
+        routes
+            .into_iter()
+            .map(|route| ScopeRoute {
+                method: route.method,
+                path: format!("{}{}", prefix, route.path),
+                handler: wrap_handler(route.handler, &middleware),
+                constraints: route.constraints,
+            })
+            .collect()
+    }
+}
+
+/// Wrap a handler with a middleware stack (first added = outermost)
+fn wrap_handler(handler: BoxedHandler, middleware: &[Arc<dyn Middleware>]) -> BoxedHandler {
+    let mut handler = handler;
+    for mw in middleware.iter().rev() {
+        let mw = Arc::clone(mw);
+        let inner = handler;
+        handler = BoxedHandler::new(
+            (move |req: HttpRequest| {
+                let mw = Arc::clone(&mw);
+                let inner = inner.clone();
+                async move {
+                    let next: Next = Box::new(move |req| inner.call(req));
+                    mw.call(req, next).await
+                }
+            })
+            .into_handler(),
+        );
+    }
+    handler
 }
 
 /// Create a new scope with the given prefix
@@ -792,6 +850,24 @@ impl Middleware for Compress {
     }
 }
 
+/// Map a handler error to an HTTP status and JSON body.
+///
+/// The client body comes from the canonical [`Error::to_client_response`], so
+/// the micro server emits the exact same `{"error", "status"}` shape as the
+/// HTTP/1, HTTP/2, and HTTP/3 servers. For 5xx errors the real internal message
+/// is logged here (via `tracing::error`) but never echoed to the client — the
+/// redacted helper replaces it with a generic message. 4xx errors keep their
+/// message. JSON escaping is handled by `serde_json`.
+fn error_response_parts(e: &Error) -> (u16, String) {
+    let status = e.status_code();
+    if status >= 500 {
+        tracing::error!(error = %e, status, "Request handler failed");
+    }
+    let response = e.to_client_response();
+    let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap_or_default();
+    (status, body)
+}
+
 /// Run the HTTP server
 async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::Result<()> {
     use hyper::server::conn::http1;
@@ -848,29 +924,23 @@ async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::
                             for (name, value) in &resp.headers {
                                 builder = builder.header(name.as_str(), value.as_str());
                             }
+                            for cookie in &resp.cookies {
+                                builder = builder.header("Set-Cookie", cookie.as_str());
+                            }
 
                             Ok::<_, std::convert::Infallible>(
                                 builder
-                                    .body(http_body_util::Full::new(bytes::Bytes::from(resp.body)))
+                                    .body(http_body_util::Full::new(resp.into_body_bytes()))
                                     .unwrap(),
                             )
                         }
                         Err(e) => {
-                            let status = match &e {
-                                Error::RouteNotFound(_) => 404,
-                                Error::Validation(_) => 400,
-                                Error::Unauthorized(_) => 401,
-                                Error::Forbidden(_) => 403,
-                                _ => 500,
-                            };
+                            let (status, body) = error_response_parts(&e);
 
                             Ok(hyper::Response::builder()
                                 .status(status)
                                 .header("Content-Type", "application/json")
-                                .body(http_body_util::Full::new(bytes::Bytes::from(format!(
-                                    r#"{{"error":"{}"}}"#,
-                                    e
-                                ))))
+                                .body(http_body_util::Full::new(bytes::Bytes::from(body)))
                                 .unwrap())
                         }
                     }
@@ -899,7 +969,7 @@ mod tests {
             .route("/users", get(test_handler).post(test_handler))
             .build();
 
-        assert_eq!(app.router.routes.len(), 3);
+        assert_eq!(app.router.len(), 3);
     }
 
     #[test]
@@ -924,5 +994,152 @@ mod tests {
         let req = HttpRequest::new("GET".to_string(), "/test".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
+    }
+
+    struct CountingMiddleware {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Middleware for CountingMiddleware {
+        fn call(
+            &self,
+            req: HttpRequest,
+            next: Next,
+        ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            next(req)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scope_middleware_runs() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let app = App::new()
+            .service(
+                scope("/admin")
+                    .wrap(CountingMiddleware {
+                        calls: calls.clone(),
+                    })
+                    .route("/users", get(test_handler)),
+            )
+            .route("/public", get(test_handler))
+            .build();
+
+        // Scoped route triggers the scope middleware
+        let req = HttpRequest::new("GET".to_string(), "/admin/users".to_string());
+        let response = app.handle(req).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Routes outside the scope do not
+        let req = HttpRequest::new("GET".to_string(), "/public".to_string());
+        let response = app.handle(req).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_nested_scope_inherits_parent_middleware() {
+        let parent_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inner_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let app = App::new()
+            .service(
+                scope("/api")
+                    .wrap(CountingMiddleware {
+                        calls: parent_calls.clone(),
+                    })
+                    .service(
+                        scope("/v1")
+                            .wrap(CountingMiddleware {
+                                calls: inner_calls.clone(),
+                            })
+                            .route("/users", get(test_handler)),
+                    ),
+            )
+            .build();
+
+        let req = HttpRequest::new("GET".to_string(), "/api/v1/users".to_string());
+        let response = app.handle(req).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(parent_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(inner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_built_app_dispatches_catch_all() {
+        async fn files(req: HttpRequest) -> Result<HttpResponse, Error> {
+            let p = req.path_params.get("path").cloned().unwrap_or_default();
+            Ok(HttpResponse::ok().with_body(p.into_bytes()))
+        }
+
+        // The optimized serve-path router resolves catch-all params.
+        let app = App::new().route("/files/*path", get(files)).build();
+        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let resp = app.handle(req).await.unwrap();
+        assert_eq!(resp.body, b"docs/readme.md");
+    }
+
+    #[tokio::test]
+    async fn test_built_app_query_method_and_unknown_method() {
+        async fn echo(req: HttpRequest) -> Result<HttpResponse, Error> {
+            Ok(HttpResponse::ok().with_body(req.body.clone()))
+        }
+
+        let app = App::new().route("/search", query(echo)).build();
+
+        // QUERY carries its query in the body and routes on method+path.
+        let mut req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        req.body = b"name=john".to_vec();
+        let resp = app.handle(req).await.unwrap();
+        assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
+
+        // Unknown method must not fall through to a GET handler.
+        let app2 = App::new().route("/search", get(echo)).build();
+        let req = HttpRequest::new("PROPFIND".to_string(), "/search".to_string());
+        let err = app2.handle(req).await;
+        assert!(matches!(err, Err(Error::RouteNotFound(_))));
+    }
+
+    #[test]
+    fn test_error_response_parts_uses_status_code() {
+        assert_eq!(error_response_parts(&Error::Conflict("dup".into())).0, 409);
+        assert_eq!(
+            error_response_parts(&Error::TooManyRequests("slow down".into())).0,
+            429
+        );
+        assert_eq!(error_response_parts(&Error::NotFound("gone".into())).0, 404);
+        assert_eq!(
+            error_response_parts(&Error::ServiceUnavailable("down".into())).0,
+            503
+        );
+    }
+
+    #[test]
+    fn test_error_response_parts_escapes_json() {
+        let e = Error::Validation(r#"bad "quoted" input"#.to_string());
+        let (status, body) = error_response_parts(&e);
+        assert_eq!(status, 400);
+
+        // Body must be valid JSON despite quotes in the message
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains(r#"bad "quoted" input"#)
+        );
+    }
+
+    #[test]
+    fn test_error_response_parts_hides_internal_message() {
+        let e = Error::Internal("secret database password".to_string());
+        let (status, body) = error_response_parts(&e);
+        assert_eq!(status, 500);
+        assert!(!body.contains("secret database password"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"], "Internal Server Error");
     }
 }

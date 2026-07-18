@@ -135,10 +135,7 @@ impl ETag {
         };
 
         // Extract value from quotes
-        let value = value_part
-            .strip_prefix('"')?
-            .strip_suffix('"')?
-            .to_string();
+        let value = value_part.strip_prefix('"')?.strip_suffix('"')?.to_string();
 
         Some(Self { value, weak })
     }
@@ -172,6 +169,7 @@ impl ETag {
     }
 
     /// Generate an ETag from a string using a hash.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self::from_bytes(s.as_bytes())
     }
@@ -290,7 +288,9 @@ impl ETagList {
     /// Check if any ETag in the list matches (strong comparison).
     pub fn contains_strong(&self, etag: &ETag) -> bool {
         if self.any {
-            return !etag.weak;
+            // RFC 7232 §3.1: "*" matches whenever the resource has any
+            // current representation, regardless of ETag weakness.
+            return true;
         }
         self.etags.iter().any(|e| e.strong_match(etag))
     }
@@ -360,10 +360,10 @@ impl ConditionalHeaders {
     /// - If-Modified-Since is after the resource's last modification
     pub fn is_not_modified(&self, etag: Option<&ETag>, last_modified: Option<SystemTime>) -> bool {
         // Check If-None-Match first (takes precedence)
-        if let Some(ref if_none_match) = self.if_none_match {
-            if let Some(etag) = etag {
-                return if_none_match.contains_weak(etag);
-            }
+        if let Some(ref if_none_match) = self.if_none_match
+            && let Some(etag) = etag
+        {
+            return if_none_match.contains_weak(etag);
         }
 
         // Check If-Modified-Since
@@ -527,10 +527,20 @@ impl ConditionalRequest for HttpRequest {
             return Some(412);
         }
 
-        // Check not modified (304) - only for safe methods
         let method = self.method.to_uppercase();
-        if (method == "GET" || method == "HEAD") && headers.is_not_modified(etag, last_modified) {
-            return Some(304);
+        let is_safe = method == "GET" || method == "HEAD";
+
+        if is_safe {
+            // Check not modified (304) - only for safe methods
+            if headers.is_not_modified(etag, last_modified) {
+                return Some(304);
+            }
+        } else if let (Some(if_none_match), Some(etag)) = (&headers.if_none_match, etag) {
+            // RFC 7232 §3.2: a matching If-None-Match on an unsafe method
+            // (PUT/POST/DELETE/...) must fail with 412 Precondition Failed.
+            if if_none_match.contains_weak(etag) {
+                return Some(412);
+            }
         }
 
         None
@@ -689,9 +699,10 @@ pub fn cacheable_response<T: serde::Serialize>(
     }
 
     // Add cache headers
-    response
-        .headers
-        .insert("Cache-Control".to_string(), "private, must-revalidate".to_string());
+    response.headers.insert(
+        "Cache-Control".to_string(),
+        "private, must-revalidate".to_string(),
+    );
     response
         .headers
         .insert("Vary".to_string(), "Accept, Accept-Encoding".to_string());
@@ -823,6 +834,58 @@ mod tests {
 
         assert!(list.contains_weak(&etag));
         assert!(list.contains_strong(&etag));
+    }
+
+    #[test]
+    fn test_etag_list_wildcard_matches_weak_etag() {
+        // RFC 7232 §3.1: "*" succeeds whenever the resource exists,
+        // even if its current ETag is weak.
+        let list = ETagList::any();
+        let weak = ETag::weak("abc123");
+
+        assert!(list.contains_strong(&weak));
+        assert!(list.contains_weak(&weak));
+    }
+
+    #[test]
+    fn test_if_match_wildcard_with_weak_etag_succeeds() {
+        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        request
+            .headers
+            .insert("If-Match".to_string(), "*".to_string());
+
+        let weak = ETag::weak("abc123");
+        assert_eq!(request.evaluate_conditionals(Some(&weak), None), None);
+    }
+
+    #[test]
+    fn test_if_none_match_unsafe_method_412() {
+        // RFC 7232 §3.2: matching If-None-Match on an unsafe method → 412
+        for method in ["PUT", "POST", "DELETE", "PATCH"] {
+            let mut request = HttpRequest::new(method.to_string(), "/resource".to_string());
+            request
+                .headers
+                .insert("If-None-Match".to_string(), "\"abc123\"".to_string());
+
+            let etag = ETag::strong("abc123");
+            assert_eq!(
+                request.evaluate_conditionals(Some(&etag), None),
+                Some(412),
+                "expected 412 for {}",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn test_if_none_match_unsafe_method_no_match_proceeds() {
+        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        request
+            .headers
+            .insert("If-None-Match".to_string(), "\"abc123\"".to_string());
+
+        let etag = ETag::strong("different");
+        assert_eq!(request.evaluate_conditionals(Some(&etag), None), None);
     }
 
     #[test]
@@ -975,5 +1038,3 @@ mod tests {
         assert!(response.is_none());
     }
 }
-
-

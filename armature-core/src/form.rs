@@ -181,14 +181,33 @@ impl MultipartParser {
     pub fn parse(&self, body: &[u8]) -> Result<Vec<FormField>, Error> {
         let mut fields = Vec::new();
         let boundary_marker = format!("--{}", self.boundary);
-        let body_str = String::from_utf8_lossy(body);
+        let delimiter = boundary_marker.as_bytes();
 
-        // Split by boundary
-        let parts: Vec<&str> = body_str.split(&boundary_marker).collect();
+        // Locate every boundary delimiter with SIMD-accelerated byte search.
+        let finder = memchr::memmem::Finder::new(delimiter);
+        let positions: Vec<usize> = finder.find_iter(body).collect();
 
-        for part in parts.iter().skip(1) {
-            if part.trim() == "--" || part.trim().is_empty() {
+        // Each part lives between two consecutive delimiters.
+        for pair in positions.windows(2) {
+            let mut part = &body[pair[0] + delimiter.len()..pair[1]];
+
+            // The closing delimiter ("--boundary--") is not a part.
+            if part.starts_with(b"--") {
                 continue;
+            }
+
+            // Strip the CRLF terminating the boundary line...
+            if let Some(rest) = part.strip_prefix(b"\r\n") {
+                part = rest;
+            } else if let Some(rest) = part.strip_prefix(b"\n") {
+                part = rest;
+            }
+
+            // ...and the CRLF preceding the next boundary.
+            if let Some(rest) = part.strip_suffix(b"\r\n") {
+                part = rest;
+            } else if let Some(rest) = part.strip_suffix(b"\n") {
+                part = rest;
             }
 
             // Parse each part
@@ -201,25 +220,30 @@ impl MultipartParser {
     }
 
     /// Parse a single multipart part
-    fn parse_part(&self, part: &str) -> Result<Option<FormField>, Error> {
-        let lines: Vec<&str> = part.lines().collect();
-
-        if lines.is_empty() {
+    fn parse_part(&self, part: &[u8]) -> Result<Option<FormField>, Error> {
+        if part.is_empty() {
             return Ok(None);
         }
+
+        // Split the header block from the body at the first blank line.
+        // The body must stay a raw byte slice: file uploads are arbitrary binary.
+        let (header_block, content) = match memchr::memmem::find(part, b"\r\n\r\n") {
+            Some(pos) => (&part[..pos], &part[pos + 4..]),
+            None => match memchr::memmem::find(part, b"\n\n") {
+                Some(pos) => (&part[..pos], &part[pos + 2..]),
+                None => (part, &part[part.len()..]),
+            },
+        };
+
+        // Headers are ASCII per RFC 7578, so parsing them as UTF-8 is safe.
+        let headers = String::from_utf8_lossy(header_block);
 
         // Parse headers
         let mut name = None;
         let mut filename = None;
         let mut content_type = None;
-        let mut content_start = 0;
 
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim().is_empty() {
-                content_start = i + 1;
-                break;
-            }
-
+        for line in headers.lines() {
             if line.starts_with("Content-Disposition:") {
                 // Parse name and filename
                 for attr in line.split(';') {
@@ -245,17 +269,13 @@ impl MultipartParser {
 
         let name = name.ok_or_else(|| Error::BadRequest("Missing field name".to_string()))?;
 
-        // Get content
-        let content_lines = &lines[content_start..];
-        let content = content_lines.join("\n").trim().to_string();
-
         // Create field
         if let Some(filename) = filename {
-            // File field
+            // File field: keep the body bytes exactly as uploaded
             let file = FormFile::new(
                 filename,
                 content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
-                content.into_bytes(),
+                content.to_vec(),
             );
             Ok(Some(FormField {
                 name,
@@ -266,7 +286,7 @@ impl MultipartParser {
             // Text field
             Ok(Some(FormField {
                 name,
-                value: Some(content),
+                value: Some(String::from_utf8_lossy(content).into_owned()),
                 file: None,
             }))
         }
@@ -341,6 +361,43 @@ mod tests {
         let parser = MultipartParser::from_content_type(content_type).unwrap();
 
         assert_eq!(parser.boundary, "----WebKitFormBoundary7MA4YWxkTrZu0gW");
+    }
+
+    #[test]
+    fn test_multipart_binary_roundtrip() {
+        // Non-UTF-8 bytes, embedded CRLFs, and leading/trailing whitespace
+        // must all survive the parse exactly as uploaded.
+        let file_data: Vec<u8> = vec![
+            b' ', b'\t', 0x00, 0xFF, 0xFE, b'\r', b'\n', 0x80, 0xC3, 0x01, b'\n', b' ',
+        ];
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--XBOUNDARY\r\n");
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"blob.bin\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(&file_data);
+        body.extend_from_slice(b"\r\n--XBOUNDARY\r\n");
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"note\"\r\n\r\n");
+        body.extend_from_slice(b"hello world");
+        body.extend_from_slice(b"\r\n--XBOUNDARY--\r\n");
+
+        let parser =
+            MultipartParser::from_content_type("multipart/form-data; boundary=XBOUNDARY").unwrap();
+        let fields = parser.parse(&body).unwrap();
+
+        assert_eq!(fields.len(), 2);
+
+        let file = fields[0].file.as_ref().unwrap();
+        assert_eq!(fields[0].name, "file");
+        assert_eq!(file.filename, "blob.bin");
+        assert_eq!(file.content_type, "application/octet-stream");
+        assert_eq!(file.data, file_data);
+        assert_eq!(file.size, file_data.len());
+
+        assert_eq!(fields[1].name, "note");
+        assert_eq!(fields[1].value.as_deref(), Some("hello world"));
     }
 
     #[test]

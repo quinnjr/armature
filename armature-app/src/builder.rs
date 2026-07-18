@@ -310,6 +310,7 @@ fn parse_method(method: &str) -> Result<HttpMethod> {
         "PATCH" => Ok(HttpMethod::PATCH),
         "OPTIONS" => Ok(HttpMethod::OPTIONS),
         "HEAD" => Ok(HttpMethod::HEAD),
+        "QUERY" => Ok(HttpMethod::QUERY),
         _ => Err(AppError::Builder {
             message: format!("Unknown HTTP method: {}", method),
         }),

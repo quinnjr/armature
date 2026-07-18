@@ -169,35 +169,49 @@ impl ConnectionManagerConfig {
 pub type ConnectionId = u64;
 
 /// State tracked for each connection.
+///
+/// The mutable counters are atomics so that per-I/O accounting
+/// (`record_bytes_read`/`record_bytes_written`/`mark_active`) can update the
+/// shared state under a *read* lock on the connection map with a lock-free
+/// atomic add, instead of taking the global write lock on every I/O. The map
+/// stores `Arc<ConnectionState>`, so the write lock is only needed on
+/// register/deregister/cull.
 #[derive(Debug)]
 struct ConnectionState {
     #[allow(dead_code)] // Reserved for connection identification
     id: ConnectionId,
-    #[allow(dead_code)] // Reserved for connection lifetime tracking
+    /// Fixed reference point used to derive `last_active` without an Instant field.
     created_at: Instant,
-    last_active: Instant,
-    bytes_read: u64,
-    bytes_written: u64,
-    requests: u64,
-    is_keep_alive: bool,
+    /// Nanoseconds since `created_at` at which the connection was last active.
+    last_active_nanos: AtomicU64,
+    bytes_read: AtomicU64,
+    bytes_written: AtomicU64,
+    requests: AtomicU64,
+    is_keep_alive: AtomicBool,
 }
 
 impl ConnectionState {
     fn new(id: ConnectionId) -> Self {
-        let now = Instant::now();
         Self {
             id,
-            created_at: now,
-            last_active: now,
-            bytes_read: 0,
-            bytes_written: 0,
-            requests: 0,
-            is_keep_alive: false,
+            created_at: Instant::now(),
+            last_active_nanos: AtomicU64::new(0),
+            bytes_read: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
+            requests: AtomicU64::new(0),
+            is_keep_alive: AtomicBool::new(false),
         }
     }
 
+    /// Mark the connection as active as of now (lock-free).
+    fn touch(&self) {
+        let elapsed = self.created_at.elapsed().as_nanos() as u64;
+        self.last_active_nanos.store(elapsed, Ordering::Relaxed);
+    }
+
     fn idle_duration(&self) -> Duration {
-        self.last_active.elapsed()
+        let last = Duration::from_nanos(self.last_active_nanos.load(Ordering::Relaxed));
+        self.created_at.elapsed().saturating_sub(last)
     }
 }
 
@@ -399,7 +413,7 @@ pub struct ConnectionManagerStats {
 /// Connection manager with dynamic tuning.
 pub struct ConnectionManager {
     config: ConnectionManagerConfig,
-    connections: RwLock<HashMap<ConnectionId, ConnectionState>>,
+    connections: RwLock<HashMap<ConnectionId, Arc<ConnectionState>>>,
     next_id: AtomicU64,
     buffer_history: Mutex<BufferHistory>,
     load: LoadTracker,
@@ -447,7 +461,7 @@ impl ConnectionManager {
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let state = ConnectionState::new(id);
+        let state = Arc::new(ConnectionState::new(id));
 
         {
             let mut connections = self.connections.write().unwrap();
@@ -474,40 +488,47 @@ impl ConnectionManager {
     }
 
     /// Mark a connection as active.
+    ///
+    /// Takes only a shared read lock to locate the connection; the update is a
+    /// lock-free atomic write on the shared `ConnectionState`.
     pub fn mark_active(&self, id: ConnectionId) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
+        if let Ok(connections) = self.connections.read()
+            && let Some(state) = connections.get(&id)
         {
-            state.last_active = Instant::now();
-            state.requests += 1;
+            state.touch();
+            state.requests.fetch_add(1, Ordering::Relaxed);
         }
         self.load.record_request();
     }
 
     /// Record bytes read on a connection.
+    ///
+    /// Lock-free atomic accounting under a shared read lock.
     pub fn record_bytes_read(&self, id: ConnectionId, bytes: u64) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
+        if let Ok(connections) = self.connections.read()
+            && let Some(state) = connections.get(&id)
         {
-            state.bytes_read += bytes;
+            state.bytes_read.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
     /// Record bytes written on a connection.
+    ///
+    /// Lock-free atomic accounting under a shared read lock.
     pub fn record_bytes_written(&self, id: ConnectionId, bytes: u64) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
+        if let Ok(connections) = self.connections.read()
+            && let Some(state) = connections.get(&id)
         {
-            state.bytes_written += bytes;
+            state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
     /// Set connection keep-alive status.
     pub fn set_keep_alive(&self, id: ConnectionId, keep_alive: bool) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(state) = connections.get_mut(&id)
+        if let Ok(connections) = self.connections.read()
+            && let Some(state) = connections.get(&id)
         {
-            state.is_keep_alive = keep_alive;
+            state.is_keep_alive.store(keep_alive, Ordering::Relaxed);
         }
     }
 
@@ -888,5 +909,45 @@ mod tests {
         let snapshot = manager.snapshot();
         assert_eq!(snapshot.active_connections, 1);
         assert!(snapshot.buffer_size > 0);
+    }
+
+    #[test]
+    fn test_concurrent_io_accounting_is_lock_free_and_correct() {
+        // Per-I/O accounting now only takes a shared read lock plus a lock-free
+        // atomic add, so many threads can update the same connection's counters
+        // concurrently without a global write lock. Verify totals are exact.
+        let manager = Arc::new(ConnectionManager::new(ConnectionManagerConfig::default()));
+        let id = manager.register_connection().unwrap();
+
+        const THREADS: u64 = 8;
+        const ITERS: u64 = 1000;
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let m = Arc::clone(&manager);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    m.record_bytes_read(id, 1);
+                    m.record_bytes_written(id, 2);
+                    m.mark_active(id);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Atomic adds must not lose updates.
+        let conns = manager.connections.read().unwrap();
+        let state = conns.get(&id).unwrap();
+        assert_eq!(state.bytes_read.load(Ordering::Relaxed), THREADS * ITERS);
+        assert_eq!(
+            state.bytes_written.load(Ordering::Relaxed),
+            THREADS * ITERS * 2
+        );
+        assert_eq!(state.requests.load(Ordering::Relaxed), THREADS * ITERS);
+
+        // Recently marked active, so not idle for anywhere near the timeout.
+        assert!(state.idle_duration() < Duration::from_secs(1));
     }
 }

@@ -20,12 +20,19 @@ pub struct SearchBuilder {
     from: Option<i64>,
     size: Option<i64>,
     sort: Vec<Value>,
+    search_after: Option<Vec<Value>>,
+    max_size: i64,
     source_includes: Option<Vec<String>>,
     source_excludes: Option<Vec<String>>,
     highlight: Option<Value>,
     aggregations: Option<Value>,
     track_total_hits: Option<bool>,
 }
+
+/// Default upper bound applied to `size` unless overridden via
+/// [`SearchBuilder::max_size`]. Prevents a caller from requesting an
+/// unbounded page.
+pub const DEFAULT_MAX_SIZE: i64 = 1000;
 
 impl SearchBuilder {
     /// Create a new search builder.
@@ -37,6 +44,8 @@ impl SearchBuilder {
             from: None,
             size: None,
             sort: Vec::new(),
+            search_after: None,
+            max_size: DEFAULT_MAX_SIZE,
             source_includes: None,
             source_excludes: None,
             highlight: None,
@@ -94,8 +103,33 @@ impl SearchBuilder {
     }
 
     /// Set result size limit.
+    ///
+    /// The effective size sent to OpenSearch is clamped to [`SearchBuilder::max_size`]
+    /// (default [`DEFAULT_MAX_SIZE`]) so a caller cannot request an unbounded page.
     pub fn size(mut self, size: i64) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// Override the maximum allowed page size used to clamp [`SearchBuilder::size`].
+    ///
+    /// Defaults to [`DEFAULT_MAX_SIZE`]. Values below `1` are treated as `1`.
+    pub fn max_size(mut self, max_size: i64) -> Self {
+        self.max_size = max_size.max(1);
+        self
+    }
+
+    /// Enable `search_after` deep pagination.
+    ///
+    /// Emits a `search_after` clause seeded with the sort values of the last hit
+    /// from a previous page. This scrolls past the 10,000-document `from`/`size`
+    /// window without the cost of deep offsets. A stable, tie-broken [`sort`] must
+    /// be configured (e.g. sort by a timestamp plus a unique id); `from` is ignored
+    /// by OpenSearch when `search_after` is present.
+    ///
+    /// [`sort`]: SearchBuilder::sort_by
+    pub fn search_after(mut self, sort_values: Vec<Value>) -> Self {
+        self.search_after = Some(sort_values);
         self
     }
 
@@ -175,11 +209,20 @@ impl SearchBuilder {
         }
 
         if let Some(size) = self.size {
-            body.insert("size".to_string(), json!(size));
+            // Clamp so a caller cannot request an unbounded page.
+            let clamped = size.clamp(0, self.max_size);
+            body.insert("size".to_string(), json!(clamped));
         }
 
         if !self.sort.is_empty() {
             body.insert("sort".to_string(), Value::Array(self.sort.clone()));
+        }
+
+        if let Some(search_after) = &self.search_after {
+            body.insert(
+                "search_after".to_string(),
+                Value::Array(search_after.clone()),
+            );
         }
 
         // Source filtering
@@ -558,5 +601,57 @@ impl AggregationResult {
     /// Get buckets from bucket aggregation.
     pub fn buckets(&self) -> Option<Vec<Value>> {
         self.value["buckets"].as_array().cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builder() -> SearchBuilder {
+        SearchBuilder::new(Arc::new(OpenSearch::default()))
+    }
+
+    #[test]
+    fn search_after_is_emitted_with_sort_values() {
+        let body = builder()
+            .sort_by("created_at", SortOrder::Desc)
+            .sort_by("id", SortOrder::Asc)
+            .search_after(vec![json!(1_700_000_000), json!("abc")])
+            .build_body();
+
+        assert_eq!(
+            body["search_after"],
+            json!([1_700_000_000, "abc"]),
+            "search_after clause should be emitted verbatim"
+        );
+        assert!(
+            body.get("sort").is_some(),
+            "search_after requires a stable sort"
+        );
+    }
+
+    #[test]
+    fn size_is_clamped_to_default_max() {
+        let body = builder().size(50_000).build_body();
+        assert_eq!(body["size"], json!(DEFAULT_MAX_SIZE));
+    }
+
+    #[test]
+    fn size_below_max_is_untouched() {
+        let body = builder().size(25).build_body();
+        assert_eq!(body["size"], json!(25));
+    }
+
+    #[test]
+    fn custom_max_size_clamps() {
+        let body = builder().max_size(100).size(5000).build_body();
+        assert_eq!(body["size"], json!(100));
+    }
+
+    #[test]
+    fn no_search_after_when_not_set() {
+        let body = builder().size(10).build_body();
+        assert!(body.get("search_after").is_none());
     }
 }

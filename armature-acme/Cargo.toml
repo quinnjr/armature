@@ -15,7 +15,7 @@ categories = ["web-programming", "cryptography"]
 armature-core = { path = "../armature-core", version = "0.2.1" }
 
 # Async runtime
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 # HTTP client for ACME protocol

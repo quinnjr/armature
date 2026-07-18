@@ -9,7 +9,7 @@
 //! - [`CowState<T>`]: Copy-on-Write state with cheap reads
 //! - [`Snapshot<T>`]: Immutable snapshot from a point in time
 //! - [`VersionedState<T>`]: State with version tracking for cache invalidation
-//! - [`AtomicState<T>`]: Lock-free state with atomic updates
+//! - [`AtomicState<T>`]: State with cheap snapshot reads and swap updates
 //!
 //! # Performance
 //!
@@ -438,13 +438,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for VersionedState<T> {
 }
 
 // ============================================================================
-// AtomicState - Lock-Free Updates
+// AtomicState - Snapshot Swap Updates
 // ============================================================================
 
-/// Lock-free state using atomic pointer swaps.
+/// State holder with cheap snapshot reads and whole-value swap updates.
 ///
-/// Provides even lower contention than CowState by using atomic
-/// operations instead of RwLock. Best for very high read frequency.
+/// Uses a lightweight `parking_lot::RwLock<Arc<T>>` internally: reads take
+/// a short read lock and clone the `Arc`, writes take a short write lock
+/// and swap the `Arc`. Best for very high read frequency with rare writes.
 ///
 /// # Caution
 ///
@@ -464,12 +465,12 @@ impl<T: std::fmt::Debug> std::fmt::Debug for VersionedState<T> {
 /// // Very fast reads
 /// let config = state.load();
 ///
-/// // Atomic update
+/// // Swap in a new value
 /// state.store(Arc::new(new_config));
 /// ```
 pub struct AtomicState<T> {
-    /// Current value as atomic Arc
-    current: std::sync::atomic::AtomicPtr<Arc<T>>,
+    /// Current value
+    current: parking_lot::RwLock<Arc<T>>,
     /// Version counter
     version: AtomicU64,
 }
@@ -477,37 +478,29 @@ pub struct AtomicState<T> {
 impl<T> AtomicState<T> {
     /// Create new atomic state.
     pub fn new(value: Arc<T>) -> Self {
-        let boxed = Box::new(value);
-        let ptr = Box::into_raw(boxed);
         COW_STATS.record_state_created();
         Self {
-            current: std::sync::atomic::AtomicPtr::new(ptr),
+            current: parking_lot::RwLock::new(value),
             version: AtomicU64::new(1),
         }
     }
 
     /// Load current value.
     ///
-    /// Very fast - just atomic load and Arc clone.
+    /// Very fast - short read lock and Arc clone.
     #[inline]
     pub fn load(&self) -> Arc<T> {
-        let ptr = self.current.load(Ordering::Acquire);
-        // SAFETY: ptr always points to valid Box<Arc<T>>
-        let arc_ref = unsafe { &*ptr };
+        let arc = Arc::clone(&self.current.read());
         COW_STATS.record_snapshot_taken();
-        Arc::clone(arc_ref)
+        arc
     }
 
     /// Store new value.
     ///
-    /// Atomically swaps to new value, dropping old.
+    /// Swaps in the new value, dropping the old once all readers release it.
     pub fn store(&self, value: Arc<T>) {
-        let new_box = Box::new(value);
-        let new_ptr = Box::into_raw(new_box);
-        let old_ptr = self.current.swap(new_ptr, Ordering::AcqRel);
+        *self.current.write() = value;
         self.version.fetch_add(1, Ordering::Release);
-        // SAFETY: old_ptr was created by Box::into_raw
-        let _old = unsafe { Box::from_raw(old_ptr) };
         COW_STATS.record_update();
     }
 
@@ -539,20 +532,6 @@ impl<T: Clone> AtomicState<T> {
         self.store(Arc::new(new_value));
     }
 }
-
-impl<T> Drop for AtomicState<T> {
-    fn drop(&mut self) {
-        let ptr = self.current.load(Ordering::Acquire);
-        if !ptr.is_null() {
-            // SAFETY: ptr was created by Box::into_raw
-            let _old = unsafe { Box::from_raw(ptr) };
-        }
-    }
-}
-
-// SAFETY: AtomicState uses atomic operations for all accesses
-unsafe impl<T: Send + Sync> Send for AtomicState<T> {}
-unsafe impl<T: Send + Sync> Sync for AtomicState<T> {}
 
 impl<T: std::fmt::Debug> std::fmt::Debug for AtomicState<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -974,6 +953,43 @@ mod tests {
         let state = AtomicState::new(Arc::new(10));
         state.update(|&v| v * 2);
         assert_eq!(*state.load(), 20);
+    }
+
+    #[test]
+    fn test_atomic_state_concurrent_load_store() {
+        // Regression: the old AtomicPtr-based implementation freed the value
+        // read by concurrent `load` calls immediately after `store`.
+        let state = Arc::new(AtomicState::new(Arc::new(vec![0u64; 64])));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        let value = state.load();
+                        // Every element of a stored vec has the same value
+                        let first = value[0];
+                        assert!(value.iter().all(|&v| v == first));
+                    }
+                })
+            })
+            .collect();
+
+        let writer = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                for i in 1..500u64 {
+                    state.store(Arc::new(vec![i; 64]));
+                }
+            })
+        };
+
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        writer.join().unwrap();
+
+        assert_eq!(state.load()[0], 499);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::{
@@ -17,18 +18,32 @@ use crate::{
 pub struct RedisService {
     config: RedisConfig,
     pool: RedisPool,
+    /// Lazily-built, reused `redis::Client` for `get_dedicated`.
+    ///
+    /// The client parses the connection URL and holds connection config; it is
+    /// built once and reused so `get_dedicated` no longer calls
+    /// `redis::Client::open(...)` on every invocation.
+    dedicated_client: OnceLock<redis::Client>,
 }
 
 impl RedisService {
     /// Create a new Redis service.
     pub async fn new(config: RedisConfig) -> Result<Self> {
         let pool = RedisPoolBuilder::new(config.clone()).build().await?;
-        Ok(Self { config, pool })
+        Ok(Self {
+            config,
+            pool,
+            dedicated_client: OnceLock::new(),
+        })
     }
 
     /// Create from an existing pool.
     pub fn from_pool(config: RedisConfig, pool: RedisPool) -> Self {
-        Self { config, pool }
+        Self {
+            config,
+            pool,
+            dedicated_client: OnceLock::new(),
+        }
     }
 
     /// Get the configuration.
@@ -47,10 +62,29 @@ impl RedisService {
         Ok(RedisConnection::new(conn))
     }
 
-    /// Get a dedicated connection (not from pool).
-    pub async fn get_dedicated(&self) -> Result<MultiplexedConnection> {
+    /// Get or lazily build the reusable dedicated `redis::Client`.
+    fn dedicated_client(&self) -> Result<&redis::Client> {
+        if let Some(client) = self.dedicated_client.get() {
+            return Ok(client);
+        }
         let client = redis::Client::open(self.config.connection_url())
             .map_err(|e| RedisError::Connection(e.to_string()))?;
+        // If another thread initialized it first, keep the existing one.
+        let _ = self.dedicated_client.set(client);
+        Ok(self
+            .dedicated_client
+            .get()
+            .expect("dedicated_client was just set"))
+    }
+
+    /// Get a dedicated connection (not from pool).
+    ///
+    /// The underlying `redis::Client` is built once and cached, so repeated
+    /// calls no longer re-parse the URL and rebuild the client. Each call still
+    /// opens a fresh multiplexed connection (that is the point of a "dedicated"
+    /// connection outside the pool).
+    pub async fn get_dedicated(&self) -> Result<MultiplexedConnection> {
+        let client = self.dedicated_client()?;
         client
             .get_multiplexed_async_connection()
             .await
@@ -273,6 +307,86 @@ impl RedisService {
         let mut conn = self.get().await?;
         let script = redis::Script::new(script);
         let result: T = script.key(keys).arg(args).invoke_async(&mut *conn).await?;
+        Ok(result)
+    }
+
+    // Multi-key convenience helpers (single round-trip instead of a loop).
+
+    /// Get multiple values in a single `MGET` round-trip.
+    ///
+    /// Returns values in the **same order** as `keys`, with `None` for missing
+    /// keys. Prefer this over looping [`get_value`](Self::get_value).
+    pub async fn mget<T: redis::FromRedisValue>(&self, keys: &[&str]) -> Result<Vec<Option<T>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.get().await?;
+        let values: Vec<Option<T>> = redis::cmd("MGET").arg(keys).query_async(&mut *conn).await?;
+        Ok(values)
+    }
+
+    /// Set multiple key/value pairs in a single `MSET` round-trip.
+    ///
+    /// Note: `MSET` has no TTL support; use a [`pipeline`](Self::pipeline) of
+    /// `SET ... EX` when per-key expiry is required.
+    pub async fn mset<T: redis::ToRedisArgs + Send + Sync>(
+        &self,
+        items: &[(&str, T)],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.get().await?;
+        let mut cmd = redis::cmd("MSET");
+        for (key, value) in items {
+            cmd.arg(*key).arg(value);
+        }
+        let _: () = cmd.query_async(&mut *conn).await?;
+        Ok(())
+    }
+
+    /// Delete multiple keys in a single variadic `DEL` round-trip.
+    ///
+    /// Returns the number of keys actually removed.
+    pub async fn del_many(&self, keys: &[&str]) -> Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.get().await?;
+        let deleted: u64 = redis::cmd("DEL").arg(keys).query_async(&mut *conn).await?;
+        Ok(deleted)
+    }
+
+    /// Execute a pipeline against a pooled connection in one round-trip.
+    ///
+    /// The `build` closure populates the pipeline; the result is decoded into
+    /// `T`. This lets multi-key callers batch arbitrary commands without
+    /// looping single-key operations.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use armature_redis::{RedisService, Result};
+    /// # async fn example(redis: &RedisService) -> Result<()> {
+    /// let (a, b): (Option<String>, Option<String>) = redis
+    ///     .pipeline(|pipe| {
+    ///         pipe.cmd("GET").arg("key:a");
+    ///         pipe.cmd("GET").arg("key:b");
+    ///     })
+    ///     .await?;
+    /// # let _ = (a, b);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn pipeline<T, F>(&self, build: F) -> Result<T>
+    where
+        T: redis::FromRedisValue,
+        F: FnOnce(&mut redis::Pipeline),
+    {
+        let mut conn = self.get().await?;
+        let mut pipe = redis::pipe();
+        build(&mut pipe);
+        let result: T = pipe.query_async(&mut *conn).await?;
         Ok(result)
     }
 }

@@ -55,6 +55,24 @@
 //! - Cache coherency traffic reduced
 //!
 //! Expected throughput improvement: 5-15% on multi-socket systems.
+//!
+//! ## Implementation Notes
+//!
+//! On Linux, thread binding is implemented with the `set_mempolicy(2)`
+//! syscall and buffer placement with `mbind(2)` (both invoked via
+//! `libc::syscall`, no libnuma dependency). Two rules govern behavior:
+//!
+//! - **Thread-scoped policy**: `set_mempolicy` only affects the *calling*
+//!   thread. [`bind_to_node`] / [`bind_to_local_node`] must therefore be
+//!   called on the worker thread whose allocations they should restrict
+//!   (this is how [`init_worker_numa`] is intended to be used).
+//! - **Graceful degradation for allocations**: [`NumaAllocator`] always
+//!   returns usable memory. If `mbind` fails (e.g. NUMA syscalls not
+//!   compiled into the kernel), the allocation is kept without NUMA
+//!   placement, a `tracing` warning is emitted, and the miss is recorded
+//!   in [`NumaAllocStats::mbind_misses`]. Binding functions, in contrast,
+//!   report failures as errors and never pretend success — on non-Linux
+//!   platforms they return [`NumaError::NotSupported`].
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -442,6 +460,86 @@ pub enum NumaPolicy {
 }
 
 // ============================================================================
+// Linux mempolicy syscall support
+// ============================================================================
+
+/// `MPOL_*` constants for `set_mempolicy(2)` / `mbind(2)`.
+///
+/// Defined locally because the `libc` crate does not export them for all
+/// supported targets. Values are stable kernel ABI (see
+/// `include/uapi/linux/mempolicy.h`).
+#[cfg(target_os = "linux")]
+mod mempolicy {
+    #![allow(dead_code)]
+
+    /// Restore the default (local allocation) policy.
+    pub const MPOL_DEFAULT: libc::c_int = 0;
+    /// Prefer the given node, fall back to others under pressure.
+    pub const MPOL_PREFERRED: libc::c_int = 1;
+    /// Strictly restrict allocation to the given node set.
+    pub const MPOL_BIND: libc::c_int = 2;
+    /// Interleave allocations across the given node set.
+    pub const MPOL_INTERLEAVE: libc::c_int = 3;
+    /// Allocate on the node of the CPU that triggers the fault (kernel >= 3.8).
+    pub const MPOL_LOCAL: libc::c_int = 4;
+
+    /// `mbind` flag: migrate already-faulted pages so they conform to the
+    /// policy (needed because `alloc_zeroed` may touch pages before `mbind`).
+    pub const MPOL_MF_MOVE: libc::c_uint = 1 << 1;
+
+    /// Number of bits in the nodemask we pass to the kernel (a single `u64`).
+    /// Node ids >= this cannot be expressed in the mask.
+    pub const MAX_NODES: usize = 64;
+}
+
+/// Raw `set_mempolicy(2)` wrapper for the calling thread.
+///
+/// Pass `nodemask: None` for modes that take no mask (`MPOL_DEFAULT`,
+/// `MPOL_LOCAL`). Returns the OS error on failure.
+#[cfg(target_os = "linux")]
+fn set_mempolicy(
+    mode: libc::c_int,
+    nodemask: Option<&u64>,
+    maxnode: usize,
+) -> Result<(), std::io::Error> {
+    let mask_ptr = nodemask.map_or(std::ptr::null(), |m| m as *const u64);
+    // SAFETY: mask_ptr is either null (with maxnode 0) or points to a valid
+    // u64 that outlives the call; maxnode never exceeds the mask's bit width.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_set_mempolicy,
+            mode,
+            mask_ptr,
+            maxnode as libc::c_ulong,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Allocation alignment used by [`NumaAllocator`].
+///
+/// On Linux this is the system page size so allocations are valid arguments
+/// to `mbind(2)` (which requires a page-aligned address).
+#[cfg(target_os = "linux")]
+fn numa_alloc_align() -> usize {
+    static ALIGN: OnceLock<usize> = OnceLock::new();
+    *ALIGN.get_or_init(|| {
+        // SAFETY: sysconf(_SC_PAGESIZE) has no memory-safety preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page > 0 { page as usize } else { 4096 }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn numa_alloc_align() -> usize {
+    64
+}
+
+// ============================================================================
 // NUMA-Aware Allocator
 // ============================================================================
 
@@ -470,9 +568,17 @@ impl NumaAllocator {
         Self::new(NumaNode::current())
     }
 
-    /// Allocate memory on this node.
+    /// Allocate zeroed memory placed on this node.
     ///
     /// Returns a pointer to the allocated memory, or None if allocation fails.
+    ///
+    /// On Linux the region is page-aligned and bound to the allocator's node
+    /// with `mbind(2)` (`MPOL_BIND` + `MPOL_MF_MOVE`), so its pages actually
+    /// land on that node. If `mbind` fails (e.g. NUMA syscalls unavailable),
+    /// the allocation is still returned — placement degrades gracefully to
+    /// the kernel default, a warning is logged, and the miss is counted in
+    /// [`NumaAllocStats::mbind_misses`]. On non-Linux platforms no placement
+    /// is attempted (every allocation counts as an `mbind` miss).
     ///
     /// # Safety
     ///
@@ -496,33 +602,72 @@ impl NumaAllocator {
 
     #[cfg(target_os = "linux")]
     fn allocate_linux(&self, size: usize) -> Option<*mut u8> {
-        use std::alloc::{Layout, alloc};
+        use std::alloc::{Layout, alloc_zeroed};
 
-        // Use standard allocation with mbind hint
-        // For actual NUMA binding, use mmap + mbind
-        let layout = Layout::from_size_align(size, 64).ok()?;
-        let ptr = unsafe { alloc(layout) };
+        // Page-aligned so the region is a valid mbind(2) argument.
+        // Zeroed so NumaBuffer::as_slice never exposes uninitialized memory.
+        let layout = Layout::from_size_align(size, numa_alloc_align()).ok()?;
+        let ptr = unsafe { alloc_zeroed(layout) };
 
         if ptr.is_null() {
             self.stats.record_failure();
-            None
-        } else {
-            self.stats.record_allocation(size, self.node.id());
-            Some(ptr)
+            return None;
         }
+
+        // Bind the region's pages to the target node. MPOL_MF_MOVE migrates
+        // any pages alloc_zeroed already faulted in. Failure is non-fatal:
+        // keep the allocation without NUMA placement (graceful degradation).
+        if self.node.id() < mempolicy::MAX_NODES {
+            let nodemask: u64 = 1u64 << self.node.id();
+            // SAFETY: ptr..ptr+size is a live allocation we own; nodemask
+            // outlives the call and maxnode matches its bit width.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_mbind,
+                    ptr as *mut libc::c_void,
+                    size as libc::c_ulong,
+                    mempolicy::MPOL_BIND,
+                    &nodemask as *const u64,
+                    mempolicy::MAX_NODES as libc::c_ulong,
+                    mempolicy::MPOL_MF_MOVE,
+                )
+            };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                tracing::warn!(
+                    node = self.node.id(),
+                    size,
+                    error = %err,
+                    "mbind failed; keeping allocation without NUMA placement"
+                );
+                self.stats.record_mbind_miss();
+            }
+        } else {
+            tracing::warn!(
+                node = self.node.id(),
+                "NUMA node id exceeds nodemask width; keeping allocation without NUMA placement"
+            );
+            self.stats.record_mbind_miss();
+        }
+
+        self.stats.record_allocation(size, self.node.id());
+        Some(ptr)
     }
 
     #[cfg(not(target_os = "linux"))]
     fn allocate_fallback(&self, size: usize) -> Option<*mut u8> {
-        use std::alloc::{Layout, alloc};
+        use std::alloc::{Layout, alloc_zeroed};
 
-        let layout = Layout::from_size_align(size, 64).ok()?;
-        let ptr = unsafe { alloc(layout) };
+        // Zeroed so NumaBuffer::as_slice never exposes uninitialized memory
+        let layout = Layout::from_size_align(size, numa_alloc_align()).ok()?;
+        let ptr = unsafe { alloc_zeroed(layout) };
 
         if ptr.is_null() {
             self.stats.record_failure();
             None
         } else {
+            // No NUMA placement possible on this platform.
+            self.stats.record_mbind_miss();
             self.stats.record_allocation(size, 0);
             Some(ptr)
         }
@@ -537,7 +682,7 @@ impl NumaAllocator {
     pub unsafe fn deallocate(&self, ptr: *mut u8, size: usize) {
         use std::alloc::{Layout, dealloc};
 
-        if let Ok(layout) = Layout::from_size_align(size, 64) {
+        if let Ok(layout) = Layout::from_size_align(size, numa_alloc_align()) {
             // SAFETY: caller guarantees ptr was allocated with this size/alignment
             unsafe { dealloc(ptr, layout) };
             self.stats.record_deallocation(size);
@@ -642,9 +787,21 @@ unsafe impl Sync for NumaBuffer {}
 // Worker NUMA Binding
 // ============================================================================
 
-/// Bind the current thread to a NUMA node.
+/// Bind the calling thread's memory policy to a NUMA node.
 ///
-/// This restricts the thread's memory allocations to the specified node.
+/// On Linux this calls `set_mempolicy(MPOL_BIND, ...)`, strictly restricting
+/// the **calling thread's** future memory allocations to the given node.
+/// Because the policy is per-thread, this must be called on the worker
+/// thread it should affect (see [`init_worker_numa`]).
+///
+/// # Errors
+///
+/// - [`NumaError::InvalidNode`] if the node id is out of range for this
+///   system (or exceeds the supported 64-node mask width).
+/// - [`NumaError::NotSupported`] on non-Linux platforms, or if the kernel
+///   lacks the NUMA syscalls (`ENOSYS`).
+/// - [`NumaError::BindFailed`] if `set_mempolicy` fails for any other
+///   reason (the OS error is included in the message).
 #[inline]
 pub fn bind_to_node(node: NumaNode) -> Result<(), NumaError> {
     #[cfg(target_os = "linux")]
@@ -655,38 +812,129 @@ pub fn bind_to_node(node: NumaNode) -> Result<(), NumaError> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = node;
-        Ok(()) // No-op on non-Linux
+        NUMA_STATS.record_bind(false);
+        Err(NumaError::NotSupported)
     }
 }
 
 #[cfg(target_os = "linux")]
 fn bind_to_node_linux(node: NumaNode) -> Result<(), NumaError> {
-    // This would use libnuma mbind or set_mempolicy
-    // For now, we just validate the node exists
-    if node.id() >= num_numa_nodes() {
+    let num_nodes = num_numa_nodes();
+    if node.id() >= num_nodes || node.id() >= mempolicy::MAX_NODES {
+        NUMA_STATS.record_bind(false);
         return Err(NumaError::InvalidNode {
             node: node.id(),
-            max: num_numa_nodes() - 1,
+            max: num_nodes.saturating_sub(1),
         });
     }
-    NUMA_STATS.record_bind(true);
-    Ok(())
+
+    let nodemask: u64 = 1u64 << node.id();
+    match set_mempolicy(mempolicy::MPOL_BIND, Some(&nodemask), mempolicy::MAX_NODES) {
+        Ok(()) => {
+            NUMA_STATS.record_bind(true);
+            Ok(())
+        }
+        Err(err) => {
+            NUMA_STATS.record_bind(false);
+            if err.raw_os_error() == Some(libc::ENOSYS) {
+                Err(NumaError::NotSupported)
+            } else {
+                Err(NumaError::BindFailed {
+                    reason: format!(
+                        "set_mempolicy(MPOL_BIND, node {}) failed: {}",
+                        node.id(),
+                        err
+                    ),
+                })
+            }
+        }
+    }
 }
 
-/// Bind the current thread to its local NUMA node.
+/// Bind the calling thread's memory policy to its local NUMA node.
+///
+/// On Linux this calls `set_mempolicy(MPOL_LOCAL)` (kernel >= 3.8), which
+/// allocates pages on the node of the CPU that faults them in — following
+/// the thread if it migrates. On kernels that predate `MPOL_LOCAL`
+/// (`EINVAL`), it falls back to an explicit [`bind_to_node`] on the current
+/// node. Like [`bind_to_node`], the policy only affects the calling thread.
+///
+/// # Errors
+///
+/// Returns [`NumaError::NotSupported`] on non-Linux platforms or when the
+/// kernel lacks NUMA syscalls (`ENOSYS`), and [`NumaError::BindFailed`] for
+/// other syscall failures.
 #[inline]
 pub fn bind_to_local_node() -> Result<(), NumaError> {
-    bind_to_node(NumaNode::current())
+    #[cfg(target_os = "linux")]
+    {
+        match set_mempolicy(mempolicy::MPOL_LOCAL, None, 0) {
+            Ok(()) => {
+                NUMA_STATS.record_bind(true);
+                Ok(())
+            }
+            // MPOL_LOCAL requires kernel >= 3.8; older kernels report EINVAL.
+            // Fall back to a strict bind to the current node.
+            Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
+                bind_to_node(NumaNode::current())
+            }
+            Err(err) => {
+                NUMA_STATS.record_bind(false);
+                if err.raw_os_error() == Some(libc::ENOSYS) {
+                    Err(NumaError::NotSupported)
+                } else {
+                    Err(NumaError::BindFailed {
+                        reason: format!("set_mempolicy(MPOL_LOCAL) failed: {}", err),
+                    })
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        NUMA_STATS.record_bind(false);
+        Err(NumaError::NotSupported)
+    }
 }
 
 /// Initialize NUMA for a worker.
 ///
-/// This combines CPU affinity and NUMA binding for optimal performance.
+/// This binds the calling thread's memory policy to the node assigned to
+/// `worker_id` (round-robin across nodes). Must be called **on the worker
+/// thread itself**, since `set_mempolicy` only affects the calling thread.
+/// On single-node or non-NUMA systems no binding is attempted and the
+/// assigned node is returned as-is.
+///
+/// Binding failures that reflect the environment rather than a caller
+/// mistake — the NUMA syscalls being unavailable ([`NumaError::NotSupported`],
+/// e.g. seccomp/container sandbox or a non-Linux platform) or the bind
+/// syscall being rejected ([`NumaError::BindFailed`]) — are treated as a
+/// non-fatal degradation: a warning is logged and the assigned node is
+/// returned as if binding had succeeded, mirroring the allocation path which
+/// records an `mbind` miss instead of failing. Genuinely fatal
+/// misconfiguration (e.g. [`NumaError::InvalidNode`]) is still returned as an
+/// error.
 pub fn init_worker_numa(worker_id: usize, config: &NumaConfig) -> Result<NumaNode, NumaError> {
     let node = config.node_for_worker(worker_id);
 
     if config.is_numa() {
-        bind_to_node(node)?;
+        match bind_to_node(node) {
+            Ok(()) => {}
+            // Environment can't honor the bind: degrade gracefully instead of
+            // failing worker init. The worker still runs; allocations simply
+            // fall back to the kernel default placement.
+            Err(err @ (NumaError::NotSupported | NumaError::BindFailed { .. })) => {
+                tracing::warn!(
+                    worker_id,
+                    node = node.id(),
+                    error = %err,
+                    "NUMA bind unavailable for worker; continuing without NUMA placement"
+                );
+            }
+            // Fatal misconfiguration (e.g. an invalid node id): still an error.
+            Err(err) => return Err(err),
+        }
     }
 
     NUMA_STATS.record_init();
@@ -704,6 +952,8 @@ pub enum NumaError {
     InvalidNode { node: usize, max: usize },
     /// NUMA not available
     NotAvailable,
+    /// NUMA binding is not supported on this platform or kernel
+    NotSupported,
     /// Binding failed
     BindFailed { reason: String },
     /// Allocation failed
@@ -717,6 +967,9 @@ impl std::fmt::Display for NumaError {
                 write!(f, "Invalid NUMA node {}, max is {}", node, max)
             }
             Self::NotAvailable => write!(f, "NUMA not available on this system"),
+            Self::NotSupported => {
+                write!(f, "NUMA binding not supported on this platform or kernel")
+            }
             Self::BindFailed { reason } => write!(f, "NUMA binding failed: {}", reason),
             Self::AllocationFailed { size } => {
                 write!(f, "NUMA allocation failed for {} bytes", size)
@@ -744,6 +997,8 @@ pub struct NumaAllocStats {
     bytes_deallocated: AtomicU64,
     /// Failed allocations
     failures: AtomicU64,
+    /// Allocations kept without NUMA placement (mbind failed or unavailable)
+    mbind_misses: AtomicU64,
     /// Allocations per node
     per_node: [AtomicU64; 8], // Support up to 8 NUMA nodes
 }
@@ -776,6 +1031,11 @@ impl NumaAllocStats {
         self.failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
+    fn record_mbind_miss(&self) {
+        self.mbind_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get total allocations.
     pub fn allocations(&self) -> u64 {
         self.allocations.load(Ordering::Relaxed)
@@ -794,6 +1054,12 @@ impl NumaAllocStats {
     /// Get failures.
     pub fn failures(&self) -> u64 {
         self.failures.load(Ordering::Relaxed)
+    }
+
+    /// Get allocations that were kept without NUMA placement because
+    /// `mbind` failed or is unavailable on this platform.
+    pub fn mbind_misses(&self) -> u64 {
+        self.mbind_misses.load(Ordering::Relaxed)
     }
 
     /// Get allocations per node.
@@ -952,6 +1218,15 @@ mod tests {
     }
 
     #[test]
+    fn test_numa_buffer_zero_initialized() {
+        // Fresh buffers must be zeroed: as_slice() would otherwise expose
+        // uninitialized memory (UB).
+        if let Some(buffer) = NumaBuffer::new(4096) {
+            assert!(buffer.as_slice().iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
     fn test_numa_buffer_read_write() {
         if let Some(mut buffer) = NumaBuffer::new(64) {
             let slice = buffer.as_mut_slice();
@@ -964,11 +1239,105 @@ mod tests {
         }
     }
 
+    /// Reset the calling thread's memory policy to the kernel default so a
+    /// test doesn't leave its thread bound.
+    #[cfg(target_os = "linux")]
+    fn reset_mempolicy() {
+        let _ = set_mempolicy(mempolicy::MPOL_DEFAULT, None, 0);
+    }
+
     #[test]
     fn test_bind_to_local_node() {
-        // Should not error on any platform
-        let result = bind_to_local_node();
-        assert!(result.is_ok());
+        match bind_to_local_node() {
+            Ok(()) => {
+                #[cfg(target_os = "linux")]
+                reset_mempolicy();
+            }
+            Err(NumaError::NotSupported) => {
+                // Non-Linux platform, or kernel without NUMA syscalls (ENOSYS).
+                eprintln!("skipping: NUMA binding not supported here");
+            }
+            Err(e) => panic!("bind_to_local_node failed unexpectedly: {e}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_bind_to_node_zero() {
+        // Binding to node 0 with MPOL_BIND should succeed on any Linux with
+        // NUMA syscalls compiled in, even single-node machines.
+        match bind_to_node(NumaNode::new(0)) {
+            Ok(()) => reset_mempolicy(),
+            Err(NumaError::NotSupported) => {
+                eprintln!("skipping: set_mempolicy returned ENOSYS");
+            }
+            Err(e) => panic!("bind_to_node(0) failed unexpectedly: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_bind_to_invalid_node() {
+        let result = bind_to_node(NumaNode::new(usize::MAX));
+        assert!(result.is_err());
+        #[cfg(target_os = "linux")]
+        assert!(matches!(result, Err(NumaError::InvalidNode { .. })));
+        #[cfg(not(target_os = "linux"))]
+        assert!(matches!(result, Err(NumaError::NotSupported)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_bind_not_supported_off_linux() {
+        // Binding must not pretend success on non-Linux platforms.
+        assert!(matches!(
+            bind_to_node(NumaNode::new(0)),
+            Err(NumaError::NotSupported)
+        ));
+        assert!(matches!(bind_to_local_node(), Err(NumaError::NotSupported)));
+    }
+
+    #[test]
+    fn test_numa_allocator_placement() {
+        let allocator = NumaAllocator::new(NumaNode::new(0));
+        let size = 8192;
+        if let Some(ptr) = allocator.allocate(size) {
+            // On Linux the allocation must be page-aligned (mbind requirement).
+            assert_eq!(ptr as usize % numa_alloc_align(), 0);
+            assert_eq!(allocator.stats().allocations(), 1);
+            assert_eq!(allocator.stats().bytes_allocated(), size as u64);
+            // mbind either succeeded (0 misses) or degraded gracefully (1).
+            assert!(allocator.stats().mbind_misses() <= 1);
+            unsafe { allocator.deallocate(ptr, size) };
+            assert_eq!(allocator.stats().deallocations(), 1);
+        }
+    }
+
+    #[test]
+    fn test_init_worker_numa_degrades_when_bind_unsupported() {
+        // A config that reports as NUMA (num_nodes > 1) but whose nodes all
+        // point at node 0, so bind_to_node never trips InvalidNode. Regardless
+        // of whether this host actually permits the bind syscall,
+        // init_worker_numa must return Ok: on a multi-node host where the
+        // syscall is blocked (seccomp/container) it degrades gracefully with a
+        // warning instead of failing worker init.
+        let config = NumaConfig {
+            num_nodes: 2,
+            nodes: vec![NumaNode::new(0), NumaNode::new(0)],
+            total_memory: 0,
+            policy: NumaPolicy::Local,
+        };
+        assert!(config.is_numa());
+
+        let result = init_worker_numa(0, &config);
+        assert!(
+            result.is_ok(),
+            "init_worker_numa must not error when NUMA binding is unsupported: {result:?}"
+        );
+        assert_eq!(result.unwrap().id(), 0);
+
+        // If a bind actually took effect, don't leave this thread bound.
+        #[cfg(target_os = "linux")]
+        reset_mempolicy();
     }
 
     #[test]
@@ -978,6 +1347,9 @@ mod tests {
 
         let err2 = NumaError::NotAvailable;
         assert!(err2.to_string().contains("not available"));
+
+        let err3 = NumaError::NotSupported;
+        assert!(err3.to_string().contains("not supported"));
     }
 
     #[test]

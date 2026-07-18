@@ -66,6 +66,6 @@ health = ["tonic-health"]
 reflection = ["tonic-reflection"]
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
 

@@ -146,6 +146,76 @@ impl CacheStore for RedisCache {
         let new_value: i64 = conn.decr(&key, delta).await?;
         Ok(new_value)
     }
+
+    /// Native multi-get: a single `MGET` round-trip instead of N `GET`s.
+    ///
+    /// `MGET` preserves argument order, so the returned vector matches `keys`
+    /// element-for-element, with `None` for missing keys.
+    async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let full_keys: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
+        trace!("Cache MGET: {} keys", full_keys.len());
+        let mut conn = self.connection.clone();
+        let values: Vec<Option<String>> = redis::cmd("MGET")
+            .arg(&full_keys)
+            .query_async(&mut conn)
+            .await?;
+        Ok(values)
+    }
+
+    /// Native multi-set in a single round-trip.
+    ///
+    /// Without a TTL this is a plain `MSET`. `MSET` cannot express per-key
+    /// expiry, so when a TTL applies we pipeline `SET ... EX` commands (still
+    /// one round-trip), preserving the exact per-key TTL semantics of
+    /// `set_json` (including the `default_ttl` fallback).
+    async fn mset(&self, items: &[(&str, String)], ttl: Option<Duration>) -> CacheResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.connection.clone();
+        let ttl = ttl.or(self.config.default_ttl);
+
+        if let Some(ttl) = ttl {
+            let ttl_seconds = ttl.as_secs();
+            trace!("Cache MSET (pipelined SET EX): {} items", items.len());
+            let mut pipe = redis::pipe();
+            for (key, value) in items {
+                pipe.cmd("SET")
+                    .arg(self.build_key(key))
+                    .arg(value)
+                    .arg("EX")
+                    .arg(ttl_seconds)
+                    .ignore();
+            }
+            let _: () = pipe.query_async(&mut conn).await?;
+        } else {
+            trace!("Cache MSET: {} items", items.len());
+            let mut cmd = redis::cmd("MSET");
+            for (key, value) in items {
+                cmd.arg(self.build_key(key)).arg(value);
+            }
+            let _: () = cmd.query_async(&mut conn).await?;
+        }
+        Ok(())
+    }
+
+    /// Native multi-delete: a single variadic `DEL` round-trip instead of N.
+    async fn mdel(&self, keys: &[&str]) -> CacheResult<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let full_keys: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
+        trace!("Cache DEL: {} keys", full_keys.len());
+        let mut conn = self.connection.clone();
+        let _: () = redis::cmd("DEL")
+            .arg(&full_keys)
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

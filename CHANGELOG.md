@@ -7,7 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-*No unreleased changes.*
+### Added
+
+#### HTTP QUERY method (`armature-core`, `armature-proc-macro`, `armature-app`, `armature-testing`)
+- `HttpMethod::QUERY` variant for the IETF `QUERY` method (safe, idempotent query with a request body — draft-ietf-httpbis-safe-method-w-body)
+- `Router::query()`, micro API `RouteBuilder::query()` / `micro::query()`, and the `#[query("/path")]` route decorator
+- `TestClient::query()` and `armature-app` builder support for `QUERY`
+- Response caching for `QUERY`: `CacheKey` now includes a body hash for `QUERY` requests, and `QUERY` is a cacheable method by default, so distinct request bodies are distinct cache entries
+
+#### Request/error hardening (`armature-core`)
+- `Application::with_max_body_size()` and `DEFAULT_MAX_BODY_SIZE` (10 MB): request bodies over the limit are rejected with `413` before buffering
+- Application-level guards are now stored and evaluated before routing; a guard declared by a module is scoped to that module's controllers' routes
+- `Application::with_socket_tuning()` applies per-socket TCP options (opt-in; see `epoll_tuning::EpollConfig`)
+- `RequestRoles` request extension and a JWT authentication middleware in `armature-auth` that verifies tokens and populates `UserContext`/`RequestRoles`
+
+#### Real implementations of previously-stubbed modules (`armature-core`)
+- `io_uring::IoUringRuntime` — real ring integration behind the (off-by-default, Linux-only) `io-uring` feature
+- NUMA `bind_to_node`/`bind_to_local_node`/allocator now issue real `set_mempolicy`/`mbind` syscalls
+- HMR now runs a real WebSocket notification server for browser auto-refresh
+- OAuth2 `userinfo`/introspection validators (`armature-mcp`) and JWT tenant resolution (`armature-tenancy`) are implemented (previously placeholders)
+
+### Changed
+
+- **Guards now enforce.** `RolesGuard` (core) and `RoleGuard`/`PermissionGuard` (`armature-auth`) previously returned `Ok(true)` for any bearer-shaped request. They now **fail closed**, requiring an authenticated `RequestRoles`/`UserContext` extension (attach it via the new `armature-auth` JWT middleware). Role/permission-protected routes will reject requests until an authentication layer populates the extension.
+- **Default request body limit is now 10 MB** (was unbounded). Raise it with `Application::with_max_body_size()`.
+- **5xx error responses are redacted.** Server-error bodies now return a generic `"Internal Server Error"` instead of the internal error message; 4xx keep their message. All three servers (module, micro, HTTP/3) share one error-to-response mapping and now agree on status codes and body shape.
+- `HttpMethod`, `Http2Config`, and `Http3Config` are now `#[non_exhaustive]`.
+- `RetryableErrors::Custom` is now honored by `Retry::call` (previously ignored), and `RetryErrorPredicate` is `Arc`-based so cloning a config preserves the predicate.
+- `LogConfig::timestamps(false)` is now applied (previously a no-op).
+- `vectored_io::status_line()` returns `Cow<'static, [u8]>` and no longer falls back to a `200` line for unlisted status codes.
+- `io_uring::BufferPool::acquire()` returns an RAII `BufferGuard` (the manual `release()` and the old tuple API were removed).
+- `HttpRequest.headers` is now a SmallVec-backed `HeaderMap` (inline for typical requests) instead of `HashMap<String,String>`, removing a per-request heap allocation. The type is a drop-in for the previous access patterns; `from_parts` still accepts a `HashMap`.
+
+### Performance
+
+- **Optimized routing on the serve path.** All TCP transports (HTTP/1.1, h2c, HTTPS, ALPN) and HTTP/3 now dispatch through the O(1) `OptimizedRouter` (static-route hash map + compiled patterns + LRU) instead of the O(n) linear scan; `match_path` no longer re-splits the path per candidate route. Catch-all routes (`/files/*path`) now match correctly on the serve path.
+- Per-request allocation reductions: alloc-free common-header interning, `micro`'s `App` clones an `Arc<Router>` instead of the whole router, zero-copy `simd-json` body parsing helper, and an empty-middleware-chain fast path.
+- Route-constraint and error-sanitizer regexes are compiled once (`LazyLock`) instead of per request/error. `route_cache` uses `parking_lot` with O(1) eviction; `connection_manager` uses lock-free atomic per-connection counters.
+- Static assets are served from a bounded in-memory content cache (keyed by path + mtime + encoding) instead of re-reading and re-compressing on every request.
+- Redis batching: cache `mget`/`mset`, session/rate-limit/queue paths use `SCAN`/`UNLINK`/pipelines and an atomic Lua job-promotion script instead of `KEYS` and per-item round-trips; tiered cache gained single-flight loading.
+- OAuth2 providers reuse a shared HTTP client instead of building one per request; compression now applies to zero-copy (`body_bytes`) responses.
+- Build: workspace crates use minimal per-crate `tokio` feature sets instead of `features = ["full"]`, and the OpenSSL/native-tls stack is eliminated (rustls only), removing a native C build from the default workspace.
+
+### Security
+
+- Fixed two unbounded-growth denial-of-service vectors reachable from network input: the Prometheus request-metrics middleware no longer labels series by raw request path (bounded/opt-in), and the in-memory rate-limit store now evicts idle entries via a scheduled prune task.
+- Removed a per-request `Box::leak` memory leak in `route_params`' wildcard matcher.
+
+### Fixed
+
+- Query strings were dropped by the module/controller server — `?a=b` params never reached handlers. They are now parsed and percent-decoded on every `listen*` path.
+- Six source modules (`conditional`, `content_negotiation`, `response_cache`, `error_correlation`, `error_transform`, `exception_filter`) were never declared and so never compiled — which also broke the `#[catch]` macro. They are now wired into the crate.
+- Numerous correctness/soundness/security fixes in `armature-core`: use-after-free in `cow_state`, dangling reference in `cache_local`, unsound `SoaStorage`, bulkhead/circuit-breaker/streaming cancellation and race bugs, HTTP/3 responses dropping headers/cookies/body, cross-user response-cache leakage, SQL injection in pagination sort, per-request `Box::leak` in wildcard routing, multipart binary corruption, and UTF-8 mishandling in percent-decoding and content negotiation.
 
 ---
 

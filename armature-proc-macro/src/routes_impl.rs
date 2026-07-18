@@ -45,7 +45,7 @@ fn extract_route_info(method: &ImplItemFn) -> Option<RouteInfo> {
             let method_name = ident.to_string();
             if matches!(
                 method_name.as_str(),
-                "get" | "post" | "put" | "delete" | "patch" | "options" | "head"
+                "get" | "post" | "put" | "delete" | "patch" | "options" | "head" | "query"
             ) {
                 // Parse the path argument
                 let route_path = if attr.meta.require_list().is_ok() {
@@ -71,7 +71,7 @@ fn extract_route_info(method: &ImplItemFn) -> Option<RouteInfo> {
     None
 }
 
-/// Remove route attributes from a method (get, post, put, delete, patch, options, head)
+/// Remove route attributes from a method (get, post, put, delete, patch, options, head, query)
 fn strip_route_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
     attrs
         .iter()
@@ -80,7 +80,7 @@ fn strip_route_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
                 let name = ident.to_string();
                 !matches!(
                     name.as_str(),
-                    "get" | "post" | "put" | "delete" | "patch" | "options" | "head"
+                    "get" | "post" | "put" | "delete" | "patch" | "options" | "head" | "query"
                 )
             } else {
                 true

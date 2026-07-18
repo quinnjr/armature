@@ -18,11 +18,14 @@
 //! ```
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 /// Type alias for a retry error predicate function.
-pub type RetryErrorPredicate = Box<dyn Fn(&dyn std::error::Error) -> bool + Send + Sync>;
+///
+/// Stored as an `Arc` so cloning a config preserves the predicate.
+pub type RetryErrorPredicate = Arc<dyn Fn(&dyn std::error::Error) -> bool + Send + Sync>;
 
 /// Backoff strategy for retries.
 #[derive(Debug, Clone)]
@@ -225,7 +228,7 @@ impl RetryConfig {
     where
         F: Fn(&dyn std::error::Error) -> bool + Send + Sync + 'static,
     {
-        self.retryable_errors = RetryableErrors::Custom(Box::new(predicate));
+        self.retryable_errors = RetryableErrors::Custom(Arc::new(predicate));
         self
     }
 }
@@ -255,10 +258,25 @@ impl Clone for RetryableErrors {
         match self {
             Self::All => Self::All,
             Self::None => Self::None,
-            Self::Custom(_) => Self::All, // Can't clone closures
+            Self::Custom(predicate) => Self::Custom(Arc::clone(predicate)),
         }
     }
 }
+
+/// Adapter presenting a `Display`-only error to the `&dyn Error` custom
+/// predicate in [`Retry::call`], where the error type is not required to
+/// implement [`std::error::Error`]. Preserves the error's display output;
+/// use [`Retry::call_if`] for typed inspection of the error.
+#[derive(Debug)]
+struct DisplayedError(String);
+
+impl std::fmt::Display for DisplayedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for DisplayedError {}
 
 /// Retry error.
 #[derive(Debug)]
@@ -316,6 +334,28 @@ impl Retry {
                     return Ok(result);
                 }
                 Err(e) => {
+                    // Consult the configured retry policy before scheduling
+                    // another attempt
+                    let is_retryable = match &self.config.retryable_errors {
+                        RetryableErrors::All => true,
+                        RetryableErrors::None => false,
+                        RetryableErrors::Custom(predicate) => {
+                            predicate(&DisplayedError(e.to_string()))
+                        }
+                    };
+
+                    if !is_retryable {
+                        debug!(
+                            attempt = attempt + 1,
+                            error = %e,
+                            "Error not retryable, failing immediately"
+                        );
+                        return Err(RetryError {
+                            last_error: e,
+                            attempts: attempt + 1,
+                        });
+                    }
+
                     let is_last_attempt = attempt + 1 >= self.config.max_attempts;
 
                     if is_last_attempt {
@@ -450,6 +490,65 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.attempts, 3);
         assert_eq!(err.last_error, "always fails");
+    }
+
+    #[tokio::test]
+    async fn test_retry_none_fails_immediately() {
+        let attempts = AtomicU32::new(0);
+        let retry = Retry::new(RetryConfig {
+            max_attempts: 3,
+            backoff: BackoffStrategy::None,
+            retryable_errors: RetryableErrors::None,
+        });
+
+        let result: Result<i32, RetryError<&str>> = retry
+            .call(|| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err("always fails") }
+            })
+            .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.attempts, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retry_custom_predicate_respected() {
+        let config = RetryConfig::new(3)
+            .backoff(BackoffStrategy::None)
+            .retry_on(|e| e.to_string().contains("transient"));
+
+        // Non-matching error: no retries
+        let attempts = AtomicU32::new(0);
+        let retry = Retry::new(config.clone());
+        let result: Result<i32, RetryError<&str>> = retry
+            .call(|| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err("fatal error") }
+            })
+            .await;
+        assert_eq!(result.unwrap_err().attempts, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Matching error: retried until exhaustion (the clone above must
+        // also have preserved the custom predicate)
+        let attempts = AtomicU32::new(0);
+        let retry = Retry::new(config);
+        let result: Result<i32, RetryError<&str>> = retry
+            .call(|| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err("transient error") }
+            })
+            .await;
+        assert_eq!(result.unwrap_err().attempts, 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_retryable_errors_clone_preserves_custom() {
+        let custom = RetryableErrors::Custom(Arc::new(|_| true));
+        assert!(matches!(custom.clone(), RetryableErrors::Custom(_)));
     }
 
     #[test]

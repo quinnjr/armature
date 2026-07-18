@@ -36,5 +36,5 @@ zstd = ["dep:zstd"]
 full = ["gzip", "brotli", "zstd"]
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 

@@ -91,6 +91,34 @@ match guard.can_activate(&context).await {
 }
 ```
 
+> **Guards fail closed.** `RolesGuard` (and `armature-auth`'s `RoleGuard`/`PermissionGuard`)
+> require **verified** role/permission information on the request — a bearer token alone is
+> not sufficient. That information is supplied by an authentication layer that has already
+> validated the token. Ship `armature_auth::JwtAuthMiddleware` (below) ahead of the guarded
+> route: it verifies the JWT signature and populates the `RequestRoles`/`UserContext`
+> extension the guard reads. Without such a layer, role-protected routes reject every request.
+>
+> Guards declared by a module apply only to that module's controllers' routes, not globally.
+
+#### JwtAuthMiddleware (armature-auth)
+
+Verifies a JWT and attaches the caller's identity so the role/permission guards can enforce.
+
+```rust
+use armature_auth::JwtAuthMiddleware;
+
+// Required mode: a missing/invalid/expired token is rejected with 401 before the handler.
+let auth = JwtAuthMiddleware::new(jwt_manager);
+
+// Optional mode: attaches identity when a valid token is present, otherwise passes through
+// so a downstream guard makes the authorization decision.
+let auth = JwtAuthMiddleware::optional(jwt_manager);
+```
+
+On a valid token it inserts a `UserContext` (from the `sub`/`roles`/`permissions` claims,
+configurable) and an `armature_core::RequestRoles` extension, which `RolesGuard`,
+`RoleGuard`, and `PermissionGuard` consume.
+
 #### ApiKeyGuard
 
 Validates API keys from the `x-api-key` header.

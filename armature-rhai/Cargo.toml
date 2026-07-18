@@ -36,7 +36,7 @@ notify = { version = "8.2", optional = true }
 dashmap = "6.2"
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tempfile = "3.27"
 
 [features]

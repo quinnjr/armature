@@ -70,6 +70,7 @@ pub struct RouteDefinition {
 
 /// HTTP methods
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HttpMethod {
     GET,
     POST,
@@ -78,6 +79,9 @@ pub enum HttpMethod {
     PATCH,
     HEAD,
     OPTIONS,
+    /// Safe, idempotent query with a request body
+    /// (draft-ietf-httpbis-safe-method-w-body).
+    QUERY,
 }
 
 impl HttpMethod {
@@ -91,6 +95,7 @@ impl HttpMethod {
             "PATCH" => Some(HttpMethod::PATCH),
             "HEAD" => Some(HttpMethod::HEAD),
             "OPTIONS" => Some(HttpMethod::OPTIONS),
+            "QUERY" => Some(HttpMethod::QUERY),
             _ => None,
         }
     }
@@ -104,6 +109,7 @@ impl HttpMethod {
             HttpMethod::PATCH => "PATCH",
             HttpMethod::HEAD => "HEAD",
             HttpMethod::OPTIONS => "OPTIONS",
+            HttpMethod::QUERY => "QUERY",
         }
     }
 }

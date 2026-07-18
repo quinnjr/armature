@@ -20,10 +20,10 @@
 //!
 //! Keeping hot data in cache can provide 50x speedup over memory access.
 
-use std::cell::UnsafeCell;
-use std::mem::MaybeUninit;
+use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // Constants
@@ -279,7 +279,9 @@ impl<H: Clone, C: Clone> Clone for HotCold<H, C> {
 /// Thread-local cache for frequently accessed state.
 ///
 /// Provides O(1) access to cached values with automatic invalidation
-/// based on a global version counter.
+/// based on a global version counter. Values are handed out as `Rc<T>`
+/// clones, so they remain valid even if the cache is refreshed or
+/// invalidated afterwards.
 ///
 /// # Example
 ///
@@ -290,7 +292,7 @@ impl<H: Clone, C: Clone> Clone for HotCold<H, C> {
 ///     static CONFIG_CACHE: LocalStateCache<Config> = LocalStateCache::new();
 /// }
 ///
-/// fn get_config(global: &GlobalConfig) -> Config {
+/// fn get_config(global: &GlobalConfig) -> Rc<Config> {
 ///     CONFIG_CACHE.with(|cache| {
 ///         cache.get_or_refresh(global.version(), || global.snapshot())
 ///     })
@@ -298,78 +300,66 @@ impl<H: Clone, C: Clone> Clone for HotCold<H, C> {
 /// ```
 pub struct LocalStateCache<T> {
     /// Cached value
-    value: UnsafeCell<Option<T>>,
+    value: RefCell<Option<Rc<T>>>,
     /// Version when cached
-    version: UnsafeCell<u64>,
+    version: Cell<u64>,
     /// Hit count
-    hits: UnsafeCell<u64>,
+    hits: Cell<u64>,
     /// Miss count
-    misses: UnsafeCell<u64>,
+    misses: Cell<u64>,
 }
 
 impl<T> LocalStateCache<T> {
     /// Create a new empty cache.
     pub const fn new() -> Self {
         Self {
-            value: UnsafeCell::new(None),
-            version: UnsafeCell::new(0),
-            hits: UnsafeCell::new(0),
-            misses: UnsafeCell::new(0),
+            value: RefCell::new(None),
+            version: Cell::new(0),
+            hits: Cell::new(0),
+            misses: Cell::new(0),
         }
     }
 
     /// Get cached value or refresh if stale.
     ///
-    /// # Safety
-    ///
-    /// Must only be called from the owning thread (thread_local).
+    /// Returns a cheap `Rc` clone of the cached value; the clone stays
+    /// valid across later refreshes or invalidations.
     #[inline]
-    pub fn get_or_refresh<F>(&self, current_version: u64, refresh: F) -> &T
+    pub fn get_or_refresh<F>(&self, current_version: u64, refresh: F) -> Rc<T>
     where
         F: FnOnce() -> T,
     {
-        // SAFETY: Only called from owning thread
-        unsafe {
-            let cached_version = *self.version.get();
-
-            if cached_version == current_version
-                && let Some(ref value) = *self.value.get()
-            {
-                *self.hits.get() += 1;
-                LOCALITY_STATS.record_cache_hit();
-                return value;
-            }
-
-            // Cache miss - refresh
-            *self.misses.get() += 1;
-            LOCALITY_STATS.record_cache_miss();
-
-            let new_value = refresh();
-            *self.value.get() = Some(new_value);
-            *self.version.get() = current_version;
-
-            (*self.value.get()).as_ref().unwrap()
+        if self.version.get() == current_version
+            && let Some(ref value) = *self.value.borrow()
+        {
+            self.hits.set(self.hits.get() + 1);
+            LOCALITY_STATS.record_cache_hit();
+            return Rc::clone(value);
         }
+
+        // Cache miss - refresh
+        self.misses.set(self.misses.get() + 1);
+        LOCALITY_STATS.record_cache_miss();
+
+        let new_value = Rc::new(refresh());
+        *self.value.borrow_mut() = Some(Rc::clone(&new_value));
+        self.version.set(current_version);
+
+        new_value
     }
 
     /// Invalidate the cache.
     #[inline]
     pub fn invalidate(&self) {
-        // SAFETY: Only called from owning thread
-        unsafe {
-            *self.value.get() = None;
-            *self.version.get() = 0;
-        }
+        *self.value.borrow_mut() = None;
+        self.version.set(0);
     }
 
     /// Get cache statistics.
     pub fn stats(&self) -> LocalCacheStats {
-        // SAFETY: Only called from owning thread
-        unsafe {
-            LocalCacheStats {
-                hits: *self.hits.get(),
-                misses: *self.misses.get(),
-            }
+        LocalCacheStats {
+            hits: self.hits.get(),
+            misses: self.misses.get(),
         }
     }
 }
@@ -379,9 +369,6 @@ impl<T> Default for LocalStateCache<T> {
         Self::new()
     }
 }
-
-// SAFETY: LocalStateCache is only accessed from owning thread
-unsafe impl<T: Send> Send for LocalStateCache<T> {}
 
 /// Statistics for a local cache.
 #[derive(Debug, Clone, Copy)]
@@ -594,14 +581,15 @@ pub fn prefetch_range<T>(slice: &[T], level: PrefetchLevel) {
 /// // SoA (good cache utilization):
 /// // [x, x, x...], [y, y, y...], [z, z, z...]
 ///
-/// let points = SoaStorage::<3, 1000>::new();
-/// points.set_field(0, 42, 1.0);  // Set x[42] = 1.0
+/// let mut points = SoaStorage::<3, 1000>::new();
+/// let idx = points.push().unwrap();
+/// points.set_field(0, idx, 1.0);  // Set x[idx] = 1.0
 /// ```
 pub struct SoaStorage<const FIELDS: usize, const CAPACITY: usize> {
-    /// Storage for each field
-    data: [Box<[MaybeUninit<f64>; CAPACITY]>; FIELDS],
+    /// Storage for each field (zero-initialized)
+    data: [Box<[f64; CAPACITY]>; FIELDS],
     /// Number of elements
-    len: AtomicUsize,
+    len: usize,
 }
 
 impl<const FIELDS: usize, const CAPACITY: usize> SoaStorage<FIELDS, CAPACITY> {
@@ -609,24 +597,26 @@ impl<const FIELDS: usize, const CAPACITY: usize> SoaStorage<FIELDS, CAPACITY> {
     pub fn new() -> Self {
         Self {
             data: std::array::from_fn(|_| {
-                Box::new(unsafe {
-                    MaybeUninit::<[MaybeUninit<f64>; CAPACITY]>::uninit().assume_init()
-                })
+                // Allocate on the heap directly to avoid large stack arrays
+                vec![0.0f64; CAPACITY]
+                    .into_boxed_slice()
+                    .try_into()
+                    .expect("boxed slice length matches CAPACITY")
             }),
-            len: AtomicUsize::new(0),
+            len: 0,
         }
     }
 
     /// Get current length.
     #[inline]
     pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
+        self.len
     }
 
     /// Check if empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len == 0
     }
 
     /// Get capacity.
@@ -638,27 +628,24 @@ impl<const FIELDS: usize, const CAPACITY: usize> SoaStorage<FIELDS, CAPACITY> {
     /// Get field value at index.
     #[inline]
     pub fn get_field(&self, field: usize, index: usize) -> f64 {
-        assert!(field < FIELDS && index < self.len());
-        unsafe { self.data[field][index].assume_init() }
+        assert!(field < FIELDS && index < self.len);
+        self.data[field][index]
     }
 
     /// Set field value at index.
     #[inline]
-    pub fn set_field(&self, field: usize, index: usize, value: f64) {
-        assert!(field < FIELDS && index < CAPACITY);
-        unsafe {
-            let ptr = self.data[field].as_ptr() as *mut MaybeUninit<f64>;
-            (*ptr.add(index)).write(value);
-        }
+    pub fn set_field(&mut self, field: usize, index: usize, value: f64) {
+        assert!(field < FIELDS && index < self.len);
+        self.data[field][index] = value;
     }
 
-    /// Push a new element (all fields must be set separately).
-    pub fn push(&self) -> Option<usize> {
-        let index = self.len.fetch_add(1, Ordering::Relaxed);
-        if index < CAPACITY {
+    /// Push a new element (all fields start zeroed; set them via `set_field`).
+    pub fn push(&mut self) -> Option<usize> {
+        if self.len < CAPACITY {
+            let index = self.len;
+            self.len += 1;
             Some(index)
         } else {
-            self.len.fetch_sub(1, Ordering::Relaxed);
             None
         }
     }
@@ -668,8 +655,7 @@ impl<const FIELDS: usize, const CAPACITY: usize> SoaStorage<FIELDS, CAPACITY> {
     /// This is cache-friendly for operations on a single field.
     pub fn field_slice(&self, field: usize) -> &[f64] {
         assert!(field < FIELDS);
-        let len = self.len();
-        unsafe { std::slice::from_raw_parts(self.data[field].as_ptr() as *const f64, len) }
+        &self.data[field][..self.len]
     }
 
     /// Prefetch a field for upcoming access.
@@ -825,6 +811,23 @@ mod tests {
     }
 
     #[test]
+    fn test_local_state_cache_value_survives_refresh() {
+        // Regression: get_or_refresh used to return a reference into the
+        // cache that dangled after a later refresh or invalidate.
+        let cache: LocalStateCache<String> = LocalStateCache::new();
+
+        let val1 = cache.get_or_refresh(1, || "first".to_string());
+
+        // Overwrite the cached slot and then invalidate entirely
+        let val2 = cache.get_or_refresh(2, || "second".to_string());
+        cache.invalidate();
+
+        // Earlier clones remain valid
+        assert_eq!(*val1, "first");
+        assert_eq!(*val2, "second");
+    }
+
+    #[test]
     fn test_local_cache_stats() {
         let cache: LocalStateCache<u64> = LocalStateCache::new();
 
@@ -868,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_soa_storage() {
-        let storage = SoaStorage::<3, 100>::new();
+        let mut storage = SoaStorage::<3, 100>::new();
 
         let idx = storage.push().unwrap();
         storage.set_field(0, idx, 1.0);
@@ -882,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_soa_field_slice() {
-        let storage = SoaStorage::<2, 100>::new();
+        let mut storage = SoaStorage::<2, 100>::new();
 
         for _ in 0..10 {
             let idx = storage.push().unwrap();
@@ -891,6 +894,37 @@ mod tests {
 
         let slice = storage.field_slice(0);
         assert_eq!(slice.len(), 10);
+    }
+
+    #[test]
+    fn test_soa_unset_fields_are_zeroed() {
+        // Regression: pushed-but-unset fields used to be uninitialized memory.
+        let mut storage = SoaStorage::<2, 8>::new();
+
+        let idx = storage.push().unwrap();
+        // Only set field 0; field 1 must read as 0.0 rather than garbage
+        storage.set_field(0, idx, 7.0);
+
+        assert_eq!(storage.get_field(0, idx), 7.0);
+        assert_eq!(storage.get_field(1, idx), 0.0);
+        assert_eq!(storage.field_slice(1), &[0.0]);
+    }
+
+    #[test]
+    fn test_soa_push_clamped_to_capacity() {
+        // Regression: overflowing push used to transiently push len past
+        // CAPACITY, allowing out-of-bounds field slices.
+        let mut storage = SoaStorage::<1, 4>::new();
+
+        for _ in 0..4 {
+            assert!(storage.push().is_some());
+        }
+
+        // Full: further pushes fail and len stays clamped
+        assert!(storage.push().is_none());
+        assert!(storage.push().is_none());
+        assert_eq!(storage.len(), 4);
+        assert_eq!(storage.field_slice(0).len(), 4);
     }
 
     #[test]

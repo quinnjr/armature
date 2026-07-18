@@ -146,6 +146,7 @@
 pub mod api_key;
 pub mod error;
 pub mod guard;
+pub mod middleware;
 pub mod oauth2;
 pub mod password;
 pub mod passwordless;
@@ -159,7 +160,8 @@ pub mod user;
 
 pub use api_key::{ApiKey, ApiKeyError, ApiKeyManager, ApiKeyStore};
 pub use error::{AuthError, Result};
-pub use guard::{AuthGuard, Guard, RoleGuard};
+pub use guard::{AuthGuard, Guard, PermissionGuard, RoleGuard};
+pub use middleware::JwtAuthMiddleware;
 pub use oauth2::{OAuth2Provider, OAuth2Token, OAuth2UserInfo};
 pub use password::{PasswordHasher, PasswordVerifier};
 pub use passwordless::{MagicLinkToken, PasswordlessError, WebAuthnManager};
@@ -284,7 +286,8 @@ pub mod prelude {
     pub use crate::AuthService;
     pub use crate::api_key::{ApiKey, ApiKeyManager, ApiKeyStore};
     pub use crate::error::{AuthError, Result};
-    pub use crate::guard::{AuthGuard, Guard, RoleGuard};
+    pub use crate::guard::{AuthGuard, Guard, PermissionGuard, RoleGuard};
+    pub use crate::middleware::JwtAuthMiddleware;
     pub use crate::oauth2::{OAuth2Provider, OAuth2Token, OAuth2UserInfo};
     pub use crate::password::{PasswordHasher, PasswordVerifier};
     pub use crate::strategy::{AuthStrategy, JwtStrategy, LocalStrategy};

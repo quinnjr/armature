@@ -16,7 +16,7 @@ categories = ["network-programming", "asynchronous", "web-programming"]
 armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # WebSocket
-tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 tungstenite = "0.29"
 
 # Async runtime
@@ -59,11 +59,11 @@ tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true }
 
 [features]
-default = ["native-tls"]
+default = ["rustls-tls"]
 native-tls = ["dep:tokio-native-tls", "dep:native-tls", "tokio-tungstenite/native-tls"]
 rustls-tls = ["dep:tokio-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
 

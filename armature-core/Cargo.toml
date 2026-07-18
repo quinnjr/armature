@@ -16,9 +16,9 @@ armature-log = { path = "../armature-log", version = "0.1.0" }
 inventory = "0.3"
 dependency-injector = "1.0.0"
 matchit = "0.9"  # High-performance router (same as Axum)
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
 hyper = { version = "1.10", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full", "tokio"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1.4"
 tower = { version = "0.5", features = ["util"] }
@@ -46,7 +46,7 @@ flate2 = "1.1.9"
 brotli = "8.0"
 uuid = { version = "1.23", features = ["v4"] }
 thiserror = "2.0"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
 regex = "1.12"
@@ -80,6 +80,10 @@ h3-quinn = { version = "0.0.10", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# io_uring userspace interface (Linux only, optional)
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
+
 [features]
 default = []
 self-signed-certs = ["rcgen"]
@@ -90,8 +94,8 @@ simd-json = ["dep:simd-json"]
 http3 = ["quinn", "h3", "h3-quinn"]
 
 # io_uring support for Linux (kernel 5.1+)
-# Provides 3-5% throughput improvement via reduced syscall overhead
-io-uring = []
+# Enables the standalone `IoUringRuntime` ring utility in `armature_core::io_uring`
+io-uring = ["dep:io-uring"]
 
 [dev-dependencies]
 tokio-test = "0.4"
