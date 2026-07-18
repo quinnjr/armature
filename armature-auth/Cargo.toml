@@ -29,7 +29,7 @@ base64 = "0.22"
 oauth2 = "5.0.0"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 url = "2.5"
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 # SAML support (optional - requires openssl/xmlsec for XML signature verification)
 # Enable with `saml` feature. Note: This requires system libraries (libxml2, xmlsec1)

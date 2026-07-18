@@ -45,7 +45,7 @@ parking_lot = "0.12"
 jsonwebtoken = { version = "10.4", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 
 [features]
 default = []

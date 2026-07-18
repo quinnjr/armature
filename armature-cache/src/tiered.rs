@@ -41,6 +41,21 @@ pub struct TieredCacheConfig {
 
     /// L1 TTL multiplier (fraction of L2 TTL)
     pub l1_ttl_fraction: f64,
+
+    /// Fixed TTL applied to entries promoted from L2 into L1 on a read hit.
+    ///
+    /// # Policy
+    ///
+    /// Deriving the promoted L1 TTL from the *live* remaining L2 TTL would
+    /// require an extra `TTL` round-trip to L2 on **every** promotion (the hot
+    /// read path). To avoid that per-read cost we instead apply this fixed
+    /// default. `None` means promoted entries are stored without expiry and
+    /// rely on L1 capacity/eviction. Defaults to 60s.
+    ///
+    /// Note: the write path (`set`) still derives the L1 TTL as
+    /// `l1_ttl_fraction * ttl` because the TTL is already known there without
+    /// any extra round-trip.
+    pub l1_promote_ttl: Option<Duration>,
 }
 
 impl Default for TieredCacheConfig {
@@ -51,6 +66,7 @@ impl Default for TieredCacheConfig {
             write_through: true,
             promote_to_l1: true,
             l1_ttl_fraction: 0.25, // L1 lives 1/4 as long as L2
+            l1_promote_ttl: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -93,13 +109,13 @@ where
         if self.config.enable_l2
             && let Some(value) = self.l2.get_json(key).await?
         {
-            // Promote to L1 if configured
+            // Promote to L1 if configured.
+            //
+            // Use the fixed `l1_promote_ttl` rather than issuing an extra
+            // `l2.ttl(key)` round-trip to derive it from the live L2 TTL. See
+            // `TieredCacheConfig::l1_promote_ttl` for the policy rationale.
             if self.config.enable_l1 && self.config.promote_to_l1 {
-                // Use shorter TTL for L1
-                let l2_ttl = self.l2.ttl(key).await?;
-                let l1_ttl = l2_ttl.map(|ttl| {
-                    Duration::from_secs_f64(ttl.as_secs_f64() * self.config.l1_ttl_fraction)
-                });
+                let l1_ttl = self.config.l1_promote_ttl;
                 let _ = self.l1.set_json(key, value.clone(), l1_ttl).await;
             }
             return Ok(Some(value));
@@ -352,5 +368,50 @@ mod tests_tiered {
         // Check L1 was populated
         let l1_value = l1.get_json("key").await.unwrap();
         assert!(l1_value.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_promotion_uses_fixed_l1_ttl_no_l2_roundtrip() {
+        let l1 = Arc::new(InMemoryCache::new());
+        let l2 = Arc::new(InMemoryCache::new());
+        let config = TieredCacheConfig {
+            l1_promote_ttl: Some(Duration::from_secs(30)),
+            ..TieredCacheConfig::default()
+        };
+        let cache = TieredCache::with_config(l1.clone(), l2.clone(), config);
+
+        // Set in L2 only, with NO TTL. The old implementation would have read
+        // L2's (absent) TTL and stored L1 without expiry; the new one applies
+        // the fixed `l1_promote_ttl` regardless of L2's TTL.
+        l2.set_json("key", "value".to_string(), None).await.unwrap();
+
+        // Trigger promotion.
+        let value = cache.get("key").await.unwrap();
+        assert_eq!(value, Some("value".to_string()));
+
+        // L1 entry should carry the fixed promote TTL (<= 30s and > 0), proving
+        // it was derived from config, not from L2's (missing) TTL.
+        let l1_ttl = l1.ttl("key").await.unwrap();
+        let l1_ttl = l1_ttl.expect("promoted L1 entry should have a TTL");
+        assert!(l1_ttl > Duration::from_secs(0));
+        assert!(l1_ttl <= Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn test_promotion_with_no_l1_ttl_stores_without_expiry() {
+        let l1 = Arc::new(InMemoryCache::new());
+        let l2 = Arc::new(InMemoryCache::new());
+        let config = TieredCacheConfig {
+            l1_promote_ttl: None,
+            ..TieredCacheConfig::default()
+        };
+        let cache = TieredCache::with_config(l1.clone(), l2.clone(), config);
+
+        l2.set_json("key", "value".to_string(), None).await.unwrap();
+        let _ = cache.get("key").await.unwrap();
+
+        // No promote TTL configured -> promoted entry has no expiry.
+        assert_eq!(l1.ttl("key").await.unwrap(), None);
+        assert!(l1.get_json("key").await.unwrap().is_some());
     }
 }

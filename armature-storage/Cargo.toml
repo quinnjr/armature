@@ -61,7 +61,7 @@ azure_identity = { version = "1.0", optional = true }
 base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
 
 [features]

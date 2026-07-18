@@ -91,6 +91,57 @@ pub trait CacheStore: Send + Sync {
     /// Returns the new value after decrementing.
     async fn decrement(&self, key: &str, delta: i64) -> CacheResult<i64>;
 
+    // ========== Native Batch Primitives ==========
+    //
+    // These are the low-level batch operations that backends can override with
+    // a single native command (e.g. Redis `MGET`/`MSET`/variadic `DEL`) to turn
+    // N round-trips into one. The DEFAULT implementations fall back to the
+    // per-key loop (run concurrently), so existing `CacheStore` impls keep
+    // working unchanged. The higher-level `get_many`/`set_many`/`delete_many`
+    // methods and `ParallelCacheOps` delegate here, so overriding these three
+    // methods is enough to accelerate all batch APIs.
+
+    /// Get multiple keys in a single batch operation.
+    ///
+    /// Returns a vector of `Option<String>` in the **same order** as `keys`;
+    /// `None` indicates a missing key.
+    ///
+    /// The default implementation issues one `get_json` per key concurrently;
+    /// backends should override this with a native multi-get (e.g. `MGET`).
+    async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
+        use futures::future::try_join_all;
+
+        let futures = keys.iter().map(|key| self.get_json(key));
+        try_join_all(futures).await
+    }
+
+    /// Set multiple key/value pairs in a single batch operation.
+    ///
+    /// The default implementation issues one `set_json` per pair concurrently;
+    /// backends should override this with a native multi-set (e.g. `MSET`, or a
+    /// pipeline of `SET ... EX` when a TTL is required).
+    async fn mset(&self, items: &[(&str, String)], ttl: Option<Duration>) -> CacheResult<()> {
+        use futures::future::try_join_all;
+
+        let futures = items
+            .iter()
+            .map(|(key, value)| self.set_json(key, value.clone(), ttl));
+        try_join_all(futures).await?;
+        Ok(())
+    }
+
+    /// Delete multiple keys in a single batch operation.
+    ///
+    /// The default implementation issues one `delete` per key concurrently;
+    /// backends should override this with a variadic `DEL`/`UNLINK`.
+    async fn mdel(&self, keys: &[&str]) -> CacheResult<()> {
+        use futures::future::try_join_all;
+
+        let futures = keys.iter().map(|key| self.delete(key));
+        try_join_all(futures).await?;
+        Ok(())
+    }
+
     // ========== Batch Operations (Parallel) ==========
 
     /// Get multiple keys in parallel.
@@ -129,10 +180,9 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn get_many(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
-        use futures::future::try_join_all;
-
-        let futures = keys.iter().map(|key| self.get_json(key));
-        try_join_all(futures).await
+        // Delegate to the native batch primitive so backends that override
+        // `mget` (e.g. Redis `MGET`) accelerate this path automatically.
+        self.mget(keys).await
     }
 
     /// Set multiple key-value pairs in parallel.
@@ -163,14 +213,8 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn set_many(&self, items: &[(&str, String)], ttl: Option<Duration>) -> CacheResult<()> {
-        use futures::future::try_join_all;
-
-        let futures = items
-            .iter()
-            .map(|(key, value)| self.set_json(key, value.clone(), ttl));
-
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the native batch primitive (e.g. Redis `MSET`/pipeline).
+        self.mset(items, ttl).await
     }
 
     /// Delete multiple keys in parallel.
@@ -195,11 +239,8 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn delete_many(&self, keys: &[&str]) -> CacheResult<()> {
-        use futures::future::try_join_all;
-
-        let futures = keys.iter().map(|key| self.delete(key));
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the native batch primitive (e.g. Redis variadic `DEL`).
+        self.mdel(keys).await
     }
 
     /// Check existence of multiple keys in parallel.
@@ -265,5 +306,71 @@ pub trait CacheStore: Send + Sync {
 
         let futures = keys.iter().map(|key| self.ttl(key));
         try_join_all(futures).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiered::InMemoryCache;
+
+    // `InMemoryCache` does NOT override `mget`/`mset`/`mdel`, so these tests
+    // exercise the trait's DEFAULT (per-key loop) implementations.
+
+    #[tokio::test]
+    async fn test_mget_default_fallback_preserves_order() {
+        let cache = InMemoryCache::new();
+        cache.set_json("a", "1".to_string(), None).await.unwrap();
+        cache.set_json("c", "3".to_string(), None).await.unwrap();
+
+        let got = cache.mget(&["a", "b", "c"]).await.unwrap();
+        assert_eq!(
+            got,
+            vec![Some("1".to_string()), None, Some("3".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mset_and_mdel_default_fallback() {
+        let cache = InMemoryCache::new();
+        cache
+            .mset(&[("x", "10".to_string()), ("y", "20".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(cache.get_json("x").await.unwrap(), Some("10".to_string()));
+        assert_eq!(cache.get_json("y").await.unwrap(), Some("20".to_string()));
+
+        cache.mdel(&["x", "y"]).await.unwrap();
+        assert_eq!(cache.get_json("x").await.unwrap(), None);
+        assert_eq!(cache.get_json("y").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_public_batch_methods_delegate_to_primitives() {
+        let cache = InMemoryCache::new();
+        cache.set_json("k1", "v1".to_string(), None).await.unwrap();
+
+        // get_many delegates to mget
+        let got = cache.get_many(&["k1", "k2"]).await.unwrap();
+        assert_eq!(got, vec![Some("v1".to_string()), None]);
+
+        // set_many delegates to mset
+        cache
+            .set_many(&[("k3", "v3".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(cache.get_json("k3").await.unwrap(), Some("v3".to_string()));
+
+        // delete_many delegates to mdel
+        cache.delete_many(&["k1", "k3"]).await.unwrap();
+        assert_eq!(cache.get_json("k1").await.unwrap(), None);
+        assert_eq!(cache.get_json("k3").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_mget_empty_keys() {
+        let cache = InMemoryCache::new();
+        let got = cache.mget(&[]).await.unwrap();
+        assert!(got.is_empty());
     }
 }

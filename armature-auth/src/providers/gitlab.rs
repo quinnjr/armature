@@ -35,7 +35,7 @@ impl GitLabProvider {
     }
 
     pub async fn get_user_info(access_token: &str) -> Result<GitLabUser, AuthError> {
-        let client = reqwest::Client::new();
+        let client = crate::providers::shared_http_client();
 
         let user: GitLabUser = client
             .get(USER_INFO_URL)

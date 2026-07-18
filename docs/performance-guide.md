@@ -484,3 +484,33 @@ let params: Vec<(String, String)> = parse_params(query_string);
 
 For more details, see the [benchmark documentation](armature-vs-nodejs-benchmark.md) and [profiling guide](../examples/profiling_server.rs).
 
+
+## Serve-Path Routing (Optimized Router)
+
+Routes are registered against the linear `Router`, but at server startup the router
+is compiled once into an `OptimizedRouter` (`route_cache.rs`) that the request path
+actually dispatches through — across HTTP/1.1, h2c, HTTPS/ALPN, and HTTP/3. It uses a
+static-route hash map for exact paths, pre-compiled patterns for parameterized routes,
+and an LRU for recently matched dynamic paths, turning per-request routing from an O(n)
+linear scan (which re-split the path for every candidate) into an O(1) lookup for static
+routes. Route semantics are unchanged: parameter extraction, catch-all (`/files/*path`),
+route constraints, and unknown-method → 404 all behave identically.
+
+## Per-Request Allocation Reductions
+
+- `HttpRequest.headers` is a SmallVec-backed `HeaderMap` (inline for typical requests),
+  so the per-request header map no longer heap-allocates.
+- Common header names are interned without allocating; the micro `App` clones an
+  `Arc<Router>` rather than the whole router; JSON bodies can be parsed zero-copy under
+  the `simd-json` feature; an empty middleware chain skips the boxed-`Next` machinery.
+- Route-constraint and error-sanitizer regexes are compiled once (`LazyLock`), not per
+  request/error. The route cache uses `parking_lot` with O(1) eviction, and
+  connection accounting uses lock-free atomics.
+- Static assets are served from a bounded in-memory content cache keyed by
+  `(path, mtime, encoding)` instead of re-reading and re-compressing on every hit.
+
+## Dependency & Build Footprint
+
+Workspace crates declare the minimal `tokio` feature subset they use instead of
+`features = ["full"]`, and the framework is rustls-only (no OpenSSL/native-tls in the
+default build), which reduces compile time and eliminates a native C build.

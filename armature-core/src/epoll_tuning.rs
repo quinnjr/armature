@@ -221,7 +221,18 @@ impl EpollConfig {
         self
     }
 
-    /// Calculate epoll flags based on configuration.
+    /// Calculate epoll interest flags based on configuration.
+    ///
+    /// The returned mask (`EPOLLIN | EPOLLOUT | EPOLLRDHUP`, plus `EPOLLET`,
+    /// `EPOLLONESHOT`, and `EPOLLEXCLUSIVE` as configured) is an **advisory
+    /// constant for custom reactors only**. The framework's built-in server
+    /// runs on tokio, which owns its epoll instance and provides no way to
+    /// inject registration flags, so these flags are **not applied** by
+    /// `Application::listen` or any other built-in server path. Use them
+    /// only when registering file descriptors with your own epoll-based
+    /// event loop. (The socket-level options in this config, by contrast,
+    /// *are* applied by the server when enabled via
+    /// `Application::with_socket_tuning`.)
     #[cfg(target_os = "linux")]
     pub fn epoll_flags(&self) -> u32 {
         use libc::{EPOLLET, EPOLLEXCLUSIVE, EPOLLIN, EPOLLONESHOT, EPOLLOUT, EPOLLRDHUP};
@@ -243,6 +254,9 @@ impl EpollConfig {
         flags
     }
 
+    /// Non-Linux stub. See the Linux implementation: these flags are
+    /// advisory constants for custom reactors and are not applied by the
+    /// framework's built-in server.
     #[cfg(not(target_os = "linux"))]
     pub fn epoll_flags(&self) -> u32 {
         0
@@ -1069,6 +1083,42 @@ mod tests {
         let config = recommended_config();
         assert!(config.max_events >= 512);
         assert!(config.recv_buffer_size.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_configure_socket_applies_tcp_nodelay() {
+        use std::net::{TcpListener, TcpStream};
+        use std::os::unix::io::AsRawFd;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        // Start from a known-disabled state so the readback proves that
+        // configure_socket actually set the option.
+        server.set_nodelay(false).unwrap();
+
+        let config = EpollConfig::default().tcp_nodelay(true);
+        configure_socket(server.as_raw_fd(), &config).unwrap();
+
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let res = unsafe {
+            libc::getsockopt(
+                server.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                &mut val as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(res, 0, "getsockopt(TCP_NODELAY) failed");
+        assert_ne!(
+            val, 0,
+            "TCP_NODELAY should be enabled after configure_socket"
+        );
     }
 
     #[cfg(target_os = "linux")]

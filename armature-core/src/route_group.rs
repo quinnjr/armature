@@ -78,7 +78,7 @@ impl MultiMiddleware {
 /// let admin = RouteGroup::new()
 ///     .prefix("/api/v1/admin");
 /// ```
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RouteGroup {
     /// Path prefix for all routes in this group
     prefix: String,
@@ -87,7 +87,10 @@ pub struct RouteGroup {
     middleware: Vec<Arc<dyn Middleware>>,
 
     /// Guards to apply to all routes
-    guards: Vec<Box<dyn Guard>>,
+    ///
+    /// Stored as `Arc<dyn Guard>` so that cloned and nested groups share
+    /// (rather than silently lose) their guards.
+    guards: Vec<Arc<dyn Guard>>,
 }
 
 impl RouteGroup {
@@ -149,7 +152,7 @@ impl RouteGroup {
     ///     .guard(Box::new(AuthenticationGuard));
     /// ```
     pub fn guard(mut self, guard: Box<dyn Guard>) -> Self {
-        self.guards.push(guard);
+        self.guards.push(Arc::from(guard));
         self
     }
 
@@ -169,7 +172,7 @@ impl RouteGroup {
     ///     ]);
     /// ```
     pub fn with_guards(mut self, guards: Vec<Box<dyn Guard>>) -> Self {
-        self.guards.extend(guards);
+        self.guards.extend(guards.into_iter().map(Arc::from));
         self
     }
 
@@ -207,7 +210,7 @@ impl RouteGroup {
     }
 
     /// Get all guards for this group
-    pub fn get_guards(&self) -> &[Box<dyn Guard>] {
+    pub fn get_guards(&self) -> &[Arc<dyn Guard>] {
         &self.guards
     }
 
@@ -235,28 +238,49 @@ impl RouteGroup {
         new_group.middleware.extend(self.middleware);
 
         // Combine guards (parent first, then child)
-        // Note: We can't clone Box<dyn Guard>, so we'll need to handle this differently
-        // For now, only use the child's guards
-        new_group.guards = self.guards;
+        new_group.guards.extend(parent.guards.iter().cloned());
+        new_group.guards.extend(self.guards);
 
         new_group
-    }
-}
-
-impl Clone for RouteGroup {
-    fn clone(&self) -> Self {
-        Self {
-            prefix: self.prefix.clone(),
-            middleware: self.middleware.clone(),
-            // Can't clone Box<dyn Guard> easily, so create empty vec
-            guards: Vec::new(),
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestGuard;
+
+    #[async_trait::async_trait]
+    impl Guard for TestGuard {
+        async fn can_activate(&self, _context: &GuardContext) -> Result<bool, Error> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn test_route_group_clone_preserves_guards() {
+        let group = RouteGroup::new()
+            .prefix("/api")
+            .guard(Box::new(TestGuard))
+            .guard(Box::new(TestGuard));
+
+        let cloned = group.clone();
+        assert_eq!(cloned.get_guards().len(), 2);
+        assert_eq!(group.get_guards().len(), 2);
+    }
+
+    #[test]
+    fn test_route_group_with_parent_inherits_guards() {
+        let parent = RouteGroup::new().prefix("/api").guard(Box::new(TestGuard));
+        let child = RouteGroup::new()
+            .prefix("/v1")
+            .guard(Box::new(TestGuard))
+            .with_parent(&parent);
+
+        // Parent guard + child guard
+        assert_eq!(child.get_guards().len(), 2);
+    }
 
     #[test]
     fn test_route_group_prefix() {

@@ -64,7 +64,13 @@ use std::time::Duration;
 use std::net::SocketAddr;
 
 /// HTTP/3 server configuration
+///
+/// Marked `#[non_exhaustive]`: construct it with [`Http3Config::default`],
+/// one of the preset constructors, or [`Http3Config::builder`] rather than an
+/// exhaustive struct literal, so that adding fields (like
+/// `max_request_body_size`) stays backwards compatible for downstream crates.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Http3Config {
     /// Maximum concurrent bidirectional streams per connection
     /// Default: 100 - same as HTTP/2
@@ -111,6 +117,11 @@ pub struct Http3Config {
     /// QPACK blocked streams
     /// Default: 16
     pub qpack_blocked_streams: u16,
+
+    /// Maximum request body size (bytes)
+    /// Requests with larger bodies are rejected with 413 Payload Too Large
+    /// Default: 10MB
+    pub max_request_body_size: usize,
 }
 
 impl Default for Http3Config {
@@ -127,6 +138,7 @@ impl Default for Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 }
@@ -151,6 +163,7 @@ impl Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 16384,
             qpack_blocked_streams: 32,
+            max_request_body_size: 50 * 1024 * 1024, // 50MB for large transfers
         }
     }
 
@@ -168,6 +181,7 @@ impl Http3Config {
             enable_datagram: true,      // For real-time data
             qpack_max_table_capacity: 2048,
             qpack_blocked_streams: 8,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 
@@ -186,6 +200,7 @@ impl Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 }
@@ -251,6 +266,12 @@ impl Http3ConfigBuilder {
     /// Enable DATAGRAM extension
     pub fn enable_datagram(mut self, enable: bool) -> Self {
         self.config.enable_datagram = enable;
+        self
+    }
+
+    /// Set maximum request body size in bytes
+    pub fn max_request_body_size(mut self, size: usize) -> Self {
+        self.config.max_request_body_size = size;
         self
     }
 
@@ -406,7 +427,7 @@ impl Http3Stats {
 #[cfg(feature = "http3")]
 mod server {
     use super::*;
-    use crate::{Error, HttpRequest, HttpResponse, Router};
+    use crate::{Error, HttpRequest, route_cache::OptimizedRouter};
     use bytes::{Buf, Bytes};
     use h3_quinn::quinn;
     use http::Response;
@@ -417,12 +438,12 @@ mod server {
     pub struct Http3Server {
         config: Http3Config,
         stats: Arc<Http3Stats>,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
     }
 
     impl Http3Server {
         /// Create a new HTTP/3 server
-        pub fn new(config: Http3Config, router: Arc<Router>) -> Self {
+        pub fn new(config: Http3Config, router: Arc<OptimizedRouter>) -> Self {
             Self {
                 config,
                 stats: Arc::new(Http3Stats::new()),
@@ -487,12 +508,16 @@ mod server {
 
             info!(address = %addr, "HTTP/3 server listening (QUIC/UDP)");
 
+            let max_request_body_size = self.config.max_request_body_size;
+
             while let Some(incoming) = endpoint.accept().await {
                 let stats = Arc::clone(&self.stats);
                 let router = Arc::clone(&self.router);
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(incoming, router, stats).await {
+                    if let Err(e) =
+                        handle_connection(incoming, router, stats, max_request_body_size).await
+                    {
                         error!(error = %e, "HTTP/3 connection error");
                     }
                 });
@@ -505,8 +530,9 @@ mod server {
     /// Handle a single QUIC connection
     async fn handle_connection(
         incoming: quinn::Incoming,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
         stats: Arc<Http3Stats>,
+        max_request_body_size: usize,
     ) -> Result<(), Error> {
         let conn = incoming
             .await
@@ -530,7 +556,10 @@ mod server {
                     let stats = Arc::clone(&stats);
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_request_resolver(resolver, router, stats).await {
+                        if let Err(e) =
+                            handle_request_resolver(resolver, router, stats, max_request_body_size)
+                                .await
+                        {
                             error!(error = %e, "HTTP/3 request error");
                         }
                     });
@@ -555,8 +584,9 @@ mod server {
     /// Handle a request using the RequestResolver API (h3 0.0.8+)
     async fn handle_request_resolver(
         resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
         stats: Arc<Http3Stats>,
+        max_request_body_size: usize,
     ) -> Result<(), Error> {
         // Resolve the request to get the request and stream
         let (request, mut stream) = resolver
@@ -578,26 +608,60 @@ mod server {
             }
         }
 
-        // Read body if present (using Buf trait)
+        // Read body if present (using Buf trait), enforcing the configured size limit
         let mut body: Vec<u8> = Vec::new();
+        let mut payload_too_large = false;
         while let Some(chunk) = stream
             .recv_data()
             .await
             .map_err(|e| Error::Internal(format!("Failed to read body: {}", e)))?
         {
-            body.extend_from_slice(chunk.chunk());
+            let data = chunk.chunk();
+            if body.len() + data.len() > max_request_body_size {
+                payload_too_large = true;
+                break;
+            }
+            body.extend_from_slice(data);
+        }
+
+        // Reject oversized requests with 413 Payload Too Large
+        if payload_too_large {
+            let http_response: http::Response<()> = Response::builder()
+                .status(413)
+                .body(())
+                .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))?;
+            stream
+                .send_response(http_response)
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to send response: {}", e)))?;
+            stream
+                .finish()
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to finish stream: {}", e)))?;
+            stats.stream_closed();
+            return Ok(());
         }
         armature_req.body = body;
 
-        // Route the request using the async router
-        let response = router
-            .route(armature_req)
-            .await
-            .unwrap_or_else(|_| HttpResponse::internal_server_error());
+        // Route the request using the async router. A routing error is mapped
+        // through the canonical client-safe response so HTTP/3 returns proper
+        // 404/400/403 (etc.) with a JSON body, matching HTTP/1 and HTTP/2 —
+        // rather than collapsing every error to a bare 500. 5xx messages are
+        // still redacted by `to_client_response`.
+        let response = match router.route(armature_req).await {
+            Ok(resp) => resp,
+            Err(err) => err.to_client_response(),
+        };
 
-        // Build HTTP/3 response
-        let http_response: http::Response<()> = Response::builder()
-            .status(response.status as u16)
+        // Build HTTP/3 response, copying headers and cookies
+        let mut builder = Response::builder().status(response.status);
+        for (name, value) in &response.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        for cookie in &response.cookies {
+            builder = builder.header("set-cookie", cookie.as_str());
+        }
+        let http_response: http::Response<()> = builder
             .body(())
             .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))?;
 
@@ -607,10 +671,11 @@ mod server {
             .await
             .map_err(|e| Error::Internal(format!("Failed to send response: {}", e)))?;
 
-        // Send body
-        if !response.body.is_empty() {
+        // Send body (zero-copy when the handler stored it as Bytes)
+        let body = response.into_body_bytes();
+        if !body.is_empty() {
             stream
-                .send_data(Bytes::from(response.body))
+                .send_data(body)
                 .await
                 .map_err(|e| Error::Internal(format!("Failed to send body: {}", e)))?;
         }

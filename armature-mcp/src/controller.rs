@@ -61,7 +61,10 @@ impl McpController {
         let body = String::from_utf8(req.body.clone())
             .map_err(|e| Error::BadRequest(format!("Invalid UTF-8: {}", e)))?;
 
-        let response_json = self.service.handle_json(&body, &req.headers).await;
+        // The MCP auth chain is HashMap-typed throughout; convert the request's
+        // HeaderMap to a HashMap at this boundary.
+        let headers: std::collections::HashMap<String, String> = req.headers.clone().into();
+        let response_json = self.service.handle_json(&body, &headers).await;
 
         Ok(HttpResponse::ok()
             .with_header("Content-Type".to_string(), "application/json".to_string())

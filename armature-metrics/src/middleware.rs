@@ -5,7 +5,18 @@
 use armature_core::{Error, HttpRequest, HttpResponse, Middleware};
 use once_cell::sync::Lazy;
 use prometheus::{CounterVec, GaugeVec, HistogramVec};
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// Default upper bound on the number of distinct `path` label values a single
+/// middleware instance will emit when path labelling is enabled. Any path
+/// beyond this cap is folded into [`OTHER_PATH_LABEL`] so the Prometheus series
+/// count for the path-labelled metric families cannot grow without bound.
+const DEFAULT_PATH_CARDINALITY_CAP: usize = 1000;
+
+/// Label value used for paths that exceed the per-instance cardinality cap.
+const OTHER_PATH_LABEL: &str = "<other>";
 
 /// HTTP request metrics
 static HTTP_REQUEST_COUNTER: Lazy<CounterVec> = Lazy::new(|| {
@@ -81,6 +92,24 @@ static HTTP_RESPONSE_SIZE_BYTES: Lazy<HistogramVec> = Lazy::new(|| {
 /// - `http_request_size_bytes` - Request size histogram
 /// - `http_response_size_bytes` - Response size histogram
 ///
+/// # Cardinality safety
+///
+/// Prometheus creates a permanent time series for every distinct combination of
+/// label values. Because the middleware only sees the concrete request path
+/// (not the matched route template), labelling metrics with the raw path lets a
+/// remote client mint unbounded series simply by requesting random URLs
+/// (`/{random}`), which floods the global registry and can exhaust memory.
+///
+/// To make this safe:
+/// - Path labelling is **disabled by default** ([`RequestMetricsMiddleware::new`]
+///   sets `include_path = false`). Opt in explicitly with
+///   [`RequestMetricsMiddleware::with_path`].
+/// - When path labelling *is* enabled, the number of distinct path label values
+///   emitted by an instance is bounded (default
+///   [`DEFAULT_PATH_CARDINALITY_CAP`]). Once the cap is reached, every new path
+///   is reported as [`OTHER_PATH_LABEL`] (`"<other>"`) so the series count is
+///   capped at roughly `cap + 1` regardless of how many unique paths are seen.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -88,38 +117,110 @@ static HTTP_RESPONSE_SIZE_BYTES: Lazy<HistogramVec> = Lazy::new(|| {
 /// use armature_metrics::*;
 /// use std::sync::Arc;
 ///
+/// // Safe default: no per-path cardinality.
 /// let middleware = Arc::new(RequestMetricsMiddleware::new());
+///
+/// // Opt in to bounded per-path labels.
+/// let with_paths = Arc::new(RequestMetricsMiddleware::with_path());
 /// ```
 pub struct RequestMetricsMiddleware {
-    /// Whether to include path in metrics (can lead to high cardinality)
+    /// Whether to include path in metrics (can lead to high cardinality).
+    ///
+    /// Defaults to `false`; enable with [`RequestMetricsMiddleware::with_path`].
     include_path: bool,
+
+    /// Maximum number of distinct `path` label values to emit before folding
+    /// further paths into [`OTHER_PATH_LABEL`].
+    max_path_cardinality: usize,
+
+    /// Bounded set of path label values already emitted by this instance. Used
+    /// to decide whether a newly seen path can get its own label or must be
+    /// folded into `<other>`.
+    seen_paths: Mutex<HashSet<String>>,
 }
 
 impl RequestMetricsMiddleware {
-    /// Create new request metrics middleware
+    /// Create new request metrics middleware.
+    ///
+    /// Path labelling is disabled by default to avoid unbounded Prometheus label
+    /// cardinality from attacker-controlled URLs. Use
+    /// [`RequestMetricsMiddleware::with_path`] to opt in to bounded per-path
+    /// labels.
     pub fn new() -> Self {
-        Self { include_path: true }
-    }
-
-    /// Create middleware without path labels (to reduce cardinality)
-    pub fn without_path() -> Self {
         Self {
             include_path: false,
+            max_path_cardinality: DEFAULT_PATH_CARDINALITY_CAP,
+            seen_paths: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Get sanitized path for metrics
+    /// Create middleware with bounded per-path labels enabled.
+    ///
+    /// Distinct path label values are capped at [`DEFAULT_PATH_CARDINALITY_CAP`];
+    /// paths beyond the cap are reported as [`OTHER_PATH_LABEL`].
+    pub fn with_path() -> Self {
+        Self {
+            include_path: true,
+            ..Self::new()
+        }
+    }
+
+    /// Create middleware with bounded per-path labels and a custom cardinality
+    /// cap.
+    ///
+    /// A cap of `0` is treated as `1` to guarantee at least the `<other>` bucket
+    /// behaves sensibly.
+    pub fn with_path_cardinality(max_path_cardinality: usize) -> Self {
+        Self {
+            include_path: true,
+            max_path_cardinality: max_path_cardinality.max(1),
+            ..Self::new()
+        }
+    }
+
+    /// Create middleware without path labels (to reduce cardinality).
+    ///
+    /// Equivalent to [`RequestMetricsMiddleware::new`]; retained for clarity and
+    /// backwards compatibility.
+    pub fn without_path() -> Self {
+        Self::new()
+    }
+
+    /// Get sanitized, cardinality-bounded path label for metrics.
+    ///
+    /// Returns `"/"` when path labelling is disabled. Otherwise the path is
+    /// length-truncated and then bounded: known paths keep their own label,
+    /// newly seen paths are admitted until [`Self::max_path_cardinality`] is
+    /// reached, after which they are folded into [`OTHER_PATH_LABEL`].
     fn sanitize_path(&self, path: &str) -> String {
         if !self.include_path {
             return "/".to_string();
         }
 
-        // Limit path length to prevent cardinality explosion
-        if path.len() > 100 {
-            return format!("{}...", &path[..97]);
+        // Limit raw path length first (defence in depth against huge labels).
+        let candidate = if path.len() > 100 {
+            format!("{}...", &path[..97])
+        } else {
+            path.to_string()
+        };
+
+        let mut seen = match self.seen_paths.lock() {
+            Ok(guard) => guard,
+            // If the lock is poisoned, fall back to the bounded label so a
+            // panic in another thread can't turn into unbounded cardinality.
+            Err(_) => return OTHER_PATH_LABEL.to_string(),
+        };
+
+        if seen.contains(&candidate) {
+            return candidate;
         }
 
-        path.to_string()
+        if seen.len() < self.max_path_cardinality {
+            seen.insert(candidate.clone());
+            candidate
+        } else {
+            OTHER_PATH_LABEL.to_string()
+        }
     }
 }
 
@@ -205,20 +306,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request_metrics_middleware_new() {
+    fn test_request_metrics_middleware_new_defaults_to_no_path() {
+        // Safe default: no per-path cardinality unless explicitly opted in.
         let middleware = RequestMetricsMiddleware::new();
+        assert!(!middleware.include_path);
+    }
+
+    #[test]
+    fn test_default_does_not_label_per_path() {
+        // With the default config every path collapses to a single "/" label,
+        // so the registry cannot accumulate one series per unique path.
+        let middleware = RequestMetricsMiddleware::default();
+        assert_eq!(middleware.sanitize_path("/api/users"), "/");
+        assert_eq!(middleware.sanitize_path("/random-9f83a"), "/");
+        assert_eq!(middleware.sanitize_path("/another/path"), "/");
+    }
+
+    #[test]
+    fn test_with_path_enables_path_labels() {
+        let middleware = RequestMetricsMiddleware::with_path();
         assert!(middleware.include_path);
+        assert_eq!(middleware.sanitize_path("/api/users"), "/api/users");
     }
 
     #[test]
     fn test_request_metrics_middleware_without_path() {
         let middleware = RequestMetricsMiddleware::without_path();
         assert!(!middleware.include_path);
+        assert_eq!(middleware.sanitize_path("/api/users"), "/");
     }
 
     #[test]
-    fn test_sanitize_path() {
-        let middleware = RequestMetricsMiddleware::new();
+    fn test_sanitize_path_truncates_long_paths() {
+        let middleware = RequestMetricsMiddleware::with_path();
         assert_eq!(middleware.sanitize_path("/api/users"), "/api/users");
 
         let long_path = "/".to_string() + &"a".repeat(150);
@@ -227,8 +347,37 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_path_without() {
-        let middleware = RequestMetricsMiddleware::without_path();
-        assert_eq!(middleware.sanitize_path("/api/users"), "/");
+    fn test_path_cardinality_is_capped() {
+        // Enable path labels with a tiny cap, then feed many unique paths.
+        let cap = 4;
+        let middleware = RequestMetricsMiddleware::with_path_cardinality(cap);
+
+        let mut labels = std::collections::HashSet::new();
+        for i in 0..1000 {
+            labels.insert(middleware.sanitize_path(&format!("/item/{i}")));
+        }
+
+        // Distinct labels must never exceed cap + 1 (the "<other>" bucket),
+        // regardless of how many unique paths were observed.
+        assert!(
+            labels.len() <= cap + 1,
+            "distinct labels {} exceeded cap+1 ({})",
+            labels.len(),
+            cap + 1
+        );
+        // Overflow paths are folded into the shared "<other>" bucket.
+        assert!(labels.contains(OTHER_PATH_LABEL));
+    }
+
+    #[test]
+    fn test_seen_paths_get_stable_labels() {
+        let middleware = RequestMetricsMiddleware::with_path_cardinality(2);
+        // First two distinct paths are admitted with their own labels.
+        assert_eq!(middleware.sanitize_path("/a"), "/a");
+        assert_eq!(middleware.sanitize_path("/b"), "/b");
+        // A repeat of an admitted path keeps its own label.
+        assert_eq!(middleware.sanitize_path("/a"), "/a");
+        // A new path beyond the cap folds into "<other>".
+        assert_eq!(middleware.sanitize_path("/c"), OTHER_PATH_LABEL);
     }
 }

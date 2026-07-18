@@ -281,6 +281,9 @@ impl LoadBalancer {
     }
 
     /// Select with sticky hash.
+    ///
+    /// Falls back to healthy-aware round-robin if the hashed worker is
+    /// unhealthy.
     #[inline]
     pub fn select_sticky(&self, key: u64) -> usize {
         let idx = (key % self.workers.len() as u64) as usize;
@@ -288,23 +291,47 @@ impl LoadBalancer {
             LB_STATS.record_selection(self.strategy);
             idx
         } else {
-            // Fallback to round-robin if unhealthy
+            // Fallback to round-robin (skips unhealthy workers)
             self.select_round_robin()
         }
     }
 
-    /// Round-robin selection.
-    #[inline]
-    fn select_round_robin(&self) -> usize {
-        let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        LB_STATS.record_selection(LoadBalanceStrategy::RoundRobin);
-        idx
+    /// Get indices of healthy workers.
+    fn healthy_indices(&self) -> Vec<usize> {
+        self.workers
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.is_healthy())
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
-    /// Least connections selection.
+    /// Round-robin selection (healthy workers only; falls back to all
+    /// workers if none are healthy).
+    #[inline]
+    fn select_round_robin(&self) -> usize {
+        let n = self.workers.len();
+        let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) % n;
+        LB_STATS.record_selection(LoadBalanceStrategy::RoundRobin);
+
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            if self.workers[idx].is_healthy() {
+                return idx;
+            }
+        }
+
+        // No healthy workers - fall back to plain rotation
+        start
+    }
+
+    /// Least connections selection (healthy workers only; falls back to all
+    /// workers if none are healthy).
     fn select_least_connections(&self) -> usize {
+        LB_STATS.record_selection(LoadBalanceStrategy::LeastConnections);
+
         let mut min_conn = u32::MAX;
-        let mut selected = 0;
+        let mut selected = None;
 
         for (idx, worker) in self.workers.iter().enumerate() {
             if !worker.is_healthy() {
@@ -313,78 +340,135 @@ impl LoadBalancer {
             let conn = worker.connections();
             if conn < min_conn {
                 min_conn = conn;
+                selected = Some(idx);
+            }
+        }
+
+        if let Some(idx) = selected {
+            return idx;
+        }
+
+        // No healthy workers - fall back to least connections across all
+        let mut min_conn = u32::MAX;
+        let mut selected = 0;
+        for (idx, worker) in self.workers.iter().enumerate() {
+            let conn = worker.connections();
+            if conn < min_conn {
+                min_conn = conn;
                 selected = idx;
             }
         }
-
-        LB_STATS.record_selection(LoadBalanceStrategy::LeastConnections);
         selected
     }
 
-    /// Weighted round-robin selection.
+    /// Weighted round-robin selection (healthy workers only; falls back to
+    /// all workers if none are healthy).
     fn select_weighted(&self) -> usize {
+        LB_STATS.record_selection(LoadBalanceStrategy::Weighted);
         let counter = self.weighted_counter.fetch_add(1, Ordering::Relaxed);
-        let position = (counter as u32) % self.total_weight;
 
+        let healthy_weight: u32 = self
+            .workers
+            .iter()
+            .filter(|w| w.is_healthy())
+            .map(|w| w.weight())
+            .sum();
+
+        if healthy_weight > 0 {
+            let position = (counter as u32) % healthy_weight;
+            let mut cumulative = 0u32;
+            for (idx, worker) in self.workers.iter().enumerate() {
+                if !worker.is_healthy() {
+                    continue;
+                }
+                cumulative += worker.weight();
+                if position < cumulative {
+                    return idx;
+                }
+            }
+        }
+
+        // No healthy workers - fall back to weighted rotation across all
+        let position = (counter as u32) % self.total_weight.max(1);
         let mut cumulative = 0u32;
         for (idx, worker) in self.workers.iter().enumerate() {
-            if !worker.is_healthy() {
-                continue;
-            }
             cumulative += worker.weight();
             if position < cumulative {
-                LB_STATS.record_selection(LoadBalanceStrategy::Weighted);
                 return idx;
             }
         }
-
-        // Fallback
-        LB_STATS.record_selection(LoadBalanceStrategy::Weighted);
         0
     }
 
-    /// Random selection.
+    /// Random selection (healthy workers only; falls back to all workers if
+    /// none are healthy).
     #[inline]
     fn select_random(&self) -> usize {
-        let idx = self.next_random() as usize % self.workers.len();
         LB_STATS.record_selection(LoadBalanceStrategy::Random);
-        idx
+        let healthy = self.healthy_indices();
+        if healthy.is_empty() {
+            self.next_random() as usize % self.workers.len()
+        } else {
+            healthy[self.next_random() as usize % healthy.len()]
+        }
     }
 
-    /// Power of Two Choices selection.
+    /// Power of Two Choices selection (healthy workers only; falls back to
+    /// all workers if none are healthy).
     fn select_power_of_two(&self) -> usize {
-        let n = self.workers.len();
+        LB_STATS.record_selection(LoadBalanceStrategy::PowerOfTwo);
+
+        let healthy = self.healthy_indices();
+        let all: Vec<usize>;
+        let candidates: &[usize] = if healthy.is_empty() {
+            all = (0..self.workers.len()).collect();
+            &all
+        } else {
+            &healthy
+        };
+
+        let n = candidates.len();
         if n <= 1 {
-            return 0;
+            return candidates.first().copied().unwrap_or(0);
         }
 
-        // Pick two random workers
-        let idx1 = self.next_random() as usize % n;
-        let mut idx2 = self.next_random() as usize % n;
+        // Pick two random candidates
+        let pos1 = self.next_random() as usize % n;
+        let mut pos2 = self.next_random() as usize % n;
 
-        // Ensure different workers
-        if idx2 == idx1 {
-            idx2 = (idx2 + 1) % n;
+        // Ensure different candidates
+        if pos2 == pos1 {
+            pos2 = (pos2 + 1) % n;
         }
+
+        let idx1 = candidates[pos1];
+        let idx2 = candidates[pos2];
 
         // Choose the one with fewer connections
         let conn1 = self.workers[idx1].connections();
         let conn2 = self.workers[idx2].connections();
 
-        let selected = if conn1 <= conn2 { idx1 } else { idx2 };
-        LB_STATS.record_selection(LoadBalanceStrategy::PowerOfTwo);
-        selected
+        if conn1 <= conn2 { idx1 } else { idx2 }
     }
 
     /// Generate next random number (xorshift64).
+    ///
+    /// Uses an atomic read-modify-write so concurrent callers each observe
+    /// a distinct state transition.
     #[inline]
     fn next_random(&self) -> u64 {
-        let mut state = self.random_state.load(Ordering::Relaxed);
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        self.random_state.store(state, Ordering::Relaxed);
-        state
+        let mut next = 0u64;
+        let _ = self
+            .random_state
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+                let mut x = state;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                next = x;
+                Some(x)
+            });
+        next
     }
 
     /// Get total connections across all workers.
@@ -825,6 +909,103 @@ mod tests {
         // Mark healthy again
         lb.mark_healthy(0);
         assert!(lb.workers[0].is_healthy());
+    }
+
+    #[test]
+    fn test_unhealthy_worker_all_strategies() {
+        // Regression: RoundRobin/Random/PowerOfTwo/Weighted used to ignore
+        // the healthy flag entirely (or fall back to worker 0 blindly).
+        for strategy in [
+            LoadBalanceStrategy::RoundRobin,
+            LoadBalanceStrategy::LeastConnections,
+            LoadBalanceStrategy::Weighted,
+            LoadBalanceStrategy::Random,
+            LoadBalanceStrategy::PowerOfTwo,
+        ] {
+            let lb = LoadBalancer::new(4, strategy);
+            lb.mark_unhealthy(0);
+            lb.mark_unhealthy(2);
+
+            for _ in 0..200 {
+                let idx = lb.select();
+                assert!(
+                    idx == 1 || idx == 3,
+                    "{:?} selected unhealthy worker {}",
+                    strategy,
+                    idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sticky_avoids_unhealthy() {
+        let lb = LoadBalancer::new(4, LoadBalanceStrategy::Sticky);
+
+        // Key that maps to worker 1
+        let key = 1u64;
+        assert_eq!(lb.select_sticky(key), 1);
+
+        lb.mark_unhealthy(1);
+        for _ in 0..100 {
+            let idx = lb.select_sticky(key);
+            assert_ne!(idx, 1, "Sticky fallback returned the unhealthy worker");
+            assert!(idx < 4);
+        }
+    }
+
+    #[test]
+    fn test_all_unhealthy_falls_back_to_all_workers() {
+        for strategy in [
+            LoadBalanceStrategy::RoundRobin,
+            LoadBalanceStrategy::LeastConnections,
+            LoadBalanceStrategy::Weighted,
+            LoadBalanceStrategy::Random,
+            LoadBalanceStrategy::PowerOfTwo,
+        ] {
+            let lb = LoadBalancer::new(3, strategy);
+            for id in 0..3 {
+                lb.mark_unhealthy(id);
+            }
+
+            // Still returns a valid index instead of panicking or pinning 0
+            for _ in 0..50 {
+                let idx = lb.select();
+                assert!(idx < 3, "{:?} returned invalid index {}", strategy, idx);
+            }
+        }
+
+        let lb = LoadBalancer::new(3, LoadBalanceStrategy::Sticky);
+        for id in 0..3 {
+            lb.mark_unhealthy(id);
+        }
+        assert!(lb.select_sticky(42) < 3);
+    }
+
+    #[test]
+    fn test_next_random_concurrent_uniqueness() {
+        // Regression: next_random was a non-atomic load/store, so concurrent
+        // callers observed identical values. With an atomic update, every
+        // successful step advances the xorshift sequence, so all drawn
+        // values are distinct.
+        let lb = Arc::new(LoadBalancer::new(4, LoadBalanceStrategy::Random));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let lb = Arc::clone(&lb);
+                std::thread::spawn(move || {
+                    (0..1000).map(|_| lb.next_random()).collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for handle in handles {
+            for value in handle.join().unwrap() {
+                assert!(seen.insert(value), "duplicate random value observed");
+            }
+        }
+        assert_eq!(seen.len(), 4000);
     }
 
     #[test]

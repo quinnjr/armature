@@ -157,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         write_through: true,
         promote_to_l1: true,
         l1_ttl_fraction: 0.1, // L1 lives 10% as long as L2
+        ..Default::default()
     };
 
     let l1_custom = Arc::new(InMemoryCache::new());

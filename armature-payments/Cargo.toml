@@ -21,7 +21,7 @@ async-trait = "0.1"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.13", features = ["json", "rustls", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 url = "2.5"
 hmac = "0.13"
 sha2 = "0.11"

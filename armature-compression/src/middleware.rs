@@ -65,13 +65,15 @@ impl CompressionMiddleware {
 
     /// Check if a response should be compressed
     fn should_compress(&self, response: &HttpResponse) -> bool {
-        // Don't compress error responses or empty bodies
-        if response.status >= 400 || response.body.is_empty() {
+        // Don't compress error responses or empty bodies.
+        // Use `body_ref()`/`body_len()` so zero-copy responses (JSON/static payloads
+        // stored in `body_bytes`, e.g. via `with_json`) are inspected correctly.
+        if response.status >= 400 || response.body_ref().is_empty() {
             return false;
         }
 
         // Check size threshold
-        if !self.config.should_compress_size(response.body.len()) {
+        if !self.config.should_compress_size(response.body_len()) {
             return false;
         }
 
@@ -101,11 +103,16 @@ impl CompressionMiddleware {
     ) -> HttpResponse {
         let level = self.config.effective_level();
 
-        match algorithm.compress(&response.body, level) {
+        // Read the body via `body_ref()` so zero-copy responses (payload in
+        // `body_bytes`) are compressed rather than silently skipped.
+        match algorithm.compress(response.body_ref(), level) {
             Ok(compressed) => {
                 // Only use compressed data if it's smaller
-                if compressed.len() < response.body.len() {
-                    response.body = compressed;
+                if compressed.len() < response.body_len() {
+                    let compressed_len = compressed.len();
+                    // Store the compressed payload via the zero-copy setter, which
+                    // clears the legacy `body` Vec and populates `body_bytes`.
+                    response = response.with_bytes_body(bytes::Bytes::from(compressed));
 
                     // Set Content-Encoding header
                     if let Some(encoding) = algorithm.encoding_name() {
@@ -115,10 +122,9 @@ impl CompressionMiddleware {
                     }
 
                     // Update Content-Length
-                    response.headers.insert(
-                        "Content-Length".to_string(),
-                        response.body.len().to_string(),
-                    );
+                    response
+                        .headers
+                        .insert("Content-Length".to_string(), compressed_len.to_string());
 
                     // Add Vary header to indicate response varies by Accept-Encoding
                     let vary = response.headers.entry("Vary".to_string()).or_default();
@@ -302,7 +308,39 @@ mod tests {
         );
 
         // Compressed body should be smaller
-        assert!(compressed.body.len() < body.len());
+        assert!(compressed.body_len() < body.len());
+    }
+
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn test_compress_json_body_bytes() {
+        // Responses built with `with_json` store their payload in `body_bytes`
+        // (the legacy `body` Vec is cleared). Verify such responses are actually
+        // compressed rather than silently skipped.
+        let middleware = CompressionMiddleware::with_config(
+            CompressionConfig::builder().gzip().min_size(10).build(),
+        );
+
+        // Use a value whose `Serialize` impl is already available through
+        // armature-core's dependency graph (no direct serde dep needed here).
+        let payload: Vec<String> = vec!["armature".to_string(); 100];
+        let response = HttpResponse::new(200).with_json(&payload).unwrap();
+
+        // Sanity: payload lives in body_bytes, not the legacy Vec, and exceeds min_size.
+        assert!(response.has_bytes_body());
+        assert!(response.body.is_empty());
+        assert!(response.body_len() > 10);
+
+        let original_len = response.body_len();
+        assert!(middleware.should_compress(&response));
+
+        let compressed = middleware.compress_response(response, CompressionAlgorithm::Gzip);
+
+        assert_eq!(
+            compressed.headers.get("Content-Encoding"),
+            Some(&"gzip".to_string())
+        );
+        assert!(compressed.body_len() < original_len);
     }
 
     #[cfg(feature = "gzip")]

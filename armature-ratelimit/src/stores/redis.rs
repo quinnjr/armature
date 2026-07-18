@@ -249,18 +249,39 @@ impl RateLimitStore for RedisStore {
 
         for pattern in &patterns {
             if pattern.contains('*') {
-                // Use SCAN for pattern matching
-                let keys: Vec<String> = redis::cmd("KEYS")
-                    .arg(pattern)
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| RateLimitError::store(e.to_string()))?;
-
-                for key in keys {
-                    let _: () = conn
-                        .del(&key)
+                // Cursored SCAN instead of the blocking `KEYS <pattern>`.
+                // KEYS scans the entire keyspace in one shot and stalls the
+                // single-threaded Redis server on large datasets; SCAN walks
+                // the keyspace incrementally in bounded chunks. Matches are
+                // removed in batches via a single variadic UNLINK per batch
+                // (UNLINK reclaims memory in a background thread, unlike the
+                // synchronous DEL — and one UNLINK per batch replaces the old
+                // N+1 per-key DELs).
+                let mut cursor: u64 = 0;
+                loop {
+                    let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(pattern)
+                        .arg("COUNT")
+                        .arg(100)
+                        .query_async(&mut conn)
                         .await
                         .map_err(|e| RateLimitError::store(e.to_string()))?;
+
+                    if !keys.is_empty() {
+                        let _: () = redis::cmd("UNLINK")
+                            .arg(&keys)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(|e| RateLimitError::store(e.to_string()))?;
+                    }
+
+                    // A returned cursor of 0 signals the iteration is complete.
+                    if next_cursor == 0 {
+                        break;
+                    }
+                    cursor = next_cursor;
                 }
             } else {
                 let _: () = conn

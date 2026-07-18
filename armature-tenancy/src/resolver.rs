@@ -191,7 +191,20 @@ impl TenantResolver for SubdomainTenantResolver {
 /// JWT claim-based tenant resolver
 ///
 /// Resolves tenant from JWT token claims.
-#[allow(dead_code)]
+///
+/// # Security
+///
+/// **This resolver does NOT verify the JWT signature.** It only splits the
+/// token and base64url-decodes the payload segment to read the configured
+/// claim. Anyone can forge an unsigned payload, so this resolver MUST be
+/// deployed behind authentication middleware (e.g. `armature-auth` /
+/// `armature-jwt`) that has already verified the token's signature and
+/// expiration. Tenant resolution from an unverified JWT is only safe
+/// post-authentication; never use this resolver as an authentication or
+/// authorization mechanism on its own.
+///
+/// Malformed tokens fail closed: any structural, encoding, or JSON error
+/// results in a resolution error, never a default tenant.
 pub struct JwtTenantResolver {
     store: Arc<dyn TenantStore>,
     claim_name: String,
@@ -237,7 +250,9 @@ impl TenantResolver for JwtTenantResolver {
             .strip_prefix("Bearer ")
             .ok_or_else(|| TenantError::Invalid("Invalid Authorization format".to_string()))?;
 
-        // Parse JWT claims (simplified - in production use armature-jwt)
+        // Parse the JWT payload WITHOUT signature verification (see the
+        // security note on this type): an authentication layer must already
+        // have verified this token before tenant resolution runs.
         let tenant_id = self.extract_claim(token)?;
 
         let tenant = self
@@ -255,12 +270,46 @@ impl TenantResolver for JwtTenantResolver {
 }
 
 impl JwtTenantResolver {
-    fn extract_claim(&self, _token: &str) -> Result<String, TenantError> {
-        // Simplified JWT parsing - in production, use armature-jwt to decode and validate
-        // For now, this is a placeholder
-        Err(TenantError::ResolutionFailed(
-            "JWT parsing requires armature-jwt integration".to_string(),
-        ))
+    /// Extract the configured claim from the JWT payload.
+    ///
+    /// **Does NOT verify the signature** — see the security note on
+    /// [`JwtTenantResolver`]. Fails closed on any malformed input.
+    fn extract_claim(&self, token: &str) -> Result<String, TenantError> {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        // A compact JWS is exactly three dot-separated segments.
+        let mut segments = token.split('.');
+        let (Some(_header), Some(payload), Some(_signature), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
+            return Err(TenantError::Invalid(
+                "Malformed JWT: expected three segments".to_string(),
+            ));
+        };
+
+        // Payload is base64url; tolerate (strip) any trailing padding.
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload.trim_end_matches('='))
+            .map_err(|_| TenantError::Invalid("Malformed JWT payload encoding".to_string()))?;
+
+        let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|_| TenantError::Invalid("Malformed JWT payload JSON".to_string()))?;
+
+        match claims.get(&self.claim_name) {
+            Some(serde_json::Value::String(value)) if !value.is_empty() => Ok(value.clone()),
+            Some(_) => Err(TenantError::Invalid(format!(
+                "JWT claim '{}' is not a non-empty string",
+                self.claim_name
+            ))),
+            None => Err(TenantError::ResolutionFailed(format!(
+                "JWT is missing the '{}' claim",
+                self.claim_name
+            ))),
+        }
     }
 }
 
@@ -406,6 +455,102 @@ mod tests {
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.name, "acme");
+    }
+
+    /// Build an (unsigned) JWT with the given JSON payload.
+    fn make_jwt(payload: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes()),
+            URL_SAFE_NO_PAD.encode(b"signature")
+        )
+    }
+
+    #[tokio::test]
+    async fn test_jwt_resolver_valid_token() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = JwtTenantResolver::new(store, "tenant_id");
+
+        let token = make_jwt(&serde_json::json!({ "sub": "user-1", "tenant_id": "tenant-1" }));
+        let mut request = create_request("GET", "/api/users");
+        request
+            .headers
+            .insert("authorization".to_string(), format!("Bearer {}", token));
+
+        let tenant = resolver.resolve(&request).await.unwrap();
+        assert_eq!(tenant.id, "tenant-1");
+        assert_eq!(tenant.name, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_resolver_missing_claim() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = JwtTenantResolver::new(store, "tenant_id");
+
+        let token = make_jwt(&serde_json::json!({ "sub": "user-1" }));
+        let mut request = create_request("GET", "/api/users");
+        request
+            .headers
+            .insert("authorization".to_string(), format!("Bearer {}", token));
+
+        let result = resolver.resolve(&request).await;
+        assert!(matches!(result, Err(TenantError::ResolutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_jwt_resolver_non_string_claim() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = JwtTenantResolver::new(store, "tenant_id");
+
+        let token = make_jwt(&serde_json::json!({ "tenant_id": 42 }));
+        let mut request = create_request("GET", "/api/users");
+        request
+            .headers
+            .insert("authorization".to_string(), format!("Bearer {}", token));
+
+        let result = resolver.resolve(&request).await;
+        assert!(matches!(result, Err(TenantError::Invalid(_))));
+    }
+
+    #[tokio::test]
+    async fn test_jwt_resolver_malformed_token() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = JwtTenantResolver::new(store, "tenant_id");
+
+        for bad_token in [
+            "not-a-jwt",
+            "one.two",
+            "one.two.three.four",
+            "aaa.!!!not-base64!!!.ccc",
+            // Valid base64url payload, but not JSON
+            "aaa.bm90LWpzb24.ccc",
+        ] {
+            let mut request = create_request("GET", "/api/users");
+            request
+                .headers
+                .insert("authorization".to_string(), format!("Bearer {}", bad_token));
+
+            let result = resolver.resolve(&request).await;
+            assert!(
+                matches!(result, Err(TenantError::Invalid(_))),
+                "token {:?} should fail closed",
+                bad_token
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jwt_resolver_missing_authorization_header() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = JwtTenantResolver::new(store, "tenant_id");
+
+        let request = create_request("GET", "/api/users");
+        let result = resolver.resolve(&request).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

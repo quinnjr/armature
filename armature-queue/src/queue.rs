@@ -7,6 +7,70 @@ use chrono::Utc;
 use redis::{AsyncCommands, Client, aio::ConnectionManager};
 use std::time::Duration;
 
+/// Number of keys hinted per `SCAN` iteration when clearing the queue.
+const SCAN_COUNT: usize = 500;
+
+/// Atomically promote all due delayed jobs to their priority queues.
+///
+/// `KEYS[1]` = delayed sorted-set key, `ARGV[1]` = queue key prefix,
+/// `ARGV[2]` = current unix timestamp. Returns the number of jobs promoted.
+///
+/// The whole script runs atomically on the server, so `ZRANGEBYSCORE` +
+/// `ZREM` + `ZADD` happen with zero per-job client round-trips and two
+/// concurrent workers can never promote the same job twice (the `ZREM == 1`
+/// guard is belt-and-suspenders on top of that atomicity). Priority is read
+/// from the stored job JSON server-side via `cjson`, matching the client-side
+/// `-(priority as i64)` scoring and `pending:<name>` key layout.
+const MOVE_DELAYED_SCRIPT: &str = r#"
+local delayed_key = KEYS[1]
+local prefix = ARGV[1]
+local now = ARGV[2]
+
+local job_ids = redis.call('ZRANGEBYSCORE', delayed_key, '-inf', now)
+local promoted = 0
+
+for _, job_id in ipairs(job_ids) do
+    local job_json = redis.call('GET', prefix .. ':job:' .. job_id)
+    if job_json then
+        -- Claim the job atomically; skip if another pass already took it.
+        if redis.call('ZREM', delayed_key, job_id) == 1 then
+            local pname = 'normal'
+            local pscore = -1
+            local ok, job = pcall(cjson.decode, job_json)
+            if ok and type(job) == 'table' and job.priority then
+                local p = job.priority
+                if p == 'Low' then pname = 'low'; pscore = 0
+                elseif p == 'Normal' then pname = 'normal'; pscore = -1
+                elseif p == 'High' then pname = 'high'; pscore = -2
+                elseif p == 'Critical' then pname = 'critical'; pscore = -3
+                end
+            end
+            redis.call('ZADD', prefix .. ':pending:' .. pname, pscore, job_id)
+            promoted = promoted + 1
+        end
+    end
+end
+
+return promoted
+"#;
+
+/// Pop the highest-priority available job id across the priority queues.
+///
+/// `KEYS` are the priority queue keys in descending priority order
+/// (critical, high, normal, low). Returns the popped job id, or `nil` when
+/// every queue is empty. Running server-side makes the "check queues high to
+/// low, pop the first non-empty" sequence a single atomic round-trip and
+/// removes the concurrent double-pop window.
+const DEQUEUE_POP_SCRIPT: &str = r#"
+for i = 1, #KEYS do
+    local popped = redis.call('ZPOPMIN', KEYS[i], 1)
+    if popped and popped[1] then
+        return popped[1]
+    end
+end
+return nil
+"#;
+
 /// Queue configuration.
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
@@ -152,37 +216,43 @@ impl Queue {
 
         let mut conn = self.connection.clone();
 
-        // Try to get job from priority queues (high to low)
-        for priority in [
-            JobPriority::Critical,
-            JobPriority::High,
-            JobPriority::Normal,
-            JobPriority::Low,
-        ] {
-            let queue_key = self.priority_queue_key(priority);
+        // A single Lua pop replaces the four sequential ZPOPMIN round-trips,
+        // scanning the priority queues high-to-low server-side and atomically
+        // popping the first available job id. As in the original loop, ids that
+        // fail to parse or whose job data has expired are discarded (already
+        // popped) and the next-best job is tried on the following iteration; in
+        // the common case this loop runs exactly once.
+        let script = redis::Script::new(DEQUEUE_POP_SCRIPT);
+        loop {
+            let job_id_str: Option<String> = script
+                .key(self.priority_queue_key(JobPriority::Critical))
+                .key(self.priority_queue_key(JobPriority::High))
+                .key(self.priority_queue_key(JobPriority::Normal))
+                .key(self.priority_queue_key(JobPriority::Low))
+                .invoke_async(&mut conn)
+                .await?;
 
-            // Pop the highest priority job
-            let result: Option<Vec<String>> = conn.zpopmin(&queue_key, 1).await?;
+            let Some(job_id_str) = job_id_str else {
+                return Ok(None);
+            };
+            let Ok(job_id) = job_id_str.parse::<JobId>() else {
+                continue;
+            };
+            let Some(mut job) = self.get_job(job_id).await? else {
+                continue;
+            };
 
-            if let Some(items) = result
-                && let Some(job_id_str) = items.first()
-                && let Ok(job_id) = job_id_str.parse::<JobId>()
-                && let Some(mut job) = self.get_job(job_id).await?
-            {
-                job.start_processing();
-                self.save_job(&job).await?;
+            job.start_processing();
+            self.save_job(&job).await?;
 
-                // Add to processing set
-                let processing_key = self.config.key("processing");
-                let _: () = conn
-                    .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
-                    .await?;
+            // Add to processing set
+            let processing_key = self.config.key("processing");
+            let _: () = conn
+                .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
+                .await?;
 
-                return Ok(Some(job));
-            }
+            return Ok(Some(job));
         }
-
-        Ok(None)
     }
 
     /// Complete a job.
@@ -259,45 +329,43 @@ impl Queue {
     /// Get queue size.
     pub async fn size(&self) -> QueueResult<usize> {
         let mut conn = self.connection.clone();
-        let mut total = 0;
 
+        // Pipeline the four ZCARDs into one round-trip instead of issuing them
+        // sequentially. Called before every enqueue, so this removes three
+        // round-trips from the hot path.
+        let mut pipe = redis::pipe();
         for priority in [
             JobPriority::Critical,
             JobPriority::High,
             JobPriority::Normal,
             JobPriority::Low,
         ] {
-            let queue_key = self.priority_queue_key(priority);
-            let count: usize = conn.zcard(&queue_key).await?;
-            total += count;
+            pipe.zcard(self.priority_queue_key(priority));
         }
 
-        Ok(total)
+        let counts: Vec<usize> = pipe.query_async(&mut conn).await?;
+        Ok(counts.iter().sum())
     }
 
     /// Move delayed jobs to ready queue.
+    ///
+    /// Runs entirely server-side via a single atomic Lua script: the previous
+    /// implementation was an N+1 (one ZRANGEBYSCORE plus a GET + ZREM + ZADD
+    /// per due job) and could double-promote a job when two workers dequeued
+    /// concurrently. The script promotes all due jobs in one round-trip with
+    /// zero per-job client traffic and no double-promotion race.
     async fn move_delayed_jobs(&self) -> QueueResult<()> {
         let mut conn = self.connection.clone();
         let delayed_key = self.config.key("delayed");
         let now = Utc::now().timestamp();
 
-        // Get all jobs that are ready
-        let job_ids: Vec<String> = conn.zrangebyscore(&delayed_key, "-inf", now).await?;
-
-        for job_id_str in job_ids {
-            if let Ok(job_id) = job_id_str.parse::<JobId>()
-                && let Some(job) = self.get_job(job_id).await?
-                && job.is_ready()
-            {
-                // Remove from delayed
-                let _: () = conn.zrem(&delayed_key, job_id.to_string()).await?;
-
-                // Add to priority queue
-                let queue_key = self.priority_queue_key(job.priority);
-                let score = -(job.priority as i64);
-                let _: () = conn.zadd(&queue_key, job_id.to_string(), score).await?;
-            }
-        }
+        let script = redis::Script::new(MOVE_DELAYED_SCRIPT);
+        let _: i64 = script
+            .key(&delayed_key)
+            .arg(&self.config.key_prefix)
+            .arg(now)
+            .invoke_async(&mut conn)
+            .await?;
 
         Ok(())
     }
@@ -319,12 +387,32 @@ impl Queue {
     /// Clear all jobs from the queue.
     pub async fn clear(&self) -> QueueResult<()> {
         let mut conn = self.connection.clone();
-
         let pattern = format!("{}:*", self.config.key_prefix);
-        let keys: Vec<String> = conn.keys(&pattern).await?;
 
-        if !keys.is_empty() {
-            let _: () = conn.del(keys).await?;
+        // Cursored SCAN + UNLINK instead of the blocking KEYS + DEL, so a large
+        // queue does not stall the Redis event loop while being cleared.
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await?;
+
+            if !keys.is_empty() {
+                let _: () = redis::cmd("UNLINK")
+                    .arg(&keys)
+                    .query_async(&mut conn)
+                    .await?;
+            }
+
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
         }
 
         Ok(())
@@ -340,6 +428,84 @@ mod tests {
         let config = QueueConfig::new("redis://localhost:6379", "test");
         assert_eq!(config.queue_name, "test");
         assert!(config.key_prefix.contains("test"));
+    }
+
+    /// The `move_delayed_jobs` Lua script hard-codes the priority -> (queue
+    /// name, score) mapping so it can promote without a client round-trip. If
+    /// the Rust `JobPriority` scoring or the `pending:<name>` key layout ever
+    /// changes, this test fails, flagging the now-stale script.
+    #[test]
+    fn test_lua_priority_mapping_matches_rust() {
+        for priority in [
+            JobPriority::Low,
+            JobPriority::Normal,
+            JobPriority::High,
+            JobPriority::Critical,
+        ] {
+            // Rust-side scoring used by enqueue/dequeue.
+            let rust_score = -(priority as i64);
+            // Serde/Debug variant name the job JSON carries (e.g. "Normal").
+            let variant = format!("{priority:?}");
+            // Lowercased suffix used by `priority_queue_key`.
+            let name = variant.to_lowercase();
+
+            let expected = format!("'{variant}' then pname = '{name}'; pscore = {rust_score}");
+            assert!(
+                MOVE_DELAYED_SCRIPT.contains(&expected),
+                "script missing mapping for {priority:?}: expected `{expected}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_priority_queue_key_layout() {
+        // Confirms the key layout the Lua script reconstructs (`prefix:pending:<name>`).
+        let config = QueueConfig::new("redis://localhost:6379", "jobs");
+        for (priority, name) in [
+            (JobPriority::Low, "low"),
+            (JobPriority::Normal, "normal"),
+            (JobPriority::High, "high"),
+            (JobPriority::Critical, "critical"),
+        ] {
+            let key = config.key(&format!("pending:{priority:?}").to_lowercase());
+            assert_eq!(key, format!("{}:pending:{}", config.key_prefix, name));
+        }
+    }
+
+    #[test]
+    fn test_dequeue_script_scans_all_keys() {
+        // The pop script must consider every priority queue passed as KEYS.
+        assert!(DEQUEUE_POP_SCRIPT.contains("for i = 1, #KEYS do"));
+        assert!(DEQUEUE_POP_SCRIPT.contains("ZPOPMIN"));
+    }
+
+    // Backend-dependent: requires a live Redis at redis://localhost:6379.
+    #[tokio::test]
+    #[ignore = "requires a running Redis instance"]
+    async fn test_move_delayed_promotes_due_jobs() {
+        use crate::job::Job;
+
+        let queue = Queue::new("redis://localhost:6379", "test_move_delayed")
+            .await
+            .unwrap();
+        queue.clear().await.unwrap();
+
+        // Enqueue a job scheduled in the past -> lands in the delayed set.
+        let past = Utc::now() - chrono::Duration::seconds(30);
+        let job = Job::new("test_move_delayed", "task", serde_json::json!({}))
+            .with_priority(JobPriority::High)
+            .schedule_at(past);
+        queue.enqueue_job(job).await.unwrap();
+
+        // Delayed jobs are not counted in size() until promoted.
+        assert_eq!(queue.size().await.unwrap(), 0);
+
+        // Dequeue triggers move_delayed_jobs; the due job should come back out.
+        let dequeued = queue.dequeue().await.unwrap();
+        assert!(dequeued.is_some());
+        assert_eq!(dequeued.unwrap().priority, JobPriority::High);
+
+        queue.clear().await.unwrap();
     }
 
     #[test]

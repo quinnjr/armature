@@ -36,6 +36,7 @@
 //! ```
 
 use bytes::{BufMut, Bytes, BytesMut};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::IoSlice;
 
@@ -65,25 +66,32 @@ static HEADER_SEP: &[u8] = b": ";
 /// Line ending
 static CRLF: &[u8] = b"\r\n";
 
-/// Get pre-computed status line for common status codes.
+/// Get the status line for a status code.
+///
+/// Common status codes return a borrowed pre-computed line; other codes
+/// are formatted on the fly via [`format_status_line`].
 #[inline]
-pub fn status_line(status: u16) -> &'static [u8] {
+pub fn status_line(status: u16) -> Cow<'static, [u8]> {
     match status {
-        200 => STATUS_200,
-        201 => STATUS_201,
-        204 => STATUS_204,
-        301 => STATUS_301,
-        302 => STATUS_302,
-        304 => STATUS_304,
-        400 => STATUS_400,
-        401 => STATUS_401,
-        403 => STATUS_403,
-        404 => STATUS_404,
-        405 => STATUS_405,
-        500 => STATUS_500,
-        502 => STATUS_502,
-        503 => STATUS_503,
-        _ => STATUS_200, // Fallback, caller should use format_status_line
+        200 => Cow::Borrowed(STATUS_200),
+        201 => Cow::Borrowed(STATUS_201),
+        204 => Cow::Borrowed(STATUS_204),
+        301 => Cow::Borrowed(STATUS_301),
+        302 => Cow::Borrowed(STATUS_302),
+        304 => Cow::Borrowed(STATUS_304),
+        400 => Cow::Borrowed(STATUS_400),
+        401 => Cow::Borrowed(STATUS_401),
+        403 => Cow::Borrowed(STATUS_403),
+        404 => Cow::Borrowed(STATUS_404),
+        405 => Cow::Borrowed(STATUS_405),
+        500 => Cow::Borrowed(STATUS_500),
+        502 => Cow::Borrowed(STATUS_502),
+        503 => Cow::Borrowed(STATUS_503),
+        _ => {
+            let mut buf = BytesMut::with_capacity(32);
+            format_status_line(status, &mut buf);
+            Cow::Owned(buf.to_vec())
+        }
     }
 }
 
@@ -197,12 +205,9 @@ impl ResponseChunks {
         body: Bytes,
     ) -> Self {
         // Status line
-        let status_line = if has_precomputed_status(status) {
-            StatusLine::Static(status_line(status))
-        } else {
-            let mut buf = BytesMut::with_capacity(32);
-            format_status_line(status, &mut buf);
-            StatusLine::Dynamic(buf)
+        let status_line = match status_line(status) {
+            Cow::Borrowed(s) => StatusLine::Static(s),
+            Cow::Owned(s) => StatusLine::Dynamic(BytesMut::from(&s[..])),
         };
 
         // Headers - estimate size: avg 30 bytes per header
@@ -220,8 +225,20 @@ impl ResponseChunks {
             headers_buf.extend_from_slice(CRLF);
         }
 
-        // Add Content-Length if body is not empty
-        if !body.is_empty() {
+        // Add Content-Length so keep-alive clients know the response framing.
+        // 204, 304, and 1xx responses must not carry a body (RFC 9110), so
+        // they get no Content-Length; every other response gets one even
+        // when the body is empty.
+        //
+        // Only auto-emit when the caller hasn't already set a Content-Length
+        // header (matched case-insensitively): emitting a second one produces
+        // two Content-Length headers, which is a message-framing violation.
+        let caller_set_content_length = headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("content-length"));
+        if caller_set_content_length {
+            // Respect the caller-provided Content-Length verbatim.
+        } else if !body.is_empty() {
             headers_buf.extend_from_slice(b"Content-Length: ");
             // Format number without allocation
             let len = body.len();
@@ -229,6 +246,8 @@ impl ResponseChunks {
             let num_str = format_usize(len, &mut num_buf);
             headers_buf.extend_from_slice(num_str);
             headers_buf.extend_from_slice(CRLF);
+        } else if status != 204 && status != 304 && !(100..200).contains(&status) {
+            headers_buf.extend_from_slice(b"Content-Length: 0\r\n");
         }
 
         Self {
@@ -498,9 +517,22 @@ mod tests {
 
     #[test]
     fn test_status_line_precomputed() {
-        assert_eq!(status_line(200), b"HTTP/1.1 200 OK\r\n");
-        assert_eq!(status_line(404), b"HTTP/1.1 404 Not Found\r\n");
-        assert_eq!(status_line(500), b"HTTP/1.1 500 Internal Server Error\r\n");
+        assert_eq!(status_line(200).as_ref(), b"HTTP/1.1 200 OK\r\n");
+        assert_eq!(status_line(404).as_ref(), b"HTTP/1.1 404 Not Found\r\n");
+        assert_eq!(
+            status_line(500).as_ref(),
+            b"HTTP/1.1 500 Internal Server Error\r\n"
+        );
+    }
+
+    #[test]
+    fn test_status_line_unlisted_is_formatted() {
+        // Unlisted codes must format their own status line, not fall back to 200
+        assert_eq!(
+            status_line(429).as_ref(),
+            b"HTTP/1.1 429 Too Many Requests\r\n"
+        );
+        assert!(status_line(418).starts_with(b"HTTP/1.1 418"));
     }
 
     #[test]
@@ -540,6 +572,33 @@ mod tests {
         assert_eq!(slices.len(), 4);
         assert!(!slices[0].is_empty()); // Status line
         assert!(!slices[1].is_empty()); // Headers
+    }
+
+    #[test]
+    fn test_empty_body_gets_content_length_zero() {
+        // Keep-alive clients need explicit framing even for empty bodies
+        let headers = HashMap::new();
+        let chunks = ResponseChunks::new(200, &headers, Bytes::new());
+        let s = String::from_utf8_lossy(&chunks.to_bytes()).to_string();
+        assert!(s.contains("Content-Length: 0\r\n"), "response was: {s:?}");
+
+        // 204, 304, and 1xx must NOT carry Content-Length
+        for status in [204, 304, 100, 101] {
+            let chunks = ResponseChunks::new(status, &headers, Bytes::new());
+            let s = String::from_utf8_lossy(&chunks.to_bytes()).to_string();
+            assert!(
+                !s.contains("Content-Length"),
+                "status {status} must not have Content-Length: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unlisted_status_response_has_correct_status_line() {
+        let headers = HashMap::new();
+        let chunks = ResponseChunks::new(429, &headers, Bytes::new());
+        let s = String::from_utf8_lossy(&chunks.to_bytes()).to_string();
+        assert!(s.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
     }
 
     #[test]
@@ -606,6 +665,28 @@ mod tests {
     fn test_empty_body() {
         let chunks = ResponseChunks::new(204, &HashMap::new(), Bytes::new());
         assert_eq!(chunks.chunk_count(), 3); // No body chunk
+    }
+
+    #[test]
+    fn test_caller_content_length_not_duplicated() {
+        // When the caller already set a Content-Length header, the auto-emit
+        // logic must not add a second one (a framing violation), regardless of
+        // header-name casing or whether the body is empty or non-empty.
+        for (name, body) in [
+            ("Content-Length", Bytes::from_static(b"12345")),
+            ("content-length", Bytes::from_static(b"12345")),
+            ("Content-Length", Bytes::new()),
+        ] {
+            let mut headers = HashMap::new();
+            headers.insert(name.to_string(), "5".to_string());
+            let chunks = ResponseChunks::new(200, &headers, body);
+            let s = String::from_utf8_lossy(&chunks.to_bytes()).to_lowercase();
+            assert_eq!(
+                s.matches("content-length:").count(),
+                1,
+                "exactly one Content-Length expected, got: {s:?}"
+            );
+        }
     }
 
     #[test]

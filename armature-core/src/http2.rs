@@ -42,6 +42,7 @@ use std::time::Duration;
 
 /// HTTP/2 server configuration
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Http2Config {
     /// Initial connection-level flow control window size (bytes)
     /// Default: 65535 (64KB) - HTTP/2 spec default
@@ -65,8 +66,9 @@ pub struct Http2Config {
     /// Default: 16384 (16KB)
     pub max_header_list_size: u32,
 
-    /// Enable HTTP/2 PING frames for keep-alive
-    /// Default: true
+    /// Enable the HTTP/2 extended CONNECT protocol (RFC 8441)
+    /// Required for WebSockets over HTTP/2
+    /// Default: false
     pub enable_connect_protocol: bool,
 
     /// Keep-alive interval for PING frames
@@ -192,6 +194,12 @@ impl Http2ConfigBuilder {
     /// Set maximum header list size
     pub fn max_header_list_size(mut self, size: u32) -> Self {
         self.config.max_header_list_size = size;
+        self
+    }
+
+    /// Enable or disable the extended CONNECT protocol (RFC 8441)
+    pub fn enable_connect_protocol(mut self, enable: bool) -> Self {
+        self.config.enable_connect_protocol = enable;
         self
     }
 
@@ -400,6 +408,10 @@ impl Http2Builder {
             .max_send_buf_size(self.config.max_send_buffer_size)
             .adaptive_window(self.config.adaptive_window);
 
+        if self.config.enable_connect_protocol {
+            builder.enable_connect_protocol();
+        }
+
         if let Some(interval) = self.config.keep_alive_interval {
             builder.keep_alive_interval(interval);
             builder.keep_alive_timeout(self.config.keep_alive_timeout);
@@ -475,6 +487,16 @@ mod tests {
         let config = Http2Config::high_throughput();
         assert_eq!(config.initial_connection_window_size, 1024 * 1024);
         assert_eq!(config.max_concurrent_streams, 250);
+    }
+
+    #[test]
+    fn test_enable_connect_protocol_builder() {
+        let config = Http2Config::builder().enable_connect_protocol(true).build();
+        assert!(config.enable_connect_protocol);
+
+        // Ensure the hyper builder can be constructed with it enabled
+        let builder = Http2Builder::with_config(config);
+        let _ = builder.configure_hyper_builder();
     }
 
     #[test]

@@ -50,6 +50,13 @@ impl MiddlewareChain {
 
     /// Execute the middleware chain with a handler
     pub async fn apply(&self, req: HttpRequest, handler: HandlerFn) -> Result<HttpResponse, Error> {
+        // Fast path: with no middleware there is no chain to build, so call the
+        // handler directly and skip the per-index recursion and boxing.
+        if self.middlewares.is_empty() {
+            trace!("No middleware registered, calling handler directly");
+            return handler(req).await;
+        }
+
         debug!(
             middleware_count = self.middlewares.len(),
             path = %req.path,
@@ -570,6 +577,23 @@ mod tests {
         let result = chain.apply(req, handler).await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_empty_chain_calls_handler_directly() {
+        // With no middleware registered, apply() must still invoke the handler
+        // and return its response unchanged.
+        let chain = MiddlewareChain::new();
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+
+        let handler = Arc::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok().with_body(b"direct".to_vec())) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+
+        let response = chain.apply(req, handler).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"direct");
     }
 
     #[tokio::test]

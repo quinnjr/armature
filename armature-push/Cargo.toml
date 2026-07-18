@@ -46,7 +46,7 @@ jsonwebtoken = { version = "10.4", optional = true }
 p256 = { version = "0.13", features = ["ecdsa", "pem"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
 
 [features]

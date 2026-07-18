@@ -33,6 +33,12 @@
 use bytes::{Bytes, BytesMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// Maximum number of headers the parser can handle per request.
+///
+/// This is the size of the fixed `httparse` header array; configured
+/// `max_headers` values above this are clamped to it.
+pub const MAX_SUPPORTED_HEADERS: usize = 100;
+
 // ============================================================================
 // Batch Configuration
 // ============================================================================
@@ -56,6 +62,9 @@ pub struct BatchConfig {
     pub max_request_size: usize,
 
     /// Maximum header count per request
+    ///
+    /// The parser uses a fixed array of [`MAX_SUPPORTED_HEADERS`] header
+    /// slots, so values above that are effectively clamped to it.
     pub max_headers: usize,
 
     /// Enable adaptive batch sizing based on load
@@ -160,8 +169,11 @@ impl BatchConfigBuilder {
     }
 
     /// Set maximum headers per request
+    ///
+    /// Values above [`MAX_SUPPORTED_HEADERS`] are clamped to it, since the
+    /// parser uses a fixed-size header array.
     pub fn max_headers(mut self, max: usize) -> Self {
-        self.config.max_headers = max;
+        self.config.max_headers = max.min(MAX_SUPPORTED_HEADERS);
         self
     }
 
@@ -455,7 +467,7 @@ impl BatchParser {
         }
 
         // Use httparse for efficient parsing
-        let mut headers = [httparse::EMPTY_HEADER; 100];
+        let mut headers = [httparse::EMPTY_HEADER; MAX_SUPPORTED_HEADERS];
         let mut req = httparse::Request::new(&mut headers);
 
         match req.parse(buffer) {
@@ -480,6 +492,19 @@ impl BatchParser {
                     .map(|h| (h.name, h.value))
                     .collect();
 
+                // The batch parser only understands Content-Length framing.
+                // Treating a chunked request as body-less would re-parse its
+                // chunk bytes as the next pipelined request (request desync),
+                // so reject Transfer-Encoding explicitly.
+                if parsed_headers
+                    .iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"))
+                {
+                    return Err(BatchParseError::InvalidSyntax(
+                        "Transfer-Encoding is not supported by the batch parser".to_string(),
+                    ));
+                }
+
                 // Determine body length
                 let content_length = parsed_headers
                     .iter()
@@ -491,6 +516,12 @@ impl BatchParser {
                 // Check if we have complete body
                 let total_len = header_len + content_length;
                 if buffer.len() < total_len {
+                    // A request larger than the read buffer can never
+                    // complete: returning Ok(None) would stall the
+                    // connection forever waiting for bytes that cannot fit.
+                    if total_len > self.config.buffer_size {
+                        return Err(BatchParseError::BufferOverflow);
+                    }
                     return Ok(None); // Incomplete body
                 }
 
@@ -929,6 +960,49 @@ mod tests {
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].path, "/test");
         assert_eq!(reader.stats().total_requests(), 1);
+    }
+
+    #[test]
+    fn test_transfer_encoding_rejected() {
+        // Chunked framing is not understood by the batch parser; accepting it
+        // would desync pipelined requests. It must be an explicit error.
+        let parser = BatchParser::new(BatchConfig::default());
+        let request = b"POST /api HTTP/1.1\r\nHost: a.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+
+        let result = parser.parse_batch(request);
+
+        assert_eq!(result.requests.len(), 0);
+        assert!(matches!(
+            result.error,
+            Some(BatchParseError::InvalidSyntax(_))
+        ));
+    }
+
+    #[test]
+    fn test_request_exceeding_buffer_capacity_errors() {
+        // A request whose header + body can never fit in the read buffer must
+        // error out instead of returning "incomplete" forever.
+        let config = BatchConfig::builder().buffer_size(128).build();
+        let parser = BatchParser::new(config);
+        let request =
+            b"POST /api HTTP/1.1\r\nHost: a.com\r\nContent-Length: 100000\r\n\r\npartial body";
+
+        let result = parser.parse_batch(request);
+
+        assert_eq!(result.requests.len(), 0);
+        assert!(matches!(
+            result.error,
+            Some(BatchParseError::BufferOverflow)
+        ));
+    }
+
+    #[test]
+    fn test_max_headers_clamped_to_supported() {
+        let config = BatchConfig::builder().max_headers(500).build();
+        assert_eq!(config.max_headers, MAX_SUPPORTED_HEADERS);
+
+        let config = BatchConfig::builder().max_headers(10).build();
+        assert_eq!(config.max_headers, 10);
     }
 
     #[test]

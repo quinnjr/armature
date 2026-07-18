@@ -33,14 +33,14 @@ opentelemetry-zipkin = { version = "0.32", features = ["reqwest-client"], option
 opentelemetry-appender-tracing = { version = "0.32", optional = true }
 
 # Async runtime
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 
 # HTTP client
-reqwest = { version = "0.13", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 tonic = { version = "0.14", optional = true }
 
 # Utilities

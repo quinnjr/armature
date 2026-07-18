@@ -143,11 +143,80 @@ impl RateLimitCheckResult {
     }
 }
 
+/// How often the background prune task calls [`RateLimitStore::cleanup`].
+///
+/// The in-memory store retains an entry per distinct rate-limit key and only
+/// reclaims idle entries when `cleanup` runs, so this task must run for the
+/// store to stay bounded. Sixty seconds keeps memory pressure low without
+/// meaningful overhead (cleanup is O(keys) over cheap timestamp comparisons).
+const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Owns a background task that periodically calls [`RateLimitStore::cleanup`]
+/// on the limiter's store, evicting idle/expired entries so the store cannot
+/// grow without bound.
+///
+/// The task is tied to the lifetime of this handle: dropping the handle (which
+/// happens when the owning [`RateLimiter`] is dropped) signals the task to stop
+/// and aborts it, so it never outlives the limiter or leaks.
+struct PruneTask {
+    shutdown: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl PruneTask {
+    /// Spawn a prune task that calls `store.cleanup()` every `interval`.
+    ///
+    /// Must be called from within a Tokio runtime (see the guarded call site
+    /// in [`RateLimiter::new`]).
+    fn spawn(store: Arc<dyn RateLimitStore>, interval: Duration) -> Self {
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let task_shutdown = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Don't fire a burst of catch-up ticks if the task is starved.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick completes immediately; consume it so cleanup runs
+            // one full interval after startup rather than right away.
+            ticker.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Err(e) = store.cleanup().await {
+                            warn!(error = %e, "Rate limit store cleanup failed");
+                        }
+                    }
+                    _ = task_shutdown.notified() => {
+                        debug!("Rate limit prune task shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { shutdown, handle }
+    }
+}
+
+impl Drop for PruneTask {
+    fn drop(&mut self) {
+        // Ask the task to stop gracefully, then abort in case it is currently
+        // parked in `store.cleanup()` and can't observe the notification.
+        self.shutdown.notify_waiters();
+        self.handle.abort();
+    }
+}
+
 /// The main rate limiter
 pub struct RateLimiter {
     store: Arc<dyn RateLimitStore>,
     algorithm: Algorithm,
     config: RateLimitConfig,
+    /// Background task that periodically prunes idle store entries. Kept alive
+    /// for as long as the limiter lives; dropped (and stopped) with it. `None`
+    /// only when the limiter is constructed outside a Tokio runtime.
+    _prune_task: Option<PruneTask>,
 }
 
 impl RateLimiter {
@@ -166,10 +235,27 @@ impl RateLimiter {
             algorithm = ?algorithm,
             "Creating new rate limiter"
         );
+
+        // Schedule periodic pruning of the store so idle per-key entries are
+        // reclaimed and the store cannot grow without bound. Spawning requires
+        // a Tokio runtime; `new` is normally reached via the async `build`, but
+        // guard against direct calls made outside a runtime so we never panic.
+        let prune_task = match tokio::runtime::Handle::try_current() {
+            Ok(_) => Some(PruneTask::spawn(store.clone(), DEFAULT_PRUNE_INTERVAL)),
+            Err(_) => {
+                debug!(
+                    "No Tokio runtime available; rate limit store prune task not \
+                     scheduled (call RateLimiter within a runtime to enable it)"
+                );
+                None
+            }
+        };
+
         Self {
             store,
             algorithm,
             config,
+            _prune_task: prune_task,
         }
     }
 
@@ -345,6 +431,45 @@ impl std::fmt::Debug for RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_limiter_schedules_prune_task() {
+        // Built inside a Tokio runtime, so the background prune task must be
+        // wired up and owned by the limiter.
+        let limiter = RateLimiter::builder()
+            .token_bucket(5, 1.0)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            limiter._prune_task.is_some(),
+            "prune task should be scheduled when constructed within a runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_task_runs_cleanup() {
+        use crate::stores::{MemoryStore, RateLimitStore};
+
+        // Idle TTL of ~1ms means the entry is immediately eligible for eviction.
+        let store = Arc::new(MemoryStore::new().with_idle_ttl(Duration::from_millis(1)));
+        store.token_bucket_check("k", 5, 1.0).await.unwrap();
+        assert!(store.key_count() > 0);
+
+        let dyn_store: Arc<dyn RateLimitStore> = store.clone();
+        let task = PruneTask::spawn(dyn_store, Duration::from_millis(20));
+
+        // Wait for at least one prune tick to fire and reclaim the idle entry.
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert_eq!(
+            store.key_count(),
+            0,
+            "scheduled prune task should have evicted the idle entry"
+        );
+
+        // Dropping the handle must stop the background task.
+        drop(task);
+    }
 
     #[tokio::test]
     async fn test_token_bucket_basic() {

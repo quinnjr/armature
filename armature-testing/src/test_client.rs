@@ -40,6 +40,12 @@ impl TestClient {
         self.request(HttpMethod::PATCH, path, Some(body)).await
     }
 
+    /// Make a QUERY request (safe query with a request body,
+    /// draft-ietf-httpbis-safe-method-w-body)
+    pub async fn query(&self, path: &str, body: Vec<u8>) -> TestResponse {
+        self.request(HttpMethod::QUERY, path, Some(body)).await
+    }
+
     /// Make a request with custom method
     pub async fn request(
         &self,

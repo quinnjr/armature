@@ -12,11 +12,11 @@ keywords = ["discovery", "microservices", "consul", "etcd"]
 categories = ["web-programming", "network-programming"]
 
 [dependencies]
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 thiserror = "2.0"
 tracing = "0.1"
 url = "2.5"

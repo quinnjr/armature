@@ -139,6 +139,18 @@ pub struct GenericOAuth2Provider {
     name: String,
     client: ConfiguredClient,
     config: OAuth2Config,
+    /// HTTP client used for token endpoint requests (oauth2's reqwest, v0.12).
+    ///
+    /// Built once at construction and reused for every call. Constructing a
+    /// `reqwest::Client` allocates a connection pool and loads the TLS root
+    /// store, so it must not be rebuilt per request.
+    oauth_http_client: oauth2::reqwest::Client,
+    /// HTTP client used for the userinfo endpoint (crate reqwest, v0.13).
+    ///
+    /// Kept separate from `oauth_http_client` because the `oauth2` crate depends
+    /// on a different major version of `reqwest` than this crate does, making the
+    /// two `Client` types distinct. Also built once and reused.
+    user_info_client: reqwest::Client,
 }
 
 impl GenericOAuth2Provider {
@@ -162,6 +174,8 @@ impl GenericOAuth2Provider {
             name,
             client,
             config,
+            oauth_http_client: oauth2::reqwest::Client::new(),
+            user_info_client: reqwest::Client::new(),
         })
     }
 }
@@ -184,11 +198,10 @@ impl OAuth2Provider for GenericOAuth2Provider {
     }
 
     async fn exchange_code(&self, code: String) -> Result<OAuth2Token> {
-        let http_client = oauth2::reqwest::Client::new();
         let token = self
             .client
             .exchange_code(AuthorizationCode::new(code))
-            .request_async(&http_client)
+            .request_async(&self.oauth_http_client)
             .await
             .map_err(|e| {
                 AuthError::AuthenticationFailed(format!("Token exchange failed: {}", e))
@@ -203,8 +216,8 @@ impl OAuth2Provider for GenericOAuth2Provider {
                 AuthError::AuthenticationFailed("No user info URL configured".into())
             })?;
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .user_info_client
             .get(user_info_url)
             .bearer_auth(&token.access_token)
             .send()
@@ -228,11 +241,10 @@ impl OAuth2Provider for GenericOAuth2Provider {
     }
 
     async fn refresh_token(&self, refresh_token: String) -> Result<OAuth2Token> {
-        let http_client = oauth2::reqwest::Client::new();
         let token = self
             .client
             .exchange_refresh_token(&oauth2::RefreshToken::new(refresh_token))
-            .request_async(&http_client)
+            .request_async(&self.oauth_http_client)
             .await
             .map_err(|e| AuthError::AuthenticationFailed(format!("Token refresh failed: {}", e)))?;
 

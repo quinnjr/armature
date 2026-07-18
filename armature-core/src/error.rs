@@ -1,6 +1,6 @@
 // Error types for the Armature framework
 
-use crate::HttpStatus;
+use crate::{HttpResponse, HttpStatus};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -242,6 +242,35 @@ impl Error {
     /// Check if this is a server error (5xx)
     pub fn is_server_error(&self) -> bool {
         self.http_status().is_server_error()
+    }
+
+    /// Build a client-safe HTTP response for this error.
+    ///
+    /// The status code comes from [`Error::status_code`]. 4xx client errors
+    /// keep their descriptive message so callers can correct their request;
+    /// 5xx server errors are redacted to a generic `"Internal Server Error"`
+    /// message so internal detail (connection strings, upstream errors, stack
+    /// context) never leaks to the client. The full error should be logged
+    /// separately at the call site.
+    ///
+    /// The JSON body is always `{"error": <message>, "status": <code>}`. This
+    /// is the single canonical error-to-response mapping shared by every server
+    /// transport (HTTP/1, HTTP/2, HTTP/3, and the micro server) so their error
+    /// responses never drift apart.
+    pub fn to_client_response(&self) -> HttpResponse {
+        let status = self.status_code();
+        let message = if status >= 500 {
+            "Internal Server Error".to_string()
+        } else {
+            self.to_string()
+        };
+        let body = serde_json::json!({
+            "error": message,
+            "status": status,
+        });
+        HttpResponse::new(status)
+            .with_json(&body)
+            .unwrap_or_else(|_| HttpResponse::internal_server_error())
     }
 
     // ============================================================================
@@ -632,6 +661,50 @@ mod tests {
     fn test_proxy_authentication_required() {
         let err = Error::ProxyAuthenticationRequired("proxy auth needed".to_string());
         assert_eq!(err.status_code(), 407);
+    }
+
+    #[test]
+    fn test_to_client_response_redacts_5xx() {
+        let err = Error::Internal("db password auth failed for user 'app'".to_string());
+        let response = err.to_client_response();
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        assert!(!body.contains("db password"));
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"], "Internal Server Error");
+        assert_eq!(parsed["status"], 500);
+    }
+
+    #[test]
+    fn test_to_client_response_keeps_4xx_message_and_status_field() {
+        let err = Error::NotFound("User 42 not found".to_string());
+        let response = err.to_client_response();
+        assert_eq!(response.status, 404);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("User 42 not found")
+        );
+        assert_eq!(parsed["status"], 404);
+    }
+
+    #[test]
+    fn test_to_client_response_escapes_json() {
+        let err = Error::Validation(r#"bad "quoted" input"#.to_string());
+        let response = err.to_client_response();
+        assert_eq!(response.status, 400);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        // Body must be valid JSON despite quotes in the message.
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains(r#"bad "quoted" input"#)
+        );
     }
 
     #[test]

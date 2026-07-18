@@ -147,6 +147,14 @@ impl HeaderMap {
         self.inner.iter().any(|h| h.name_eq(name))
     }
 
+    /// Check if header exists (case-insensitive).
+    ///
+    /// HashMap-compatible alias for [`contains`](Self::contains).
+    #[inline]
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.contains(name)
+    }
+
     /// Insert a header, replacing any existing header with same name.
     ///
     /// Returns the old value if replaced.
@@ -212,6 +220,14 @@ impl HeaderMap {
     #[inline]
     pub fn names(&self) -> impl Iterator<Item = &String> {
         self.inner.iter().map(|h| &h.name)
+    }
+
+    /// Iterate over header names.
+    ///
+    /// HashMap-compatible alias for [`names`](Self::names).
+    #[inline]
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.names()
     }
 
     /// Iterate over header values.
@@ -364,6 +380,14 @@ where
             map.insert(k, v);
         }
         map
+    }
+}
+
+impl Extend<(String, String)> for HeaderMap {
+    fn extend<I: IntoIterator<Item = (String, String)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
     }
 }
 
@@ -569,5 +593,105 @@ mod tests {
         headers.insert("Content-Type", "application/json");
 
         assert_eq!(&headers["Content-Type"], "application/json");
+    }
+
+    #[test]
+    fn test_contains_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", "application/json");
+
+        // Case-insensitive, HashMap-compatible alias for `contains`.
+        assert!(headers.contains_key("Content-Type"));
+        assert!(headers.contains_key("content-type"));
+        assert!(!headers.contains_key("Accept"));
+    }
+
+    #[test]
+    fn test_keys() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", "application/json");
+        headers.insert("Accept", "text/html");
+
+        let keys: Vec<_> = headers.keys().cloned().collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"Content-Type".to_string()));
+        assert!(keys.contains(&"Accept".to_string()));
+    }
+
+    #[test]
+    fn test_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", "application/json");
+        headers.insert("Accept", "text/html");
+
+        let values: Vec<_> = headers.values().cloned().collect();
+        assert_eq!(values.len(), 2);
+        assert!(values.contains(&"application/json".to_string()));
+        assert!(values.contains(&"text/html".to_string()));
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let mut headers = HeaderMap::new();
+        assert!(headers.is_empty());
+        headers.insert("Content-Type", "application/json");
+        assert!(!headers.is_empty());
+    }
+
+    #[test]
+    fn test_default() {
+        let headers = HeaderMap::default();
+        assert!(headers.is_empty());
+        assert!(headers.is_inline());
+    }
+
+    #[test]
+    fn test_extend_trait() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Existing", "1");
+
+        // Exercise the `Extend<(String, String)>` trait impl explicitly.
+        let extra: Vec<(String, String)> = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Accept".to_string(), "text/html".to_string()),
+        ];
+        Extend::extend(&mut headers, extra);
+
+        assert_eq!(headers.len(), 3);
+        assert_eq!(
+            headers.get("Content-Type"),
+            Some(&"application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn test_into_iterator_owned() {
+        let mut headers = HeaderMap::new();
+        headers.insert("A", "1");
+        headers.insert("B", "2");
+
+        let collected: Vec<(String, String)> = headers.into_iter().collect();
+        assert_eq!(collected.len(), 2);
+    }
+
+    #[test]
+    fn test_into_iterator_ref() {
+        let mut headers = HeaderMap::new();
+        headers.insert("A", "1");
+
+        let collected: Vec<(&String, &String)> = (&headers).into_iter().collect();
+        assert_eq!(collected.len(), 1);
+    }
+
+    #[test]
+    fn test_hashmap_roundtrip() {
+        let mut map = HashMap::new();
+        map.insert("Content-Type".to_string(), "application/json".to_string());
+
+        // HashMap -> HeaderMap -> HashMap round-trips via `From`.
+        let headers: HeaderMap = map.clone().into();
+        assert!(headers.contains_key("content-type")); // case-insensitive
+        let back: HashMap<String, String> = headers.into();
+        assert_eq!(back.get("Content-Type"), map.get("Content-Type"));
     }
 }

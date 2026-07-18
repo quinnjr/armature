@@ -45,15 +45,37 @@ impl Guard for AuthenticationGuard {
     }
 }
 
-/// Role-based guard
+/// Roles attached to a request by an authentication layer.
+///
+/// An upstream authentication middleware (e.g. a JWT validator) is expected
+/// to insert this into [`HttpRequest::extensions`] after verifying the
+/// caller's identity. [`RolesGuard`] reads it to authorize the request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RequestRoles(pub Vec<String>);
+
+impl RequestRoles {
+    pub fn new(roles: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self(roles.into_iter().map(Into::into).collect())
+    }
+
+    pub fn contains(&self, role: &str) -> bool {
+        self.0.iter().any(|r| r == role)
+    }
+}
+
+/// Role-based guard.
+///
+/// Requires a `Bearer` authorization header and a [`RequestRoles`] extension
+/// containing at least one of the required roles. Fails closed: requests
+/// without verified roles are rejected.
 pub struct RolesGuard {
-    _required_roles: Vec<String>,
+    required_roles: Vec<String>,
 }
 
 impl RolesGuard {
     pub fn new(roles: Vec<String>) -> Self {
         Self {
-            _required_roles: roles,
+            required_roles: roles,
         }
     }
 }
@@ -70,13 +92,25 @@ impl Guard for RolesGuard {
             return Err(Error::Forbidden("Invalid authorization header".to_string()));
         }
 
-        // In production, decode JWT and check roles
-        // For now, just check if token exists
-        // let token = &auth_header[7..];
-        // let claims = decode_jwt(token)?;
-        // let has_role = self.required_roles.iter().any(|role| claims.roles.contains(role));
+        if self.required_roles.is_empty() {
+            return Ok(true);
+        }
 
-        Ok(true) // Placeholder
+        // Roles must have been attached by an authentication layer that
+        // verified the token (e.g. armature-auth / armature-jwt).
+        let roles = context
+            .request
+            .extensions
+            .get::<RequestRoles>()
+            .ok_or_else(|| {
+                Error::Forbidden("No verified roles associated with this request".to_string())
+            })?;
+
+        if self.required_roles.iter().any(|role| roles.contains(role)) {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden("Insufficient role".to_string()))
+        }
     }
 }
 
@@ -217,16 +251,59 @@ mod tests {
         assert!(guard.can_activate(&context).await.is_err());
     }
 
+    fn bearer_request() -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer token123".to_string());
+        HttpRequest::from_parts(
+            "GET".to_string(),
+            "/admin".to_string(),
+            headers,
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
     #[tokio::test]
-    async fn test_roles_guard_with_role() {
+    async fn test_roles_guard_without_verified_roles_is_rejected() {
         let guard = RolesGuard::new(vec!["admin".to_string()]);
 
-        let request = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        // Authenticated (bearer token present) but no RequestRoles extension:
+        // must fail closed.
+        let context = GuardContext::new(bearer_request());
+        assert!(guard.can_activate(&context).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_roles_guard_with_matching_role() {
+        let guard = RolesGuard::new(vec!["admin".to_string()]);
+
+        let mut request = bearer_request();
+        request
+            .extensions
+            .insert(RequestRoles::new(["user", "admin"]));
         let context = GuardContext::new(request);
 
-        // Will fail without actual role implementation, but tests structure
-        let result = guard.can_activate(&context).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(matches!(guard.can_activate(&context).await, Ok(true)));
+    }
+
+    #[tokio::test]
+    async fn test_roles_guard_with_insufficient_role() {
+        let guard = RolesGuard::new(vec!["admin".to_string()]);
+
+        let mut request = bearer_request();
+        request.extensions.insert(RequestRoles::new(["user"]));
+        let context = GuardContext::new(request);
+
+        assert!(guard.can_activate(&context).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_roles_guard_no_required_roles_allows_authenticated() {
+        let guard = RolesGuard::new(vec![]);
+
+        let context = GuardContext::new(bearer_request());
+        assert!(matches!(guard.can_activate(&context).await, Ok(true)));
     }
 
     #[test]

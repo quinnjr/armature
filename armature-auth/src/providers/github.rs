@@ -49,7 +49,7 @@ impl GitHubProvider {
 
     /// Fetch user info from GitHub
     pub async fn get_user_info(access_token: &str) -> Result<GitHubUser, AuthError> {
-        let client = reqwest::Client::new();
+        let client = crate::providers::shared_http_client();
 
         // Get user profile
         let mut user: GitHubUser = client

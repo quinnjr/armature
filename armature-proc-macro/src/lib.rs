@@ -119,6 +119,28 @@ pub fn head(attr: TokenStream, item: TokenStream) -> TokenStream {
     routes::route_impl(attr, item, "HEAD")
 }
 
+/// HTTP QUERY route decorator
+///
+/// QUERY is a safe, idempotent method that carries the query in the request
+/// body (draft-ietf-httpbis-safe-method-w-body). Use it for queries too large
+/// or structured for a URL query string.
+///
+/// ```ignore
+/// #[routes]
+/// impl SearchController {
+///     #[query("/search")]
+///     async fn search(req: HttpRequest) -> Result<HttpResponse, Error> {
+///         let filters: SearchFilters = req.json()?;
+///         // Execute the query described by the request body
+///         Ok(HttpResponse::json(&run_search(filters))?)
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
+    routes::route_impl(attr, item, "QUERY")
+}
+
 /// Routes impl block decorator
 ///
 /// This macro should be applied to the impl block of a controller to register

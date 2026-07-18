@@ -139,7 +139,7 @@ impl Middleware for TelemetryMiddleware {
 }
 
 /// Helper to extract trace context from HTTP headers
-struct HeaderExtractor<'a>(&'a std::collections::HashMap<String, String>);
+struct HeaderExtractor<'a>(&'a armature_core::headers::HeaderMap);
 
 impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
     fn get(&self, key: &str) -> Option<&str> {
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_header_extractor() {
-        let mut headers = std::collections::HashMap::new();
+        let mut headers = armature_core::headers::HeaderMap::new();
         headers.insert("traceparent".to_string(), "00-123-456-01".to_string());
 
         let extractor = HeaderExtractor(&headers);
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_header_extractor_multiple_keys() {
-        let mut headers = std::collections::HashMap::new();
+        let mut headers = armature_core::headers::HeaderMap::new();
         headers.insert("key1".to_string(), "value1".to_string());
         headers.insert("key2".to_string(), "value2".to_string());
 

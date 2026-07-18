@@ -27,10 +27,12 @@
 //! ```
 
 use crate::handler::BoxedHandler;
+use crate::route_constraint::RouteConstraints;
+use crate::routing::Router;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -57,18 +59,21 @@ impl RouteKey {
     }
 
     /// Create from request.
+    ///
+    /// Returns `None` if the request method is not a known HTTP method, so
+    /// unknown methods are never silently treated as GET.
     #[inline]
-    pub fn from_request(req: &HttpRequest) -> Self {
+    pub fn from_request(req: &HttpRequest) -> Option<Self> {
         let path = req
             .path
             .split_once('?')
             .map(|(p, _)| p)
             .unwrap_or(&req.path);
 
-        Self {
-            method: HttpMethod::from_str(&req.method).unwrap_or(HttpMethod::GET),
+        Some(Self {
+            method: HttpMethod::from_str(&req.method)?,
             path: path.to_string(),
-        }
+        })
     }
 }
 
@@ -98,6 +103,11 @@ pub struct CachedRoute {
     pub param_indices: Vec<(String, usize)>,
     /// Is this a static route (no params)?
     pub is_static: bool,
+    /// Segment index of a catch-all parameter, if any.
+    ///
+    /// The catch-all parameter captures all remaining segments joined with
+    /// `/`, mirroring `CompiledRoute::extract_params`.
+    pub catch_all_index: Option<usize>,
 }
 
 impl CachedRoute {
@@ -107,6 +117,7 @@ impl CachedRoute {
             route_index,
             param_indices: Vec::new(),
             is_static: true,
+            catch_all_index: None,
         }
     }
 
@@ -116,6 +127,19 @@ impl CachedRoute {
             route_index,
             param_indices,
             is_static: false,
+            catch_all_index: None,
+        }
+    }
+
+    /// Create a cached entry from a compiled route pattern.
+    pub fn from_compiled(route_index: usize, compiled: &CompiledRoute) -> Self {
+        Self {
+            route_index,
+            param_indices: compiled.param_indices.clone(),
+            is_static: compiled.is_static,
+            catch_all_index: compiled
+                .has_catch_all
+                .then(|| compiled.segments.len().saturating_sub(1)),
         }
     }
 
@@ -130,7 +154,12 @@ impl CachedRoute {
         let mut params = HashMap::with_capacity(self.param_indices.len());
 
         for (name, idx) in &self.param_indices {
-            if let Some(value) = segments.get(*idx) {
+            if self.catch_all_index == Some(*idx) {
+                // Catch-all: join all remaining segments
+                if let Some(rest) = segments.get(*idx..) {
+                    params.insert(name.clone(), rest.join("/"));
+                }
+            } else if let Some(value) = segments.get(*idx) {
                 params.insert(name.clone(), (*value).to_string());
             }
         }
@@ -171,9 +200,12 @@ impl RouteCache {
     }
 
     /// Get a cached route.
+    ///
+    /// Uses a shared read lock so concurrent lookups (the hot path) never
+    /// serialize against each other.
     #[inline]
     pub fn get(&self, key: &RouteKey) -> Option<CachedRoute> {
-        let cache = self.cache.read().ok()?;
+        let cache = self.cache.read();
         let result = cache.get(key).cloned();
 
         if result.is_some() {
@@ -187,26 +219,27 @@ impl RouteCache {
 
     /// Insert a route into the cache.
     pub fn insert(&self, key: RouteKey, route: CachedRoute) {
-        if let Ok(mut cache) = self.cache.write() {
-            // Simple eviction: if full, clear half
-            if cache.len() >= self.max_size {
-                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
-                let to_remove: Vec<_> = cache.keys().take(self.max_size / 2).cloned().collect();
-                for k in to_remove {
-                    cache.remove(&k);
-                }
-            }
+        let mut cache = self.cache.write();
 
-            cache.insert(key, route);
-            self.stats.insertions.fetch_add(1, Ordering::Relaxed);
+        // Incremental eviction: when full, evict a single existing entry to
+        // make room for the newcomer. This is O(1) amortized under the write
+        // lock instead of cloning half the keys and clearing them (O(n)),
+        // which previously blocked every reader for the duration.
+        if cache.len() >= self.max_size
+            && !cache.contains_key(&key)
+            && let Some(evict_key) = cache.keys().next().cloned()
+        {
+            cache.remove(&evict_key);
+            self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
+
+        cache.insert(key, route);
+        self.stats.insertions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clear the cache.
     pub fn clear(&self) {
-        if let Ok(mut cache) = self.cache.write() {
-            cache.clear();
-        }
+        self.cache.write().clear();
     }
 
     /// Get cache statistics.
@@ -216,7 +249,7 @@ impl RouteCache {
 
     /// Get current cache size.
     pub fn len(&self) -> usize {
-        self.cache.read().map(|c| c.len()).unwrap_or(0)
+        self.cache.read().len()
     }
 
     /// Check if cache is empty.
@@ -443,6 +476,13 @@ pub struct OptimizedRoute {
     pub compiled: CompiledRoute,
     /// Handler
     pub handler: BoxedHandler,
+    /// Optional route constraints for parameter validation.
+    ///
+    /// Carried alongside the compiled pattern so the optimized dispatch can
+    /// validate a matched route's parameters exactly as the linear
+    /// [`Router`](crate::routing::Router) does, returning the same
+    /// `Error::BadRequest` on failure.
+    pub constraints: Option<RouteConstraints>,
 }
 
 /// Optimized router with caching and static fast path.
@@ -498,7 +538,57 @@ impl OptimizedRouter {
             method,
             compiled,
             handler,
+            constraints: None,
         });
+    }
+
+    /// Build an `OptimizedRouter` from a fully-populated linear [`Router`].
+    ///
+    /// Every [`Route`](crate::routing::Route) — method, path, handler, and
+    /// optional constraints — is ingested into the optimized structures so the
+    /// serve path can dispatch in O(1) for the common case while preserving the
+    /// linear router's exact semantics:
+    ///
+    /// * Routes keep their registration order in `routes`, and the pattern-match
+    ///   fallback returns the **first** matching route in that order, matching
+    ///   [`Router::route`](crate::routing::Router::route).
+    /// * A static route is only added to the O(1) static fast path if no
+    ///   **earlier** route (of the same method) also matches that concrete path.
+    ///   This preserves first-registered-wins precedence: an earlier `:param` or
+    ///   `*catch_all` route that would shadow a later static path is still
+    ///   selected by the fallback scan, never bypassed by the HashMap. Duplicate
+    ///   static registrations are likewise resolved to the first one.
+    /// * Constraints travel with each route and are validated after the match.
+    pub fn from_router(router: &Router) -> Self {
+        let mut opt = Self::new();
+
+        for route in &router.routes {
+            let compiled = CompiledRoute::compile(&route.path);
+            let route_index = opt.routes.len();
+
+            // Only take the O(1) static fast path when no earlier route shadows
+            // this concrete path. `matches` handles static, `:param`, and
+            // `*catch_all` earlier routes, so precedence is identical to the
+            // linear first-match scan.
+            if compiled.is_static {
+                let shadowed_by_earlier = opt.routes.iter().any(|earlier| {
+                    earlier.method == route.method && earlier.compiled.matches(&route.path)
+                });
+                if !shadowed_by_earlier {
+                    opt.static_routes
+                        .add(route.method.clone(), &route.path, route_index);
+                }
+            }
+
+            opt.routes.push(OptimizedRoute {
+                method: route.method.clone(),
+                compiled,
+                handler: route.handler.clone(),
+                constraints: route.constraints.clone(),
+            });
+        }
+
+        opt
     }
 
     /// Route a request with optimized matching.
@@ -513,46 +603,60 @@ impl OptimizedRouter {
             .unwrap_or((&request.path, None));
 
         if let Some(query) = query_string {
-            request.query_params = crate::simd_parser::parse_query_string_fast(query);
+            request.query_params = crate::simd_parser::parse_query_string_decoded(query);
         }
 
-        let key = RouteKey::new(
-            HttpMethod::from_str(&request.method).unwrap_or(HttpMethod::GET),
-            path,
-        );
+        // Unknown HTTP methods must not fall back to GET handlers.
+        let Some(method) = HttpMethod::from_str(&request.method) else {
+            return Err(Error::RouteNotFound(format!("{} {}", request.method, path)));
+        };
 
-        // 1. Try static route fast path (O(1))
+        let key = RouteKey::new(method.clone(), path);
+
+        // 1. Try static route fast path (O(1)). Static routes carry no path
+        //    params; any constraints validate against the empty map (matching
+        //    the linear router, which only checks params that are present).
         if let Some(route_index) = self.static_routes.get(&key) {
             self.stats.static_hits.fetch_add(1, Ordering::Relaxed);
-            return self.routes[route_index].handler.call(request).await;
+            let route = &self.routes[route_index];
+            if let Some(constraints) = &route.constraints {
+                constraints.validate(&request.path_params)?;
+            }
+            return route.handler.call(request).await;
         }
 
-        // 2. Try cache (O(1))
+        // 2. Try cache (O(1)).
         if let Some(cached) = self.cache.get(&key) {
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-            request.path_params = cached.extract_params(path);
-            return self.routes[cached.route_index].handler.call(request).await;
+            let route = &self.routes[cached.route_index];
+            let params = cached.extract_params(path);
+            if let Some(constraints) = &route.constraints {
+                constraints.validate(&params)?;
+            }
+            request.path_params = params;
+            return route.handler.call(request).await;
         }
 
-        // 3. Fall back to pattern matching
+        // 3. Fall back to pattern matching. Returns the first matching route in
+        //    registration order, mirroring the linear `Router::route`.
         self.stats.pattern_matches.fetch_add(1, Ordering::Relaxed);
 
         for (route_index, route) in self.routes.iter().enumerate() {
-            if Some(route.method.clone()) != HttpMethod::from_str(&request.method) {
+            if route.method != method {
                 continue;
             }
 
             if route.compiled.matches(path) {
                 // Cache the match for future requests
-                let cached = if route.compiled.is_static {
-                    CachedRoute::static_route(route_index)
-                } else {
-                    CachedRoute::with_params(route_index, route.compiled.param_indices.clone())
-                };
+                let cached = CachedRoute::from_compiled(route_index, &route.compiled);
                 self.cache.insert(key, cached);
 
-                // Extract params and call handler
-                request.path_params = route.compiled.extract_params(path);
+                // Extract params, validate constraints, then call handler.
+                let params = route.compiled.extract_params(path);
+                if let Some(constraints) = &route.constraints {
+                    constraints.validate(&params)?;
+                }
+                request.path_params = params;
                 return route.handler.call(request).await;
             }
         }
@@ -744,6 +848,116 @@ mod tests {
     }
 
     #[test]
+    fn test_route_key_from_request_unknown_method() {
+        let req = HttpRequest::new("PROPFIND".to_string(), "/health".to_string());
+        assert!(RouteKey::from_request(&req).is_none());
+
+        let req = HttpRequest::new("GET".to_string(), "/health?x=1".to_string());
+        let key = RouteKey::from_request(&req).unwrap();
+        assert_eq!(key, RouteKey::new(HttpMethod::GET, "/health"));
+    }
+
+    #[test]
+    fn test_cached_route_catch_all_extracts_remaining_segments() {
+        let compiled = CompiledRoute::compile("/files/*path");
+        let cached = CachedRoute::from_compiled(0, &compiled);
+        assert_eq!(cached.catch_all_index, Some(1));
+
+        let params = cached.extract_params("/files/docs/readme.md");
+        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+
+        let params = cached.extract_params("/files/docs");
+        assert_eq!(params.get("path"), Some(&"docs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_router_unknown_method_not_routed_to_get() {
+        let mut router = OptimizedRouter::new();
+        router.add_route(
+            HttpMethod::GET,
+            "/health",
+            crate::handler::handler(|_req: HttpRequest| async {
+                Ok::<_, Error>(HttpResponse::ok())
+            }),
+        );
+
+        // Known method hits the static fast path.
+        let ok = router
+            .route(HttpRequest::new("GET".to_string(), "/health".to_string()))
+            .await;
+        assert!(ok.is_ok());
+
+        // Unknown method must not fall back to the GET handler.
+        let err = router
+            .route(HttpRequest::new(
+                "PROPFIND".to_string(),
+                "/health".to_string(),
+            ))
+            .await;
+        assert!(matches!(err, Err(Error::RouteNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_router_cached_catch_all_params() {
+        let mut router = OptimizedRouter::new();
+        router.add_route(
+            HttpMethod::GET,
+            "/files/*path",
+            crate::handler::handler(|req: HttpRequest| async move {
+                let path = req.path_params.get("path").cloned().unwrap_or_default();
+                let mut response = HttpResponse::ok();
+                response.body = path.into_bytes();
+                Ok::<_, Error>(response)
+            }),
+        );
+
+        // First request: pattern match populates the cache.
+        let first = router
+            .route(HttpRequest::new(
+                "GET".to_string(),
+                "/files/docs/readme.md".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.body, b"docs/readme.md");
+
+        // Second request: served from the cache, must yield the same params.
+        let second = router
+            .route(HttpRequest::new(
+                "GET".to_string(),
+                "/files/docs/readme.md".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.body, b"docs/readme.md");
+        assert!(router.stats().cache_hits() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_router_decodes_query_params() {
+        let mut router = OptimizedRouter::new();
+        router.add_route(
+            HttpMethod::GET,
+            "/search",
+            crate::handler::handler(|req: HttpRequest| async move {
+                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                let mut response = HttpResponse::ok();
+                response.body = q.into_bytes();
+                Ok::<_, Error>(response)
+            }),
+        );
+
+        let response = router
+            .route(HttpRequest::new(
+                "GET".to_string(),
+                "/search?q=hello%20world".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"hello world");
+    }
+
+    #[test]
     fn test_route_cache() {
         let cache = RouteCache::new();
 
@@ -851,6 +1065,248 @@ mod tests {
         assert_eq!(stats.cache_hits(), 30);
         assert_eq!(stats.pattern_matches(), 20);
         assert!((stats.optimization_ratio() - 0.8).abs() < 0.001);
+    }
+
+    // ------------------------------------------------------------------
+    // `from_router`: the compiled serve-path router must dispatch with the
+    // exact semantics of the linear `Router::route`.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_from_router_dispatches_static_and_param() {
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/health",
+            |_req: HttpRequest| async { Ok::<_, Error>(HttpResponse::ok()) },
+        ));
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/users/:id",
+            |req: HttpRequest| async move {
+                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                let mut r = HttpResponse::ok();
+                r.body = id.into_bytes();
+                Ok::<_, Error>(r)
+            },
+        ));
+
+        let opt = OptimizedRouter::from_router(&router);
+
+        // Static route → O(1) static fast path.
+        let resp = opt
+            .route(HttpRequest::new("GET".into(), "/health".into()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(opt.stats().static_hits() >= 1);
+
+        // Param route → pattern match, params extracted onto the request.
+        let resp = opt
+            .route(HttpRequest::new("GET".into(), "/users/42".into()))
+            .await
+            .unwrap();
+        assert_eq!(resp.body, b"42");
+    }
+
+    #[tokio::test]
+    async fn test_from_router_catch_all() {
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/files/*path",
+            |req: HttpRequest| async move {
+                let p = req.path_params.get("path").cloned().unwrap_or_default();
+                let mut r = HttpResponse::ok();
+                r.body = p.into_bytes();
+                Ok::<_, Error>(r)
+            },
+        ));
+
+        let opt = OptimizedRouter::from_router(&router);
+
+        // Catch-all returns the full joined remainder, not a single segment.
+        let resp = opt
+            .route(HttpRequest::new(
+                "GET".into(),
+                "/files/docs/readme.md".into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.body, b"docs/readme.md");
+    }
+
+    #[tokio::test]
+    async fn test_from_router_validates_constraints() {
+        let constraints =
+            RouteConstraints::new().add("id", Box::new(crate::route_constraint::UIntConstraint));
+        let mut router = crate::routing::Router::new();
+        router.add_route(
+            crate::routing::Route::new(HttpMethod::GET, "/users/:id", |_req: HttpRequest| async {
+                Ok::<_, Error>(HttpResponse::ok())
+            })
+            .with_constraints(constraints),
+        );
+
+        let opt = OptimizedRouter::from_router(&router);
+
+        // Valid param passes.
+        let ok = opt
+            .route(HttpRequest::new("GET".into(), "/users/123".into()))
+            .await;
+        assert!(ok.is_ok());
+
+        // Invalid param → same BadRequest as the linear router.
+        let err = opt
+            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
+            .await;
+        assert!(matches!(err, Err(Error::BadRequest(_))));
+
+        // Cached path must re-validate constraints identically.
+        let err_again = opt
+            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
+            .await;
+        assert!(matches!(err_again, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_from_router_unknown_method_not_get() {
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/health",
+            |_req: HttpRequest| async { Ok::<_, Error>(HttpResponse::ok()) },
+        ));
+        let opt = OptimizedRouter::from_router(&router);
+
+        let err = opt
+            .route(HttpRequest::new("PROPFIND".into(), "/health".into()))
+            .await;
+        assert!(matches!(err, Err(Error::RouteNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_from_router_query_method_routing() {
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::QUERY,
+            "/search",
+            |req: HttpRequest| async move { Ok::<_, Error>(HttpResponse::ok().with_body(req.body)) },
+        ));
+        let opt = OptimizedRouter::from_router(&router);
+
+        // QUERY carries its query in the body; routing matches on method+path.
+        let mut req = HttpRequest::new("QUERY".into(), "/search".into());
+        req.body = b"name=john".to_vec();
+        let resp = opt.route(req).await.unwrap();
+        assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
+
+        // GET to the same path must NOT reach the QUERY handler.
+        let err = opt
+            .route(HttpRequest::new("GET".into(), "/search".into()))
+            .await;
+        assert!(matches!(err, Err(Error::RouteNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_from_router_preserves_registration_order_precedence() {
+        // A `:param` route registered BEFORE a static route that it shadows.
+        // The linear router returns the first registered match; the optimized
+        // router must not let the static HashMap override that.
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/users/:id",
+            |req: HttpRequest| async move {
+                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                Ok::<_, Error>(HttpResponse::ok().with_body(format!("param:{id}").into_bytes()))
+            },
+        ));
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/users/me",
+            |_req: HttpRequest| async {
+                Ok::<_, Error>(HttpResponse::ok().with_body(b"static".to_vec()))
+            },
+        ));
+
+        // Reference: what the linear router does for /users/me.
+        let linear = router
+            .clone()
+            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .await
+            .unwrap();
+
+        let opt = OptimizedRouter::from_router(&router);
+        let optimized = opt
+            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .await
+            .unwrap();
+
+        // Identical: both select the earlier-registered :id route.
+        assert_eq!(optimized.body, linear.body);
+        assert_eq!(optimized.body, b"param:me");
+    }
+
+    #[tokio::test]
+    async fn test_from_router_decodes_query_params() {
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/search",
+            |req: HttpRequest| async move {
+                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                Ok::<_, Error>(HttpResponse::ok().with_body(q.into_bytes()))
+            },
+        ));
+        let opt = OptimizedRouter::from_router(&router);
+
+        let resp = opt
+            .route(HttpRequest::new(
+                "GET".into(),
+                "/search?q=hello%20world".into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.body, b"hello world");
+    }
+
+    #[test]
+    fn test_from_router_skips_shadowed_static_fast_path() {
+        // `/users/:id` (index 0) shadows the later static `/users/me` (index 1),
+        // so `/users/me` must NOT be registered in the static fast path.
+        let mut router = crate::routing::Router::new();
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/users/:id",
+            |_req: HttpRequest| async { Ok::<_, Error>(HttpResponse::ok()) },
+        ));
+        router.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/users/me",
+            |_req: HttpRequest| async { Ok::<_, Error>(HttpResponse::ok()) },
+        ));
+        let opt = OptimizedRouter::from_router(&router);
+        // The shadowed static route stays out of the O(1) map.
+        assert!(
+            opt.static_routes
+                .get(&RouteKey::new(HttpMethod::GET, "/users/me"))
+                .is_none()
+        );
+
+        // A non-shadowed static route DOES get the fast path.
+        let mut router2 = crate::routing::Router::new();
+        router2.add_route(crate::routing::Route::new(
+            HttpMethod::GET,
+            "/health",
+            |_req: HttpRequest| async { Ok::<_, Error>(HttpResponse::ok()) },
+        ));
+        let opt2 = OptimizedRouter::from_router(&router2);
+        assert!(
+            opt2.static_routes
+                .get(&RouteKey::new(HttpMethod::GET, "/health"))
+                .is_some()
+        );
     }
 
     #[test]

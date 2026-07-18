@@ -1,12 +1,25 @@
-//! `io_uring` Backend for High-Performance I/O (Linux 5.1+)
+//! `io_uring` Utilities (Linux 5.1+)
 //!
-//! This module provides optional `io_uring` support for Linux systems,
-//! offering significant performance improvements over traditional epoll:
+//! This module provides an optional, **standalone** `io_uring` layer for
+//! Linux systems. What is actually implemented:
 //!
-//! - **3-5% throughput increase** in typical web workloads
-//! - **Reduced syscall overhead** via batched submissions
-//! - **Better cache locality** with ring buffer design
-//! - **Zero-copy I/O** where possible
+//! - Configuration types ([`IoUringConfig`], [`TcpOptions`]) and statistics
+//!   counters ([`IoUringStats`]) — available on all platforms.
+//! - A [`BufferPool`] of reusable byte buffers — available on all platforms.
+//! - [`IoUringRuntime`]: a real `io_uring` ring (built on the
+//!   [`io-uring`](https://docs.rs/io-uring) crate) with synchronous
+//!   `read_at`/`write_at` submission helpers for file/socket file
+//!   descriptors. Only available on Linux with the `io-uring` Cargo feature
+//!   enabled.
+//! - Runtime availability and feature probing ([`is_available`],
+//!   [`IoUringFeatures::detect`]). With the `io-uring` feature enabled these
+//!   probe the kernel by creating a ring and registering an opcode probe;
+//!   without it they fall back to a `/proc/version` kernel-version heuristic.
+//!
+//! **Not implemented:** this module is *not* wired into the HTTP server
+//! runtime. The armature HTTP server continues to use tokio's epoll-based
+//! I/O. `IoUringRuntime` is a self-contained utility for performing
+//! positional reads/writes on raw file descriptors via `io_uring`.
 //!
 //! ## Requirements
 //!
@@ -15,29 +28,25 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust
+//! # #[cfg(all(target_os = "linux", feature = "io-uring"))]
+//! # fn main() -> std::io::Result<()> {
 //! use armature_core::io_uring::{IoUringConfig, IoUringRuntime};
 //!
-//! // Check if io_uring is available
+//! // Check if io_uring is available (probes the kernel)
 //! if IoUringRuntime::is_available() {
 //!     let config = IoUringConfig::builder()
-//!         .ring_size(4096)
-//!         .sqpoll(true)  // Kernel-side polling
+//!         .ring_size(256)
 //!         .build();
 //!
 //!     let runtime = IoUringRuntime::new(config)?;
-//!     // Use runtime for I/O operations
+//!     let _ = runtime.stats().submissions();
 //! }
+//! # Ok(())
+//! # }
+//! # #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+//! # fn main() {}
 //! ```
-//!
-//! ## Performance Characteristics
-//!
-//! | Operation | epoll | io_uring | Improvement |
-//! |-----------|-------|----------|-------------|
-//! | Accept    | ~1μs  | ~0.8μs   | 20% faster  |
-//! | Read      | ~0.5μs| ~0.3μs   | 40% faster  |
-//! | Write     | ~0.5μs| ~0.3μs   | 40% faster  |
-//! | Batch I/O | N/A   | ~0.1μs/op| Batched     |
 //!
 //! ## Security Considerations
 //!
@@ -236,6 +245,8 @@ pub struct IoUringStats {
     bytes_written: AtomicU64,
     /// Successful accepts
     accepts: AtomicU64,
+    /// Operations that completed with an error result
+    errors: AtomicU64,
     /// Current ring utilization (0-100)
     ring_utilization: AtomicU64,
 }
@@ -288,6 +299,12 @@ impl IoUringStats {
         self.accepts.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record an operation that completed with an error result
+    #[inline]
+    pub fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Update ring utilization
     #[inline]
     pub fn update_utilization(&self, percent: u64) {
@@ -329,6 +346,11 @@ impl IoUringStats {
         self.accepts.load(Ordering::Relaxed)
     }
 
+    /// Get the number of operations that completed with an error result
+    pub fn errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
+    }
+
     /// Get ring utilization
     pub fn ring_utilization(&self) -> u64 {
         self.ring_utilization.load(Ordering::Relaxed)
@@ -344,8 +366,21 @@ impl IoUringStats {
 // Runtime Detection
 // ============================================================================
 
-/// Check if io_uring is available on this system
-#[cfg(target_os = "linux")]
+/// Check if io_uring is available on this system.
+///
+/// With the `io-uring` feature enabled this actually probes the kernel by
+/// creating a small ring, so it also catches rings disabled by seccomp,
+/// containers, or `kernel.io_uring_disabled`.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub fn is_available() -> bool {
+    ::io_uring::IoUring::new(2).is_ok()
+}
+
+/// Check if io_uring is available on this system.
+///
+/// Without the `io-uring` feature this is a `/proc/version` kernel-version
+/// heuristic (>= 5.1); it cannot detect rings disabled by seccomp or sysctl.
+#[cfg(all(target_os = "linux", not(feature = "io-uring")))]
 pub fn is_available() -> bool {
     // Check kernel version >= 5.1
     if let Ok(version) = std::fs::read_to_string("/proc/version")
@@ -364,6 +399,7 @@ pub fn is_available() -> bool {
 
 /// Parse kernel version from /proc/version
 #[cfg(target_os = "linux")]
+#[cfg_attr(feature = "io-uring", allow(dead_code))]
 fn parse_kernel_version(version_str: &str) -> Option<(u32, u32)> {
     // Format: "Linux version X.Y.Z ..."
     let parts: Vec<&str> = version_str.split_whitespace().collect();
@@ -397,8 +433,49 @@ pub struct IoUringFeatures {
 }
 
 impl IoUringFeatures {
-    /// Detect available features
-    #[cfg(target_os = "linux")]
+    /// Detect available features by probing the kernel.
+    ///
+    /// Creates a small ring and registers an [`io_uring::Probe`] to test
+    /// opcode support. If ring creation fails (old kernel, seccomp,
+    /// `kernel.io_uring_disabled`, ...), all features report `false`.
+    ///
+    /// Notes on mapping:
+    /// - `sqpoll` is tested by actually building an SQPOLL ring, so it
+    ///   reflects both kernel support and process privileges.
+    /// - `buffer_ring` and `multishot_accept` are flag-based kernel features
+    ///   (not opcodes), so they cannot be probed directly; both landed in
+    ///   Linux 5.19 and are approximated by probing the `IORING_OP_SOCKET`
+    ///   opcode, which was also added in 5.19.
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    pub fn detect() -> Self {
+        use ::io_uring::{IoUring, Probe, opcode};
+
+        let Ok(ring) = IoUring::new(2) else {
+            return Self::unsupported();
+        };
+
+        let mut probe = Probe::new();
+        let probed = ring.submitter().register_probe(&mut probe).is_ok();
+        let supported = |code: u8| probed && probe.is_supported(code);
+
+        let sqpoll_ring: std::io::Result<IoUring> = IoUring::builder().setup_sqpoll(100).build(2);
+
+        Self {
+            basic: true,
+            sqpoll: sqpoll_ring.is_ok(),
+            buffer_ring: supported(opcode::Socket::CODE),
+            multishot_accept: supported(opcode::Socket::CODE),
+            zerocopy: supported(opcode::SendZc::CODE),
+            fixed_files: supported(opcode::ReadFixed::CODE),
+        }
+    }
+
+    /// Detect available features.
+    ///
+    /// Without the `io-uring` feature this is a `/proc/version`
+    /// kernel-version heuristic; it cannot detect rings disabled by seccomp
+    /// or sysctl. Enable the `io-uring` feature for real probing.
+    #[cfg(all(target_os = "linux", not(feature = "io-uring")))]
     pub fn detect() -> Self {
         let version = std::fs::read_to_string("/proc/version")
             .ok()
@@ -415,8 +492,15 @@ impl IoUringFeatures {
         }
     }
 
+    /// Detect available features (non-Linux: always unsupported)
     #[cfg(not(target_os = "linux"))]
     pub fn detect() -> Self {
+        Self::unsupported()
+    }
+
+    /// All features reported as unsupported
+    #[cfg(any(not(target_os = "linux"), feature = "io-uring"))]
+    fn unsupported() -> Self {
         Self {
             basic: false,
             sqpoll: false,
@@ -466,14 +550,249 @@ impl IoBackend {
 }
 
 // ============================================================================
+// IoUringRuntime (Linux + `io-uring` feature only)
+// ============================================================================
+
+/// A standalone `io_uring` ring with synchronous submission helpers.
+///
+/// This wraps an [`io_uring::IoUring`] instance and offers blocking,
+/// positional [`read_at`](Self::read_at) / [`write_at`](Self::write_at)
+/// helpers on raw file descriptors. Each call builds an SQE, submits it,
+/// and waits for its completion before returning, so buffer lifetimes are
+/// enforced by ordinary Rust borrows.
+///
+/// The ring is internally serialized with a mutex, so the runtime is
+/// `Send + Sync` and any thread may submit.
+///
+/// ## Configuration mapping
+///
+/// From [`IoUringConfig`], the following fields are applied:
+/// - `ring_size`: submission queue depth (normalized to a power of two,
+///   capped at 32768).
+/// - `sqpoll` / `sqpoll_idle_ms`: kernel-side submission polling. If the
+///   kernel or environment refuses SQPOLL, construction falls back to a
+///   plain ring instead of failing.
+/// - `iopoll`: busy-wait completion polling (only meaningful for `O_DIRECT`
+///   file I/O; regular buffered fds will fail with `EOPNOTSUPP`).
+///
+/// The remaining knobs are **not** applied by this minimal layer:
+/// `single_issuer` and `defer_taskrun` would forbid the any-thread
+/// submission model used here, and `fixed_buffers` / `buffer_size` /
+/// `buffer_ring` / `buffer_ring_entries` require registered-buffer plumbing
+/// this utility does not implement.
+///
+/// ## Not an HTTP server backend
+///
+/// This type is not wired into the armature HTTP server runtime; it is a
+/// self-contained utility for fd-based I/O.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub struct IoUringRuntime {
+    ring: std::sync::Mutex<::io_uring::IoUring>,
+    stats: IoUringStats,
+}
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+impl std::fmt::Debug for IoUringRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoUringRuntime")
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+impl IoUringRuntime {
+    /// Check if io_uring is available on this system (probes the kernel).
+    pub fn is_available() -> bool {
+        is_available()
+    }
+
+    /// Create a new runtime from the given configuration.
+    ///
+    /// See the type-level docs for which configuration fields are applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `io_uring_setup(2)` error if the kernel cannot
+    /// create a ring (e.g. `ENOSYS` on kernels < 5.1, `EPERM` in restricted
+    /// containers or with `kernel.io_uring_disabled` set).
+    pub fn new(config: IoUringConfig) -> std::io::Result<Self> {
+        let entries = config.ring_size.max(1).next_power_of_two().min(32768);
+
+        let build = |sqpoll: bool| {
+            let mut builder = ::io_uring::IoUring::builder();
+            if config.iopoll {
+                builder.setup_iopoll();
+            }
+            if sqpoll {
+                builder.setup_sqpoll(config.sqpoll_idle_ms);
+            }
+            builder.build(entries)
+        };
+
+        let ring = match build(config.sqpoll) {
+            Ok(ring) => ring,
+            // SQPOLL may be refused by older kernels or restricted
+            // environments; fall back to a plain ring rather than failing.
+            Err(_) if config.sqpoll => build(false)?,
+            Err(e) => return Err(e),
+        };
+
+        Ok(Self {
+            ring: std::sync::Mutex::new(ring),
+            stats: IoUringStats::new(),
+        })
+    }
+
+    /// Get the statistics recorded by this runtime's submission paths.
+    pub fn stats(&self) -> &IoUringStats {
+        &self.stats
+    }
+
+    /// Read from `fd` at `offset` into `buf` via the ring.
+    ///
+    /// Builds an `IORING_OP_READ` SQE, submits it, and blocks until its
+    /// completion is reaped, then returns the number of bytes read
+    /// (0 = end of file). Passing `offset = u64::MAX` (`-1`) reads at the
+    /// fd's current file position (useful for sockets/pipes).
+    ///
+    /// The kernel is guaranteed to be done with `buf` when this returns,
+    /// so the `&mut` borrow fully covers the I/O lifetime.
+    ///
+    /// Reads longer than `u32::MAX` bytes are truncated to `u32::MAX`
+    /// (like a short `pread(2)`).
+    pub fn read_at(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+
+        let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let sqe = ::io_uring::opcode::Read::new(
+            ::io_uring::types::Fd(fd.as_raw_fd()),
+            buf.as_mut_ptr(),
+            len,
+        )
+        .offset(offset)
+        .build();
+
+        // SAFETY: `submit_one` blocks until the completion for this SQE is
+        // reaped, so the kernel never touches `buf` after this call returns,
+        // and the `&mut` borrow guarantees exclusivity in the meantime.
+        let n = unsafe { self.submit_one(sqe) }?;
+        self.stats.record_read(n as u64);
+        Ok(n)
+    }
+
+    /// Write `buf` to `fd` at `offset` via the ring.
+    ///
+    /// Builds an `IORING_OP_WRITE` SQE, submits it, and blocks until its
+    /// completion is reaped, then returns the number of bytes written.
+    /// Passing `offset = u64::MAX` (`-1`) writes at the fd's current file
+    /// position (useful for sockets/pipes).
+    ///
+    /// The kernel is guaranteed to be done with `buf` when this returns,
+    /// so the borrow fully covers the I/O lifetime.
+    ///
+    /// Writes longer than `u32::MAX` bytes are truncated to `u32::MAX`
+    /// (like a short `pwrite(2)`).
+    pub fn write_at(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        buf: &[u8],
+        offset: u64,
+    ) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+
+        let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let sqe = ::io_uring::opcode::Write::new(
+            ::io_uring::types::Fd(fd.as_raw_fd()),
+            buf.as_ptr(),
+            len,
+        )
+        .offset(offset)
+        .build();
+
+        // SAFETY: `submit_one` blocks until the completion for this SQE is
+        // reaped, so the kernel never reads `buf` after this call returns,
+        // and the shared borrow keeps the memory alive in the meantime.
+        let n = unsafe { self.submit_one(sqe) }?;
+        self.stats.record_write(n as u64);
+        Ok(n)
+    }
+
+    /// Submit a single SQE and block until its completion is reaped.
+    ///
+    /// Records submission/completion/error statistics.
+    ///
+    /// # Safety
+    ///
+    /// Any buffers referenced by `sqe` must remain valid (and, for reads,
+    /// exclusively borrowed) until this function returns: the function only
+    /// returns after the CQE for the operation has been reaped (or before
+    /// the SQE was ever handed to the kernel).
+    unsafe fn submit_one(&self, sqe: ::io_uring::squeue::Entry) -> std::io::Result<usize> {
+        let mut ring = self.ring.lock().unwrap();
+
+        // SAFETY (push): per this function's contract, the buffers the SQE
+        // points at stay valid until the completion is reaped below.
+        unsafe {
+            let mut sq = ring.submission();
+            if sq.push(&sqe).is_err() {
+                // SQ full: flush pending entries and retry once.
+                self.stats.record_sq_full();
+                drop(sq);
+                ring.submit()?;
+                let mut sq = ring.submission();
+                sq.push(&sqe)
+                    .map_err(|_| std::io::Error::other("io_uring submission queue full"))?;
+            }
+        }
+        self.stats.record_submission();
+
+        // Wait for the completion, retrying on EINTR: we must not return
+        // while the kernel may still be using the caller's buffer. Because
+        // submissions are serialized (one in flight per lock hold) the CQ
+        // can never overflow here, so other wait errors are not expected.
+        loop {
+            match ring.submit_and_wait(1) {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+                Err(e) => {
+                    self.stats.record_error();
+                    return Err(e);
+                }
+            }
+        }
+
+        let cqe = ring
+            .completion()
+            .next()
+            .ok_or_else(|| std::io::Error::other("io_uring completion queue empty after wait"))?;
+        self.stats.record_completion();
+
+        let res = cqe.result();
+        if res < 0 {
+            self.stats.record_error();
+            Err(std::io::Error::from_raw_os_error(-res))
+        } else {
+            Ok(res as usize)
+        }
+    }
+}
+
+// ============================================================================
 // Buffer Pool for io_uring
 // ============================================================================
 
 /// A pool of pre-allocated buffers for io_uring operations
 #[derive(Debug)]
 pub struct BufferPool {
-    /// Buffer data
-    buffers: Vec<Vec<u8>>,
+    /// Buffer data (each slot behind its own lock so exclusive access is
+    /// enforced by the type system rather than by caller discipline)
+    buffers: Vec<std::sync::Mutex<Vec<u8>>>,
     /// Free buffer indices
     free_list: std::sync::Mutex<Vec<usize>>,
     /// Buffer size
@@ -496,7 +815,7 @@ impl BufferPool {
         let mut free_list = Vec::with_capacity(count);
 
         for i in 0..count {
-            buffers.push(vec![0u8; buffer_size]);
+            buffers.push(std::sync::Mutex::new(vec![0u8; buffer_size]));
             free_list.push(i);
         }
 
@@ -508,38 +827,25 @@ impl BufferPool {
         }
     }
 
-    /// Acquire a buffer from the pool
+    /// Acquire a buffer from the pool.
     ///
-    /// # Safety
-    ///
-    /// The returned mutable reference is safe because:
-    /// 1. We hold the Mutex lock while determining which buffer to return
-    /// 2. The buffer index is removed from the free list, ensuring exclusive access
-    /// 3. The caller must call `release()` to return the buffer
-    #[allow(clippy::mut_from_ref)] // Safe: Mutex provides synchronization, index removal ensures exclusivity
-    pub fn acquire(&self) -> Option<(usize, &mut [u8])> {
-        let mut free = self.free_list.lock().unwrap();
-        if let Some(idx) = free.pop() {
+    /// Returns an RAII guard that dereferences to the buffer and returns
+    /// it to the pool when dropped. Returns `None` if the pool is empty.
+    pub fn acquire(&self) -> Option<BufferGuard<'_>> {
+        let idx = self.free_list.lock().unwrap().pop();
+        if let Some(idx) = idx {
             self.stats.allocations.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: We have exclusive access via removing idx from free list.
-            // No other thread can acquire this buffer until we release it.
-            let buf = unsafe {
-                let ptr = self.buffers.as_ptr().add(idx) as *mut Vec<u8>;
-                (*ptr).as_mut_slice()
-            };
-            Some((idx, buf))
+            // The index was removed from the free list, so this slot lock is
+            // uncontended; it enforces exclusive access for the guard's lifetime.
+            let buf = self.buffers[idx].lock().unwrap();
+            Some(BufferGuard {
+                pool: self,
+                index: idx,
+                buf,
+            })
         } else {
             self.stats.pool_misses.fetch_add(1, Ordering::Relaxed);
             None
-        }
-    }
-
-    /// Release a buffer back to the pool
-    pub fn release(&self, idx: usize) {
-        if idx < self.buffers.len() {
-            let mut free = self.free_list.lock().unwrap();
-            free.push(idx);
-            self.stats.deallocations.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -556,6 +862,48 @@ impl BufferPool {
     /// Get available buffers count
     pub fn available(&self) -> usize {
         self.free_list.lock().unwrap().len()
+    }
+}
+
+/// RAII guard for a buffer acquired from a [`BufferPool`].
+///
+/// Dereferences to the buffer contents and releases the buffer back to
+/// the pool when dropped.
+#[derive(Debug)]
+pub struct BufferGuard<'a> {
+    pool: &'a BufferPool,
+    index: usize,
+    buf: std::sync::MutexGuard<'a, Vec<u8>>,
+}
+
+impl BufferGuard<'_> {
+    /// Get the pool index of this buffer (e.g. for io_uring registration).
+    pub fn index(&self) -> usize {
+        self.index
+    }
+}
+
+impl std::ops::Deref for BufferGuard<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+impl std::ops::DerefMut for BufferGuard<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.buf
+    }
+}
+
+impl Drop for BufferGuard<'_> {
+    fn drop(&mut self) {
+        self.pool.free_list.lock().unwrap().push(self.index);
+        self.pool
+            .stats
+            .deallocations
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -658,7 +1006,14 @@ pub enum IoOp {
 }
 
 impl IoOp {
-    /// Get the opcode for this operation
+    /// Get the opcode for this operation.
+    ///
+    /// **Reference data only:** these constants mirror the kernel's
+    /// `IORING_OP_*` values for documentation/diagnostic purposes. To check
+    /// what the running kernel actually supports, use
+    /// [`IoUringFeatures::detect`] (or `io_uring::Probe` directly when the
+    /// `io-uring` feature is enabled) instead of comparing against this
+    /// table.
     pub fn opcode(self) -> u8 {
         match self {
             Self::Accept => 13,
@@ -739,13 +1094,36 @@ mod tests {
         assert_eq!(pool.buffer_size(), 1024);
 
         // Acquire a buffer
-        let (idx, buf) = pool.acquire().unwrap();
+        let mut buf = pool.acquire().unwrap();
         assert_eq!(buf.len(), 1024);
         assert_eq!(pool.available(), 9);
+        buf[0] = 42;
 
-        // Release it
-        pool.release(idx);
+        // Released on drop
+        drop(buf);
         assert_eq!(pool.available(), 10);
+    }
+
+    #[test]
+    fn test_buffer_pool_exclusive_buffers() {
+        let pool = BufferPool::new(2, 64);
+
+        // Two concurrent acquisitions must hand out distinct buffers
+        let a = pool.acquire().unwrap();
+        let b = pool.acquire().unwrap();
+        assert_ne!(a.index(), b.index());
+        assert_eq!(pool.available(), 0);
+
+        // Pool exhausted
+        assert!(pool.acquire().is_none());
+
+        drop(a);
+        drop(b);
+        assert_eq!(pool.available(), 2);
+
+        // Re-acquire after release works
+        let c = pool.acquire().unwrap();
+        assert_eq!(c.len(), 64);
     }
 
     #[test]
@@ -780,5 +1158,153 @@ mod tests {
         assert_eq!(IoOp::Nop.opcode(), 0);
         assert_eq!(IoOp::Accept.opcode(), 13);
         assert_eq!(IoOp::Read.opcode(), 22);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    mod runtime_tests {
+        use super::super::*;
+        use std::io::Read as _;
+        use std::os::fd::AsFd;
+
+        /// Create a runtime, or None (with a message) if the kernel refuses
+        /// io_uring (e.g. EPERM in containers, ENOSYS on old kernels).
+        fn runtime_or_skip(config: IoUringConfig) -> Option<IoUringRuntime> {
+            match IoUringRuntime::new(config) {
+                Ok(rt) => Some(rt),
+                Err(e) => {
+                    eprintln!("skipping io_uring test: kernel refused ring creation: {e}");
+                    None
+                }
+            }
+        }
+
+        #[test]
+        fn test_write_read_round_trip() {
+            let config = IoUringConfig::builder().ring_size(64).build();
+            let Some(runtime) = runtime_or_skip(config) else {
+                return;
+            };
+
+            let path = std::env::temp_dir().join(format!(
+                "armature-io-uring-roundtrip-{}",
+                std::process::id()
+            ));
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .expect("create temp file");
+
+            let data = b"hello from io_uring: the quick brown fox";
+
+            // Write via the ring
+            let written = runtime
+                .write_at(file.as_fd(), data, 0)
+                .expect("write_at failed");
+            assert_eq!(written, data.len());
+
+            // Read back via the ring
+            let mut buf = vec![0u8; data.len()];
+            let read = runtime
+                .read_at(file.as_fd(), &mut buf, 0)
+                .expect("read_at failed");
+            assert_eq!(read, data.len());
+            assert_eq!(&buf[..], &data[..]);
+
+            // Cross-check against ordinary file I/O
+            let mut verify = Vec::new();
+            let mut reopened = std::fs::File::open(&path).expect("reopen temp file");
+            reopened.read_to_end(&mut verify).expect("std read");
+            assert_eq!(&verify[..], &data[..]);
+
+            // Stats flowed through the real submission path
+            assert_eq!(runtime.stats().submissions(), 2);
+            assert_eq!(runtime.stats().completions(), 2);
+            assert_eq!(runtime.stats().pending(), 0);
+            assert_eq!(runtime.stats().errors(), 0);
+            assert_eq!(runtime.stats().bytes_written(), data.len() as u64);
+            assert_eq!(runtime.stats().bytes_read(), data.len() as u64);
+
+            drop(file);
+            drop(reopened);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn test_read_at_eof_returns_zero() {
+            let Some(runtime) = runtime_or_skip(IoUringConfig::low_resource()) else {
+                return;
+            };
+
+            let path =
+                std::env::temp_dir().join(format!("armature-io-uring-eof-{}", std::process::id()));
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .expect("create temp file");
+
+            let mut buf = [0u8; 16];
+            let read = runtime
+                .read_at(file.as_fd(), &mut buf, 0)
+                .expect("read_at failed");
+            assert_eq!(read, 0, "empty file should read 0 bytes (EOF)");
+
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn test_error_result_recorded_in_stats() {
+            let Some(runtime) = runtime_or_skip(IoUringConfig::default()) else {
+                return;
+            };
+
+            // /dev/null opened read-only: writing must fail with EBADF.
+            let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+            let err = runtime
+                .write_at(file.as_fd(), b"nope", 0)
+                .expect_err("write to read-only fd should fail");
+            assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+            assert_eq!(runtime.stats().errors(), 1);
+            assert_eq!(runtime.stats().submissions(), 1);
+            assert_eq!(runtime.stats().completions(), 1);
+            assert_eq!(runtime.stats().bytes_written(), 0);
+        }
+
+        #[test]
+        fn test_is_available_probes() {
+            // On this machine (Linux with io_uring compiled in) availability
+            // should agree with whether we can actually build a ring.
+            let can_build = IoUringRuntime::new(IoUringConfig::low_resource()).is_ok();
+            assert_eq!(IoUringRuntime::is_available(), can_build);
+        }
+
+        #[test]
+        fn test_features_detect_probed() {
+            let features = IoUringFeatures::detect();
+            if !features.basic {
+                eprintln!("skipping: io_uring not available for feature probing");
+                return;
+            }
+            // Fixed files (IORING_OP_READ_FIXED) exist since 5.1, so any
+            // kernel that can create a ring should support them.
+            assert!(features.fixed_files);
+        }
+
+        #[test]
+        fn test_sqpoll_config_falls_back() {
+            // SQPOLL may or may not be permitted; either way construction
+            // must not fail because of it.
+            let config = IoUringConfig::builder().ring_size(32).sqpoll(true).build();
+            let Some(runtime) = runtime_or_skip(config) else {
+                return;
+            };
+            let _ = runtime.stats();
+        }
     }
 }
