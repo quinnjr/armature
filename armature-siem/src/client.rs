@@ -160,12 +160,30 @@ impl SiemClient {
     }
 }
 
+/// Azure Log Analytics HTTP Data Collector API path used in the SharedKey
+/// signature's canonical string. This is fixed by the Azure API contract
+/// and is unrelated to the actual request path/endpoint configured.
+#[cfg(feature = "http")]
+const SENTINEL_SIGNED_RESOURCE: &str = "/api/logs";
+
+/// Per-request Azure Sentinel `SharedKey` signing material.
+#[cfg(feature = "http")]
+struct SentinelAuth {
+    /// Log Analytics workspace ID (the `SharedKey {workspace_id}:{sig}` prefix)
+    workspace_id: String,
+    /// Base64-encoded shared key (primary or secondary workspace key)
+    shared_key_b64: String,
+    /// Value for the `Log-Type` header (the custom log table name)
+    log_type: String,
+}
+
 /// HTTP transport (for Splunk HEC, Elastic, Sentinel, etc.)
 #[cfg(feature = "http")]
 pub struct HttpTransport {
     client: reqwest::Client,
     endpoint: String,
     auth_header: Option<String>,
+    sentinel: Option<SentinelAuth>,
 }
 
 #[cfg(feature = "http")]
@@ -185,6 +203,8 @@ impl HttpTransport {
 
         let client = builder.build()?;
 
+        let mut sentinel = None;
+
         // Build auth header based on provider
         let auth_header = match config.provider {
             crate::SiemProvider::Splunk => config.token.as_ref().map(|t| format!("Splunk {}", t)),
@@ -192,8 +212,26 @@ impl HttpTransport {
                 config.token.as_ref().map(|t| format!("Bearer {}", t))
             }
             crate::SiemProvider::Sentinel => {
-                // Azure Sentinel uses SharedKey authentication
-                config.token.clone()
+                // Azure Sentinel uses SharedKey authentication, which must
+                // be computed per-request (the signature covers the body's
+                // content-length and the request's `x-ms-date`). No static
+                // Authorization header is used for Sentinel.
+                let workspace_id = config.workspace_id.clone().ok_or_else(|| {
+                    SiemError::Config("Sentinel transport requires a workspace_id".to_string())
+                })?;
+                let shared_key_b64 = config.token.clone().ok_or_else(|| {
+                    SiemError::Config("Sentinel transport requires a shared key token".to_string())
+                })?;
+                let log_type = config
+                    .index
+                    .clone()
+                    .unwrap_or_else(|| "ArmatureEvent".to_string());
+                sentinel = Some(SentinelAuth {
+                    workspace_id,
+                    shared_key_b64,
+                    log_type,
+                });
+                None
             }
             crate::SiemProvider::SumoLogic => {
                 // Sumo Logic uses the token in the URL or as header
@@ -217,21 +255,72 @@ impl HttpTransport {
             client,
             endpoint: config.endpoint.clone(),
             auth_header,
+            sentinel,
         })
     }
-}
 
-#[cfg(feature = "http")]
-#[async_trait]
-impl SiemTransport for HttpTransport {
-    async fn send(&self, data: &str, content_type: &str) -> SiemResult<()> {
+    /// Compute the Azure Sentinel `SharedKey` `Authorization` header value
+    /// and the RFC 1123 `x-ms-date` string for `data` as of `date`.
+    ///
+    /// Canonical string per the Azure Monitor HTTP Data Collector API:
+    /// `POST\n{content_length}\napplication/json\nx-ms-date:{rfc1123_date}\n/api/logs`
+    /// HMAC-SHA256'd with the base64-decoded shared key, then base64-encoded.
+    fn sentinel_signature(
+        sentinel: &SentinelAuth,
+        data: &str,
+        date: chrono::DateTime<chrono::Utc>,
+    ) -> SiemResult<(String, String)> {
+        use base64::Engine as _;
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        let rfc1123_date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let content_length = data.len();
+        let canonical = format!(
+            "POST\n{}\napplication/json\nx-ms-date:{}\n{}",
+            content_length, rfc1123_date, SENTINEL_SIGNED_RESOURCE
+        );
+
+        let decoded_key = base64::engine::general_purpose::STANDARD
+            .decode(&sentinel.shared_key_b64)
+            .map_err(|e| SiemError::Auth(format!("invalid Sentinel shared key: {}", e)))?;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_key)
+            .map_err(|e| SiemError::Auth(format!("invalid Sentinel HMAC key: {}", e)))?;
+        mac.update(canonical.as_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let auth = format!("SharedKey {}:{}", sentinel.workspace_id, signature);
+        Ok((auth, rfc1123_date))
+    }
+
+    /// Send with an explicit timestamp. This is the internal seam that
+    /// makes Sentinel `SharedKey` signing deterministic and testable
+    /// without threading a clock through the public `SiemTransport::send`
+    /// signature: production code always calls this via `send` with
+    /// `Utc::now()`, while tests can pin a fixed date to reproduce an
+    /// exact expected signature.
+    async fn send_at(
+        &self,
+        data: &str,
+        content_type: &str,
+        date: chrono::DateTime<chrono::Utc>,
+    ) -> SiemResult<()> {
         let mut request = self
             .client
             .post(&self.endpoint)
             .header("Content-Type", content_type)
             .body(data.to_string());
 
-        if let Some(ref auth) = self.auth_header {
+        if let Some(ref sentinel) = self.sentinel {
+            let (auth, rfc1123_date) = Self::sentinel_signature(sentinel, data, date)?;
+            request = request
+                .header("Authorization", auth)
+                .header("x-ms-date", rfc1123_date)
+                .header("Log-Type", &sentinel.log_type)
+                .header("time-generated-field", "timestamp");
+        } else if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
 
@@ -258,6 +347,14 @@ impl SiemTransport for HttpTransport {
             let body = response.text().await.unwrap_or_default();
             Err(SiemError::Transport(format!("HTTP {} - {}", status, body)))
         }
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait]
+impl SiemTransport for HttpTransport {
+    async fn send(&self, data: &str, content_type: &str) -> SiemResult<()> {
+        self.send_at(data, content_type, chrono::Utc::now()).await
     }
 
     async fn close(&self) -> SiemResult<()> {
@@ -521,6 +618,85 @@ impl SiemTransport for MemoryTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "http")]
+    mod sentinel_signing {
+        use super::super::*;
+        use crate::SiemProvider;
+        use crate::config::SiemConfig;
+        use armature_testkit::{StubResponse, StubServer};
+        use base64::Engine as _;
+        use chrono::{TimeZone, Utc};
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        /// A known Azure Sentinel SharedKey signing vector, computed
+        /// independently of `HttpTransport`'s implementation so the test
+        /// pins the exact canonicalization Azure expects:
+        ///
+        /// canonical string = "POST\n{content_length}\napplication/json\nx-ms-date:{rfc1123_date}\n/api/logs"
+        /// signature = base64(HMAC-SHA256(base64_decode(shared_key), canonical_string))
+        fn expected_signature(
+            shared_key_b64: &str,
+            content_length: usize,
+            rfc1123_date: &str,
+        ) -> String {
+            let canonical = format!(
+                "POST\n{}\napplication/json\nx-ms-date:{}\n/api/logs",
+                content_length, rfc1123_date
+            );
+            let decoded_key = base64::engine::general_purpose::STANDARD
+                .decode(shared_key_b64)
+                .expect("test shared key must be valid base64");
+            let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_key)
+                .expect("HMAC can take a key of any length");
+            mac.update(canonical.as_bytes());
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        }
+
+        #[tokio::test]
+        async fn signs_sentinel_requests_with_shared_key_hmac() {
+            let server = StubServer::start_single(StubResponse::new(200, "")).await;
+
+            let workspace_id = "test-workspace-123";
+            // Base64-encoded shared key material (Azure shared keys are
+            // always base64-encoded on the wire).
+            let shared_key_b64 =
+                base64::engine::general_purpose::STANDARD.encode(b"super-secret-key-material");
+
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Sentinel)
+                .endpoint(server.url())
+                .token(shared_key_b64.clone())
+                .workspace_id(workspace_id)
+                .build()
+                .expect("valid sentinel config");
+
+            let transport = HttpTransport::new(&config).expect("build sentinel transport");
+
+            // Fixed date, injected via the internal seam, so the signature
+            // is fully reproducible.
+            let fixed_date = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
+
+            let body = r#"{"event":"test"}"#;
+            transport
+                .send_at(body, "application/json", fixed_date)
+                .await
+                .expect("send should succeed against stub server");
+
+            let rfc1123_date = fixed_date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+            let expected_sig = expected_signature(&shared_key_b64, body.len(), &rfc1123_date);
+            let expected_auth = format!("SharedKey {}:{}", workspace_id, expected_sig);
+
+            let recorded = server.assert_received("POST", "/");
+            assert_eq!(
+                recorded.header("Authorization"),
+                Some(expected_auth.as_str())
+            );
+            assert_eq!(recorded.header("x-ms-date"), Some(rfc1123_date.as_str()));
+            assert!(recorded.header("Log-Type").is_some());
+        }
+    }
 
     #[tokio::test]
     async fn test_memory_transport() {

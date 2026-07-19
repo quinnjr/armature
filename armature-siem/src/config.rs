@@ -128,6 +128,8 @@ pub struct SiemConfig {
     pub transport: Transport,
     /// Authentication token (HEC token, API key, etc.)
     pub token: Option<String>,
+    /// Azure Log Analytics workspace ID (Sentinel `SharedKey` authentication)
+    pub workspace_id: Option<String>,
     /// Username for basic auth
     pub username: Option<String>,
     /// Password for basic auth
@@ -178,6 +180,7 @@ impl Default for SiemConfig {
             format: EventFormat::Json,
             transport: Transport::Https,
             token: None,
+            workspace_id: None,
             username: None,
             password: None,
             index: None,
@@ -299,6 +302,12 @@ impl SiemConfigBuilder {
     /// Set the authentication token
     pub fn token(mut self, token: impl Into<String>) -> Self {
         self.config.token = Some(token.into());
+        self
+    }
+
+    /// Set the Azure Log Analytics workspace ID (Sentinel `SharedKey` auth)
+    pub fn workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.config.workspace_id = Some(workspace_id.into());
         self
     }
 

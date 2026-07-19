@@ -26,6 +26,8 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 url = "2.5"
 base64 = "0.22"
 hostname = "0.4"
+hmac = "0.13.0"
+sha2 = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2.2"
@@ -35,6 +37,7 @@ webpki-roots = "1.0"
 tokio-test = "0.4"
 wiremock = "0.6"
 rcgen = { version = "0.14", features = ["pem"] }
+armature-testkit = { path = "../armature-testkit" }
 
 [features]
 default = []

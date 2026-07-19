@@ -154,6 +154,7 @@ impl SentinelConfig {
             .provider(SiemProvider::Sentinel)
             .endpoint(endpoint)
             .token(shared_key)
+            .workspace_id(workspace)
             .format(EventFormat::Json)
             .transport(Transport::Https)
     }
