@@ -61,6 +61,7 @@ members = [
     "armature-siem",
     "armature-app",
     "armature-mcp",
+    "armature-testkit",
 ]
 exclude = [
     "templates/*",
