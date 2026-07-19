@@ -721,10 +721,18 @@ mod tests {
         let key_der =
             rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
 
-        rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .unwrap()
+        // Pin the ring provider explicitly: under `--features full` both the
+        // `ring` and `aws-lc-rs` rustls backends can be present, which makes the
+        // process-default provider ambiguous. The production connector pins ring
+        // the same way (see `build_tls_connector`).
+        rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap()
     }
 
     fn tcp_tls_transport(endpoint: String, tls_verify: bool) -> TcpTransport {
