@@ -2,4 +2,4 @@
 
 pub mod http_stub;
 
-pub use http_stub::{StubResponse, StubServer};
+pub use http_stub::{StubResponse, StubServer, StubServerBuilder};
