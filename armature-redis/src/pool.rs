@@ -5,7 +5,7 @@ use bb8_redis::RedisConnectionManager;
 use redis::aio::ConnectionLike;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{RedisConfig, RedisError, Result};
 
@@ -57,44 +57,65 @@ impl ManageConnection for RedisClusterConnectionManager {
 /// to know which mode is active.
 #[derive(Clone)]
 pub enum RedisPool {
-    /// Single-node pool.
-    Single(Pool<RedisConnectionManager>),
-    /// Cluster-aware pool.
-    Cluster(Pool<RedisClusterConnectionManager>),
+    /// Single-node pool. The optional `String` is the `connection_name`
+    /// (`RedisConfig::connection_name`), applied via `CLIENT SETNAME` on each
+    /// checkout when set.
+    Single(Pool<RedisConnectionManager>, Option<String>),
+    /// Cluster-aware pool. Same `connection_name` handling as `Single`.
+    Cluster(Pool<RedisClusterConnectionManager>, Option<String>),
 }
 
 impl RedisPool {
     /// Get a connection from the pool.
+    ///
+    /// If `RedisConfig::connection_name` was set when the pool was built,
+    /// issues `CLIENT SETNAME <name>` on the checked-out connection before
+    /// returning it. This is best-effort: a failure to set the name is
+    /// logged but does not fail the checkout (the connection is still
+    /// usable, just unnamed).
     pub async fn get(&self) -> Result<RedisConnection<'_>> {
-        match self {
-            RedisPool::Single(pool) => {
+        let (mut conn, name) = match self {
+            RedisPool::Single(pool, name) => {
                 let conn = pool
                     .get()
                     .await
                     .map_err(|e| RedisError::Pool(e.to_string()))?;
-                Ok(RedisConnection::Single(conn))
+                (RedisConnection::Single(conn), name)
             }
-            RedisPool::Cluster(pool) => {
+            RedisPool::Cluster(pool, name) => {
                 let conn = pool
                     .get()
                     .await
                     .map_err(|e| RedisError::Pool(e.to_string()))?;
-                Ok(RedisConnection::Cluster(conn))
+                (RedisConnection::Cluster(conn), name)
+            }
+        };
+
+        if let Some(name) = name {
+            let result: std::result::Result<(), redis::RedisError> = redis::cmd("CLIENT")
+                .arg("SETNAME")
+                .arg(name.as_str())
+                .query_async(&mut conn)
+                .await;
+            if let Err(e) = result {
+                warn!(error = %e, connection_name = %name, "failed to set Redis connection name");
             }
         }
+
+        Ok(conn)
     }
 
     /// Get pool state (connection counts).
     pub fn state(&self) -> bb8::State {
         match self {
-            RedisPool::Single(pool) => pool.state(),
-            RedisPool::Cluster(pool) => pool.state(),
+            RedisPool::Single(pool, _) => pool.state(),
+            RedisPool::Cluster(pool, _) => pool.state(),
         }
     }
 
     /// True if this pool was built in cluster mode.
     pub fn is_cluster(&self) -> bool {
-        matches!(self, RedisPool::Cluster(_))
+        matches!(self, RedisPool::Cluster(_, _))
     }
 }
 
@@ -199,7 +220,7 @@ impl RedisPoolBuilder {
             "Redis connection pool created"
         );
 
-        Ok(RedisPool::Single(pool))
+        Ok(RedisPool::Single(pool, self.config.connection_name.clone()))
     }
 
     async fn build_cluster(self) -> Result<RedisPool> {
@@ -237,13 +258,43 @@ impl RedisPoolBuilder {
             "Redis cluster connection pool created"
         );
 
-        Ok(RedisPool::Cluster(pool))
+        Ok(RedisPool::Cluster(
+            pool,
+            self.config.connection_name.clone(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end proof (requires Docker) that `RedisConfig::connection_name`
+    /// is actually applied: checking out a connection from a pool built with
+    /// `connection_name` set must issue `CLIENT SETNAME`, so `CLIENT GETNAME`
+    /// on that same connection reflects it.
+    #[tokio::test]
+    async fn checkout_applies_connection_name_via_client_setname() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let config = RedisConfig::builder()
+            .url(container.url())
+            .connection_name("wf2-test-conn")
+            .build();
+
+        let pool = RedisPoolBuilder::new(config).build().await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+
+        let name: String = redis::cmd("CLIENT")
+            .arg("GETNAME")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(name, "wf2-test-conn");
+    }
 
     /// With `cluster = true` + `cluster_nodes` set, `RedisPoolBuilder::build`
     /// must dispatch to the cluster manager path

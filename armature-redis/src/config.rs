@@ -124,6 +124,14 @@ impl RedisConfig {
     pub fn connection_url(&self) -> String {
         let mut url = self.url.clone();
 
+        // Upgrade to TLS scheme if configured, regardless of how the config
+        // was constructed (builder's `tls()` already rewrites the scheme at
+        // set-time, but a directly-constructed or deserialized config with
+        // `tls: true` and a plain `redis://` URL must still be upgraded here).
+        if self.tls && url.starts_with("redis://") {
+            url = url.replacen("redis://", "rediss://", 1);
+        }
+
         // Add auth if provided
         if let Some(password) = &self.password {
             if let Some(username) = &self.username {
@@ -145,11 +153,18 @@ impl RedisConfig {
             }
         }
 
-        // Add database if provided
-        if let Some(db) = self.database
-            && (!url.contains('/') || url.ends_with(':'))
-        {
-            url = format!("{}/{}", url.trim_end_matches('/'), db);
+        // Add database if provided, but only when the URL doesn't already
+        // carry a db path segment after the `scheme://[auth@]host[:port]`
+        // prefix. A bare `redis://host:port` always contains `/` (from the
+        // scheme separator), so checking `url.contains('/')` against the
+        // *whole* URL never appends the database; we must only look past the
+        // scheme separator for an actual path segment.
+        if let Some(db) = self.database {
+            let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
+            let has_db_segment = url[scheme_end..].contains('/');
+            if !has_db_segment {
+                url = format!("{}/{}", url.trim_end_matches('/'), db);
+            }
         }
 
         url
@@ -249,6 +264,77 @@ impl RedisConfigBuilder {
     /// Build the configuration.
     pub fn build(self) -> RedisConfig {
         self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_url_appends_database_when_no_db_segment_present() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/3");
+    }
+
+    #[test]
+    fn connection_url_keeps_existing_db_segment() {
+        let config = RedisConfig {
+            url: "redis://h:6379/1".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/1");
+    }
+
+    #[test]
+    fn connection_url_without_database_is_unchanged() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: None,
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379");
+    }
+
+    #[test]
+    fn connection_url_with_auth_and_database() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: Some(2),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://user:pass@h:6379/2");
+    }
+
+    #[test]
+    fn connection_url_upgrades_to_tls_scheme_when_tls_true_directly_constructed() {
+        // Constructed directly (not via the builder's `tls()` setter, which
+        // rewrites the scheme eagerly) — `connection_url` must still upgrade
+        // the scheme when `tls` is true.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            tls: true,
+            ..Default::default()
+        };
+        assert!(config.connection_url().starts_with("rediss://"));
+    }
+
+    #[test]
+    fn connection_url_tls_upgrade_still_appends_database() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            tls: true,
+            database: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "rediss://h:6379/5");
     }
 }
 

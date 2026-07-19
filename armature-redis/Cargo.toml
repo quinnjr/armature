@@ -38,6 +38,7 @@ url = "2.5"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 
 [features]
 default = []
