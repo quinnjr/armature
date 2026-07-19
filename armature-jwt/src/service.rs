@@ -8,7 +8,11 @@ use serde::{Serialize, de::DeserializeOwned};
 #[derive(Clone)]
 pub struct JwtService {
     config: JwtConfig,
-    encoding_key: EncodingKey,
+    /// Absent for services constructed via [`JwtService::verify_only`], which
+    /// only need a decoding key (e.g. a public key with no matching private
+    /// key on hand). `sign` fails cleanly in that case rather than requiring
+    /// signing material a verifier does not have.
+    encoding_key: Option<EncodingKey>,
     decoding_key: DecodingKey,
     validation: Validation,
 }
@@ -22,7 +26,28 @@ impl JwtService {
 
         Ok(Self {
             config,
-            encoding_key,
+            encoding_key: Some(encoding_key),
+            decoding_key,
+            validation,
+        })
+    }
+
+    /// Create a verify-only JWT service.
+    ///
+    /// Only builds the decoding key, so it works with configs that carry a
+    /// public key (or secret) but no private key — the common case for a
+    /// service that verifies tokens issued elsewhere. Calling [`sign`] on the
+    /// result returns an error instead of panicking or requiring signing
+    /// material that was never provided.
+    ///
+    /// [`sign`]: JwtService::sign
+    pub fn verify_only(config: JwtConfig) -> Result<Self> {
+        let decoding_key = config.decoding_key()?;
+        let validation = config.validation();
+
+        Ok(Self {
+            config,
+            encoding_key: None,
             decoding_key,
             validation,
         })
@@ -30,8 +55,15 @@ impl JwtService {
 
     /// Sign a token with claims
     pub fn sign<T: Serialize>(&self, claims: &T) -> Result<String> {
+        let encoding_key = self.encoding_key.as_ref().ok_or_else(|| {
+            JwtError::ConfigError(
+                "signing key not available: this JwtService was constructed with \
+                 JwtService::verify_only and can only verify tokens"
+                    .to_string(),
+            )
+        })?;
         let header = Header::new(self.config.algorithm);
-        encode(&header, claims, &self.encoding_key).map_err(JwtError::from)
+        encode(&header, claims, encoding_key).map_err(JwtError::from)
     }
 
     /// Verify and decode a token

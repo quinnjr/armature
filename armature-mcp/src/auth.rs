@@ -548,19 +548,51 @@ async fn authenticate_jwt(
         .strip_prefix("Bearer ")
         .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
 
-    // Decode JWT (without full verification for now - integrate with armature-jwt for production)
-    // This is a simplified implementation - in production, use armature-jwt's JwtManager
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
+    // Reject anything that isn't even shaped like a JWT before doing any
+    // cryptographic work.
+    if token.split('.').count() != 3 {
         return Err(McpError::InvalidRequest("Invalid JWT format".into()));
     }
 
-    // Decode payload (base64url)
-    let payload = base64_decode_url_safe(parts[1])
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload encoding".into()))?;
+    // Build a verify-only armature-jwt manager from this JwtAuth's configured
+    // key material and algorithm, then VERIFY the signature (and expiration)
+    // before trusting anything in the payload. This is the only path into
+    // the claims below - a token that fails verification never reaches it.
+    let algorithm = parse_jwt_algorithm(&auth.algorithm)?;
 
-    let claims: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload JSON".into()))?;
+    let mut config = match algorithm {
+        armature_jwt::Algorithm::HS256
+        | armature_jwt::Algorithm::HS384
+        | armature_jwt::Algorithm::HS512 => {
+            let secret = auth.secret.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured secret".into())
+            })?;
+            armature_jwt::JwtConfig::new(secret).with_algorithm(algorithm)
+        }
+        _ => {
+            let public_key = auth.public_key.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured public key".into())
+            })?;
+            let mut config = armature_jwt::JwtConfig::new(String::new()).with_algorithm(algorithm);
+            config.secret = None;
+            config.public_key = Some(public_key);
+            config
+        }
+    };
+
+    if let Some(iss) = &auth.issuer {
+        config = config.with_issuer(iss.clone());
+    }
+    if let Some(aud) = &auth.audience {
+        config = config.with_audience(vec![aud.clone()]);
+    }
+
+    let manager = armature_jwt::JwtManager::verify_only(config)
+        .map_err(|e| McpError::InvalidRequest(format!("Invalid JWT auth configuration: {e}")))?;
+
+    let claims: serde_json::Value = manager
+        .verify(token)
+        .map_err(|e| McpError::InvalidRequest(format!("JWT verification failed: {e}")))?;
 
     // Extract subject
     let subject = claims.get("sub").and_then(|v| v.as_str()).map(String::from);
@@ -794,6 +826,30 @@ async fn validate_oauth2_via_introspection(
     })
 }
 
+/// Parse a `JwtAuth::algorithm` string (e.g. `"HS256"`) into the
+/// `armature_jwt`/`jsonwebtoken` `Algorithm` enum used to actually verify
+/// tokens.
+fn parse_jwt_algorithm(algorithm: &str) -> Result<armature_jwt::Algorithm> {
+    use armature_jwt::Algorithm;
+    match algorithm {
+        "HS256" => Ok(Algorithm::HS256),
+        "HS384" => Ok(Algorithm::HS384),
+        "HS512" => Ok(Algorithm::HS512),
+        "RS256" => Ok(Algorithm::RS256),
+        "RS384" => Ok(Algorithm::RS384),
+        "RS512" => Ok(Algorithm::RS512),
+        "ES256" => Ok(Algorithm::ES256),
+        "ES384" => Ok(Algorithm::ES384),
+        "PS256" => Ok(Algorithm::PS256),
+        "PS384" => Ok(Algorithm::PS384),
+        "PS512" => Ok(Algorithm::PS512),
+        "EdDSA" => Ok(Algorithm::EdDSA),
+        other => Err(McpError::InvalidRequest(format!(
+            "Unsupported JWT algorithm: {other}"
+        ))),
+    }
+}
+
 fn extract_scopes(claims: &serde_json::Value, scope_claim: &str) -> Vec<String> {
     // Try the configured claim name
     if let Some(scope_value) = claims.get(scope_claim) {
@@ -819,47 +875,6 @@ fn parse_scope_value(value: &serde_json::Value) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-fn base64_decode_url_safe(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    // Add padding if needed
-    let padded = match input.len() % 4 {
-        2 => format!("{}==", input),
-        3 => format!("{}=", input),
-        _ => input.to_string(),
-    };
-
-    // Replace URL-safe characters
-    let standard = padded.replace('-', "+").replace('_', "/");
-
-    // Decode
-    base64_decode(&standard)
-}
-
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut output = Vec::new();
-    let mut buffer: u32 = 0;
-    let mut bits_collected = 0;
-
-    for c in input.chars() {
-        if c == '=' {
-            break;
-        }
-
-        let value = ALPHABET.iter().position(|&b| b == c as u8).ok_or(())?;
-        buffer = (buffer << 6) | (value as u32);
-        bits_collected += 6;
-
-        if bits_collected >= 8 {
-            bits_collected -= 8;
-            output.push((buffer >> bits_collected) as u8);
-            buffer &= (1 << bits_collected) - 1;
-        }
-    }
-
-    Ok(output)
 }
 
 #[cfg(test)]
@@ -906,12 +921,6 @@ mod tests {
         assert!(!ctx.has_scope("mcp:admin"));
     }
 
-    #[test]
-    fn test_base64_decode() {
-        let decoded = base64_decode_url_safe("SGVsbG8gV29ybGQ").unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World");
-    }
-
     #[tokio::test]
     async fn test_api_token_authentication() {
         let auth = ApiTokenAuth::new()
@@ -951,6 +960,57 @@ mod tests {
 
         let result = authenticate(&config, &headers, "tools/call").await;
         assert!(result.is_ok());
+    }
+
+    /// Mint a signed HS256 JWT via armature-jwt, carrying an `exp` claim
+    /// `seconds_from_now` seconds in the future (negative for already-expired).
+    fn mint_jwt(secret: &str, sub: &str, scope: &str, seconds_from_now: i64) -> String {
+        let config = armature_jwt::JwtConfig::new(secret.to_string());
+        let manager = armature_jwt::JwtManager::new(config).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = serde_json::json!({
+            "sub": sub,
+            "scope": scope,
+            "exp": now + seconds_from_now,
+        });
+        manager.sign(&claims).unwrap()
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_bad_signature() {
+        // JwtAuth is configured with the correct secret, but the token is
+        // signed with a different one. This must NOT be accepted just
+        // because the payload happens to decode to well-formed JSON.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let forged = mint_jwt("wrong-secret", "attacker", "mcp:read mcp:write", 3600);
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&forged)).await;
+        assert!(
+            result.is_err(),
+            "a token signed with the wrong secret must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_accepts_valid_signature_and_enforces_exp() {
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        // Correctly signed, unexpired token -> accepted with the right claims.
+        let valid = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+        let ctx = authenticate_jwt(&auth, &bearer_headers(&valid))
+            .await
+            .expect("correctly signed, unexpired token should be accepted");
+        assert_eq!(ctx.subject, Some("user-42".to_string()));
+        assert_eq!(ctx.scopes, vec!["mcp:read".to_string()]);
+        assert_eq!(ctx.auth_method, "jwt");
+
+        // Correctly signed but expired token -> rejected.
+        let expired = mint_jwt("correct-secret", "user-42", "mcp:read", -3600);
+        let result = authenticate_jwt(&auth, &bearer_headers(&expired)).await;
+        assert!(result.is_err(), "an expired token must be rejected");
     }
 
     /// Spawn a minimal HTTP/1.1 stub server that answers every connection
