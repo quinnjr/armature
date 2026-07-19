@@ -50,6 +50,27 @@ impl OpenSearchClient {
             ));
         }
 
+        // Configure AWS SigV4 auth for AWS OpenSearch Service / Serverless.
+        // Every outgoing request is signed by the `opensearch` crate's own
+        // `aws-auth` support (opensearch::http::transport signs via
+        // aws-sigv4 immediately before send, using the service name "es").
+        #[cfg(feature = "aws-auth")]
+        if let Some(region) = &config.aws_region {
+            let provider = config.aws_credentials_provider.clone().ok_or_else(|| {
+                OpenSearchError::Validation(
+                    "aws_region is set but no aws_credentials_provider was configured; \
+                     call OpenSearchConfig::with_aws_credentials_provider to sign requests, \
+                     or unset aws_region to use unauthenticated/basic auth"
+                        .to_string(),
+                )
+            })?;
+
+            builder = builder.auth(opensearch::auth::Credentials::AwsSigV4(
+                provider,
+                aws_types::region::Region::new(region.clone()),
+            ));
+        }
+
         let transport = builder
             .build()
             .map_err(|e| OpenSearchError::Connection(e.to_string()))?;

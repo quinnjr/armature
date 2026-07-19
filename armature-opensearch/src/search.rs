@@ -353,8 +353,9 @@ impl SearchBuilder {
             .unwrap_or("eq")
             .to_string();
 
-        // Parse aggregations
-        let aggregations = result.get("aggs").cloned();
+        // Parse aggregations. OpenSearch responses put them under the
+        // top-level "aggregations" key; only the *request* body uses "aggs".
+        let aggregations = result.get("aggregations").cloned();
 
         Ok(SearchResult {
             total,

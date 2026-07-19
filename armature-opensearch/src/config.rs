@@ -20,6 +20,12 @@ pub struct OpenSearchConfig {
     /// AWS region (for AWS OpenSearch Service).
     #[cfg(feature = "aws-auth")]
     pub aws_region: Option<String>,
+    /// Credentials provider used to sign requests with AWS SigV4 when
+    /// [`OpenSearchConfig::aws_region`] is set. Required for AWS OpenSearch
+    /// Service / OpenSearch Serverless authentication; without it, requests
+    /// are sent unsigned even if `aws_region` is configured.
+    #[cfg(feature = "aws-auth")]
+    pub aws_credentials_provider: Option<aws_credential_types::provider::SharedCredentialsProvider>,
     /// Enable request compression.
     pub compression: bool,
     /// Maximum number of retries.
@@ -38,6 +44,8 @@ impl OpenSearchConfig {
             tls: None,
             #[cfg(feature = "aws-auth")]
             aws_region: None,
+            #[cfg(feature = "aws-auth")]
+            aws_credentials_provider: None,
             compression: true,
             max_retries: 3,
         }
@@ -81,9 +89,30 @@ impl OpenSearchConfig {
     }
 
     /// Set AWS region for AWS OpenSearch Service.
+    ///
+    /// This alone does not enable request signing: pair it with
+    /// [`OpenSearchConfig::with_aws_credentials_provider`] so `OpenSearchClient::new`
+    /// has credentials to sign with. If a region is set without a credentials
+    /// provider, `OpenSearchClient::new` returns a validation error rather than
+    /// silently sending unsigned requests.
     #[cfg(feature = "aws-auth")]
     pub fn with_aws_region(mut self, region: impl Into<String>) -> Self {
         self.aws_region = Some(region.into());
+        self
+    }
+
+    /// Set the credentials provider used to sign requests with AWS SigV4.
+    ///
+    /// Callers typically obtain a provider from `aws-config`'s default chain,
+    /// e.g. `aws_config::load_defaults(BehaviorVersion::latest()).await.credentials_provider()`,
+    /// or supply a fixed/test provider via
+    /// `aws_credential_types::provider::SharedCredentialsProvider::new(...)`.
+    #[cfg(feature = "aws-auth")]
+    pub fn with_aws_credentials_provider(
+        mut self,
+        provider: aws_credential_types::provider::SharedCredentialsProvider,
+    ) -> Self {
+        self.aws_credentials_provider = Some(provider);
         self
     }
 
