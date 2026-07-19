@@ -454,6 +454,52 @@ mod tests {
     use item::{Column, Entity as Item};
 
     #[test]
+    fn paginated_new_computes_total_pages_and_first_page_flags() {
+        // 95 items at 20/page => 5 pages (div_ceil). Page 1: no prev, has next.
+        let page = Paginated::new(vec!["a"], 1, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(page.meta.has_next);
+        assert!(!page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_middle_page_has_next_and_prev() {
+        let page = Paginated::<&str>::new(vec![], 3, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(page.meta.has_next);
+        assert!(page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_last_page_has_no_next() {
+        let page = Paginated::<&str>::new(vec![], 5, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(!page.meta.has_next);
+        assert!(page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_exact_multiple_total_does_not_add_extra_page() {
+        // 100 items at 20/page => exactly 5 pages, not 6.
+        let page = Paginated::<&str>::new(vec![], 5, 20, 100);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(!page.meta.has_next);
+    }
+
+    #[test]
+    fn paginated_new_zero_total_items_has_no_next_or_prev() {
+        let page = Paginated::<&str>::new(vec![], 1, 20, 0);
+
+        assert_eq!(page.meta.total_pages, 0);
+        assert!(!page.meta.has_next);
+        assert!(!page.meta.has_prev);
+    }
+
+    #[test]
     fn no_count_query_fetches_per_page_plus_one_without_count() {
         let opts = PaginationOptions::new(3, 20);
         let stmt = Item::find()
