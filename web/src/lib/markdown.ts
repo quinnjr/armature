@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
 import { resolve } from 'node:path';
 import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
 import { docs, docFile } from './docs';
 import { url } from './url';
 
@@ -55,6 +56,42 @@ marked.use({
   },
 });
 
+// The docs are repo-controlled, but they are injected via set:html on every
+// visitor's page — sanitize at build time so a bad markdown commit cannot
+// ship script to readers. The allowlist keeps everything marked emits.
+const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: sanitizeHtml.defaults.allowedTags.concat([
+    'h1',
+    'h2',
+    'img',
+    'details',
+    'summary',
+    'kbd',
+    'mark',
+    'del',
+    'ins',
+    'input',
+  ]),
+  allowedAttributes: {
+    ...sanitizeHtml.defaults.allowedAttributes,
+    a: ['href', 'name', 'target', 'rel', 'title'],
+    img: ['src', 'alt', 'title', 'width', 'height'],
+    input: ['type', 'checked', 'disabled'],
+    code: ['class'],
+    pre: ['class'],
+    span: ['class'],
+    '*': ['id', 'align', 'style'],
+  },
+  allowedStyles: {
+    '*': { 'text-align': [/^(left|center|right)$/] },
+  },
+};
+
+/** Render markdown source to sanitized HTML (exported for tests). */
+export function renderMarkdown(markdown: string): string {
+  return sanitizeHtml(marked.parse(markdown, { async: false }), SANITIZE_OPTIONS);
+}
+
 /** Read a markdown file from the repository docs/ directory and render it to HTML. */
 export function renderDocMarkdown(file: string): string {
   let markdown: string;
@@ -66,5 +103,5 @@ export function renderDocMarkdown(file: string): string {
   if (!markdown.trim()) {
     throw new Error(`empty markdown source: ${file}`);
   }
-  return marked.parse(markdown, { async: false });
+  return renderMarkdown(markdown);
 }

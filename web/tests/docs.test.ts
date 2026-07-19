@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { docs, docFile, docsByCategory, getDoc } from '../src/lib/docs';
 import { categories as overviewCategories } from '../src/lib/overview';
-import { DOCS_DIR, renderDocMarkdown, rewriteDocLink } from '../src/lib/markdown';
+import { DOCS_DIR, renderDocMarkdown, renderMarkdown, rewriteDocLink } from '../src/lib/markdown';
 
 describe('docs registry', () => {
   it('has unique ids', () => {
@@ -99,6 +99,26 @@ describe('markdown rendering', () => {
     expect(rewriteDocLink('https://example.com/x.md')).toBe('https://example.com/x.md');
     expect(rewriteDocLink('#section')).toBe('#section');
     expect(rewriteDocLink('/docs/auth-guide')).toBe('/docs/auth-guide');
+  });
+
+  it('strips script and event-handler HTML from markdown', () => {
+    const html = renderMarkdown(
+      '# Title\n\n<script>alert(1)</script>\n\n<img src="x.png" onerror="alert(1)" alt="ok">\n\n[link](https://example.com)'
+    );
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('onerror');
+    expect(html).toContain('<h1');
+    expect(html).toContain('<img');
+    expect(html).toContain('alt="ok"');
+  });
+
+  it('keeps the markup marked emits (code classes, tables, task lists)', () => {
+    const html = renderMarkdown(
+      '```rust\nfn main() {}\n```\n\n| a | b |\n|:--|--:|\n| 1 | 2 |\n\n- [x] done\n'
+    );
+    expect(html).toContain('language-rust');
+    expect(html).toContain('<table');
+    expect(html).toContain('<input');
   });
 
   it('no rendered doc contains a relative .md href', () => {
