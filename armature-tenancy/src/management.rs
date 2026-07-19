@@ -815,6 +815,32 @@ impl InMemoryManagedTenantStore {
         Self::default()
     }
 
+    /// Shared filter predicate used by both `filtered` (which clones matches
+    /// for `list`) and `filtered_count` (which counts without cloning).
+    fn matches(filter: &TenantFilter, t: &ManagedTenant) -> bool {
+        if let Some(status) = filter.status {
+            if t.status != status {
+                return false;
+            }
+        }
+        if let Some(plan) = filter.plan {
+            if t.plan != plan {
+                return false;
+            }
+        }
+        if let Some(ref owner) = filter.owner_id {
+            if t.owner_id.as_ref() != Some(owner) {
+                return false;
+            }
+        }
+        if let Some(ref search) = filter.search {
+            if !t.tenant.name.contains(search) && !t.tenant.id.contains(search) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Apply the filter predicate to every stored tenant, without pagination.
     ///
     /// Shared by `list` (which additionally paginates the result) and
@@ -823,31 +849,20 @@ impl InMemoryManagedTenantStore {
         let tenants = self.tenants.read();
         tenants
             .values()
-            .filter(|t| {
-                if let Some(status) = filter.status {
-                    if t.status != status {
-                        return false;
-                    }
-                }
-                if let Some(plan) = filter.plan {
-                    if t.plan != plan {
-                        return false;
-                    }
-                }
-                if let Some(ref owner) = filter.owner_id {
-                    if t.owner_id.as_ref() != Some(owner) {
-                        return false;
-                    }
-                }
-                if let Some(ref search) = filter.search {
-                    if !t.tenant.name.contains(search) && !t.tenant.id.contains(search) {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|t| Self::matches(filter, t))
             .cloned()
             .collect()
+    }
+
+    /// Count stored tenants matching the filter without cloning any of
+    /// them (unlike `filtered().len()`, which clones every matching
+    /// `ManagedTenant` just to discard it after counting).
+    fn filtered_count(&self, filter: &TenantFilter) -> usize {
+        let tenants = self.tenants.read();
+        tenants
+            .values()
+            .filter(|t| Self::matches(filter, t))
+            .count()
     }
 }
 
@@ -907,8 +922,10 @@ impl ManagedTenantStore for InMemoryManagedTenantStore {
     async fn count(&self, filter: &TenantFilter) -> Result<u64, TenantError> {
         // Count the full filtered set BEFORE pagination is applied - `list`
         // truncates to a page, which previously made `count` report the
-        // page size instead of the total number of matches.
-        Ok(self.filtered(filter).len() as u64)
+        // page size instead of the total number of matches. Uses
+        // `filtered_count`, which counts under the read lock without
+        // cloning every matching `ManagedTenant`.
+        Ok(self.filtered_count(filter) as u64)
     }
 
     async fn update_usage(&self, id: &str, usage: &TenantUsage) -> Result<(), TenantError> {

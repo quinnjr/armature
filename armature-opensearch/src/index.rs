@@ -44,22 +44,12 @@ impl IndexManager {
                 return Err(OpenSearchError::IndexExists(name.to_string()));
             }
 
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
         if !status.is_success() {
             let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
         Ok(())
@@ -84,12 +74,7 @@ impl IndexManager {
 
         if !status.is_success() {
             let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
         Ok(())
@@ -143,12 +128,7 @@ impl IndexManager {
 
         if !response.status_code().is_success() {
             let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
         Ok(())
@@ -168,12 +148,7 @@ impl IndexManager {
 
         if !response.status_code().is_success() {
             let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
         Ok(())

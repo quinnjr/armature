@@ -21,6 +21,21 @@ pub trait CacheProvider: Send + Sync {
     /// Delete value from cache
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
 
+    /// Delete multiple keys from cache.
+    ///
+    /// Used by bulk operations such as [`TenantCache::clear_tenant`] to
+    /// avoid one round-trip per key. The default implementation simply
+    /// loops over [`Self::delete`], so existing `CacheProvider`
+    /// implementations keep compiling and behaving identically without any
+    /// changes. Providers with a native batch/variadic delete (e.g. Redis
+    /// `DEL`/`UNLINK`) should override this for a real performance win.
+    async fn delete_many(&self, keys: &[String]) -> Result<(), CacheError> {
+        for key in keys {
+            self.delete(key).await?;
+        }
+        Ok(())
+    }
+
     /// Check if key exists
     async fn exists(&self, key: &str) -> Result<bool, CacheError>;
 
@@ -128,9 +143,7 @@ impl<P: CacheProvider> TenantCache<P> {
     pub async fn clear_tenant(&self, tenant: &Tenant) -> Result<(), CacheError> {
         let prefix = tenant.cache_key("");
         let keys = self.provider.keys_with_prefix(&prefix).await?;
-        for key in keys {
-            self.provider.delete(&key).await?;
-        }
+        self.provider.delete_many(&keys).await?;
         Ok(())
     }
 

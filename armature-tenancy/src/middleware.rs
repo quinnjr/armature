@@ -69,8 +69,9 @@ fn strip_incoming_tenant_headers(request: &mut HttpRequest) {
         .headers
         .names()
         .filter(|name| {
-            name.to_ascii_lowercase()
-                .starts_with(INTERNAL_TENANT_HEADER_PREFIX)
+            name.as_bytes()
+                .get(..INTERNAL_TENANT_HEADER_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(INTERNAL_TENANT_HEADER_PREFIX.as_bytes()))
         })
         .cloned()
         .collect();

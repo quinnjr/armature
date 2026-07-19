@@ -453,12 +453,12 @@ mod tests {
             .build();
         let redis = RedisService::from_pool(
             config,
-            crate::pool::RedisPool::Single(
-                bb8::Pool::builder().build_unchecked(
+            crate::pool::RedisPool::Single(bb8::Pool::builder().build_unchecked(
+                crate::pool::NamedRedisConnectionManager::new(
                     bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:1").unwrap(),
+                    None,
                 ),
-                None,
-            ),
+            )),
         );
 
         // A future that resolves immediately must pass through untouched.
