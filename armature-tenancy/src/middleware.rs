@@ -109,7 +109,12 @@ impl Middleware for TenantMiddleware {
                 if self.optional {
                     // Optional mode: proceed with NO tenant identity present.
                     // Headers were stripped above, and no TenantContext was
-                    // inserted, so `get_tenant_id` returns None (anonymous).
+                    // inserted here, but defense-in-depth: remove any
+                    // TenantContext that may have been preset on the request
+                    // (e.g. by a server/framework default) before continuing,
+                    // so a resolution failure can never let a stale/preset
+                    // tenant context leak through.
+                    request.extensions.remove::<TenantContext>();
                     next(request).await
                 } else {
                     // Return error

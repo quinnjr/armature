@@ -14,6 +14,9 @@ pub struct Tenant {
     /// Tenant name/slug
     pub name: String,
 
+    /// Human-readable display name (distinct from the slug in `name`)
+    pub display_name: Option<String>,
+
     /// Tenant domain (if using subdomain isolation)
     pub domain: Option<String>,
 
@@ -44,12 +47,19 @@ impl Tenant {
         Self {
             id: id.into(),
             name: name.into(),
+            display_name: None,
             domain: None,
             database: None,
             schema: None,
             active: true,
             metadata: HashMap::new(),
         }
+    }
+
+    /// Set the human-readable display name
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
     }
 
     /// Set tenant domain
