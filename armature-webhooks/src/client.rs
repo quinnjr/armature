@@ -41,7 +41,15 @@ impl WebhookClient {
         client
     }
 
-    /// Send a webhook to a URL with automatic signing
+    /// Send a webhook to a URL
+    ///
+    /// Note: this does **not** sign the request. `WebhookClient` has no
+    /// client-level default signing secret, so without one the request is
+    /// sent unsigned (no `X-Webhook-Signature` header). Use
+    /// [`WebhookClient::send_with_secret`] to sign the request with a
+    /// specific secret, or [`WebhookClient::send_to_endpoint`] /
+    /// [`WebhookClient::dispatch`] for registry-managed endpoints, which are
+    /// always signed with the endpoint's configured secret.
     pub async fn send(&self, url: &str, payload: WebhookPayload) -> Result<WebhookDelivery> {
         self.send_with_secret(url, payload, None).await
     }
@@ -80,7 +88,8 @@ impl WebhookClient {
             .header("X-Webhook-Event", &delivery.payload.event);
 
         if let Some(secret) = secret {
-            let signer = WebhookSignature::new(secret);
+            let signer =
+                WebhookSignature::new(secret).with_algorithm(self.config.signing_algorithm);
             let signature = signer.sign(&body);
             request = request.header("X-Webhook-Signature", signature);
         }
@@ -117,7 +126,8 @@ impl WebhookClient {
         }
 
         // Sign the payload
-        let signer = WebhookSignature::new(&endpoint.secret);
+        let signer =
+            WebhookSignature::new(&endpoint.secret).with_algorithm(self.config.signing_algorithm);
         let signature = signer.sign(&body);
 
         // Build request
@@ -157,12 +167,15 @@ impl WebhookClient {
         })?;
 
         let endpoints = registry.get_endpoints_for_event(&payload.event);
-        let mut deliveries = Vec::with_capacity(endpoints.len());
 
-        for endpoint in endpoints {
-            let delivery = self.send_to_endpoint(&endpoint, payload.clone()).await?;
-            deliveries.push(delivery);
-        }
+        let futures = endpoints
+            .iter()
+            .map(|endpoint| self.send_to_endpoint(endpoint, payload.clone()));
+
+        let deliveries = futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(deliveries)
     }
@@ -279,7 +292,10 @@ impl Default for WebhookClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WebhookEndpoint;
     use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_client_creation() {
@@ -330,5 +346,65 @@ mod tests {
 
         assert_eq!(delivery.status, WebhookDeliveryStatus::PermanentlyFailed);
         assert!(delivery.last_error.unwrap().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_delivers_to_all_endpoints_and_collects_results() {
+        let server1 = MockServer::start().await;
+        let server2 = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server1)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server2)
+            .await;
+
+        let registry = Arc::new(WebhookRegistry::new());
+        registry.register(
+            WebhookEndpoint::builder(format!("{}/hook", server1.uri()))
+                .events(vec!["order.created"])
+                .build(),
+        );
+        registry.register(
+            WebhookEndpoint::builder(format!("{}/hook", server2.uri()))
+                .events(vec!["order.created"])
+                .build(),
+        );
+
+        let client = WebhookClient::with_registry(WebhookConfig::default(), registry);
+        let payload = WebhookPayload::new("order.created").with_data(serde_json::json!({}));
+
+        let deliveries = client.dispatch(payload).await.unwrap();
+
+        assert_eq!(deliveries.len(), 2);
+        assert!(
+            deliveries
+                .iter()
+                .all(|d| d.status == WebhookDeliveryStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn test_send_with_secret_uses_configured_signing_algorithm() {
+        let config = WebhookConfig::builder()
+            .signing_algorithm(crate::SigningAlgorithm::HmacSha512)
+            .build();
+        let client = WebhookClient::new(config);
+
+        let signer =
+            WebhookSignature::new("secret").with_algorithm(client.config().signing_algorithm);
+        let signature = signer.sign(b"payload");
+
+        // SHA-512 hex digest (128 chars) should appear in the v1 component
+        let v1 = signature.split("v1=").nth(1).unwrap();
+        assert_eq!(v1.len(), 128);
     }
 }

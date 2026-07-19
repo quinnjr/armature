@@ -89,7 +89,13 @@ impl ServiceDiscovery for ConsulDiscovery {
     }
 
     async fn discover(&self, service_name: &str) -> Result<Vec<ServiceInstance>, DiscoveryError> {
-        let url = format!("{}/v1/health/service/{}", self.base_url, service_name);
+        // `passing=true` asks Consul to filter out instances whose health
+        // checks are not all passing, so callers never get routed to an
+        // unhealthy/critical instance.
+        let url = format!(
+            "{}/v1/health/service/{}?passing=true",
+            self.base_url, service_name
+        );
 
         let response = self.client.get(&url).send().await?;
 
@@ -198,10 +204,47 @@ impl ServiceDiscovery for ConsulDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use armature_testkit::http_stub::{StubResponse, StubServer};
 
     #[test]
     fn test_consul_discovery_creation() {
         let consul = ConsulDiscovery::new("http://localhost:8500");
         assert!(consul.is_ok());
+    }
+
+    #[tokio::test]
+    async fn discover_requests_passing_true_so_unhealthy_instances_are_excluded() {
+        let body = serde_json::json!([{
+            "Service": {
+                "ID": "svc-1",
+                "Service": "api",
+                "Address": "localhost",
+                "Port": 8080,
+                "Tags": [],
+                "Meta": null,
+            }
+        }])
+        .to_string();
+
+        let server = StubServer::builder()
+            .route(
+                "GET",
+                "/v1/health/service/api",
+                StubResponse::json(200, body),
+            )
+            .start()
+            .await;
+
+        let consul = ConsulDiscovery::new(server.url()).unwrap();
+        let instances = consul.discover("api").await.unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].id, "svc-1");
+
+        let req = server.assert_received("GET", "/v1/health/service/api");
+        assert_eq!(
+            req.query.as_deref(),
+            Some("passing=true"),
+            "discover() must ask Consul to filter to passing (healthy) instances only"
+        );
     }
 }

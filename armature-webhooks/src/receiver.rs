@@ -1,6 +1,6 @@
 //! Webhook receiver for handling incoming webhooks
 
-use crate::{Result, WebhookError, WebhookPayload, WebhookSignature};
+use crate::{Result, WebhookConfig, WebhookError, WebhookPayload, WebhookSignature};
 
 /// Receiver for incoming webhooks
 #[derive(Debug, Clone)]
@@ -11,10 +11,21 @@ pub struct WebhookReceiver {
 
 impl WebhookReceiver {
     /// Create a new receiver with the given secret
+    ///
+    /// Uses [`WebhookConfig::default`] for the timestamp tolerance and signing
+    /// algorithm. To have a `WebhookConfig`'s settings (e.g. a custom
+    /// `timestamp_tolerance` or `signing_algorithm`) flow through, use
+    /// [`WebhookReceiver::from_config`] instead.
     pub fn new(secret: impl Into<String>) -> Self {
+        Self::from_config(secret, &WebhookConfig::default())
+    }
+
+    /// Create a new receiver from a [`WebhookConfig`], so its
+    /// `timestamp_tolerance` and `signing_algorithm` are honored
+    pub fn from_config(secret: impl Into<String>, config: &WebhookConfig) -> Self {
         Self {
-            signature: WebhookSignature::new(secret),
-            timestamp_tolerance: 300, // 5 minutes default
+            signature: WebhookSignature::new(secret).with_algorithm(config.signing_algorithm),
+            timestamp_tolerance: config.timestamp_tolerance,
         }
     }
 
@@ -45,7 +56,9 @@ impl WebhookReceiver {
 
     /// Verify signature from HTTP headers
     ///
-    /// Looks for the signature in common header names:
+    /// Looks for the signature in common header names, matched
+    /// case-insensitively (HTTP header names are case-insensitive per RFC
+    /// 7230 section 3.2):
     /// - X-Webhook-Signature
     /// - X-Hub-Signature-256
     pub fn verify_from_headers(
@@ -53,12 +66,12 @@ impl WebhookReceiver {
         payload: &[u8],
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<bool> {
-        // Try common signature header names
+        const CANDIDATES: &[&str] = &["x-webhook-signature", "x-hub-signature-256"];
+
         let signature = headers
-            .get("X-Webhook-Signature")
-            .or_else(|| headers.get("x-webhook-signature"))
-            .or_else(|| headers.get("X-Hub-Signature-256"))
-            .or_else(|| headers.get("x-hub-signature-256"))
+            .iter()
+            .find(|(key, _)| CANDIDATES.contains(&key.to_lowercase().as_str()))
+            .map(|(_, value)| value)
             .ok_or(WebhookError::SignatureMissing)?;
 
         self.verify(payload, signature)
@@ -214,6 +227,43 @@ mod tests {
         let result = receiver.verify_from_headers(payload, &headers);
         assert!(result.is_ok());
         assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_from_headers_mixed_case() {
+        let secret = "test-secret";
+        let receiver = WebhookReceiver::new(secret);
+        let signer = WebhookSignature::new(secret);
+
+        let payload = b"test payload";
+        let signature = signer.sign(payload);
+
+        // HTTP header names are case-insensitive; a mixed-case variant
+        // like "x-webhook-Signature" must still be found.
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-webhook-Signature".to_string(), signature.clone());
+
+        let result = receiver.verify_from_headers(payload, &headers);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // Also check the GitHub-style alternate header in a different case
+        let mut headers2 = std::collections::HashMap::new();
+        headers2.insert("X-HUB-SIGNATURE-256".to_string(), signature);
+
+        let result2 = receiver.verify_from_headers(payload, &headers2);
+        assert!(result2.is_ok());
+        assert!(result2.unwrap());
+    }
+
+    #[test]
+    fn test_from_config_threads_timestamp_tolerance() {
+        let config = crate::WebhookConfig::builder()
+            .timestamp_tolerance(60)
+            .build();
+        let receiver = WebhookReceiver::from_config("test-secret", &config);
+
+        assert_eq!(receiver.timestamp_tolerance, 60);
     }
 
     #[test]

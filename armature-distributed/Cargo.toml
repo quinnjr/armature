@@ -27,4 +27,5 @@ rand = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 

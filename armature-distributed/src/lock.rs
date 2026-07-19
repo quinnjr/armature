@@ -3,8 +3,31 @@
 use async_trait::async_trait;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::runtime::Handle;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+/// Lua script that only mutates the key if the caller's token still matches
+/// the stored value. Shared by the renewal watchdog and by release paths so
+/// a lock is never refreshed or deleted out from under another holder.
+const RELEASE_SCRIPT: &str = r#"
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+    else
+        return 0
+    end
+"#;
+
+const RENEW_SCRIPT: &str = r#"
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+        redis.call("pexpire", KEYS[1], ARGV[2])
+        return 1
+    else
+        return 0
+    end
+"#;
 
 /// Distributed lock errors
 #[derive(Debug, Error)]
@@ -38,35 +61,93 @@ pub trait DistributedLock: Send + Sync {
     async fn acquire_timeout(&self, timeout: Duration) -> Result<LockGuard, LockError>;
 }
 
-/// Lock guard that automatically releases on drop
+/// Lock guard that automatically releases on drop.
+///
+/// While held, a background watchdog task periodically refreshes the key's
+/// TTL in Redis (guarded by the lock's token, via [`RENEW_SCRIPT`]) so the
+/// lock does not silently expire while the critical section is still
+/// running. The watchdog is cancelled when the guard is released or dropped.
 pub struct LockGuard {
     key: String,
     token: String,
     conn: redis::aio::ConnectionManager,
+    /// Signals the watchdog task to stop; dropping the sender also stops it.
+    watchdog_stop: Option<oneshot::Sender<()>>,
+    /// Handle to the watchdog task, kept so `drop` can detach it cleanly.
+    watchdog: Option<JoinHandle<()>>,
 }
 
 impl LockGuard {
-    /// Create new lock guard
-    fn new(key: String, token: String, conn: redis::aio::ConnectionManager) -> Self {
-        Self { key, token, conn }
+    /// Create a new lock guard and spawn its renewal watchdog.
+    ///
+    /// `ttl` is the lock's TTL; the watchdog renews at `ttl / 3`, mirroring
+    /// `LeaderElection`'s refresh cadence.
+    fn new(key: String, token: String, conn: redis::aio::ConnectionManager, ttl: Duration) -> Self {
+        let (watchdog_stop, mut stop_rx) = oneshot::channel();
+
+        let watchdog = {
+            let key = key.clone();
+            let token = token.clone();
+            let mut conn = conn.clone();
+            let ttl_ms = ttl.as_millis().max(1) as usize;
+            let interval = Duration::from_millis((ttl.as_millis() / 3).max(1) as u64);
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break,
+                        _ = tokio::time::sleep(interval) => {}
+                    }
+
+                    let result: Result<i32, _> = redis::Script::new(RENEW_SCRIPT)
+                        .key(&key)
+                        .arg(&token)
+                        .arg(ttl_ms)
+                        .invoke_async(&mut conn)
+                        .await;
+
+                    match result {
+                        Ok(1) => debug!("Renewed lock: {}", key),
+                        Ok(_) => {
+                            warn!("Lock renewal found lock no longer held: {}", key);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Lock renewal failed for {}: {}", key, e);
+                        }
+                    }
+                }
+            })
+        };
+
+        Self {
+            key,
+            token,
+            conn,
+            watchdog_stop: Some(watchdog_stop),
+            watchdog: Some(watchdog),
+        }
+    }
+
+    /// Stop the renewal watchdog (best effort; does not wait for it to exit).
+    fn stop_watchdog(&mut self) {
+        if let Some(stop) = self.watchdog_stop.take() {
+            let _ = stop.send(());
+        }
+        // Detach rather than await: `release`/`drop` must not block on the
+        // watchdog's next wake-up.
+        self.watchdog.take();
     }
 
     /// Manually release the lock
     pub async fn release(mut self) -> Result<(), LockError> {
+        self.stop_watchdog();
         self.release_internal().await
     }
 
     async fn release_internal(&mut self) -> Result<(), LockError> {
-        // Use Lua script for atomic release
-        let script = r#"
-            if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("del", KEYS[1])
-            else
-                return 0
-            end
-        "#;
-
-        let result: i32 = redis::Script::new(script)
+        // Use Lua script for atomic, token-guarded release.
+        let result: i32 = redis::Script::new(RELEASE_SCRIPT)
             .key(&self.key)
             .arg(&self.token)
             .invoke_async(&mut self.conn)
@@ -84,21 +165,27 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // Best effort release on drop
+        self.stop_watchdog();
+
+        // Best-effort release on drop. This is only safe to spawn when a
+        // Tokio runtime is actually running on this thread; dropping a guard
+        // outside of one (e.g. during process shutdown after the runtime has
+        // been torn down) must not panic, so we skip the release in that
+        // case rather than call `tokio::spawn` unconditionally.
+        let Ok(handle) = Handle::try_current() else {
+            warn!(
+                "Lock guard for {} dropped off a Tokio runtime; skipping best-effort release",
+                self.key
+            );
+            return;
+        };
+
         let key = self.key.clone();
         let token = self.token.clone();
         let mut conn = self.conn.clone();
 
-        tokio::spawn(async move {
-            let script = r#"
-                if redis.call("get", KEYS[1]) == ARGV[1] then
-                    return redis.call("del", KEYS[1])
-                else
-                    return 0
-                end
-            "#;
-
-            let _: Result<i32, _> = redis::Script::new(script)
+        handle.spawn(async move {
+            let _: Result<i32, _> = redis::Script::new(RELEASE_SCRIPT)
                 .key(&key)
                 .arg(&token)
                 .invoke_async(&mut conn)
@@ -172,7 +259,12 @@ impl DistributedLock for RedisLock {
 
         if result.is_some() {
             info!("Acquired lock: {}", self.key);
-            Ok(Some(LockGuard::new(self.key.clone(), token, conn)))
+            Ok(Some(LockGuard::new(
+                self.key.clone(),
+                token,
+                conn,
+                self.ttl,
+            )))
         } else {
             debug!("Failed to acquire lock (already held): {}", self.key);
             Ok(None)
@@ -233,5 +325,135 @@ mod tests {
 
         assert_eq!(builder.key, "test-lock");
         assert_eq!(builder.ttl, Duration::from_secs(60));
+    }
+
+    // --- Redis-backed semantics tests ---
+    //
+    // These exercise real lock semantics against a containerized Redis and
+    // are skipped (not failed) when Docker is unavailable, matching the
+    // pattern used elsewhere in the workspace (e.g. `armature-redis`).
+
+    async fn connection_manager(url: &str) -> redis::aio::ConnectionManager {
+        let client = redis::Client::open(url).expect("open redis client");
+        client
+            .get_connection_manager()
+            .await
+            .expect("get connection manager")
+    }
+
+    #[tokio::test]
+    async fn mutual_exclusion_second_acquire_fails_while_first_held() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let conn = connection_manager(&container.url()).await;
+
+        let lock = RedisLock::new("wf3-mutex", Duration::from_secs(30), conn);
+
+        let guard = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error")
+            .expect("first acquire should succeed");
+
+        let second = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error");
+        assert!(
+            second.is_none(),
+            "second acquire should fail while the first guard is held"
+        );
+
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn token_guarded_release_does_not_delete_lock_reacquired_by_someone_else() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let conn1 = connection_manager(&container.url()).await;
+        let conn2 = connection_manager(&container.url()).await;
+
+        let short_ttl = Duration::from_millis(200);
+        let lock = RedisLock::new("wf3-token-guard", short_ttl, conn1);
+
+        let mut guard = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error")
+            .expect("first acquire should succeed");
+        // Disable the renewal watchdog so the key can expire naturally,
+        // simulating a stale holder whose lease lapsed.
+        guard.stop_watchdog();
+
+        tokio::time::sleep(short_ttl * 3).await;
+
+        // A different holder re-acquires the now-expired key.
+        let lock2 = RedisLock::new("wf3-token-guard", Duration::from_secs(30), conn2);
+        let guard2 = lock2
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error")
+            .expect("second holder should be able to acquire the expired lock");
+
+        // The stale guard's release must be a no-op (token mismatch), not a
+        // deletion of the new holder's lock.
+        let release_result = guard.release().await;
+        assert!(
+            matches!(release_result, Err(LockError::NotHeld)),
+            "stale release should fail with NotHeld, got {release_result:?}"
+        );
+
+        // The new holder's lock must still be intact.
+        let still_held = lock2
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error");
+        assert!(
+            still_held.is_none(),
+            "new holder's lock must still be held after the stale release"
+        );
+
+        drop(guard2);
+    }
+
+    #[tokio::test]
+    async fn renewal_watchdog_keeps_lock_held_past_original_ttl() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let conn = connection_manager(&container.url()).await;
+
+        let ttl = Duration::from_millis(300);
+        let lock = RedisLock::new("wf3-renewal", ttl, conn);
+
+        let guard = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error")
+            .expect("first acquire should succeed");
+
+        // Wait past the original TTL; without a renewal watchdog the key
+        // would have expired by now.
+        tokio::time::sleep(ttl * 2).await;
+
+        let second = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error");
+        assert!(
+            second.is_none(),
+            "lock should still be held past its original TTL thanks to the renewal watchdog"
+        );
+
+        drop(guard);
     }
 }

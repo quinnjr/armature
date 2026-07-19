@@ -4,11 +4,9 @@ Webhook handling for the Armature framework.
 
 ## Features
 
-- **Signature Verification** - Validate webhook signatures
-- **Retry Support** - Automatic delivery retries
-- **Event Registry** - Type-safe event handling
-- **Idempotency** - Prevent duplicate processing
-- **Provider Support** - Stripe, GitHub, Slack, etc.
+- **Signature Verification** - HMAC-SHA256/SHA512 webhook signature signing and verification
+- **Retry Support** - Automatic delivery retries with configurable backoff
+- **Event Registry** - Subscribe endpoints to specific event types and dispatch to all of them
 
 ## Installation
 
@@ -19,57 +17,46 @@ armature-webhooks = "0.1"
 
 ## Quick Start
 
-```rust
-use armature_webhooks::{WebhookHandler, WebhookConfig};
+### Receiving webhooks
 
-let handler = WebhookHandler::new(WebhookConfig {
-    secret: "your-webhook-secret",
-    signature_header: "X-Signature",
+```rust
+use armature_webhooks::WebhookReceiver;
+
+let receiver = WebhookReceiver::new("your-webhook-secret");
+
+// Create a handler that only processes "order.*" events
+let handler = receiver.handler("order.*", |event| {
+    match event.event.as_str() {
+        "order.created" => {
+            // process_order(event.data)
+        }
+        _ => {}
+    }
+    Ok(())
 });
 
-let app = Application::new()
-    .post("/webhooks", move |req| {
-        let handler = handler.clone();
-        async move {
-            handler.handle(req, |event| async move {
-                match event.event_type.as_str() {
-                    "order.created" => process_order(event.data).await,
-                    _ => Ok(()),
-                }
-            }).await
-        }
-    });
+// In your request handling code, verify + dispatch a raw request body
+// and its `X-Webhook-Signature` header value:
+let handled = handler.handle(payload_bytes, signature_header)?;
 ```
 
-## Provider-Specific Handlers
-
-### Stripe
+### Sending webhooks
 
 ```rust
-let stripe = StripeWebhook::new("whsec_...");
-stripe.handle(req, |event| async move {
-    match event {
-        StripeEvent::PaymentSucceeded(payment) => { ... }
-        StripeEvent::CustomerCreated(customer) => { ... }
-        _ => Ok(()),
-    }
-}).await
-```
+use armature_webhooks::{WebhookClient, WebhookConfig, WebhookPayload};
 
-### GitHub
+let client = WebhookClient::new(WebhookConfig::default());
 
-```rust
-let github = GitHubWebhook::new("secret");
-github.handle(req, |event| async move {
-    match event {
-        GitHubEvent::Push(push) => { ... }
-        GitHubEvent::PullRequest(pr) => { ... }
-        _ => Ok(()),
-    }
-}).await
+let payload = WebhookPayload::new("user.created")
+    .with_data(serde_json::json!({
+        "user_id": "123",
+        "email": "user@example.com"
+    }));
+
+// Sign and send with a specific secret
+client.send_with_secret("https://example.com/webhook", payload, Some("endpoint-secret")).await?;
 ```
 
 ## License
 
 MIT OR Apache-2.0
-

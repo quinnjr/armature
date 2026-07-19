@@ -32,4 +32,5 @@ consul-client = ["consul"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+armature-testkit = { path = "../armature-testkit" }
 

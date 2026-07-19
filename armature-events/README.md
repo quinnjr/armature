@@ -6,8 +6,6 @@ Event system for the Armature framework.
 
 - **Event Bus** - Publish/subscribe events
 - **Async Handlers** - Non-blocking event processing
-- **Event Sourcing** - Append-only event log
-- **Replay** - Rebuild state from events
 
 ## Installation
 
@@ -18,18 +16,50 @@ armature-events = "0.1"
 
 ## Quick Start
 
-```rust
-use armature_events::{EventBus, Event};
+```rust,ignore
+use armature_events::{Event, EventBus, EventHandler, EventHandlerError, EventMetadata, TypedEventHandler};
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use std::any::Any;
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+struct UserCreated {
+    metadata: EventMetadata,
+    user_id: String,
+    email: String,
+}
+
+impl Event for UserCreated {
+    fn event_name(&self) -> &str { "user_created" }
+    fn event_id(&self) -> Uuid { self.metadata.id }
+    fn timestamp(&self) -> DateTime<Utc> { self.metadata.timestamp }
+    fn as_any(&self) -> &dyn Any { self }
+    fn clone_event(&self) -> Box<dyn Event> { Box::new(self.clone()) }
+}
+
+#[derive(Clone)]
+struct EmailHandler;
+
+#[async_trait]
+impl EventHandler<UserCreated> for EmailHandler {
+    async fn handle(&self, event: &UserCreated) -> Result<(), EventHandlerError> {
+        send_welcome_email(&event.email).await
+    }
+}
 
 let bus = EventBus::new();
 
-// Subscribe
-bus.subscribe::<UserCreated>(|event| async move {
-    send_welcome_email(&event.email).await
-});
+// Subscribe: two type params (event type, handler type) wrapped in TypedEventHandler
+bus.subscribe::<UserCreated, _>(TypedEventHandler::new(EmailHandler));
 
 // Publish
-bus.publish(UserCreated { user_id: "123".into() }).await;
+bus.publish(UserCreated {
+    metadata: EventMetadata::new("user_created"),
+    user_id: "123".into(),
+    email: "alice@example.com".into(),
+})
+.await?;
 ```
 
 ## License

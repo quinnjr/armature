@@ -49,6 +49,7 @@ use mq_bridge::{Handled, HandlerError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::RwLock;
 
 /// Configuration for mq-bridge endpoints
 #[derive(Debug, Clone)]
@@ -346,24 +347,28 @@ pub fn from_canonical(canonical: CanonicalMessage, default_topic: &str) -> Messa
 /// This broker uses mq-bridge endpoints for message transport, providing
 /// access to Kafka, AMQP, NATS, MQTT, and more through a unified interface.
 pub struct MqBridgeBroker {
-    #[allow(dead_code)]
     config: MqBridgeConfig,
+    /// The endpoint built from `config.topic`, kept around for `endpoint()`
+    /// and `channel()` (mainly used by the in-memory test broker).
     endpoint: Endpoint,
-    route_name: String,
     connected: AtomicBool,
+    /// Publishers are expensive to construct (each one opens a fresh
+    /// connection to the backing transport), so they are created lazily per
+    /// destination topic and reused across calls to `publish`/
+    /// `publish_with_options` instead of being rebuilt on every message.
+    publishers: RwLock<HashMap<String, Arc<dyn MessagePublisher>>>,
 }
 
 impl MqBridgeBroker {
     /// Create a new mq-bridge broker
     pub async fn new(config: MqBridgeConfig) -> Result<Self, MessagingError> {
         let endpoint = config.build_endpoint();
-        let route_name = format!("armature-{}", config.topic);
 
         Ok(Self {
             config,
             endpoint,
-            route_name,
             connected: AtomicBool::new(true),
+            publishers: RwLock::new(HashMap::new()),
         })
     }
 
@@ -409,14 +414,56 @@ impl MqBridgeBroker {
         self.endpoint.channel().ok()
     }
 
-    async fn get_publisher(&self) -> Result<Arc<dyn MessagePublisher>, MessagingError> {
-        create_publisher_from_route(&self.route_name, &self.endpoint)
-            .await
-            .map_err(|e| MessagingError::Connection(e.to_string()))
+    /// Build the endpoint that should be used to route a message for the
+    /// given topic: the endpoint built from `config.topic` when the topic
+    /// matches the broker's default (avoiding an extra endpoint build), or a
+    /// fresh endpoint pointed at the requested topic otherwise. This is what
+    /// makes the per-call topic (the `topic` argument to `subscribe*`, or
+    /// `message.topic` for publishing) actually control routing instead of
+    /// always going to `config.topic`.
+    fn endpoint_for_topic(&self, topic: &str) -> Endpoint {
+        if topic == self.config.topic {
+            self.endpoint.clone()
+        } else {
+            let mut config = self.config.clone();
+            config.topic = topic.to_string();
+            config.build_endpoint()
+        }
     }
 
-    async fn get_consumer(&self) -> Result<Box<dyn MessageConsumer>, MessagingError> {
-        create_consumer_from_route(&self.route_name, &self.endpoint)
+    /// Get (creating and caching if necessary) the publisher for `topic`.
+    /// Publishers are cached per-topic so repeated `publish`/
+    /// `publish_with_options` calls reuse the same underlying connection
+    /// instead of opening a new one per message.
+    async fn get_or_create_publisher(
+        &self,
+        topic: &str,
+    ) -> Result<Arc<dyn MessagePublisher>, MessagingError> {
+        if let Some(publisher) = self.publishers.read().await.get(topic) {
+            return Ok(publisher.clone());
+        }
+
+        let mut publishers = self.publishers.write().await;
+        // Re-check after acquiring the write lock in case another task raced
+        // us and already created the publisher for this topic.
+        if let Some(publisher) = publishers.get(topic) {
+            return Ok(publisher.clone());
+        }
+
+        let endpoint = self.endpoint_for_topic(topic);
+        let route_name = format!("armature-{}", topic);
+        let publisher = create_publisher_from_route(&route_name, &endpoint)
+            .await
+            .map_err(|e| MessagingError::Connection(e.to_string()))?;
+
+        publishers.insert(topic.to_string(), publisher.clone());
+        Ok(publisher)
+    }
+
+    async fn get_consumer(&self, topic: &str) -> Result<Box<dyn MessageConsumer>, MessagingError> {
+        let endpoint = self.endpoint_for_topic(topic);
+        let route_name = format!("armature-{}", topic);
+        create_consumer_from_route(&route_name, &endpoint)
             .await
             .map_err(|e| MessagingError::Connection(e.to_string()))
     }
@@ -495,7 +542,10 @@ impl MessageBroker for MqBridgeBroker {
     type Subscription = MqBridgeSubscription;
 
     async fn publish(&self, message: Message) -> Result<(), MessagingError> {
-        let publisher = self.get_publisher().await?;
+        // Route by the message's own topic, not the broker's default
+        // `config.topic` - this is what lets multi-topic use of a single
+        // `MqBridgeBroker` actually reach the right destination.
+        let publisher = self.get_or_create_publisher(&message.topic).await?;
         let canonical = to_canonical(&message);
 
         publisher
@@ -511,7 +561,13 @@ impl MessageBroker for MqBridgeBroker {
         message: Message,
         _options: PublishOptions,
     ) -> Result<(), MessagingError> {
-        // mq-bridge handles persistence and routing internally
+        // `persistent`/`routing_key`/`exchange`/`partition_key` have no
+        // per-call equivalent in mq-bridge: persistence and AMQP routing are
+        // fixed at endpoint/route construction time (see mq-bridge's
+        // `AmqpPublisher::send` and `KafkaConfig::partition_key`), and
+        // mq-bridge does not expose a per-`CanonicalMessage` override for
+        // them. There is nothing meaningful to apply here beyond what
+        // `publish` already does, so this intentionally just delegates.
         self.publish(message).await
     }
 
@@ -532,7 +588,10 @@ impl MessageBroker for MqBridgeBroker {
     ) -> Result<Self::Subscription, MessagingError> {
         let (subscription, mut cancel_rx) = MqBridgeSubscription::new(topic.to_string());
 
-        let mut consumer = self.get_consumer().await?;
+        // Route by the topic argument, not the broker's default
+        // `config.topic` - otherwise every subscription would consume from
+        // the same single endpoint regardless of what was requested.
+        let mut consumer = self.get_consumer(topic).await?;
 
         let adapter = Arc::new(HandlerAdapter {
             handler,
@@ -760,6 +819,59 @@ mod tests {
             let msgs = channel.drain_messages();
             assert_eq!(msgs.len(), 1);
             assert_eq!(msgs[0].payload.as_ref(), b"hello");
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_routes_by_message_topic_not_broker_default() {
+        let broker = MqBridgeBroker::memory("default-topic").await.unwrap();
+
+        // Publish to a topic different from the broker's configured default;
+        // the message must be routed there, not to "default-topic".
+        let msg = Message::new("other-topic", b"hello-other".to_vec());
+        broker.publish(msg).await.unwrap();
+
+        let other_channel = MqBridgeConfig::memory("other-topic")
+            .build_endpoint()
+            .channel()
+            .expect("memory channel for other-topic");
+        let other_msgs = other_channel.drain_messages();
+        assert_eq!(other_msgs.len(), 1);
+        assert_eq!(other_msgs[0].payload.as_ref(), b"hello-other");
+
+        // Nothing should have landed on the broker's default topic channel.
+        if let Some(default_channel) = broker.channel() {
+            assert!(default_channel.drain_messages().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn publisher_is_cached_per_topic_across_publishes() {
+        let broker = MqBridgeBroker::memory("test-topic").await.unwrap();
+
+        broker
+            .publish(Message::new("test-topic", b"one".to_vec()))
+            .await
+            .unwrap();
+        broker
+            .publish(Message::new("test-topic", b"two".to_vec()))
+            .await
+            .unwrap();
+
+        // A second publish to the same topic must reuse the cached
+        // publisher rather than constructing a fresh one.
+        assert_eq!(broker.publishers.read().await.len(), 1);
+
+        // A publish to a different topic gets its own cache entry.
+        broker
+            .publish(Message::new("another-topic", b"three".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(broker.publishers.read().await.len(), 2);
+
+        if let Some(channel) = broker.channel() {
+            let msgs = channel.drain_messages();
+            assert_eq!(msgs.len(), 2);
         }
     }
 }

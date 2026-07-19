@@ -73,7 +73,7 @@ mod retry;
 mod signature;
 
 pub use client::WebhookClient;
-pub use config::{WebhookConfig, WebhookConfigBuilder};
+pub use config::{SigningAlgorithm, WebhookConfig, WebhookConfigBuilder};
 pub use endpoint::{WebhookEndpoint, WebhookEndpointBuilder};
 pub use error::WebhookError;
 pub use payload::{WebhookDelivery, WebhookDeliveryStatus, WebhookPayload};

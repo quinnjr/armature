@@ -106,10 +106,12 @@
 //!
 //!     // Process jobs
 //!     let mut worker = Worker::new(queue);
-//!     worker.register_handler("send_email", |job| async move {
-//!         // Send email logic
-//!         Ok(())
-//!     });
+//!     worker
+//!         .register_handler("send_email", |job| async move {
+//!             // Send email logic
+//!             Ok(())
+//!         })
+//!         .await;
 //!
 //!     worker.start().await?;
 //!

@@ -1,9 +1,9 @@
 //! Queue implementation with Redis backend.
 
 use crate::error::{QueueError, QueueResult};
-use crate::job::{Job, JobData, JobId, JobPriority, JobState};
+use crate::job::{Job, JobData, JobId, JobPriority, JobState, JobStatus};
 use armature_log::{debug, info};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use redis::{AsyncCommands, Client, aio::ConnectionManager};
 use std::time::Duration;
 
@@ -172,11 +172,46 @@ impl Queue {
         self.enqueue_job(job).await
     }
 
+    /// Enqueue a job to run after a delay.
+    ///
+    /// Convenience wrapper over [`Job::schedule_after`] + [`enqueue_job`]: the
+    /// job lands in the delayed set and is promoted once due.
+    ///
+    /// [`enqueue_job`]: Self::enqueue_job
+    pub async fn enqueue_in(
+        &self,
+        delay: chrono::Duration,
+        job_type: impl Into<String>,
+        data: JobData,
+    ) -> QueueResult<JobId> {
+        let job = Job::new(&self.config.queue_name, job_type, data).schedule_after(delay);
+        self.enqueue_job(job).await
+    }
+
+    /// Enqueue a job to run at a specific time.
+    ///
+    /// Convenience wrapper over [`Job::schedule_at`] + [`enqueue_job`]: the job
+    /// lands in the delayed set and is promoted once its scheduled time passes.
+    ///
+    /// [`enqueue_job`]: Self::enqueue_job
+    pub async fn enqueue_at(
+        &self,
+        when: DateTime<Utc>,
+        job_type: impl Into<String>,
+        data: JobData,
+    ) -> QueueResult<JobId> {
+        let job = Job::new(&self.config.queue_name, job_type, data).schedule_at(when);
+        self.enqueue_job(job).await
+    }
+
     /// Enqueue a job with options.
     pub async fn enqueue_job(&self, job: Job) -> QueueResult<JobId> {
-        // Check queue size limit
+        // Check queue size limit. The cap counts every job occupying the
+        // queue -- pending (all priorities), delayed/scheduled, and in-flight
+        // `processing` -- not just the ready `pending:*` sets, so scheduled and
+        // in-flight jobs cannot silently push the queue past `max_size`.
         if self.config.max_size > 0 {
-            let size = self.size().await?;
+            let size = self.backlog_size().await?;
             if size >= self.config.max_size {
                 return Err(QueueError::QueueFull);
             }
@@ -297,6 +332,35 @@ impl Queue {
         Ok(())
     }
 
+    /// Return a dequeued-but-unprocessed job to its pending priority queue.
+    ///
+    /// A job popped by [`dequeue`] has already been marked processing (attempt
+    /// incremented) and placed in the `processing` set. When the caller cannot
+    /// run it after all (e.g. a batch consumer that dequeued the wrong job
+    /// type), this puts it back on its priority queue and removes it from
+    /// `processing`, undoing the `start_processing` bookkeeping so the requeue
+    /// does not burn a retry attempt. Without this the job would be orphaned in
+    /// `processing` forever (data loss).
+    ///
+    /// [`dequeue`]: Self::dequeue
+    pub async fn requeue(&self, job: &Job) -> QueueResult<()> {
+        let mut job = job.clone();
+
+        // Undo the `start_processing` side effects so the job looks untouched.
+        job.status = JobStatus::pending();
+        job.started_at = None;
+        job.attempts = job.attempts.saturating_sub(1);
+        self.save_job(&job).await?;
+
+        let mut conn = self.connection.clone();
+        let queue_key = self.priority_queue_key(job.priority);
+        let score = -(job.priority as i64);
+        let _: () = conn.zadd(&queue_key, job.id.to_string(), score).await?;
+
+        self.remove_from_processing(job.id).await?;
+        Ok(())
+    }
+
     /// Get a job by ID.
     pub async fn get_job(&self, job_id: JobId) -> QueueResult<Option<Job>> {
         let mut conn = self.connection.clone();
@@ -347,6 +411,41 @@ impl Queue {
         Ok(counts.iter().sum())
     }
 
+    /// Total number of jobs occupying the queue, for `max_size` enforcement.
+    ///
+    /// Unlike [`size`], which counts only ready `pending:*` jobs, this also
+    /// counts delayed/scheduled jobs and in-flight `processing` jobs -- every
+    /// job that holds a slot against the configured cap. Pipelined into one
+    /// round-trip.
+    ///
+    /// [`size`]: Self::size
+    pub async fn backlog_size(&self) -> QueueResult<usize> {
+        let mut conn = self.connection.clone();
+
+        let mut pipe = redis::pipe();
+        for priority in [
+            JobPriority::Critical,
+            JobPriority::High,
+            JobPriority::Normal,
+            JobPriority::Low,
+        ] {
+            pipe.zcard(self.priority_queue_key(priority));
+        }
+        pipe.zcard(self.config.key("delayed"));
+        pipe.zcard(self.config.key("processing"));
+
+        let counts: Vec<usize> = pipe.query_async(&mut conn).await?;
+        Ok(counts.iter().sum())
+    }
+
+    /// Number of jobs currently in the in-flight `processing` set.
+    pub async fn processing_len(&self) -> QueueResult<usize> {
+        let mut conn = self.connection.clone();
+        let processing_key = self.config.key("processing");
+        let count: usize = conn.zcard(&processing_key).await?;
+        Ok(count)
+    }
+
     /// Move delayed jobs to ready queue.
     ///
     /// Runs entirely server-side via a single atomic Lua script: the previous
@@ -358,6 +457,17 @@ impl Queue {
         let mut conn = self.connection.clone();
         let delayed_key = self.config.key("delayed");
         let now = Utc::now().timestamp();
+
+        // Cheap O(log N) guard on the hot dequeue path: peek the earliest
+        // delayed job's score and skip the promotion round-trip entirely unless
+        // something is actually due. Previously the full ZRANGEBYSCORE script
+        // ran on every single `dequeue()` even when the delayed set was empty
+        // or entirely in the future.
+        let earliest: Vec<(String, i64)> = conn.zrange_withscores(&delayed_key, 0, 0).await?;
+        match earliest.first() {
+            Some((_, score)) if *score <= now => {}
+            _ => return Ok(()),
+        }
 
         let script = redis::Script::new(MOVE_DELAYED_SCRIPT);
         let _: i64 = script

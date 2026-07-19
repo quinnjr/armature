@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rdkafka::Message as KafkaMessage;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::{Header, Headers, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::sync::RwLock;
@@ -209,9 +209,10 @@ impl MessageBroker for KafkaBroker {
         };
         client_config.set("auto.offset.reset", offset_reset);
 
-        // Auto commit based on ack mode
-        let enable_auto_commit =
-            options.ack_mode == AckMode::Auto || options.ack_mode == AckMode::None;
+        // Auto commit based on ack mode, combined with the configured preference.
+        // Manual ack mode always disables auto-commit since offsets are committed
+        // explicitly after the handler succeeds (see `consume_messages`).
+        let enable_auto_commit = derive_enable_auto_commit(options.ack_mode, &self.config);
         client_config.set(
             "enable.auto.commit",
             if enable_auto_commit { "true" } else { "false" },
@@ -286,8 +287,9 @@ impl MessageBroker for KafkaBroker {
 
         // Spawn consumer task
         let topic_owned = topic.to_string();
+        let ack_mode = options.ack_mode;
         tokio::spawn(async move {
-            consume_messages(consumer, handler, &topic_owned, active).await;
+            consume_messages(consumer, handler, &topic_owned, ack_mode, active).await;
         });
 
         info!(topic = topic, group_id = %group_id, "Subscribed to Kafka topic");
@@ -306,10 +308,25 @@ impl MessageBroker for KafkaBroker {
     }
 }
 
+/// Derive the `enable.auto.commit` rdkafka property from the subscribe-time
+/// ack mode and the configured `enable_auto_commit` preference.
+///
+/// `AckMode::Manual` always disables auto-commit: offsets are committed
+/// explicitly in `consume_messages` after the handler reports success.
+/// For `Auto`/`None` ack modes, the configured preference is honored so
+/// `KafkaConfig::without_auto_commit` actually has an effect.
+fn derive_enable_auto_commit(ack_mode: AckMode, config: &KafkaConfig) -> bool {
+    match ack_mode {
+        AckMode::Manual => false,
+        AckMode::Auto | AckMode::None => config.enable_auto_commit,
+    }
+}
+
 async fn consume_messages(
     consumer: Arc<StreamConsumer>,
     handler: Arc<dyn MessageHandler>,
     topic: &str,
+    ack_mode: AckMode,
     active: Arc<AtomicBool>,
 ) {
     use futures_util::StreamExt;
@@ -325,7 +342,16 @@ async fn consume_messages(
                     Ok(result) => {
                         match result {
                             ProcessingResult::Success => {
-                                // Message processed successfully
+                                // Commit the offset explicitly in manual ack mode, since
+                                // `enable.auto.commit` is disabled for that mode and
+                                // rdkafka will never advance the consumer group's offset
+                                // on its own, causing redelivery on restart.
+                                if ack_mode == AckMode::Manual
+                                    && let Err(e) = consumer
+                                        .commit_message(&borrowed_message, CommitMode::Async)
+                                {
+                                    error!(error = %e, "Failed to commit Kafka offset");
+                                }
                             }
                             ProcessingResult::Retry => {
                                 warn!(
@@ -425,5 +451,54 @@ impl Subscription for KafkaSubscription {
 
     fn topic(&self) -> &str {
         &self.topic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_ack_mode_always_disables_auto_commit() {
+        let mut config = KafkaConfig::new("localhost:9092");
+        assert!(config.enable_auto_commit, "default config should be true");
+        assert!(!derive_enable_auto_commit(AckMode::Manual, &config));
+
+        config.enable_auto_commit = false;
+        assert!(!derive_enable_auto_commit(AckMode::Manual, &config));
+    }
+
+    #[test]
+    fn auto_and_none_ack_modes_respect_configured_preference() {
+        let mut config = KafkaConfig::new("localhost:9092");
+
+        // Config says auto-commit is enabled (the default).
+        assert!(derive_enable_auto_commit(AckMode::Auto, &config));
+        assert!(derive_enable_auto_commit(AckMode::None, &config));
+
+        // `without_auto_commit()` must actually take effect for Auto/None.
+        config = config.without_auto_commit();
+        assert!(!derive_enable_auto_commit(AckMode::Auto, &config));
+        assert!(!derive_enable_auto_commit(AckMode::None, &config));
+    }
+
+    #[test]
+    fn build_headers_includes_custom_and_reserved_headers() {
+        let message = Message::new("topic", b"payload".to_vec())
+            .with_header("x-custom", "value")
+            .with_correlation_id("corr-1")
+            .with_content_type("application/json");
+
+        let headers = KafkaBroker::build_headers(&message);
+        let mut seen = std::collections::HashSet::new();
+        for header in headers.iter() {
+            seen.insert(header.key.to_string());
+        }
+
+        assert!(seen.contains("message_id"));
+        assert!(seen.contains("timestamp"));
+        assert!(seen.contains("correlation_id"));
+        assert!(seen.contains("content_type"));
+        assert!(seen.contains("x-custom"));
     }
 }

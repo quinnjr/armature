@@ -1,5 +1,6 @@
 //! Webhook signature generation and verification
 
+use crate::config::SigningAlgorithm;
 use crate::{Result, WebhookError};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha512};
@@ -11,17 +12,28 @@ type HmacSha512 = Hmac<Sha512>;
 #[derive(Debug, Clone)]
 pub struct WebhookSignature {
     secret: String,
+    algorithm: SigningAlgorithm,
 }
 
 impl WebhookSignature {
     /// Create a new signature utility with the given secret
+    ///
+    /// Uses HMAC-SHA256 by default. Use [`WebhookSignature::with_algorithm`]
+    /// to select a different signing algorithm (e.g. HMAC-SHA512).
     pub fn new(secret: impl Into<String>) -> Self {
         Self {
             secret: secret.into(),
+            algorithm: SigningAlgorithm::HmacSha256,
         }
     }
 
-    /// Generate a signature for the given payload using HMAC-SHA256
+    /// Set the signing algorithm to use for signing and verification
+    pub fn with_algorithm(mut self, algorithm: SigningAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
+    /// Generate a signature for the given payload using the configured algorithm
     pub fn sign(&self, payload: &[u8]) -> String {
         self.sign_with_timestamp(payload, &Self::current_timestamp())
     }
@@ -29,7 +41,7 @@ impl WebhookSignature {
     /// Generate a signature with a specific timestamp
     pub fn sign_with_timestamp(&self, payload: &[u8], timestamp: &str) -> String {
         let signed_payload = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
-        let signature = self.compute_hmac_sha256(signed_payload.as_bytes());
+        let signature = self.compute_hmac(signed_payload.as_bytes());
         format!("t={},v1={}", timestamp, signature)
     }
 
@@ -55,10 +67,18 @@ impl WebhookSignature {
 
         // Compute expected signature
         let signed_payload = format!("{}.{}", parts.timestamp, String::from_utf8_lossy(payload));
-        let expected = self.compute_hmac_sha256(signed_payload.as_bytes());
+        let expected = self.compute_hmac(signed_payload.as_bytes());
 
         // Constant-time comparison to prevent timing attacks
         Ok(constant_time_compare(&parts.signature, &expected))
+    }
+
+    /// Compute the HMAC using the configured signing algorithm
+    fn compute_hmac(&self, data: &[u8]) -> String {
+        match self.algorithm {
+            SigningAlgorithm::HmacSha256 => self.compute_hmac_sha256(data),
+            SigningAlgorithm::HmacSha512 => self.compute_hmac_sha512(data),
+        }
     }
 
     /// Compute HMAC-SHA256 signature
@@ -71,7 +91,6 @@ impl WebhookSignature {
     }
 
     /// Compute HMAC-SHA512 signature
-    #[allow(dead_code)]
     fn compute_hmac_sha512(&self, data: &[u8]) -> String {
         let mut mac =
             HmacSha512::new_from_slice(self.secret.as_bytes()).expect("HMAC can take any size key");
@@ -215,6 +234,47 @@ mod tests {
         // Should fail with small tolerance
         let result = signer.verify(payload, &signature, 60);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sha512_algorithm_selection_produces_sha512_signature() {
+        let secret = "test-secret";
+        let payload = b"test payload";
+        let timestamp = "1234567890";
+
+        let sha256_signer = WebhookSignature::new(secret);
+        let sha512_signer =
+            WebhookSignature::new(secret).with_algorithm(SigningAlgorithm::HmacSha512);
+
+        let sha256_sig = sha256_signer.sign_with_timestamp(payload, timestamp);
+        let sha512_sig = sha512_signer.sign_with_timestamp(payload, timestamp);
+
+        // The two algorithms must produce different signatures
+        assert_ne!(sha256_sig, sha512_sig);
+
+        // Compute the expected raw HMAC-SHA512 value directly and confirm it's embedded
+        let expected_sha512 = sha512_signer.compute_hmac_sha512(
+            format!("{}.{}", timestamp, String::from_utf8_lossy(payload)).as_bytes(),
+        );
+        assert!(sha512_sig.contains(&expected_sha512));
+
+        // SHA-512 hex digest is 128 chars, SHA-256 is 64 chars
+        let v1_sha512 = sha512_sig.split("v1=").nth(1).unwrap();
+        let v1_sha256 = sha256_sig.split("v1=").nth(1).unwrap();
+        assert_eq!(v1_sha512.len(), 128);
+        assert_eq!(v1_sha256.len(), 64);
+
+        // And verification round-trips correctly for the sha512 signer
+        // (use a fresh, current-timestamp signature so it's within tolerance)
+        let live_sha512_sig = sha512_signer.sign(payload);
+        let result = sha512_signer.verify(payload, &live_sha512_sig, 300);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // A sha256 signer must reject a sha512-produced signature (mismatched digest)
+        let cross_result = sha256_signer.verify(payload, &live_sha512_sig, 300);
+        assert!(cross_result.is_ok());
+        assert!(!cross_result.unwrap());
     }
 
     #[test]

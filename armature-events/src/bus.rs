@@ -112,8 +112,9 @@ impl EventBus {
         let mut errors = Vec::new();
 
         // Handle events asynchronously or synchronously
-        if self.config.async_handling {
-            // Spawn tasks for each handler
+        if self.config.async_handling && self.config.continue_on_error {
+            // Spawn tasks for each handler and run them concurrently. This is only safe
+            // when errors from one handler must not prevent others from running.
             let mut tasks = Vec::new();
 
             for handler in handlers.iter() {
@@ -130,16 +131,34 @@ impl EventBus {
                     Ok(Err(e)) => {
                         error!("Handler failed: {}", e);
                         errors.push(e);
-                        if !self.config.continue_on_error {
-                            break;
-                        }
                     }
                     Err(e) => {
                         error!("Handler task panicked: {}", e);
                         errors.push(EventHandlerError::HandlerFailed(e.to_string()));
-                        if !self.config.continue_on_error {
-                            break;
-                        }
+                    }
+                }
+            }
+        } else if self.config.async_handling {
+            // continue_on_error is false: handlers must run sequentially so that a
+            // failing handler stops execution before the next handler starts. Spawning
+            // all handlers up front (as in the concurrent branch above) would let every
+            // handler run to completion regardless of earlier failures, defeating
+            // "stop on first error".
+            for handler in handlers.iter() {
+                let handler = handler.clone();
+                let event = event.clone();
+                let task = tokio::spawn(async move { handler.handle_dyn(event.as_ref()).await });
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Handler failed: {}", e);
+                        errors.push(e);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Handler task panicked: {}", e);
+                        errors.push(EventHandlerError::HandlerFailed(e.to_string()));
+                        break;
                     }
                 }
             }
@@ -359,6 +378,62 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(h1_clone.count(), 1);
         assert_eq!(h2_clone.count(), 1);
+    }
+
+    #[derive(Clone)]
+    struct FailingHandler {
+        counter: Arc<AtomicU32>,
+    }
+
+    impl FailingHandler {
+        fn new(counter: Arc<AtomicU32>) -> Self {
+            Self { counter }
+        }
+    }
+
+    #[async_trait]
+    impl EventHandler<TestEvent> for FailingHandler {
+        async fn handle(&self, _event: &TestEvent) -> Result<(), EventHandlerError> {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            Err(EventHandlerError::HandlerFailed("boom".to_string()))
+        }
+    }
+
+    /// Regression test for the `continue_on_error(false)` builder doc, which promises
+    /// "stop on first error". Previously, in the default async path, every handler was
+    /// `tokio::spawn`ed up front before any were awaited, so a failing first handler
+    /// never prevented a second handler from running. With `continue_on_error(false)`,
+    /// handlers must run sequentially: the second handler must not run once the first
+    /// has failed, and `publish` must return `Err(EventBusError::HandlersFailed(_))`.
+    #[tokio::test]
+    async fn test_continue_on_error_false_stops_on_first_failure() {
+        let bus = EventBusBuilder::new()
+            .continue_on_error(false)
+            .enable_logging(false)
+            .build();
+
+        let failing_counter = Arc::new(AtomicU32::new(0));
+        let second_handler = TestHandler::new();
+        let second_handler_clone = second_handler.clone();
+
+        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(FailingHandler::new(
+            failing_counter.clone(),
+        )));
+        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(second_handler));
+
+        let event = TestEvent::new("Hello".to_string());
+        let result = bus.publish(event).await;
+
+        assert!(
+            matches!(result, Err(EventBusError::HandlersFailed(_))),
+            "expected HandlersFailed error, got {result:?}"
+        );
+        assert_eq!(failing_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second_handler_clone.count(),
+            0,
+            "second handler must not run once continue_on_error(false) stopped after the first failure"
+        );
     }
 
     #[tokio::test]

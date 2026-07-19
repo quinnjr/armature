@@ -8,43 +8,82 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use lapin::{
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, options::*,
-    types::FieldTable,
+    types::FieldTable, uri::AMQPUri,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     AckMode, Message, MessageBroker, MessageHandler, MessagingConfig, MessagingError,
-    ProcessingResult, PublishOptions, SubscribeOptions, Subscription,
+    ProcessingResult, PublishOptions, SubscribeOptions, Subscription, config::RabbitMqConfig,
 };
 
 /// RabbitMQ message broker
 pub struct RabbitMqBroker {
     connection: Arc<Connection>,
     channels: Arc<RwLock<Vec<Channel>>>,
+    /// Channels pre-created at connect time per `RabbitMqConfig::channel_pool_size`,
+    /// handed out by `subscribe_with_options` before falling back to creating a
+    /// fresh channel. This avoids paying for an extra channel-open round trip
+    /// on every subscription when the config asked for a warm pool.
+    channel_pool: Arc<Mutex<Vec<Channel>>>,
     publish_channel: Channel,
     connected: Arc<AtomicBool>,
+}
+
+/// Parse `config.base.url` into an [`AMQPUri`] and apply `config.vhost`.
+///
+/// Broken out as a pure function so the vhost-application logic can be
+/// unit-tested without needing a live broker connection.
+fn build_amqp_uri(config: &RabbitMqConfig) -> Result<AMQPUri, MessagingError> {
+    let mut uri: AMQPUri = config.base.url.parse().map_err(|e| {
+        MessagingError::Configuration(format!("invalid AMQP URL '{}': {e}", config.base.url))
+    })?;
+    uri.vhost = config.vhost.clone();
+    Ok(uri)
 }
 
 impl RabbitMqBroker {
     /// Connect to RabbitMQ
     pub async fn connect(config: &MessagingConfig) -> Result<Self, MessagingError> {
-        info!(url = %config.url, "Connecting to RabbitMQ");
+        let rabbitmq_config = RabbitMqConfig {
+            base: config.clone(),
+            ..Default::default()
+        };
+        Self::connect_with_config(rabbitmq_config).await
+    }
 
-        let connection = Connection::connect(&config.url, ConnectionProperties::default()).await?;
+    /// Connect with RabbitMQ-specific configuration, honoring `vhost`,
+    /// `publisher_confirms`, and `channel_pool_size`.
+    pub async fn connect_with_config(config: RabbitMqConfig) -> Result<Self, MessagingError> {
+        info!(url = %config.base.url, vhost = %config.vhost, "Connecting to RabbitMQ");
+
+        let uri = build_amqp_uri(&config)?;
+        let connection = Connection::connect_uri(uri, ConnectionProperties::default()).await?;
 
         let publish_channel = connection.create_channel().await?;
 
-        // Enable publisher confirms if requested
-        publish_channel
-            .confirm_select(ConfirmSelectOptions::default())
-            .await?;
+        // Enable publisher confirms only if requested
+        if config.publisher_confirms {
+            publish_channel
+                .confirm_select(ConfirmSelectOptions::default())
+                .await?;
+        }
+
+        // Pre-warm a pool of channels for subscriptions to draw from (the
+        // publish channel above counts toward the configured pool size).
+        let pool_size = config.channel_pool_size.saturating_sub(1);
+        let mut channel_pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            channel_pool.push(connection.create_channel().await?);
+        }
 
         info!("Connected to RabbitMQ successfully");
 
         Ok(Self {
             connection: Arc::new(connection),
             channels: Arc::new(RwLock::new(Vec::new())),
+            channel_pool: Arc::new(Mutex::new(channel_pool)),
             publish_channel,
             connected: Arc::new(AtomicBool::new(true)),
         })
@@ -209,7 +248,15 @@ impl MessageBroker for RabbitMqBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        let channel = self.connection.create_channel().await?;
+        // Draw a pre-warmed channel from the pool if one is available;
+        // otherwise fall back to creating a fresh one on demand.
+        let channel = {
+            let mut pool = self.channel_pool.lock().await;
+            match pool.pop() {
+                Some(channel) => channel,
+                None => self.connection.create_channel().await?,
+            }
+        };
 
         // Set prefetch count if specified
         if let Some(prefetch) = options.prefetch_count {
@@ -442,5 +489,43 @@ impl Subscription for RabbitMqSubscription {
 
     fn topic(&self) -> &str {
         &self.topic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RabbitMqConfig;
+
+    #[test]
+    fn build_amqp_uri_applies_configured_vhost() {
+        let config = RabbitMqConfig::new("amqp://localhost:5672").with_vhost("/my-vhost");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "/my-vhost");
+    }
+
+    #[test]
+    fn build_amqp_uri_defaults_to_slash_vhost() {
+        let config = RabbitMqConfig::new("amqp://localhost:5672");
+        assert_eq!(config.vhost, "/");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "/");
+    }
+
+    #[test]
+    fn build_amqp_uri_overrides_vhost_embedded_in_url() {
+        // Even if the URL string already encodes a vhost path, the explicit
+        // `RabbitMqConfig::vhost` must win, since that's the field users are
+        // expected to configure.
+        let config = RabbitMqConfig::new("amqp://localhost:5672/original-vhost")
+            .with_vhost("override-vhost");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "override-vhost");
+    }
+
+    #[test]
+    fn build_amqp_uri_rejects_invalid_url() {
+        let config = RabbitMqConfig::new("not a valid amqp url");
+        assert!(build_amqp_uri(&config).is_err());
     }
 }

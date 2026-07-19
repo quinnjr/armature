@@ -120,7 +120,11 @@ pub trait ServiceDiscovery: Send + Sync {
         if let Some(health_url) = service.health_check_url {
             match reqwest::get(&health_url).await {
                 Ok(response) => Ok(response.status().is_success()),
-                Err(_) => Ok(false),
+                // A transport error (connection refused, DNS failure, TLS
+                // error, timeout, ...) is not the same thing as the service
+                // reporting itself unhealthy — surface it distinctly so
+                // callers can tell "unreachable" apart from "unhealthy".
+                Err(e) => Err(DiscoveryError::HealthCheckFailed(e.to_string())),
             }
         } else {
             Ok(true) // No health check configured, assume healthy
@@ -199,5 +203,25 @@ mod tests {
         assert_eq!(service.name, "api");
         assert_eq!(service.url(), "http://localhost:8080");
         assert!(service.tags.contains(&"production".to_string()));
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_err_on_transport_failure_instead_of_ok_false() {
+        // Port 0 is never a listening service, so connecting to it fails
+        // immediately with a transport error rather than an HTTP response.
+        let discovery = crate::memory::InMemoryDiscovery::new();
+        let service = ServiceInstance::new("svc-1", "api", "localhost", 8080)
+            .with_health_check("http://127.0.0.1:0/health");
+        discovery.register(&service).await.unwrap();
+
+        let result = discovery.health_check("svc-1").await;
+
+        match result {
+            Err(DiscoveryError::HealthCheckFailed(_)) => {}
+            other => panic!(
+                "expected Err(HealthCheckFailed) on transport error, got {:?}",
+                other
+            ),
+        }
     }
 }
