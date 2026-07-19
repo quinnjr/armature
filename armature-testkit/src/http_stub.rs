@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 pub struct RecordedRequest {
     pub method: String,
     pub path: String,
+    pub query: Option<String>,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
 }
@@ -30,6 +31,11 @@ impl RecordedRequest {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The query string (e.g., `trace=1` from `/path?trace=1`), if present.
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
     }
 
     /// The body decoded as UTF-8 (lossy).
@@ -168,6 +174,7 @@ impl StubServerBuilder {
                             let (parts, body) = req.into_parts();
                             let method = parts.method.as_str().to_ascii_uppercase();
                             let path = parts.uri.path().to_string();
+                            let query = parts.uri.query().map(|q| q.to_string());
                             let headers = parts
                                 .headers
                                 .iter()
@@ -186,6 +193,7 @@ impl StubServerBuilder {
                             requests.lock().unwrap().push(RecordedRequest {
                                 method: method.clone(),
                                 path: path.clone(),
+                                query,
                                 headers,
                                 body: bytes,
                             });
@@ -266,11 +274,13 @@ mod tests {
             .start()
             .await;
 
-        let _ = raw_request(server.url(), "POST", "/introspect", "token=abc").await;
+        let _ = raw_request(server.url(), "POST", "/introspect?trace=1", "token=abc").await;
 
         let rec = server.assert_received("POST", "/introspect");
         assert_eq!(rec.body_string(), "token=abc");
         assert_eq!(rec.header("content-length"), Some("9"));
+        assert_eq!(rec.path, "/introspect");
+        assert_eq!(rec.query(), Some("trace=1"));
         assert_eq!(server.requests().len(), 1);
     }
 

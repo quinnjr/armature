@@ -30,6 +30,16 @@ impl PebbleCa {
         format!("https://127.0.0.1:{port}/dir")
     }
 
+    /// The trust-anchor root certificate URL, e.g. `https://127.0.0.1:PORT/roots/0`.
+    pub async fn roots_url(&self) -> String {
+        let port = self
+            .container
+            .get_host_port_ipv4(14000.tcp())
+            .await
+            .expect("pebble mapped port");
+        format!("https://127.0.0.1:{port}/roots/0")
+    }
+
     /// Explains Pebble's self-signed CA: the ACME client under test must accept
     /// Pebble's test root (served at `/roots/0`) — Workflow 4 wires a rustls
     /// client config that trusts it.
@@ -49,5 +59,7 @@ mod tests {
         let ca = PebbleCa::start().await;
         let dir = ca.directory_url().await;
         assert!(dir.ends_with("/dir"), "unexpected directory url: {dir}");
+        let roots = ca.roots_url().await;
+        assert!(roots.ends_with("/roots/0"), "unexpected roots url: {roots}");
     }
 }

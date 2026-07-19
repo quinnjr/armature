@@ -25,7 +25,7 @@ impl RedisContainer {
     pub async fn url(&self) -> String {
         let port = self
             .container
-            .get_host_port_ipv4(6379)
+            .get_host_port_ipv4(6379.tcp())
             .await
             .expect("redis mapped port");
         format!("redis://127.0.0.1:{port}")
@@ -51,7 +51,7 @@ impl PostgresContainer {
     pub async fn url(&self) -> String {
         let port = self
             .container
-            .get_host_port_ipv4(5432)
+            .get_host_port_ipv4(5432.tcp())
             .await
             .expect("postgres mapped port");
         format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
