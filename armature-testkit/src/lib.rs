@@ -1,16 +1,5 @@
 //! Deterministic, offline test harnesses for verifying Armature integrations.
 
-/// Temporary smoke marker proving the crate compiles and tests run.
-pub fn crate_smoke() -> bool {
-    true
-}
+pub mod http_stub;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn smoke() {
-        assert!(crate_smoke());
-    }
-}
+pub use http_stub::{StubResponse, StubServer};
