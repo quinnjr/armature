@@ -10,6 +10,14 @@ pub enum FrameGuard {
     /// Allow framing from same origin
     SameOrigin,
     /// Allow framing from specific origin
+    ///
+    /// # Deprecated / legacy
+    ///
+    /// `ALLOW-FROM` was never standardized in the Fetch/HTML spec and modern browsers
+    /// (Chrome, Firefox, Safari, Edge) ignore this directive entirely — it is a no-op in
+    /// practice. It has been superseded by the `frame-ancestors` directive of
+    /// Content-Security-Policy (see [`crate::content_security_policy::CspConfig`]), which
+    /// is what you should use to restrict framing to specific origins.
     AllowFrom(String),
 }
 

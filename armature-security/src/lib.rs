@@ -171,7 +171,10 @@ impl SecurityMiddleware {
             hsts: None,
             hide_powered_by: false,
             referrer_policy: referrer_policy::ReferrerPolicy::NoReferrer,
-            xss_filter: xss_filter::XssFilter::Enabled,
+            // Modern browsers have removed the legacy XSS auditor (it could itself introduce
+            // vulnerabilities), so it is disabled by default in line with Helmet's current
+            // recommendation. Prefer a strong Content-Security-Policy instead.
+            xss_filter: xss_filter::XssFilter::Disabled,
             content_type_options: content_type_options::ContentTypeOptions::NoSniff,
             download_options: download_options::DownloadOptions::NoOpen,
             permitted_cross_domain_policies:
@@ -236,7 +239,12 @@ impl SecurityMiddleware {
 
         // Content Security Policy
         if let Some(ref csp) = self.csp {
-            headers.insert("Content-Security-Policy".to_string(), csp.to_header_value());
+            let header_name = if csp.report_only {
+                "Content-Security-Policy-Report-Only"
+            } else {
+                "Content-Security-Policy"
+            };
+            headers.insert(header_name.to_string(), csp.to_header_value());
         }
 
         // DNS Prefetch Control
@@ -308,16 +316,22 @@ impl SecurityMiddleware {
     }
 
     /// Convenience method to enable all common security features (recommended defaults)
+    ///
+    /// Note: Expect-CT is intentionally *not* enabled here. The `Expect-CT` header is
+    /// deprecated and has been removed from all major browsers (since ~2023), so it is a
+    /// no-op in practice; use it explicitly via [`Self::with_expect_ct`] only if you have a
+    /// specific legacy requirement.
     pub fn enable_all(max_age_seconds: u64) -> Self {
         Self {
             csp: Some(content_security_policy::CspConfig::default()),
             dns_prefetch_control: dns_prefetch_control::DnsPrefetchControl::Off,
-            expect_ct: Some(expect_ct::ExpectCtConfig::new(max_age_seconds)),
+            expect_ct: None,
             frame_guard: frame_guard::FrameGuard::Deny,
             hsts: Some(hsts::HstsConfig::new(max_age_seconds)),
             hide_powered_by: true,
             referrer_policy: referrer_policy::ReferrerPolicy::NoReferrer,
-            xss_filter: xss_filter::XssFilter::Enabled,
+            // See `new()` for why this defaults to `Disabled`.
+            xss_filter: xss_filter::XssFilter::Disabled,
             content_type_options: content_type_options::ContentTypeOptions::NoSniff,
             download_options: download_options::DownloadOptions::NoOpen,
             permitted_cross_domain_policies:
@@ -403,6 +417,63 @@ mod tests {
         assert!(secured.headers.contains_key("X-XSS-Protection"));
         assert!(secured.headers.contains_key("Strict-Transport-Security"));
         assert!(secured.headers.contains_key("Content-Security-Policy"));
+    }
+
+    #[test]
+    fn test_xss_filter_defaults_to_disabled() {
+        // Modern browsers dropped the legacy XSS auditor; both `new()` and the
+        // recommended `enable_all`/`Default` configuration should disable it ("0")
+        // rather than opting into the deprecated, sometimes-exploitable filter ("1").
+        assert_eq!(
+            SecurityMiddleware::new().xss_filter,
+            xss_filter::XssFilter::Disabled
+        );
+        assert_eq!(
+            SecurityMiddleware::default().xss_filter,
+            xss_filter::XssFilter::Disabled
+        );
+
+        let secured = SecurityMiddleware::default().apply(HttpResponse::ok());
+        assert_eq!(
+            secured.headers.get("X-XSS-Protection"),
+            Some(&"0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_enable_all_does_not_enable_expect_ct() {
+        // Expect-CT is deprecated and removed from browsers; the recommended defaults
+        // should not send it.
+        let middleware = SecurityMiddleware::default();
+        assert!(middleware.expect_ct.is_none());
+
+        let secured = middleware.apply(HttpResponse::ok());
+        assert!(!secured.headers.contains_key("Expect-CT"));
+    }
+
+    #[test]
+    fn test_csp_header_name_depends_on_report_only() {
+        // Enforcing CSP uses the standard header name.
+        let enforcing =
+            SecurityMiddleware::new().with_csp(content_security_policy::CspConfig::default());
+        let secured = enforcing.apply(HttpResponse::ok());
+        assert!(secured.headers.contains_key("Content-Security-Policy"));
+        assert!(
+            !secured
+                .headers
+                .contains_key("Content-Security-Policy-Report-Only")
+        );
+
+        // report_only(true) must emit the header under the Report-Only name instead.
+        let report_only = SecurityMiddleware::new()
+            .with_csp(content_security_policy::CspConfig::default().report_only(true));
+        let secured = report_only.apply(HttpResponse::ok());
+        assert!(
+            secured
+                .headers
+                .contains_key("Content-Security-Policy-Report-Only")
+        );
+        assert!(!secured.headers.contains_key("Content-Security-Policy"));
     }
 
     #[test]
