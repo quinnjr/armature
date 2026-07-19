@@ -2,9 +2,7 @@
 
 use async_trait::async_trait;
 use tracing::debug;
-use web_push::{
-    ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder,
-};
+use web_push::{ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder};
 
 use crate::{Notification, Platform, PushError, PushProvider, Result, Subscription};
 
@@ -84,14 +82,15 @@ impl From<&Subscription> for WebPushSubscription {
 /// Web Push provider using VAPID.
 pub struct WebPushProvider {
     config: WebPushConfig,
-    client: web_push::IsahcWebPushClient,
+    client: reqwest::Client,
 }
 
 impl WebPushProvider {
     /// Create a new Web Push provider.
     pub fn new(config: WebPushConfig) -> Result<Self> {
-        let client =
-            web_push::IsahcWebPushClient::new().map_err(|e| PushError::Config(e.to_string()))?;
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| PushError::Config(e.to_string()))?;
 
         Ok(Self { config, client })
     }
@@ -147,10 +146,55 @@ impl WebPushProvider {
 
         debug!(endpoint = %subscription.endpoint, "Sending web push notification");
 
-        // Send (WebPushClient trait is in scope)
-        WebPushClient::send(&self.client, message)
+        // Send the built message over our own reqwest (rustls) client, mirroring
+        // web-push's request_builder so we don't depend on its isahc/libcurl client.
+        let mut request = self
+            .client
+            .post(message.endpoint.to_string())
+            .header("TTL", message.ttl.to_string());
+
+        if let Some(payload) = message.payload {
+            request = request
+                .header(
+                    reqwest::header::CONTENT_ENCODING,
+                    payload.content_encoding.to_str(),
+                )
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
+            for (key, value) in payload.crypto_headers.into_iter() {
+                request = request.header(key, value);
+            }
+            request = request.body(payload.content);
+        }
+
+        let response = request
+            .send()
             .await
-            .map_err(PushError::from)?;
+            .map_err(|e| PushError::Provider(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Read Retry-After before the body consumes the response.
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            let body = response.text().await.unwrap_or_default();
+            return Err(match status {
+                // 404/410: the push subscription is gone — callers should prune it.
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE => {
+                    PushError::Unregistered(format!("{status}: {body}"))
+                }
+                reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    PushError::RateLimited(retry_after.unwrap_or(60))
+                }
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE => PushError::PayloadTooLarge {
+                    size: 0,
+                    limit: 4096,
+                },
+                _ => PushError::Provider(format!("web push endpoint returned {status}: {body}")),
+            });
+        }
 
         debug!("Web push notification sent successfully");
         Ok(())

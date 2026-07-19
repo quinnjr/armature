@@ -32,12 +32,13 @@ uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 url = "2.5"
 
-# Web Push (VAPID). Default-disabled — historically web-push 0.10's
-# default-features pulled `isahc` → curl-sys → libcurl C headers at
-# build time. Callers who need web push opt in via
-# `features = ["web-push"]` and should arrange for libcurl-dev /
-# libssl-dev on their build host.
-web-push = { version = "0.11", optional = true }
+# Web Push (VAPID). We use web-push only to build the VAPID signature and
+# the encrypted ECE payload; the notification is sent over our own reqwest
+# (rustls) client. `default-features = false` drops web-push's default
+# `isahc-client`, which pulled `isahc` → `curl-sys` → a vendored libcurl C
+# build — so `features = ["web-push"]` no longer needs libcurl/libssl on the
+# build host and stays pure-Rust/rustls like the rest of the workspace.
+web-push = { version = "0.11", default-features = false, optional = true }
 
 # JWT for FCM/APNS
 jsonwebtoken = { version = "10.4", optional = true }
@@ -53,6 +54,6 @@ tokio-test = "0.4"
 default = ["fcm"]
 web-push = ["dep:web-push"]
 fcm = ["jsonwebtoken"]
-apns = ["jsonwebtoken", "p256"]
+apns = ["jsonwebtoken", "p256", "reqwest/http2"]
 all = ["web-push", "fcm", "apns"]
 
