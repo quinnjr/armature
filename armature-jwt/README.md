@@ -20,23 +20,22 @@ armature-jwt = "0.1"
 ## Quick Start
 
 ```rust
-use armature_jwt::{JwtManager, JwtConfig, Claims};
+use armature_jwt::{JwtManager, JwtConfig, StandardClaims};
+use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create JWT manager
-    let config = JwtConfig::new("your-secret-key")
-        .expiration(Duration::from_secs(3600));
-    let jwt = JwtManager::new(config);
+    let config = JwtConfig::new("your-secret-key".to_string())
+        .with_expiration(Duration::from_secs(3600));
+    let manager = JwtManager::new(config)?;
 
-    // Create a token
-    let claims = Claims::new()
-        .subject("user123")
-        .claim("role", "admin");
-    let token = jwt.sign(&claims)?;
+    // Create claims
+    let claims = StandardClaims::new()
+        .with_subject("user123".to_string());
+    let token = manager.sign(&claims)?;
 
     // Verify a token
-    let verified = jwt.verify(&token)?;
+    let verified: StandardClaims = manager.verify(&token)?;
     println!("User: {}", verified.sub.unwrap());
 
     Ok(())
@@ -46,11 +45,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Token Refresh
 
 ```rust
-// Generate token pair (access + refresh)
-let (access, refresh) = jwt.generate_pair(&claims)?;
+use armature_jwt::{JwtManager, JwtConfig, StandardClaims};
 
-// Refresh the access token
-let new_access = jwt.refresh(&refresh)?;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let config = JwtConfig::new("secret".to_string());
+# let manager = JwtManager::new(config)?;
+# let claims = StandardClaims::new();
+// Generate token pair (access + refresh)
+let pair = manager.generate_token_pair(&claims)?;
+
+// Refresh the access token using a refresh token
+let new_pair = manager.refresh_token::<StandardClaims>(&pair.refresh_token)?;
+# Ok(())
+# }
 ```
 
 ## License

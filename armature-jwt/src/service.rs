@@ -260,6 +260,18 @@ mod tests {
             "refresh exp {r_exp} must exceed access exp {a_exp}"
         );
         assert_ne!(pair.access_token, pair.refresh_token);
+
+        // Verify that the metadata refresh_expires_in matches the actual token lifetime
+        // (refresh_token.exp - now ≈ refresh_expires_in, within tolerance of ±2 seconds)
+        let now = chrono::Utc::now().timestamp();
+        let actual_lifetime = r_exp - now;
+        let expected = pair.refresh_expires_in as i64;
+        assert!(
+            (actual_lifetime - expected).abs() <= 2,
+            "TokenPair.refresh_expires_in {} must match refresh token lifetime {} (±2s)",
+            expected,
+            actual_lifetime
+        );
     }
 
     #[test]
