@@ -13,10 +13,10 @@ pub struct RedisConfig {
     /// Minimum idle connections.
     pub min_idle: Option<u32>,
     /// Connection timeout.
-    #[serde(with = "humantime_serde", default = "default_connection_timeout")]
+    #[serde(with = "duration_secs_serde", default = "default_connection_timeout")]
     pub connection_timeout: Duration,
     /// Command timeout.
-    #[serde(with = "humantime_serde", default = "default_command_timeout")]
+    #[serde(with = "duration_secs_serde", default = "default_command_timeout")]
     pub command_timeout: Duration,
     /// Database number (0-15).
     pub database: Option<u8>,
@@ -137,10 +137,10 @@ impl RedisConfig {
         // `?`, `#`, or whitespace would otherwise corrupt the URL (e.g. be
         // parsed as a path/query separator or a second userinfo boundary).
         if let Some(password) = &self.password {
-            let encoded_password = percent_encode(password);
+            let encoded_password = urlencoding::encode(password);
             if let Some(username) = &self.username {
                 // Redis 6+ ACL format: redis://username:password@host
-                let encoded_username = percent_encode(username);
+                let encoded_username = urlencoding::encode(username);
                 url = url.replacen(
                     "redis://",
                     &format!("redis://{}:{}@", encoded_username, encoded_password),
@@ -168,37 +168,34 @@ impl RedisConfig {
         // percent-encoded (or, before encoding was added, raw) credentials
         // would otherwise be mistaken for a path separator and wrongly
         // suppress the database append.
+        //
+        // The scan (and any db-segment insertion) is further restricted to
+        // the *path* region only — up to the first `?` or `#` — so a query
+        // string (e.g. `?protocol=resp3`) with no path segment doesn't get
+        // mistaken for one, and so the db segment is inserted before the
+        // query/fragment rather than appended after it (which would corrupt
+        // the URL, e.g. `redis://h:6379?protocol=resp3` -> `.../3` tacked on
+        // after the query instead of `redis://h:6379/3?protocol=resp3`).
         if let Some(db) = self.database {
             let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
             let after_auth = url[scheme_end..]
                 .find('@')
                 .map(|i| scheme_end + i + 1)
                 .unwrap_or(scheme_end);
-            let has_db_segment = url[after_auth..].contains('/');
+            let query_or_fragment_start = url[after_auth..]
+                .find(['?', '#'])
+                .map(|i| after_auth + i)
+                .unwrap_or(url.len());
+            let has_db_segment = url[after_auth..query_or_fragment_start].contains('/');
             if !has_db_segment {
-                url = format!("{}/{}", url.trim_end_matches('/'), db);
+                let path = &url[..query_or_fragment_start];
+                let rest = &url[query_or_fragment_start..];
+                url = format!("{}/{}{}", path.trim_end_matches('/'), db, rest);
             }
         }
 
         url
     }
-}
-
-/// Percent-encode a string for safe use in the userinfo (username/password)
-/// segment of a Redis URL, escaping everything outside
-/// `[A-Za-z0-9\-_.~]`. Mirrors the equivalent helper in
-/// `armature-diesel/src/pool.rs`.
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 /// Builder for Redis configuration.
@@ -397,6 +394,19 @@ mod tests {
     }
 
     #[test]
+    fn connection_url_inserts_database_before_query_string() {
+        // Regression test: a URL with a query string but no path segment
+        // must get the db segment inserted *before* the `?`, not appended
+        // after it (which would corrupt the URL).
+        let config = RedisConfig {
+            url: "redis://h:6379?protocol=resp3".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/3?protocol=resp3");
+    }
+
+    #[test]
     fn connection_url_password_with_slash_still_appends_database() {
         // Before the fix, `has_db_segment` scanned the whole
         // `scheme://user:pass@host` string, so a `/` inside the raw
@@ -415,7 +425,11 @@ mod tests {
     }
 }
 
-mod humantime_serde {
+/// (De)serializes a `Duration` as an integer number of seconds. Despite the
+/// name similarity to the `humantime_serde` crate, this does NOT use
+/// human-readable duration strings (e.g. `"5s"`) — it is a plain integer
+/// seconds codec.
+mod duration_secs_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 

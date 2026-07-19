@@ -19,17 +19,17 @@ pub struct DatabaseConfig {
 
     /// Connection timeout.
     #[serde(default = "default_connect_timeout")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub connect_timeout: Duration,
 
     /// Idle timeout for connections.
     #[serde(default = "default_idle_timeout")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub idle_timeout: Duration,
 
     /// Maximum lifetime of a connection.
     #[serde(default = "default_max_lifetime")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub max_lifetime: Duration,
 
     /// Enable SQLx logging.
@@ -221,8 +221,8 @@ impl Default for DatabaseConfig {
 }
 
 /// Serde helper: (de)serializes a `Duration` as an integer number of
-/// seconds (not humantime strings), despite the module name.
-mod humantime_serde {
+/// seconds (not humantime strings).
+mod duration_secs_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 
@@ -306,6 +306,7 @@ mod tests {
 
         let config = DatabaseConfig::from_env().expect("from_env should succeed");
 
+        // SAFETY: guarded by ENV_LOCK
         unsafe {
             std::env::remove_var("DATABASE_URL");
             std::env::remove_var("DATABASE_IDLE_TIMEOUT");
@@ -318,6 +319,7 @@ mod tests {
     fn from_env_rejects_invalid_database_idle_timeout() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+        // SAFETY: guarded by ENV_LOCK
         unsafe {
             std::env::set_var("DATABASE_URL", "postgres://localhost/idle_timeout_bad");
             std::env::set_var("DATABASE_IDLE_TIMEOUT", "not-a-number");
@@ -325,6 +327,7 @@ mod tests {
 
         let result = DatabaseConfig::from_env();
 
+        // SAFETY: guarded by ENV_LOCK
         unsafe {
             std::env::remove_var("DATABASE_URL");
             std::env::remove_var("DATABASE_IDLE_TIMEOUT");

@@ -23,26 +23,6 @@ use diesel_async::pooled_connection::bb8::Pool as Bb8Pool;
 // Configuration helpers
 // ============================================================================
 
-/// Percent-encode a value for use in a libpq-style connection URL query
-/// parameter (e.g. `application_name`, `sslmode`).
-///
-/// `tokio-postgres` percent-decodes query parameter values when parsing a
-/// connection URL, so this keeps names containing spaces or other reserved
-/// characters intact.
-#[cfg(feature = "postgres")]
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
 /// Build the PostgreSQL connection URL used to establish new connections,
 /// appending `application_name` / `sslmode` as libpq connection options when
 /// configured.
@@ -56,11 +36,11 @@ fn pg_connection_url(config: &DieselConfig) -> String {
     let mut params: Vec<String> = Vec::new();
 
     if let Some(name) = &config.application_name {
-        params.push(format!("application_name={}", percent_encode(name)));
+        params.push(format!("application_name={}", urlencoding::encode(name)));
     }
 
     if let Some(mode) = &config.ssl_mode {
-        params.push(format!("sslmode={}", percent_encode(mode)));
+        params.push(format!("sslmode={}", urlencoding::encode(mode)));
     }
 
     if params.is_empty() {
@@ -212,8 +192,12 @@ impl PgPoolBb8 {
             .max_size(config.pool_size as u32)
             .connection_timeout(config.connect_timeout)
             .min_idle(config.min_idle.map(|n| n as u32))
-            .max_lifetime(Some(config.max_lifetime))
-            .idle_timeout(Some(config.idle_timeout))
+            .max_lifetime(
+                (config.max_lifetime != std::time::Duration::ZERO).then_some(config.max_lifetime),
+            )
+            .idle_timeout(
+                (config.idle_timeout != std::time::Duration::ZERO).then_some(config.idle_timeout),
+            )
             .test_on_check_out(config.test_on_checkout)
             .build(manager)
             .await
@@ -489,6 +473,34 @@ mod mysql_pool_config_tests {
         // must succeed even though nothing is listening on that port.
         let pool = MysqlPool::new(config).await;
         assert!(pool.is_ok(), "pool construction should not eagerly connect");
+    }
+}
+
+#[cfg(all(test, feature = "postgres", feature = "bb8"))]
+mod bb8_pool_config_tests {
+    use crate::{DieselConfig, PgPoolBb8};
+    use std::time::Duration;
+
+    // bb8's `.max_lifetime(Some(Duration::ZERO))` / `.idle_timeout(Some(Duration::ZERO))`
+    // panic ("must be greater than zero!"), but `Duration::ZERO` is the only
+    // way `DieselConfig` (whose fields are non-`Option` `Duration`s) can
+    // express "disabled". `PgPoolBb8::new` must map zero to `None` before
+    // passing it to bb8's builder, so building a pool with zero
+    // `max_lifetime`/`idle_timeout` must not panic (nor require a live
+    // server, since bb8 with no `min_idle` set does not eagerly connect).
+    #[tokio::test]
+    async fn pool_construction_does_not_panic_on_zero_max_lifetime_and_idle_timeout() {
+        let config = DieselConfig::new("postgres://user:pass@127.0.0.1:1/nonexistent_db")
+            .pool_size(1)
+            .connect_timeout(Duration::from_millis(50))
+            .max_lifetime(Duration::ZERO)
+            .idle_timeout(Duration::ZERO);
+
+        let pool = PgPoolBb8::new(config).await;
+        assert!(
+            pool.is_ok(),
+            "bb8 pool construction should not panic or fail on zero max_lifetime/idle_timeout"
+        );
     }
 }
 

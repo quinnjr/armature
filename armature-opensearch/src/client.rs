@@ -4,7 +4,7 @@ use crate::{
     bulk::{BulkOperation, BulkResponse},
     config::OpenSearchConfig,
     document::Document,
-    error::{OpenSearchError, Result, json_or_error},
+    error::{OpenSearchError, Result, error_reason, json_or_error},
     index::IndexManager,
     search::SearchBuilder,
 };
@@ -38,6 +38,44 @@ impl OpenSearchClient {
         let url = opensearch::http::Url::parse(url)
             .map_err(|e| OpenSearchError::Validation(format!("Invalid URL: {}", e)))?;
 
+        // Refuse to send mTLS client certificates or AWS SigV4 credentials over a
+        // non-TLS connection: both are secrets/identity material, and sending them
+        // in cleartext over the network defeats the point of authenticating at all.
+        // Loopback is exempted so local stub/integration tests (which never speak
+        // TLS) keep working.
+        #[cfg(feature = "aws-auth")]
+        let aws_auth_configured = config.aws_region.is_some();
+        #[cfg(not(feature = "aws-auth"))]
+        let aws_auth_configured = false;
+
+        if (config.tls.is_some() || aws_auth_configured) && url.scheme() != "https" {
+            let host = url.host_str().unwrap_or("");
+            let is_loopback =
+                host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
+            if !is_loopback {
+                return Err(OpenSearchError::Validation(format!(
+                    "config.url '{}' uses scheme '{}', but TLS client certificates and/or AWS \
+                     SigV4 credentials must not be sent over a non-https connection; use an \
+                     https:// URL (loopback hosts are exempt for local testing)",
+                    url,
+                    url.scheme()
+                )));
+            }
+        }
+
+        // Basic auth and AWS SigV4 auth are mutually exclusive: the opensearch
+        // crate's TransportBuilder can only hold a single Credentials value, so
+        // configuring both would silently discard basic auth in favor of SigV4.
+        #[cfg(feature = "aws-auth")]
+        if config.aws_region.is_some() && config.username.is_some() && config.password.is_some() {
+            return Err(OpenSearchError::Validation(
+                "Basic auth (username/password) cannot be combined with AWS SigV4 auth \
+                 (aws_region): the opensearch crate's TransportBuilder can only hold a single \
+                 Credentials value at a time; configure one or the other"
+                    .to_string(),
+            ));
+        }
+
         let conn_pool = SingleNodeConnectionPool::new(url);
         let mut builder = TransportBuilder::new(conn_pool);
 
@@ -53,15 +91,6 @@ impl OpenSearchClient {
                  TransportBuilder has no separate connect-phase timeout, only the combined \
                  `request_timeout` ({:?}) is honored",
                 config.connect_timeout, config.request_timeout
-            );
-        }
-
-        // `TransportBuilder` has no retry mechanism at all; requests are sent exactly once.
-        if config.max_retries != 3 {
-            warn!(
-                "OpenSearchConfig::max_retries ({}) is not applied: the opensearch crate's \
-                 TransportBuilder has no built-in retry support",
-                config.max_retries
             );
         }
 
@@ -420,7 +449,12 @@ impl OpenSearchClient {
             .send()
             .await?;
 
+        let status = response.status_code();
         let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
 
         if result["errors"].as_bool().unwrap_or(false) {
             let items = result["items"].as_array();
@@ -475,7 +509,12 @@ impl OpenSearchClient {
             .send()
             .await?;
 
+        let status = response.status_code();
         let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
 
         if result["errors"].as_bool().unwrap_or(false) {
             let items = result["items"].as_array();
@@ -584,8 +623,8 @@ impl OpenSearchClient {
 
     /// Ping the cluster.
     pub async fn ping(&self) -> Result<bool> {
-        let response = self.client.ping().send().await;
-        Ok(response.is_ok())
+        let response = self.client.ping().send().await?;
+        Ok(response.status_code().is_success())
     }
 }
 
@@ -594,5 +633,101 @@ impl std::fmt::Debug for OpenSearchClient {
         f.debug_struct("OpenSearchClient")
             .field("urls", &self.config.urls)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TlsConfig;
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn mtls_conflicts_with_basic_auth() {
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_basic_auth("user", "pass")
+            .with_tls(TlsConfig::default().with_client_cert("cert.pem", "key.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("mTLS client cert combined with basic auth must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("basic auth") || msg.contains("mTLS"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[cfg(all(feature = "aws-auth", any(feature = "rustls", feature = "native-tls")))]
+    #[test]
+    fn mtls_conflicts_with_sigv4_auth() {
+        let provider = aws_credential_types::provider::SharedCredentialsProvider::new(
+            aws_credential_types::Credentials::for_tests(),
+        );
+
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_aws_region("us-east-1")
+            .with_aws_credentials_provider(provider)
+            .with_tls(TlsConfig::default().with_client_cert("cert.pem", "key.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("mTLS client cert combined with AWS SigV4 auth must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("SigV4"), "unexpected error: {msg}");
+    }
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn ca_cert_missing_file_produces_read_error() {
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_tls(TlsConfig::with_ca_cert("/no/such/path/ca.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("a missing ca_cert file must fail client construction");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to read"),
+            "expected a read-failure message, got: {msg}"
+        );
+    }
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn tls_over_non_loopback_http_requires_https() {
+        let config = OpenSearchConfig::new("http://example.com:9200")
+            .with_tls(TlsConfig::with_ca_cert("/no/such/path/ca.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("TLS config over a non-https, non-loopback URL must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("https"), "unexpected error: {msg}");
+    }
+
+    #[cfg(feature = "aws-auth")]
+    #[test]
+    fn sigv4_over_non_loopback_http_requires_https() {
+        let config = OpenSearchConfig::new("http://example.com:9200").with_aws_region("us-east-1");
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("AWS SigV4 over a non-https, non-loopback URL must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("https"), "unexpected error: {msg}");
+    }
+
+    #[cfg(feature = "aws-auth")]
+    #[test]
+    fn basic_auth_conflicts_with_sigv4_auth() {
+        let provider = aws_credential_types::provider::SharedCredentialsProvider::new(
+            aws_credential_types::Credentials::for_tests(),
+        );
+
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_basic_auth("user", "pass")
+            .with_aws_region("us-east-1")
+            .with_aws_credentials_provider(provider);
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("basic auth combined with AWS SigV4 auth must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("SigV4"), "unexpected error: {msg}");
     }
 }

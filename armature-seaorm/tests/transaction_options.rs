@@ -68,5 +68,21 @@ async fn begin_transaction_with_options_applies_isolation_and_read_only() {
         "transaction_read_only should reflect TransactionOptions::read_only(true)"
     );
 
+    let deferrable_row = txn
+        .query_one(Statement::from_string(
+            backend,
+            "SHOW transaction_deferrable".to_owned(),
+        ))
+        .await
+        .expect("SHOW transaction_deferrable failed")
+        .expect("SHOW transaction_deferrable returned no row");
+    let deferrable: String = deferrable_row
+        .try_get("", "transaction_deferrable")
+        .expect("failed to read transaction_deferrable column");
+    assert_eq!(
+        deferrable, "on",
+        "transaction_deferrable should reflect TransactionOptions::deferrable(true)"
+    );
+
     txn.rollback().await.expect("rollback failed");
 }

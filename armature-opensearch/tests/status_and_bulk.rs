@@ -300,6 +300,52 @@ async fn bulk_execute_sends_ndjson_and_parses_response() {
 }
 
 #[tokio::test]
+async fn bulk_index_surfaces_rejected_status_instead_of_ok() {
+    // A 429/503/413/401 bulk rejection returns an envelope like
+    // `{"error": {...}, "status": 429}` with no top-level `errors: true` key,
+    // so status-code must be checked independently of the per-item `errors` field.
+    let rejected_body =
+        r#"{"error": {"type": "circuit_breaking_exception", "reason": "rejected"}, "status": 429}"#;
+    let server = StubServer::builder()
+        .route("POST", "/_bulk", StubResponse::json(429, rejected_body))
+        .start()
+        .await;
+
+    let config = OpenSearchConfig::new(server.url());
+    let client = OpenSearchClient::new(config).expect("client construction");
+
+    let docs = vec![(
+        "1".to_string(),
+        TestDoc {
+            name: "alice".to_string(),
+        },
+    )];
+
+    client
+        .bulk_index(docs)
+        .await
+        .expect_err("a 429 bulk rejection must surface as an error, not Ok(count)");
+}
+
+#[tokio::test]
+async fn bulk_delete_surfaces_rejected_status_instead_of_ok() {
+    let rejected_body =
+        r#"{"error": {"type": "circuit_breaking_exception", "reason": "rejected"}, "status": 429}"#;
+    let server = StubServer::builder()
+        .route("POST", "/_bulk", StubResponse::json(429, rejected_body))
+        .start()
+        .await;
+
+    let config = OpenSearchConfig::new(server.url());
+    let client = OpenSearchClient::new(config).expect("client construction");
+
+    client
+        .bulk_delete::<TestDoc>(vec!["1".to_string()])
+        .await
+        .expect_err("a 429 bulk rejection must surface as an error, not Ok(count)");
+}
+
+#[tokio::test]
 async fn bulk_execute_with_no_operations_short_circuits() {
     let server = StubServer::start_single(StubResponse::json(500, ERROR_BODY)).await;
     let config = OpenSearchConfig::new(server.url());

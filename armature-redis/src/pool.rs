@@ -27,20 +27,128 @@ async fn apply_connection_name(conn: &mut impl ConnectionLike, name: Option<&str
     }
 }
 
-/// Upgrade a `redis://` seed node URL to `rediss://` for TLS, leaving
-/// already-`rediss://` (or otherwise-schemed) entries untouched.
+/// Upgrade a seed node entry to `rediss://` for TLS.
+///
+/// Handles three cases:
+/// - `redis://host:port` -> `rediss://host:port`
+/// - schemeless `host:port` -> `rediss://host:port` (no scheme at all, so
+///   there's nothing to preserve except the address itself)
+/// - already-`rediss://` (or any other explicit scheme) -> unchanged
 ///
 /// Used to fix a cluster TLS downgrade: `RedisConfig::connection_url()`
 /// upgrades the scheme for the single-node/fallback path, but explicit
 /// `cluster_nodes` entries bypass that method entirely, so without this an
 /// operator setting `.tls(true)` together with `.cluster_nodes([...])` would
-/// silently get an unencrypted cluster connection carrying credentials.
+/// silently get an unencrypted cluster connection carrying credentials. The
+/// schemeless case matters too: a node given as bare `host:6379` (no scheme
+/// at all) previously stayed plaintext under `.tls(true)` because the old
+/// implementation only matched an explicit `redis://` prefix.
 fn upgrade_node_to_tls(node: &str) -> String {
     if let Some(rest) = node.strip_prefix("redis://") {
         format!("rediss://{rest}")
-    } else {
+    } else if node.contains("://") {
+        // Already has some other explicit scheme (e.g. `rediss://`): leave it.
         node.to_string()
+    } else {
+        // Schemeless entry, e.g. `host:6379`.
+        format!("rediss://{node}")
     }
+}
+
+/// Splice percent-encoded credentials (`config.username`/`config.password`)
+/// into a cluster seed node's userinfo, unless the node already has one.
+///
+/// Mirrors the auth-splicing behavior of `RedisConfig::connection_url()`
+/// (legacy `:password@` form when no username is set, `user:pass@` form
+/// otherwise), but operates on an arbitrary node string that may or may not
+/// carry an explicit scheme.
+fn splice_node_credentials(node: &str, config: &RedisConfig) -> String {
+    let Some(password) = &config.password else {
+        return node.to_string();
+    };
+
+    // Determine where the scheme ends (if any) and where the authority
+    // (userinfo@host[:port]) region ends, so we don't mistake a `@` inside a
+    // path/query for existing userinfo.
+    let scheme_end = node.find("://").map(|i| i + 3).unwrap_or(0);
+    let authority_end = node[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(node.len());
+
+    if node[scheme_end..authority_end].contains('@') {
+        // Node already carries its own userinfo; don't override it.
+        return node.to_string();
+    }
+
+    let encoded_password = urlencoding::encode(password);
+    let userinfo = if let Some(username) = &config.username {
+        format!("{}:{}@", urlencoding::encode(username), encoded_password)
+    } else {
+        format!(":{encoded_password}@")
+    };
+
+    format!("{}{}{}", &node[..scheme_end], userinfo, &node[scheme_end..])
+}
+
+/// Build the list of cluster seed node URLs from `config`.
+///
+/// Pure (no I/O) so it can be unit-tested directly. `database` is never
+/// applied — it's irrelevant in cluster mode (Redis Cluster doesn't support
+/// `SELECT`).
+///
+/// - When `config.cluster_nodes` is empty, falls back to
+///   `vec![config.connection_url()]` (which already applies TLS-upgrade and
+///   credential-splicing for the single fallback node).
+/// - Otherwise, each explicit node is TLS-upgraded (see
+///   `upgrade_node_to_tls`) when `config.tls` is set, and has
+///   `config.username`/`config.password` spliced in as percent-encoded
+///   userinfo (see `splice_node_credentials`) unless the node already has its
+///   own userinfo. Without this, explicit `cluster_nodes` previously bypassed
+///   both TLS upgrade and credentials entirely — a config with a password
+///   set would connect without auth (NOAUTH at runtime) even though the
+///   single-node path spliced credentials in.
+fn cluster_seed_nodes(config: &RedisConfig) -> Vec<String> {
+    if config.cluster_nodes.is_empty() {
+        return vec![config.connection_url()];
+    }
+
+    config
+        .cluster_nodes
+        .iter()
+        .map(|node| {
+            let node = if config.tls {
+                upgrade_node_to_tls(node)
+            } else {
+                node.clone()
+            };
+            splice_node_credentials(&node, config)
+        })
+        .collect()
+}
+
+/// Issue a scoped checkout + `PING` probe against a freshly-built pool, to
+/// fail fast at `build()` time if the pool can't actually reach a server,
+/// rather than surfacing the failure on the first real `get()` call later.
+///
+/// Shared by `RedisPoolBuilder::build_single` and
+/// `RedisPoolBuilder::build_cluster` — both built a pool and immediately
+/// checked it out to `PING` it in an identical scoped block.
+async fn probe_pool<M>(pool: &Pool<M>) -> Result<()>
+where
+    M: ManageConnection,
+    M::Connection: ConnectionLike,
+    M::Error: std::error::Error,
+{
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| RedisError::Pool(e.to_string()))?;
+    let _: String = redis::cmd("PING")
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| RedisError::Connection(e.to_string()))?;
+    Ok(())
 }
 
 /// Redact userinfo (`user:pass@`) from a node URL for safe logging. Never
@@ -173,6 +281,7 @@ impl ManageConnection for NamedRedisConnectionManager {
 /// public API (`get`, `state`) is identical either way so callers don't need
 /// to know which mode is active.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum RedisPool {
     /// Single-node pool. Any `connection_name` (`RedisConfig::connection_name`)
     /// is applied via `CLIENT SETNAME` once, when each physical connection is
@@ -232,6 +341,7 @@ impl RedisPool {
 /// variants implement `redis::aio::ConnectionLike`, so callers can issue
 /// commands (via `redis::cmd(..).query_async(&mut conn)` or the
 /// `AsyncCommands` trait) without matching on the variant.
+#[non_exhaustive]
 pub enum RedisConnection<'a> {
     /// Connection from a single-node pool.
     Single(PooledConnection<'a, NamedRedisConnectionManager>),
@@ -311,21 +421,15 @@ impl RedisPoolBuilder {
             .await
             .map_err(|e| RedisError::Pool(e.to_string()))?;
 
-        // Test the connection in a scope so the connection is dropped before returning pool
-        {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RedisError::Pool(e.to_string()))?;
-            let _: String = redis::cmd("PING")
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| RedisError::Connection(e.to_string()))?;
-        }
+        probe_pool(&pool).await?;
 
+        // Never log `self.config.url` directly: `RedisConfig::password`/
+        // `username` are not embedded in `self.config.url` itself, but an
+        // operator-provided URL may already carry `user:pass@` inline.
+        // Redact userinfo before logging, for parity with the cluster path.
         info!(
             pool_size = self.config.pool_size,
-            url = %self.config.url,
+            url = %redact_node_for_logging(&self.config.url),
             "Redis connection pool created"
         );
 
@@ -333,22 +437,7 @@ impl RedisPoolBuilder {
     }
 
     async fn build_cluster(self) -> Result<RedisPool> {
-        let nodes = if self.config.cluster_nodes.is_empty() {
-            vec![self.config.connection_url()]
-        } else if self.config.tls {
-            // `RedisConfig::connection_url()` upgrades `redis://` -> `rediss://`
-            // when `tls` is set, but that only touches `config.url` — explicit
-            // `cluster_nodes` bypass it entirely. Without this, `.tls(true)`
-            // combined with `.cluster_nodes([...])` would silently build an
-            // unencrypted cluster connection carrying credentials.
-            self.config
-                .cluster_nodes
-                .iter()
-                .map(|n| upgrade_node_to_tls(n))
-                .collect()
-        } else {
-            self.config.cluster_nodes.clone()
-        };
+        let nodes = cluster_seed_nodes(&self.config);
 
         let manager = RedisClusterConnectionManager::new(nodes.clone())?
             .with_connection_name(self.config.connection_name.clone());
@@ -361,17 +450,7 @@ impl RedisPoolBuilder {
             .await
             .map_err(|e| RedisError::Pool(e.to_string()))?;
 
-        // Test the connection in a scope so the connection is dropped before returning pool
-        {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RedisError::Pool(e.to_string()))?;
-            let _: String = redis::cmd("PING")
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| RedisError::Connection(e.to_string()))?;
-        }
+        probe_pool(&pool).await?;
 
         // Never log `nodes` directly: when `cluster_nodes` was empty, it was
         // built from `connection_url()`, which may embed `user:pass@`
@@ -457,11 +536,10 @@ mod tests {
         // Mirrors `RedisPoolBuilder::build`'s dispatch: cluster=true must
         // route through `build_cluster`, which constructs
         // `RedisClusterConnectionManager`, never `RedisConnectionManager`.
-        let nodes = if builder.config.cluster_nodes.is_empty() {
-            vec![builder.config.connection_url()]
-        } else {
-            builder.config.cluster_nodes.clone()
-        };
+        // Uses the real `cluster_seed_nodes` helper that `build_cluster`
+        // itself calls, so this exercises the actual production path rather
+        // than a re-implemented copy.
+        let nodes = cluster_seed_nodes(&builder.config);
         let manager = RedisClusterConnectionManager::new(nodes)
             .expect("cluster manager should construct from valid seed URLs");
 
@@ -482,7 +560,8 @@ mod tests {
     /// `RedisClusterConnectionManager::new`. Before the fix, `build_cluster`
     /// passed `cluster_nodes` through unchanged, so a TLS-enabled cluster
     /// config with plain `redis://` seed nodes silently built an unencrypted
-    /// connection.
+    /// connection. Calls `cluster_seed_nodes` directly — the exact helper
+    /// `build_cluster` calls — rather than a re-implemented copy.
     #[test]
     fn cluster_nodes_are_upgraded_to_tls_when_tls_enabled() {
         let config = RedisConfig {
@@ -496,15 +575,7 @@ mod tests {
             ..Default::default()
         };
 
-        let nodes = if config.tls {
-            config
-                .cluster_nodes
-                .iter()
-                .map(|n| upgrade_node_to_tls(n))
-                .collect::<Vec<_>>()
-        } else {
-            config.cluster_nodes.clone()
-        };
+        let nodes = cluster_seed_nodes(&config);
 
         assert_eq!(
             nodes,
@@ -522,6 +593,140 @@ mod tests {
             upgrade_node_to_tls("rediss://h:7000"),
             "rediss://h:7000".to_string()
         );
+    }
+
+    #[test]
+    fn upgrade_node_to_tls_prepends_scheme_to_schemeless_node() {
+        // A cluster node given as bare `host:port` with no scheme at all
+        // must still be upgraded to `rediss://` — only matching an explicit
+        // `redis://` prefix would leave it plaintext under TLS.
+        assert_eq!(upgrade_node_to_tls("h:6379"), "rediss://h:6379".to_string());
+    }
+
+    /// `cluster_seed_nodes` is the pure helper `build_cluster` calls to
+    /// build its node list. These tests cover it directly (no Docker, no
+    /// network) since `build_cluster` itself needs a live cluster to run.
+
+    #[test]
+    fn cluster_seed_nodes_falls_back_to_connection_url_when_empty() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            cluster: true,
+            cluster_nodes: Vec::new(),
+            database: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(cluster_seed_nodes(&config), vec![config.connection_url()]);
+    }
+
+    #[test]
+    fn cluster_seed_nodes_upgrades_redis_scheme_to_rediss_under_tls() {
+        let config = RedisConfig {
+            tls: true,
+            cluster: true,
+            cluster_nodes: vec!["redis://127.0.0.1:7000".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["rediss://127.0.0.1:7000".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_seed_nodes_upgrades_schemeless_node_to_rediss_under_tls() {
+        let config = RedisConfig {
+            tls: true,
+            cluster: true,
+            cluster_nodes: vec!["127.0.0.1:7000".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["rediss://127.0.0.1:7000".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_seed_nodes_leaves_already_rediss_node_unchanged() {
+        let config = RedisConfig {
+            tls: true,
+            cluster: true,
+            cluster_nodes: vec!["rediss://127.0.0.1:7001".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["rediss://127.0.0.1:7001".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_seed_nodes_splices_percent_encoded_credentials() {
+        // Regression test: explicit `cluster_nodes` previously bypassed
+        // `config.username`/`config.password` entirely, so a cluster config
+        // with credentials set would connect without auth (NOAUTH at
+        // runtime) even though the single-node fallback path spliced them
+        // in via `connection_url()`.
+        let config = RedisConfig {
+            cluster: true,
+            cluster_nodes: vec!["redis://127.0.0.1:7000".to_string()],
+            username: Some("us/er".to_string()),
+            password: Some("pa:ss@word".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["redis://us%2Fer:pa%3Ass%40word@127.0.0.1:7000".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_seed_nodes_does_not_override_existing_userinfo() {
+        let config = RedisConfig {
+            cluster: true,
+            cluster_nodes: vec!["redis://user:pass@127.0.0.1:7002".to_string()],
+            username: Some("other".to_string()),
+            password: Some("secret".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["redis://user:pass@127.0.0.1:7002".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_seed_nodes_password_only_uses_legacy_userinfo_form() {
+        let config = RedisConfig {
+            cluster: true,
+            cluster_nodes: vec!["redis://127.0.0.1:7000".to_string()],
+            password: Some("secret".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cluster_seed_nodes(&config),
+            vec!["redis://:secret@127.0.0.1:7000".to_string()]
+        );
+    }
+
+    /// Docker-free coverage for `#8`: the connection-name field must survive
+    /// manager construction unchanged, since `connect()` relies on it being
+    /// present at connection-establishment time.
+    #[test]
+    fn named_manager_retains_configured_connection_name() {
+        let inner = RedisConnectionManager::new("redis://127.0.0.1:6379").expect("valid redis url");
+        let manager = NamedRedisConnectionManager::new(inner, Some("wf2-test-conn".to_string()));
+        assert_eq!(manager.connection_name.as_deref(), Some("wf2-test-conn"));
+    }
+
+    #[test]
+    fn cluster_manager_retains_configured_connection_name() {
+        let manager =
+            RedisClusterConnectionManager::new(vec!["redis://127.0.0.1:7000".to_string()])
+                .expect("valid seed nodes")
+                .with_connection_name(Some("wf2-test-conn".to_string()));
+        assert_eq!(manager.connection_name.as_deref(), Some("wf2-test-conn"));
     }
 
     #[test]

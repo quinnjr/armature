@@ -8,8 +8,25 @@ use sea_orm::{
 use std::future::Future;
 use std::pin::Pin;
 
+/// Sealing module for [`TransactionExt`].
+///
+/// `TransactionExt` is a use-not-implement framework trait: only the types
+/// this crate implements it for ([`Database`] and [`DatabaseConnection`])
+/// are meant to provide implementations. Sealing it lets us add new
+/// required methods (like [`TransactionExt::begin_transaction_with_options`])
+/// without it being a breaking change for downstream crates, since no
+/// downstream crate can implement `TransactionExt` in the first place.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::Database {}
+    impl Sealed for sea_orm::DatabaseConnection {}
+}
+
 /// Extension trait for transaction management.
-pub trait TransactionExt {
+///
+/// This trait is sealed: it can only be implemented by types within this
+/// crate (currently [`Database`] and [`DatabaseConnection`]).
+pub trait TransactionExt: sealed::Sealed {
     /// Begin a new database transaction and return the raw [`DatabaseTransaction`].
     ///
     /// This does **not** take a closure and does **not** auto-commit or

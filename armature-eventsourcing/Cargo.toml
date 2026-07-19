@@ -1,6 +1,6 @@
 [package]
 name = "armature-eventsourcing"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -21,6 +21,7 @@ uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2.0"
 dashmap = "6.2"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

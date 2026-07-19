@@ -4,6 +4,7 @@ use std::time::Duration;
 
 /// OpenSearch client configuration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OpenSearchConfig {
     /// OpenSearch URL(s).
     pub urls: Vec<String>,
@@ -28,8 +29,6 @@ pub struct OpenSearchConfig {
     pub aws_credentials_provider: Option<aws_credential_types::provider::SharedCredentialsProvider>,
     /// Enable request compression.
     pub compression: bool,
-    /// Maximum number of retries.
-    pub max_retries: u32,
 }
 
 impl OpenSearchConfig {
@@ -47,7 +46,6 @@ impl OpenSearchConfig {
             #[cfg(feature = "aws-auth")]
             aws_credentials_provider: None,
             compression: true,
-            max_retries: 3,
         }
     }
 
@@ -125,15 +123,6 @@ impl OpenSearchConfig {
     /// express it); see `OpenSearchClient::new`.
     pub fn with_compression(mut self, enabled: bool) -> Self {
         self.compression = enabled;
-        self
-    }
-
-    /// Set maximum retries.
-    ///
-    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
-    /// express it); see `OpenSearchClient::new`.
-    pub fn with_max_retries(mut self, retries: u32) -> Self {
-        self.max_retries = retries;
         self
     }
 }

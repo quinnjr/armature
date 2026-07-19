@@ -125,6 +125,84 @@ impl IsolationLevel {
 }
 
 // ============================================================================
+// Isolation statement ordering (shared between backends)
+// ============================================================================
+
+/// One of the two operations `transaction_with_isolation` performs: opening
+/// the transaction (`BEGIN`, via `conn.transaction()`) and applying the
+/// isolation level (`SET TRANSACTION ISOLATION LEVEL ...`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TxOp {
+    /// `conn.transaction()` opening `BEGIN`.
+    Begin,
+    /// `SET TRANSACTION ISOLATION LEVEL ...`.
+    SetIsolation,
+}
+
+/// Ordered sequence of operations for PostgreSQL.
+///
+/// `SET TRANSACTION ISOLATION LEVEL` only affects the transaction it runs
+/// *inside*; run before `BEGIN` it is a silent no-op. It must therefore come
+/// after `Begin`.
+pub(crate) const PG_ISOLATION_ORDER: [TxOp; 2] = [TxOp::Begin, TxOp::SetIsolation];
+
+/// Ordered sequence of operations for MySQL.
+///
+/// `SET TRANSACTION ISOLATION LEVEL` sets the level for the *next*
+/// transaction and errors ("Transaction characteristics can't be changed
+/// while a transaction is in progress") if issued after `BEGIN`. It must
+/// therefore come before `Begin`.
+// Only consumed by the MySQL `transaction_with_isolation` impl below (and by
+// the docker-free ordering test); with the `mysql` feature disabled (the
+// default), nothing in this crate reads it.
+#[allow(dead_code)]
+pub(crate) const MYSQL_ISOLATION_ORDER: [TxOp; 2] = [TxOp::SetIsolation, TxOp::Begin];
+
+/// Runs `f` inside a transaction with `isolation_sql` applied, in the order
+/// dictated by `order` (see [`PG_ISOLATION_ORDER`] / [`MYSQL_ISOLATION_ORDER`]).
+///
+/// Both backends need the same two operations - open the transaction and
+/// apply the isolation level - and differ only in which one must run first.
+/// Branching on the shared `order` constants here (instead of hand-writing
+/// the sequence once per backend) means a docker-free test can assert
+/// directly on those constants and know it is testing the exact same
+/// decision the real Postgres/MySQL code paths make, not a copy of it that
+/// could silently drift out of sync.
+async fn run_with_ordered_isolation<Conn, F, T>(
+    order: [TxOp; 2],
+    conn: &mut Conn,
+    isolation_sql: String,
+    f: F,
+) -> Result<T, diesel::result::Error>
+where
+    Conn: diesel_async::AsyncConnection,
+    <Conn as diesel_async::AsyncConnectionCore>::Backend:
+        diesel::backend::DieselReserveSpecialization,
+    for<'r> F: AsyncFnOnce(&'r mut Conn) -> Result<T, diesel::result::Error>
+        + AsyncTxFn<&'r mut Conn, Result<T, diesel::result::Error>>
+        + Send,
+    T: Send,
+{
+    use diesel_async::RunQueryDsl;
+
+    if order[0] == TxOp::SetIsolation {
+        // Before `Begin`: issue the isolation SQL first, then open the
+        // transaction and run the body.
+        diesel::sql_query(isolation_sql).execute(conn).await?;
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
+            .await
+    } else {
+        // After `Begin`: open the transaction, then issue the isolation SQL
+        // as the first statement inside it, then run the body.
+        conn.transaction::<T, diesel::result::Error, _>(async |conn| {
+            diesel::sql_query(isolation_sql).execute(conn).await?;
+            f(conn).await
+        })
+        .await
+    }
+}
+
+// ============================================================================
 // PostgreSQL Transaction Implementation
 // ============================================================================
 
@@ -158,24 +236,14 @@ impl TransactionExt<AsyncPgConnection> for crate::PgPool {
             + Send,
         T: Send,
     {
-        use diesel_async::{AsyncConnection, RunQueryDsl};
-
         let mut conn = self.get().await?;
         let conn: &mut AsyncPgConnection = &mut conn;
 
         let isolation_sql = format!("SET TRANSACTION ISOLATION LEVEL {}", isolation.to_pg_sql());
 
-        conn.transaction::<T, diesel::result::Error, _>(async |conn| {
-            // `SET TRANSACTION` only affects the *current* transaction when run
-            // inside one; running it before `conn.transaction()` opens the
-            // BEGIN block is a silent no-op in PostgreSQL. It must be the
-            // first statement executed after BEGIN.
-            diesel::sql_query(isolation_sql).execute(conn).await?;
-
-            f(conn).await
-        })
-        .await
-        .map_err(|e| DieselError::Transaction(e.to_string()))
+        run_with_ordered_isolation(PG_ISOLATION_ORDER, conn, isolation_sql, f)
+            .await
+            .map_err(|e| DieselError::Transaction(e.to_string()))
     }
 }
 
@@ -213,26 +281,15 @@ impl TransactionExt<AsyncMysqlConnection> for crate::MysqlPool {
             + Send,
         T: Send,
     {
-        use diesel_async::{AsyncConnection, RunQueryDsl};
-
         let mut conn = self.get().await?;
         let conn: &mut AsyncMysqlConnection = &mut conn;
 
-        // Unlike PostgreSQL, MySQL's `SET TRANSACTION ISOLATION LEVEL` sets
-        // the level for the *next* transaction and must be issued *before*
-        // that transaction starts (issuing it after `BEGIN` raises
-        // "Transaction characteristics can't be changed while a transaction
-        // is in progress"). So, for MySQL, running it here - before
-        // `conn.transaction()` opens the transaction - is correct.
-        diesel::sql_query(format!(
+        let isolation_sql = format!(
             "SET TRANSACTION ISOLATION LEVEL {}",
             isolation.to_mysql_sql()
-        ))
-        .execute(conn)
-        .await
-        .map_err(|e| DieselError::Transaction(e.to_string()))?;
+        );
 
-        conn.transaction::<T, diesel::result::Error, _>(async |conn| f(conn).await)
+        run_with_ordered_isolation(MYSQL_ISOLATION_ORDER, conn, isolation_sql, f)
             .await
             .map_err(|e| DieselError::Transaction(e.to_string()))
     }
@@ -275,59 +332,53 @@ impl<'a, C> TransactionGuard<'a, C> {
     }
 }
 
-#[cfg(feature = "postgres")]
-impl<'a> TransactionGuard<'a, AsyncPgConnection> {
-    /// Commit the transaction by issuing `COMMIT`.
-    pub async fn commit(mut self) -> DieselResult<()> {
-        use diesel_async::RunQueryDsl;
+/// Generates `commit()`/`rollback()` inherent methods on
+/// `TransactionGuard<'a, $conn>` for a concrete diesel-async connection type.
+///
+/// Both methods differ only in which SQL statement they issue, so this macro
+/// (rather than four near-identical hand-written bodies, one pair per
+/// backend) is the single place that owns the shared behavior: **the guard
+/// is marked `finished` *before* the statement is sent**, not after it
+/// succeeds. Marking it after would mean a `COMMIT`/`ROLLBACK` that fails
+/// (e.g. connection dropped mid-flight) leaves `finished == false`, and since
+/// `self` is consumed by value here regardless of the `Result`, `Drop` would
+/// then fire its "dropped without calling commit()/rollback()" warning even
+/// though one of them plainly *was* called. The guard's contract is "was
+/// commit()/rollback() invoked", not "did it succeed" - callers still get the
+/// real `Err` back to handle.
+macro_rules! impl_transaction_guard_finish {
+    ($conn:ty) => {
+        impl<'a> TransactionGuard<'a, $conn> {
+            /// Commit the transaction by issuing `COMMIT`.
+            pub async fn commit(mut self) -> DieselResult<()> {
+                self.finished = true;
+                Self::finish(self.conn, "COMMIT").await
+            }
 
-        diesel::sql_query("COMMIT")
-            .execute(self.conn)
-            .await
-            .map_err(|e| DieselError::Transaction(e.to_string()))?;
-        self.finished = true;
-        Ok(())
-    }
+            /// Roll back the transaction by issuing `ROLLBACK`.
+            pub async fn rollback(mut self) -> DieselResult<()> {
+                self.finished = true;
+                Self::finish(self.conn, "ROLLBACK").await
+            }
 
-    /// Roll back the transaction by issuing `ROLLBACK`.
-    pub async fn rollback(mut self) -> DieselResult<()> {
-        use diesel_async::RunQueryDsl;
+            async fn finish(conn: &mut $conn, sql: &'static str) -> DieselResult<()> {
+                use diesel_async::RunQueryDsl;
 
-        diesel::sql_query("ROLLBACK")
-            .execute(self.conn)
-            .await
-            .map_err(|e| DieselError::Transaction(e.to_string()))?;
-        self.finished = true;
-        Ok(())
-    }
+                diesel::sql_query(sql)
+                    .execute(conn)
+                    .await
+                    .map_err(|e| DieselError::Transaction(e.to_string()))?;
+                Ok(())
+            }
+        }
+    };
 }
+
+#[cfg(feature = "postgres")]
+impl_transaction_guard_finish!(AsyncPgConnection);
 
 #[cfg(feature = "mysql")]
-impl<'a> TransactionGuard<'a, AsyncMysqlConnection> {
-    /// Commit the transaction by issuing `COMMIT`.
-    pub async fn commit(mut self) -> DieselResult<()> {
-        use diesel_async::RunQueryDsl;
-
-        diesel::sql_query("COMMIT")
-            .execute(self.conn)
-            .await
-            .map_err(|e| DieselError::Transaction(e.to_string()))?;
-        self.finished = true;
-        Ok(())
-    }
-
-    /// Roll back the transaction by issuing `ROLLBACK`.
-    pub async fn rollback(mut self) -> DieselResult<()> {
-        use diesel_async::RunQueryDsl;
-
-        diesel::sql_query("ROLLBACK")
-            .execute(self.conn)
-            .await
-            .map_err(|e| DieselError::Transaction(e.to_string()))?;
-        self.finished = true;
-        Ok(())
-    }
-}
+impl_transaction_guard_finish!(AsyncMysqlConnection);
 
 impl<'a, C> Drop for TransactionGuard<'a, C> {
     fn drop(&mut self) {
@@ -411,6 +462,56 @@ mod isolation_level_sql_mapping_tests {
             IsolationLevel::RepeatableRead.to_mysql_sql()
         );
         assert_eq!(sql, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    }
+}
+
+/// Docker-free test proving the isolation-SQL-vs-`BEGIN` *ordering* itself,
+/// not just the enum -> SQL string mapping (`isolation_level_sql_mapping_tests`
+/// above). The old (broken-placement) code passed the mapping tests just as
+/// well as the fixed code - the bug was in *where* the statement runs
+/// relative to `BEGIN`, which those tests never exercised. `PG_ISOLATION_ORDER`
+/// / `MYSQL_ISOLATION_ORDER` are the exact constants `run_with_ordered_isolation`
+/// branches on for the real Postgres/MySQL code paths (see
+/// `transaction_with_isolation` on `PgPool`/`MysqlPool`), so asserting on them
+/// here catches a regression that swaps the order without needing Docker.
+#[cfg(test)]
+mod isolation_ordering_tests {
+    use super::{MYSQL_ISOLATION_ORDER, PG_ISOLATION_ORDER, TxOp};
+
+    #[test]
+    fn postgres_runs_set_isolation_after_begin() {
+        assert_eq!(PG_ISOLATION_ORDER, [TxOp::Begin, TxOp::SetIsolation]);
+        assert_eq!(
+            PG_ISOLATION_ORDER.iter().position(|op| *op == TxOp::Begin),
+            Some(0),
+            "BEGIN must be the first operation for PostgreSQL"
+        );
+        assert_eq!(
+            PG_ISOLATION_ORDER
+                .iter()
+                .position(|op| *op == TxOp::SetIsolation),
+            Some(1),
+            "SET TRANSACTION ISOLATION LEVEL must run after BEGIN for PostgreSQL"
+        );
+    }
+
+    #[test]
+    fn mysql_runs_set_isolation_before_begin() {
+        assert_eq!(MYSQL_ISOLATION_ORDER, [TxOp::SetIsolation, TxOp::Begin]);
+        assert_eq!(
+            MYSQL_ISOLATION_ORDER
+                .iter()
+                .position(|op| *op == TxOp::SetIsolation),
+            Some(0),
+            "SET TRANSACTION ISOLATION LEVEL must run before BEGIN for MySQL"
+        );
+        assert_eq!(
+            MYSQL_ISOLATION_ORDER
+                .iter()
+                .position(|op| *op == TxOp::Begin),
+            Some(1),
+            "BEGIN must run after SET TRANSACTION ISOLATION LEVEL for MySQL"
+        );
     }
 }
 

@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use tracing::debug;
 
 /// Aggregate repository
 ///
@@ -85,6 +86,18 @@ where
         if let Some(frequency) = self.snapshot_frequency
             && aggregate.version().is_multiple_of(frequency)
         {
+            // A snapshot store + frequency are configured, so the caller clearly
+            // expects snapshots to be persisted here. `create_snapshot` on this
+            // generic (non-serde-bounded) path is a deliberate no-op (see its
+            // doc comment), so make the footgun visible instead of silently
+            // doing nothing: `save_with_snapshot` is required for real
+            // snapshot persistence.
+            debug!(
+                aggregate_id = aggregate.aggregate_id(),
+                version = aggregate.version(),
+                "snapshot_frequency configured but base save() does not persist \
+                 snapshots; use AggregateRepository::save_with_snapshot instead"
+            );
             self.create_snapshot(aggregate).await?;
         }
 

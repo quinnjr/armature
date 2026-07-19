@@ -541,25 +541,30 @@ impl EmailQueueBackend for RedisBackend {
             .arg(self.pending_key())
             .query_async(&mut conn)
             .await
-            .unwrap_or(0);
+            .map_err(|e| MailError::Queue(e.to_string()))?;
 
         let retrying: u64 = redis::cmd("ZCARD")
             .arg(self.retry_key())
             .query_async(&mut conn)
             .await
-            .unwrap_or(0);
+            .map_err(|e| MailError::Queue(e.to_string()))?;
 
         let dead_letter: u64 = redis::cmd("LLEN")
             .arg(self.dead_letter_key())
             .query_async(&mut conn)
             .await
-            .unwrap_or(0);
+            .map_err(|e| MailError::Queue(e.to_string()))?;
 
+        // HGET returns nil (deserialized as None by the redis crate) when the
+        // "processed" field hasn't been set yet (e.g. no jobs processed since
+        // startup) — that's a legitimate 0, not an error, so default it after
+        // the Redis-call error is propagated rather than masking real outages.
         let processed: u64 = redis::cmd("HGET")
             .arg(self.stats_key())
             .arg("processed")
-            .query_async(&mut conn)
+            .query_async::<Option<u64>>(&mut conn)
             .await
+            .map_err(|e| MailError::Queue(e.to_string()))?
             .unwrap_or(0);
 
         Ok(QueueStats {
