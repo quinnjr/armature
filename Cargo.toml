@@ -70,7 +70,10 @@ exclude = [
     "benches/comparison_servers/warp_server",
     "benches/comparison_servers/rocket_server",
 ]
-resolver = "2"
+# MSRV-aware resolver (stable since 1.84): honors `rust-version` when picking
+# dependency versions, so a fresh resolve won't pull deps that raised their MSRV
+# above ours (e.g. kdl 6.7.1, a dev-dep of armature-ferron, requires rustc 1.95).
+resolver = "3"
 
 [workspace.package]
 version = "0.1.1"
