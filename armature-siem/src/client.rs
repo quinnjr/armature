@@ -131,14 +131,30 @@ impl SiemClient {
                     continue;
                 }
 
-                if let Ok(formatted) = formatter.format_batch(&events, &config) {
-                    let _ = Self::send_via_transport(
-                        &transport,
-                        &config,
-                        &formatted,
-                        formatter.content_type(),
-                    )
-                    .await;
+                match formatter.format_batch(&events, &config) {
+                    Ok(formatted) => {
+                        if let Err(err) = Self::send_via_transport(
+                            &transport,
+                            &config,
+                            &formatted,
+                            formatter.content_type(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                error = %err,
+                                event_count = events.len(),
+                                "background SIEM flush failed to send batch; events dropped"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            event_count = events.len(),
+                            "background SIEM flush failed to format batch; events dropped"
+                        );
+                    }
                 }
             }
         })
@@ -458,6 +474,22 @@ impl HttpTransport {
         Ok((auth, rfc1123_date))
     }
 
+    /// Convert an HTTP `Retry-After` header value into the milliseconds
+    /// used by `SiemError::RateLimited`.
+    ///
+    /// Per RFC 7231, `Retry-After` (when given as a delay-seconds value, as
+    /// opposed to an HTTP-date) is in **seconds**, but `SiemError::RateLimited`
+    /// documents its field as **milliseconds** (the retry-loop consumer in
+    /// `send_via_transport` uses `Duration::from_millis`), so the seconds
+    /// value must be converted here at the producer. A missing or
+    /// unparseable header falls back to a conservative 1s (1000ms) default.
+    fn retry_after_header_to_ms(header_value: Option<&str>) -> u64 {
+        header_value
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|secs| secs.saturating_mul(1000))
+            .unwrap_or(1000)
+    }
+
     /// Send with an explicit timestamp. This is the internal seam that
     /// makes Sentinel `SharedKey` signing deterministic and testable
     /// without threading a clock through the public `SiemTransport::send`
@@ -504,14 +536,14 @@ impl HttpTransport {
         if status.is_success() {
             Ok(())
         } else if status.as_u16() == 429 {
-            // Rate limited
-            let retry_after = response
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
-            Err(SiemError::RateLimited(retry_after))
+            // Rate limited.
+            let retry_after_ms = Self::retry_after_header_to_ms(
+                response
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok()),
+            );
+            Err(SiemError::RateLimited(retry_after_ms))
         } else if status.as_u16() == 401 || status.as_u16() == 403 {
             Err(SiemError::Auth(format!(
                 "Authentication failed: {}",
@@ -600,18 +632,40 @@ impl rustls::client::danger::ServerCertVerifier for NoServerCertVerification {
 pub struct TcpTransport {
     endpoint: String,
     tls: bool,
+    /// Retained for diagnostics/tests; the effective TLS config is now baked
+    /// into `tls_connector` at construction time, so these are no longer
+    /// read on the send path.
+    #[allow(dead_code)]
     tls_verify: bool,
+    #[allow(dead_code)]
     ca_cert_path: Option<String>,
+    /// Pre-built TLS connector (only present when `tls` is true), built once
+    /// in `new()` rather than per-`send` so that the CA file isn't re-read
+    /// and the `rustls::ClientConfig` isn't rebuilt on every event.
+    /// `tokio_rustls::TlsConnector` is a thin `Arc`-backed handle, so cloning
+    /// it per-send is cheap.
+    tls_connector: Option<tokio_rustls::TlsConnector>,
 }
 
 impl TcpTransport {
     /// Create a new TCP transport
     pub fn new(config: &SiemConfig) -> SiemResult<Self> {
+        let tls = config.transport == Transport::Tls;
+        let tls_verify = config.tls_verify;
+        let ca_cert_path = config.ca_cert_path.clone();
+
+        let tls_connector = if tls {
+            Some(Self::build_tls_connector(tls_verify, &ca_cert_path)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             endpoint: config.endpoint.clone(),
-            tls: config.transport == Transport::Tls,
-            tls_verify: config.tls_verify,
-            ca_cert_path: config.ca_cert_path.clone(),
+            tls,
+            tls_verify,
+            ca_cert_path,
+            tls_connector,
         })
     }
 
@@ -619,10 +673,16 @@ impl TcpTransport {
     ///
     /// Never falls back to a permissive default: verification is only
     /// disabled when `tls_verify` is explicitly `false`.
-    fn build_tls_connector(&self) -> SiemResult<tokio_rustls::TlsConnector> {
+    ///
+    /// Called once from `new()` (so a bad `ca_cert_path` surfaces as a
+    /// construction-time error) rather than per-`send`.
+    fn build_tls_connector(
+        tls_verify: bool,
+        ca_cert_path: &Option<String>,
+    ) -> SiemResult<tokio_rustls::TlsConnector> {
         let provider = rustls::crypto::ring::default_provider();
 
-        let client_config = if !self.tls_verify {
+        let client_config = if !tls_verify {
             rustls::ClientConfig::builder_with_provider(Arc::new(provider.clone()))
                 .with_safe_default_protocol_versions()
                 .map_err(|e| {
@@ -634,7 +694,7 @@ impl TcpTransport {
         } else {
             let mut roots = rustls::RootCertStore::empty();
 
-            if let Some(ca_path) = &self.ca_cert_path {
+            if let Some(ca_path) = ca_cert_path {
                 let file = std::fs::File::open(ca_path).map_err(|e| {
                     SiemError::Transport(format!(
                         "Failed to open CA certificate '{}': {}",
@@ -679,7 +739,11 @@ impl SiemTransport for TcpTransport {
         let stream = TcpStream::connect(&self.endpoint).await?;
 
         if self.tls {
-            let connector = self.build_tls_connector()?;
+            let connector = self.tls_connector.clone().ok_or_else(|| {
+                SiemError::Transport(
+                    "TLS transport has no connector initialized (this is a bug)".to_string(),
+                )
+            })?;
 
             let host = self
                 .endpoint
@@ -1198,11 +1262,14 @@ mod tests {
     }
 
     fn tcp_tls_transport(endpoint: String, tls_verify: bool) -> TcpTransport {
+        let tls_connector = TcpTransport::build_tls_connector(tls_verify, &None)
+            .expect("build tls connector for test transport");
         TcpTransport {
             endpoint,
             tls: true,
             tls_verify,
             ca_cert_path: None,
+            tls_connector: Some(tls_connector),
         }
     }
 

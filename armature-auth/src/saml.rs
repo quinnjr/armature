@@ -162,6 +162,13 @@ impl SamlConfig {
 pub struct SamlServiceProvider {
     name: String,
     config: SamlConfig,
+    /// IdP metadata parsed exactly once at construction (for the `IdpMetadata::Xml`
+    /// case) instead of re-parsing on every auth-request / response-validation call.
+    /// `None` for `IdpMetadata::Url`, which is unsupported (fetching is unimplemented)
+    /// and errors per request. This descriptor is cloned — never mutated — per request;
+    /// the validate path's `allow_unsigned_assertions` branch clears `key_descriptors`
+    /// on its own fresh clone so the shared cached copy stays intact.
+    idp_entity: Option<samael::metadata::EntityDescriptor>,
 }
 
 impl SamlServiceProvider {
@@ -180,7 +187,26 @@ impl SamlServiceProvider {
             ));
         }
 
-        Ok(Self { name, config })
+        // Parse the IdP metadata XML once here. The signing certificate and SSO
+        // endpoint(s) used per request come from this descriptor; parsing it once
+        // avoids repeating the parse (and ServiceProvider rebuild) on every call.
+        // `IdpMetadata::Url` is unsupported, so it stays `None` and the per-request
+        // paths return the same explicit "URL not implemented" error as before.
+        let idp_entity = match &config.idp_metadata {
+            IdpMetadata::Xml(xml) => Some(
+                xml.parse::<samael::metadata::EntityDescriptor>()
+                    .map_err(|e| {
+                        AuthError::SamlValidation(format!("Failed to parse IdP metadata XML: {e}"))
+                    })?,
+            ),
+            IdpMetadata::Url(_) => None,
+        };
+
+        Ok(Self {
+            name,
+            config,
+            idp_entity,
+        })
     }
 
     /// Generate relay state
@@ -237,18 +263,69 @@ impl SamlProvider for SamlServiceProvider {
     }
 
     fn get_metadata(&self) -> Result<String> {
-        // Generate SP metadata XML
+        // Generate SP metadata XML, emitting the optionally-configured SP properties
+        // (signing KeyDescriptor, SingleLogoutService, ContactPerson) when present so
+        // they are not silently dropped.
+        let cfg = &self.config;
+
+        // <KeyDescriptor use="signing"> carrying the SP certificate, when configured.
+        let key_descriptor = if let Some(cert_pem) = &cfg.sp_certificate {
+            let cert_b64 = pem_body(cert_pem);
+            format!(
+                r#"
+    <KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>{cert_b64}</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </KeyDescriptor>"#
+            )
+        } else {
+            String::new()
+        };
+
+        // <SingleLogoutService> when an SLS URL is configured.
+        let single_logout_service = if let Some(sls_url) = &cfg.sls_url {
+            format!(
+                r#"
+    <SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                         Location="{sls_url}"/>"#
+            )
+        } else {
+            String::new()
+        };
+
+        // <ContactPerson> from the configured contact information.
+        let contact_person = if let Some(contact) = &cfg.contact_person {
+            format!(
+                r#"
+  <ContactPerson contactType="{contact_type}">
+    <GivenName>{given_name}</GivenName>
+    <SurName>{surname}</SurName>
+    <EmailAddress>{email}</EmailAddress>
+  </ContactPerson>"#,
+                contact_type = contact.contact_type,
+                given_name = contact.given_name,
+                surname = contact.surname,
+                email = contact.email,
+            )
+        } else {
+            String::new()
+        };
+
         let metadata_xml = format!(
             r#"<?xml version="1.0"?>
 <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata"
-                  entityID="{}">
-  <SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+                  entityID="{entity_id}">
+  <SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">{key_descriptor}{single_logout_service}
     <AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
-                              Location="{}"
+                              Location="{acs_url}"
                               index="0"/>
-  </SPSSODescriptor>
+  </SPSSODescriptor>{contact_person}
 </EntityDescriptor>"#,
-            self.config.entity_id, self.config.acs_url
+            entity_id = cfg.entity_id,
+            acs_url = cfg.acs_url,
         );
 
         Ok(metadata_xml)
@@ -262,25 +339,19 @@ impl SamlProvider for SamlServiceProvider {
 impl SamlServiceProvider {
     fn create_auth_request_from_metadata(&self) -> Result<SamlAuthRequest> {
         use samael::crypto::{Crypto, CryptoProvider};
-        use samael::metadata::{EntityDescriptor, HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
+        use samael::metadata::{HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
         use samael::service_provider::ServiceProviderBuilder;
         use samael::traits::ToXml;
 
-        // 1. Parse the IdP metadata XML into an EntityDescriptor. The SingleSignOnService
-        //    endpoint(s) used below live in this metadata.
-        let idp_xml = match &self.config.idp_metadata {
-            IdpMetadata::Xml(xml) => xml.clone(),
-            IdpMetadata::Url(_) => {
-                return Err(AuthError::SamlValidation(
-                    "IdP metadata must be provided as XML to generate an AuthnRequest; \
-                     URL-based metadata fetching is not implemented here"
-                        .to_string(),
-                ));
-            }
-        };
-
-        let idp_metadata: EntityDescriptor = idp_xml.parse().map_err(|e| {
-            AuthError::SamlValidation(format!("Failed to parse IdP metadata XML: {e}"))
+        // 1. Use the IdP metadata parsed once at construction. The SingleSignOnService
+        //    endpoint(s) used below live in this descriptor. Clone the cached copy so we
+        //    never hand a mutably-owned shared descriptor to the builder.
+        let idp_metadata = self.idp_entity.clone().ok_or_else(|| {
+            AuthError::SamlValidation(
+                "IdP metadata must be provided as XML to generate an AuthnRequest; \
+                 URL-based metadata fetching is not implemented here"
+                    .to_string(),
+            )
         })?;
 
         let sp = ServiceProviderBuilder::default()
@@ -354,6 +425,17 @@ impl SamlServiceProvider {
 /// AuthnRequest signing, where samael's `Crypto::sign_xml` expects DER key bytes.
 #[cfg(feature = "saml")]
 fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+    general_purpose::STANDARD
+        .decode(pem_body(pem))
+        .map_err(|e| AuthError::SamlValidation(format!("Failed to decode PEM data: {e}")))
+}
+
+/// Extract the base64 body of a PEM block, dropping the `-----BEGIN ...-----` /
+/// `-----END ...-----` header and footer lines and any surrounding whitespace. Used both
+/// to feed `pem_to_der` (for AuthnRequest signing) and to embed the SP certificate's
+/// base64 DER directly into an `<X509Certificate>` element in the SP metadata.
+#[cfg(feature = "saml")]
+fn pem_body(pem: &str) -> String {
     let mut body = String::new();
     for line in pem.lines() {
         let line = line.trim();
@@ -362,9 +444,7 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
         }
         body.push_str(line);
     }
-    general_purpose::STANDARD
-        .decode(body)
-        .map_err(|e| AuthError::SamlValidation(format!("Failed to decode PEM data: {e}")))
+    body
 }
 
 /// Real SAML response verification (enveloped XML signature + SAML conditions).
@@ -378,24 +458,20 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 #[cfg(feature = "saml")]
 impl SamlServiceProvider {
     fn validate_response_verified(&self, saml_response: &str) -> Result<SamlAssertion> {
-        use samael::metadata::EntityDescriptor;
         use samael::service_provider::ServiceProviderBuilder;
 
-        // 1. Obtain IdP metadata XML and parse it into an EntityDescriptor. The signing
-        //    certificate(s) used to verify the response signature live in this metadata.
-        let idp_xml = match &self.config.idp_metadata {
-            IdpMetadata::Xml(xml) => xml.clone(),
-            IdpMetadata::Url(_) => {
-                return Err(AuthError::SamlValidation(
-                    "IdP metadata must be provided as XML for response validation; \
-                     URL-based metadata fetching is not implemented here"
-                        .to_string(),
-                ));
-            }
-        };
-
-        let mut idp_metadata: EntityDescriptor = idp_xml.parse().map_err(|e| {
-            AuthError::SamlValidation(format!("Failed to parse IdP metadata XML: {e}"))
+        // 1. Use the IdP metadata parsed once at construction. The signing certificate(s)
+        //    used to verify the response signature live in this descriptor. Clone the
+        //    cached copy: the `allow_unsigned_assertions` branch below mutates it (clears
+        //    key_descriptors), so each call needs its own copy and must never mutate the
+        //    shared cached descriptor. The cloned cert bytes are identical to what the
+        //    previous per-call re-parse produced, so verification behavior is unchanged.
+        let mut idp_metadata = self.idp_entity.clone().ok_or_else(|| {
+            AuthError::SamlValidation(
+                "IdP metadata must be provided as XML for response validation; \
+                 URL-based metadata fetching is not implemented here"
+                    .to_string(),
+            )
         })?;
 
         // When unsigned assertions are explicitly allowed, strip the IdP signing
@@ -546,6 +622,63 @@ mod tests {
         };
 
         assert_eq!(contact.email, "john@example.com");
+    }
+
+    // get_metadata must surface the optionally-configured SP properties
+    // (SingleLogoutService, signing KeyDescriptor, ContactPerson) rather than dropping
+    // them, so this asserts each configured knob appears in the emitted metadata.
+    #[test]
+    fn get_metadata_emits_configured_sp_properties() {
+        let idp_xml = r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.test/metadata">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"/>
+</md:EntityDescriptor>"#;
+
+        let config = SamlConfig::new(
+            "https://sp.example.test/metadata".to_string(),
+            "https://sp.example.test/acs".to_string(),
+            IdpMetadata::Xml(idp_xml.to_string()),
+        )
+        .with_sls_url("https://sp.example.test/sls".to_string())
+        .with_keys(
+            "-----BEGIN CERTIFICATE-----\nTUlJQmR1bW15Y2VydA==\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            "-----BEGIN PRIVATE KEY-----\nTUlJQmR1bW15a2V5\n-----END PRIVATE KEY-----\n"
+                .to_string(),
+        )
+        .with_contact(ContactInfo {
+            contact_type: "technical".to_string(),
+            given_name: "Jane".to_string(),
+            surname: "Ops".to_string(),
+            email: "ops@example.test".to_string(),
+        });
+
+        let provider = SamlServiceProvider::new("sp".to_string(), config).expect("provider build");
+        let metadata = provider.get_metadata().expect("metadata generation");
+
+        assert!(
+            metadata.contains("SingleLogoutService"),
+            "metadata should contain SingleLogoutService: {metadata}"
+        );
+        assert!(
+            metadata.contains("https://sp.example.test/sls"),
+            "SLS Location should be emitted: {metadata}"
+        );
+        assert!(
+            metadata.contains("KeyDescriptor"),
+            "metadata should contain a signing KeyDescriptor: {metadata}"
+        );
+        assert!(
+            metadata.contains("TUlJQmR1bW15Y2VydA=="),
+            "SP certificate body should be embedded: {metadata}"
+        );
+        assert!(
+            metadata.contains("ContactPerson"),
+            "metadata should contain ContactPerson: {metadata}"
+        );
+        assert!(
+            metadata.contains("ops@example.test"),
+            "contact email should be emitted: {metadata}"
+        );
     }
 }
 

@@ -8,7 +8,7 @@
 //! - 🔐 **JWT Authentication** - Token-based auth with `armature-jwt`
 //! - 🌐 **OAuth2** - Google, Auth0, Microsoft, AWS Cognito, Okta
 //! - 🔑 **SAML** - Enterprise SAML 2.0 authentication (requires `saml` feature)
-//! - 🔒 **Password Hashing** - Secure bcrypt-based hashing
+//! - 🔒 **Password Hashing** - Argon2 (default) and bcrypt
 //! - 🛡️ **Guards** - Route protection with auth and role guards
 //! - 👤 **User Context** - Request-scoped user information
 //!
@@ -126,7 +126,8 @@
 //!     entity_id: "https://myapp.com".to_string(),
 //!     acs_url: "https://myapp.com/callback".to_string(),
 //!     sls_url: None,
-//!     idp_metadata: IdpMetadata::Url("https://idp.example.com/metadata".to_string()),
+//!     // IdP metadata must be provided as XML; URL-based fetching is not yet supported.
+//!     idp_metadata: IdpMetadata::Xml("<EntityDescriptor>...</EntityDescriptor>".to_string()),
 //!     sp_certificate: None,
 //!     sp_private_key: None,
 //!     contact_person: None,

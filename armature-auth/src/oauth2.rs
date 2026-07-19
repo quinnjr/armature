@@ -152,12 +152,6 @@ pub struct GenericOAuth2Provider {
     /// `reqwest::Client` allocates a connection pool and loads the TLS root
     /// store, so it must not be rebuilt per request.
     oauth_http_client: oauth2::reqwest::Client,
-    /// HTTP client used for the userinfo endpoint (crate reqwest, v0.13).
-    ///
-    /// Kept separate from `oauth_http_client` because the `oauth2` crate depends
-    /// on a different major version of `reqwest` than this crate does, making the
-    /// two `Client` types distinct. Also built once and reused.
-    user_info_client: reqwest::Client,
 }
 
 impl GenericOAuth2Provider {
@@ -193,7 +187,6 @@ impl GenericOAuth2Provider {
             client,
             config,
             oauth_http_client: oauth2::reqwest::Client::new(),
-            user_info_client: reqwest::Client::new(),
         })
     }
 }
@@ -234,8 +227,7 @@ impl OAuth2Provider for GenericOAuth2Provider {
                 AuthError::AuthenticationFailed("No user info URL configured".into())
             })?;
 
-        let response = self
-            .user_info_client
+        let response = crate::providers::shared_http_client()
             .get(user_info_url)
             .bearer_auth(&token.access_token)
             .send()

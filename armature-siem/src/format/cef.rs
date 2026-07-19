@@ -127,18 +127,20 @@ impl CefFormatter {
         // Add custom metadata into distinct CEF custom slots: string-valued
         // entries go into `cs1..cs6` (with `cs{n}Label`), numeric-valued
         // entries go into `cn1..cn3` (with `cn{n}Label`). CEF's `cn1` is
-        // already used above for `httpStatusCode`, so numeric metadata
-        // starts at `cn2`. Once all slots for a value's kind are exhausted,
-        // remaining metadata is serialized as a single JSON blob into
-        // `cs6`/`deviceCustomString6` (`additionalMetadata`) rather than
-        // being silently dropped or overwriting an already-used slot.
+        // only reserved for `httpStatusCode` when that field is present
+        // above; otherwise numeric metadata may use `cn1` too. Once all
+        // slots for a value's kind are exhausted, remaining metadata is
+        // serialized as a single JSON blob into a non-standard
+        // `additionalMetadata` extension key (distinct from `cs6`, which
+        // may independently still hold a 6th string metadata value) rather
+        // than being silently dropped or overwriting an already-used slot.
         const MAX_CS: usize = 6;
-        // cn1 is reserved for httpStatusCode above.
-        const CN_START: usize = 2;
         const MAX_CN: usize = 3;
+        // cn1 is reserved for httpStatusCode above only when it was set.
+        let cn_start: usize = if event.http_status.is_some() { 2 } else { 1 };
 
         let mut next_cs = 1usize;
-        let mut next_cn = CN_START;
+        let mut next_cn = cn_start;
         let mut overflow = serde_json::Map::new();
 
         for (key, value) in &event.metadata {
@@ -277,6 +279,60 @@ mod tests {
         assert!(
             !(result.contains("cs1=acme-corp") && result.contains("cs1=high")),
             "metadata entries collided on the same cs slot: {result}"
+        );
+    }
+
+    #[test]
+    fn test_cef_metadata_overflow_preserves_all_string_values() {
+        let formatter = CefFormatter;
+        let mut event = sample_event();
+        // 8 string metadata entries: first 6 go into cs1..cs6, the
+        // remaining 2 must still appear, carried in additionalMetadata.
+        for i in 1..=8 {
+            event = event.metadata(format!("key{i}"), serde_json::json!(format!("val{i}")));
+        }
+        let config = sample_config();
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        for i in 1..=6 {
+            assert!(
+                result.contains(&format!("val{i}")),
+                "expected val{i} in a cs slot: {result}"
+            );
+        }
+        assert!(
+            result.contains("cs6="),
+            "expected cs6 slot to be used: {result}"
+        );
+        assert!(
+            result.contains("additionalMetadata="),
+            "expected overflow extension key: {result}"
+        );
+        for i in 7..=8 {
+            assert!(
+                result.contains(&format!("val{i}")),
+                "expected overflow val{i} to survive in additionalMetadata: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cef_numeric_metadata_uses_cn1_when_no_http_status() {
+        let formatter = CefFormatter;
+        let event = sample_event().metadata("risk_score", serde_json::json!(42));
+        let config = sample_config();
+        assert!(event.http_status.is_none());
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        assert!(
+            result.contains("cn1=42"),
+            "expected numeric metadata to use cn1 when http_status is absent: {result}"
+        );
+        assert!(
+            result.contains("cn1Label=risk_score"),
+            "expected cn1Label to be set: {result}"
         );
     }
 

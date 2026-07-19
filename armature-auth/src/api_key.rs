@@ -80,6 +80,11 @@ pub enum ApiKeyError {
     RateLimitExceeded,
 }
 
+/// Once the per-key rate-limit counter map grows past this many entries, a
+/// miss triggers an opportunistic sweep of expired windows (see
+/// [`ApiKeyManager::check_rate_limit`]) instead of sweeping on every call.
+const RATE_COUNTER_SWEEP_THRESHOLD: usize = 1024;
+
 /// API Key structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKey {
@@ -212,17 +217,44 @@ impl ApiKeyManager {
     /// Record a request against `key_id`'s rate limit window and check it
     /// against `limit` (requests per window). Returns
     /// [`ApiKeyError::RateLimitExceeded`] once the count exceeds `limit`.
+    ///
+    /// The counter map is bounded: once it grows past
+    /// [`RATE_COUNTER_SWEEP_THRESHOLD`] entries, a miss (a key id not yet
+    /// tracked) triggers an opportunistic sweep that evicts any entries whose
+    /// window has fully elapsed — those are exactly the entries this
+    /// function would reset to `(now, 0)` on next access, so limit decisions
+    /// are unaffected. This keeps unbounded key rotation/revocation traffic
+    /// from growing the map forever without paying for an O(n) sweep on
+    /// every call.
     fn check_rate_limit(&self, key_id: &str, limit: u32) -> Result<(), ApiKeyError> {
         let mut counters = self.rate_counters.lock().unwrap();
         let now = Utc::now();
-        let entry = counters.entry(key_id.to_string()).or_insert((now, 0));
 
-        if now - entry.0 > self.rate_limit_window {
-            *entry = (now, 0);
+        // Borrowing lookup first: avoids allocating `key_id.to_string()` on
+        // the common hot path where the key is already tracked.
+        if let Some(entry) = counters.get_mut(key_id) {
+            if now - entry.0 > self.rate_limit_window {
+                *entry = (now, 0);
+            }
+
+            entry.1 += 1;
+            return if entry.1 > limit {
+                Err(ApiKeyError::RateLimitExceeded)
+            } else {
+                Ok(())
+            };
         }
 
-        entry.1 += 1;
-        if entry.1 > limit {
+        // Miss: this key id isn't tracked yet. Opportunistically evict
+        // expired entries before inserting, but only once the map has grown
+        // large enough to matter, so we don't pay an O(n) sweep every call.
+        if counters.len() >= RATE_COUNTER_SWEEP_THRESHOLD {
+            let window = self.rate_limit_window;
+            counters.retain(|_, (window_start, _)| now - *window_start <= window);
+        }
+
+        counters.insert(key_id.to_string(), (now, 1));
+        if 1 > limit {
             Err(ApiKeyError::RateLimitExceeded)
         } else {
             Ok(())
@@ -507,6 +539,63 @@ mod tests {
 
         let result = manager.validate(&key.key).await;
         assert!(matches!(result, Err(ApiKeyError::Revoked)));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_window_resets_after_expiry() {
+        let store = Arc::new(InMemoryStore::new());
+        let manager =
+            ApiKeyManager::new(store.clone()).with_rate_limit_window(Duration::milliseconds(50));
+
+        let mut key = manager
+            .generate("user_123", vec!["read".to_string()])
+            .await
+            .unwrap();
+        key.rate_limit = Some(2);
+        store.save(&key).await.unwrap();
+
+        // First 2 calls (the limit) succeed.
+        for _ in 0..2 {
+            let result = manager.validate(&key.key).await;
+            assert!(result.is_ok(), "expected call within limit to succeed");
+        }
+
+        // The 3rd call within the same window is rejected.
+        let result = manager.validate(&key.key).await;
+        assert!(matches!(result, Err(ApiKeyError::RateLimitExceeded)));
+
+        // Wait past the window and confirm the count resets.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let result = manager.validate(&key.key).await;
+        assert!(
+            result.is_ok(),
+            "expected count to reset after window elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_revokes_old_key_and_preserves_scopes() {
+        let store = Arc::new(InMemoryStore::new());
+        let manager = ApiKeyManager::new(store);
+
+        let old_key = manager
+            .generate("user_123", vec!["read".to_string(), "write".to_string()])
+            .await
+            .unwrap();
+
+        let new_key = manager.rotate(&old_key.id).await.unwrap();
+
+        // Old key is now revoked.
+        let old_result = manager.validate(&old_key.key).await;
+        assert!(matches!(old_result, Err(ApiKeyError::Revoked)));
+
+        // New key validates and carries the same scopes.
+        let validated = manager.validate(&new_key.key).await.unwrap();
+        assert!(validated.is_some());
+        let validated = validated.unwrap();
+        assert_eq!(validated.scopes, old_key.scopes);
+        assert_ne!(validated.id, old_key.id);
+        assert_eq!(validated.user_id, old_key.user_id);
     }
 
     #[tokio::test]

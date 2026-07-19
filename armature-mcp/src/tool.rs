@@ -12,7 +12,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Fn-pointer form of an MCP tool handler. Const-evaluable, so it can
 /// sit inside `inventory::submit!`'s static initializer.
@@ -95,6 +95,12 @@ pub trait McpToolProvider: Send + Sync {
 #[derive(Default)]
 pub struct McpToolRegistry {
     tools: HashMap<String, &'static McpToolEntry>,
+    /// Lazily-computed, sorted cache of tool names. The registry is
+    /// populated once at startup from `inventory` and never mutated
+    /// afterward, so this cache — built on the first paginated list
+    /// call — stays valid for the registry's whole lifetime and avoids
+    /// re-sorting the full key set on every `list_tools_page` call.
+    sorted_names: OnceLock<Vec<String>>,
 }
 
 impl McpToolRegistry {
@@ -106,7 +112,10 @@ impl McpToolRegistry {
             tools.insert(entry.name.to_string(), entry);
         }
 
-        Self { tools }
+        Self {
+            tools,
+            sorted_names: OnceLock::new(),
+        }
     }
 
     /// Get all registered tool definitions
@@ -129,8 +138,11 @@ impl McpToolRegistry {
         cursor: Option<&str>,
         limit: usize,
     ) -> (Vec<ToolDefinition>, Option<String>) {
-        let mut names: Vec<&String> = self.tools.keys().collect();
-        names.sort();
+        let names = self.sorted_names.get_or_init(|| {
+            let mut names: Vec<String> = self.tools.keys().cloned().collect();
+            names.sort();
+            names
+        });
 
         let start = match cursor {
             Some(c) => names.partition_point(|name| name.as_str() <= c),
@@ -315,7 +327,10 @@ mod tests {
                 )));
             tools.insert(name.to_string(), entry);
         }
-        McpToolRegistry { tools }
+        McpToolRegistry {
+            tools,
+            sorted_names: OnceLock::new(),
+        }
     }
 
     #[test]

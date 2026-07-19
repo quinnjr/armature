@@ -95,10 +95,18 @@ impl JwtService {
     pub fn generate_token_pair<T: Serialize + Clone>(&self, claims: &T) -> Result<TokenPair> {
         let now = chrono::Utc::now().timestamp();
 
-        let access_claims =
-            Self::claims_with_expiration(claims, now + self.config.expires_in.as_secs() as i64)?;
-        let refresh_claims = Self::claims_with_expiration(
-            claims,
+        // Serialize the claims once and reuse the resulting `Value` for both tokens; only
+        // `exp` differs between the access and refresh claims, so there is no need to run
+        // `serde_json::to_value` twice.
+        let base_claims = serde_json::to_value(claims)
+            .map_err(|e| JwtError::SerializationError(e.to_string()))?;
+
+        let access_claims = Self::set_expiration(
+            base_claims.clone(),
+            now + self.config.expires_in.as_secs() as i64,
+        )?;
+        let refresh_claims = Self::set_expiration(
+            base_claims,
             now + self.config.refresh_expires_in.as_secs() as i64,
         )?;
 
@@ -129,12 +137,9 @@ impl JwtService {
         self.generate_token_pair(&claims)
     }
 
-    /// Serialize `claims` to a JSON object with its `exp` field set (added or overwritten) to
-    /// the given Unix timestamp.
-    fn claims_with_expiration<T: Serialize>(claims: &T, exp: i64) -> Result<serde_json::Value> {
-        let mut value = serde_json::to_value(claims)
-            .map_err(|e| JwtError::SerializationError(e.to_string()))?;
-
+    /// Set (add or overwrite) the `exp` field on an already-serialized claims `Value` to the
+    /// given Unix timestamp.
+    fn set_expiration(mut value: serde_json::Value, exp: i64) -> Result<serde_json::Value> {
         match value.as_object_mut() {
             Some(obj) => {
                 obj.insert("exp".to_string(), serde_json::Value::from(exp));
@@ -349,5 +354,58 @@ mod tests {
         let decoded: TestClaims = service.decode_unverified(&token).unwrap();
 
         assert_eq!(decoded, claims);
+    }
+
+    #[test]
+    fn sign_standard_merges_configured_and_additional_claims() {
+        let config = JwtConfig::new("test-secret".to_string())
+            .with_issuer("test-issuer".to_string())
+            .with_audience(vec!["test-audience".to_string()]);
+        let service = JwtService::new(config).unwrap();
+
+        let before = chrono::Utc::now().timestamp();
+
+        let additional = serde_json::json!({
+            "role": "admin",
+            "org_id": "org-42",
+        });
+
+        let token = service
+            .sign_standard("user-123".to_string(), Some(additional))
+            .unwrap();
+
+        let decoded: serde_json::Value = service.verify(&token).unwrap();
+
+        assert_eq!(
+            decoded.get("sub").and_then(|v| v.as_str()),
+            Some("user-123")
+        );
+        assert_eq!(
+            decoded.get("iss").and_then(|v| v.as_str()),
+            Some("test-issuer")
+        );
+        assert_eq!(
+            decoded.get("aud").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::Value::String(
+                "test-audience".to_string()
+            )])
+        );
+        assert_eq!(decoded.get("role").and_then(|v| v.as_str()), Some("admin"));
+        assert_eq!(
+            decoded.get("org_id").and_then(|v| v.as_str()),
+            Some("org-42")
+        );
+
+        // `additional_claims` must not clobber the standard exp/iss fields.
+        let exp = decoded.get("exp").and_then(|v| v.as_i64()).unwrap();
+        assert!(
+            exp > before,
+            "exp {exp} should be a valid future timestamp (now was {before})"
+        );
+        assert_eq!(
+            decoded.get("iss").and_then(|v| v.as_str()),
+            Some("test-issuer"),
+            "additional_claims must not clobber the configured issuer"
+        );
     }
 }

@@ -10,7 +10,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Handler function type for MCP resource reads
 pub type ResourceHandlerFn =
@@ -83,6 +83,12 @@ pub trait McpResourceProvider: Send + Sync {
 #[derive(Default)]
 pub struct McpResourceRegistry {
     resources: HashMap<String, &'static McpResourceEntry>,
+    /// Lazily-computed, sorted cache of resource URIs. The registry is
+    /// populated once at startup from `inventory` and never mutated
+    /// afterward, so this cache — built on the first paginated list
+    /// call — stays valid for the registry's whole lifetime and avoids
+    /// re-sorting the full key set on every `list_resources_page` call.
+    sorted_uris: OnceLock<Vec<String>>,
 }
 
 impl McpResourceRegistry {
@@ -94,7 +100,10 @@ impl McpResourceRegistry {
             resources.insert(entry.uri.to_string(), entry);
         }
 
-        Self { resources }
+        Self {
+            resources,
+            sorted_uris: OnceLock::new(),
+        }
     }
 
     /// Get all registered resource definitions
@@ -117,8 +126,11 @@ impl McpResourceRegistry {
         cursor: Option<&str>,
         limit: usize,
     ) -> (Vec<ResourceDefinition>, Option<String>) {
-        let mut uris: Vec<&String> = self.resources.keys().collect();
-        uris.sort();
+        let uris = self.sorted_uris.get_or_init(|| {
+            let mut uris: Vec<String> = self.resources.keys().cloned().collect();
+            uris.sort();
+            uris
+        });
 
         let start = match cursor {
             Some(c) => uris.partition_point(|uri| uri.as_str() <= c),
@@ -232,7 +244,10 @@ mod tests {
                 )));
             resources.insert(uri.to_string(), entry);
         }
-        McpResourceRegistry { resources }
+        McpResourceRegistry {
+            resources,
+            sorted_uris: OnceLock::new(),
+        }
     }
 
     #[test]

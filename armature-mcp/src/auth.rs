@@ -9,7 +9,7 @@ use crate::error::{McpError, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Authentication method for MCP access
@@ -111,7 +111,7 @@ impl ApiTokenAuth {
 }
 
 /// JWT authentication configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JwtAuth {
     /// Secret key for HMAC algorithms (HS256, HS384, HS512)
     pub secret: Option<String>,
@@ -127,6 +127,28 @@ pub struct JwtAuth {
     pub scope_claim: String,
     /// Algorithm (default: HS256)
     pub algorithm: String,
+    /// Lazily-built, cached verify-only `armature_jwt::JwtManager` for this
+    /// auth config. `JwtAuth` is a pure function of its other fields (which
+    /// never change after construction), so the manager - and the PEM
+    /// parsing / `Validation` construction it does internally - only needs
+    /// to be built once and reused across every `authenticate_jwt` call.
+    /// Wrapped in `Arc` so clones of `JwtAuth` (e.g. inside `McpAuthMethod`)
+    /// share the same cached manager rather than each re-initializing it.
+    jwt_manager: Arc<OnceLock<armature_jwt::JwtManager>>,
+}
+
+impl std::fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("secret", &self.secret)
+            .field("public_key", &self.public_key)
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("required_scopes", &self.required_scopes)
+            .field("scope_claim", &self.scope_claim)
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 impl Default for JwtAuth {
@@ -139,6 +161,7 @@ impl Default for JwtAuth {
             required_scopes: Vec::new(),
             scope_claim: "scope".to_string(),
             algorithm: "HS256".to_string(),
+            jwt_manager: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -532,32 +555,20 @@ async fn authenticate_api_token(
     })
 }
 
-async fn authenticate_jwt(
-    auth: &JwtAuth,
-    headers: &std::collections::HashMap<String, String>,
-) -> Result<McpAuthContext> {
-    // Get Authorization header
-    let header_value = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        .map(|(_, v)| v)
-        .ok_or_else(|| McpError::InvalidRequest("Missing Authorization header".into()))?;
-
-    // Extract token
-    let token = header_value
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
-
-    // Reject anything that isn't even shaped like a JWT before doing any
-    // cryptographic work.
-    if token.split('.').count() != 3 {
-        return Err(McpError::InvalidRequest("Invalid JWT format".into()));
+/// Build (on first use) and thereafter reuse the verify-only `JwtManager` for
+/// a given `JwtAuth`. The manager is a pure function of `auth`'s key
+/// material, issuer/audience, and algorithm - none of which change after
+/// construction - so it is safe to cache for the lifetime of the `JwtAuth`
+/// (and its clones, via the shared `Arc<OnceLock<_>>`).
+///
+/// Verification behavior is unchanged: same algorithm pinning, same
+/// signature/expiration checks performed by `armature_jwt`, same error
+/// mapping to `McpError::InvalidRequest` on construction failure.
+fn get_or_build_jwt_manager(auth: &JwtAuth) -> Result<&armature_jwt::JwtManager> {
+    if let Some(manager) = auth.jwt_manager.get() {
+        return Ok(manager);
     }
 
-    // Build a verify-only armature-jwt manager from this JwtAuth's configured
-    // key material and algorithm, then VERIFY the signature (and expiration)
-    // before trusting anything in the payload. This is the only path into
-    // the claims below - a token that fails verification never reaches it.
     let algorithm = parse_jwt_algorithm(&auth.algorithm)?;
 
     let mut config = match algorithm {
@@ -589,6 +600,52 @@ async fn authenticate_jwt(
 
     let manager = armature_jwt::JwtManager::verify_only(config)
         .map_err(|e| McpError::InvalidRequest(format!("Invalid JWT auth configuration: {e}")))?;
+
+    // `OnceLock::get_or_init` would require an infallible closure; since
+    // building the manager is fallible, set explicitly. If another thread
+    // won the race, `set` returns the value back as `Err`, which is fine -
+    // both are equivalent managers for the same immutable config, so we just
+    // fall back to whatever ended up in the cell.
+    let _ = auth.jwt_manager.set(manager);
+    Ok(auth
+        .jwt_manager
+        .get()
+        .expect("jwt_manager was just set or already initialized"))
+}
+
+async fn authenticate_jwt(
+    auth: &JwtAuth,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<McpAuthContext> {
+    // Get Authorization header
+    let header_value = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v)
+        .ok_or_else(|| McpError::InvalidRequest("Missing Authorization header".into()))?;
+
+    // Extract token
+    let token = header_value
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
+
+    // Reject anything that isn't even shaped like a JWT before doing any
+    // cryptographic work.
+    if token.split('.').count() != 3 {
+        return Err(McpError::InvalidRequest("Invalid JWT format".into()));
+    }
+
+    // Build a verify-only armature-jwt manager from this JwtAuth's configured
+    // key material and algorithm, then VERIFY the signature (and expiration)
+    // before trusting anything in the payload. This is the only path into
+    // the claims below - a token that fails verification never reaches it.
+    //
+    // `JwtAuth` is a pure function of its (immutable, post-construction)
+    // fields, so the manager - which re-parses PEM key material and rebuilds
+    // a `Validation` internally - only needs to be built once per `JwtAuth`
+    // and reused across every call, instead of being rebuilt (and re-logged)
+    // on every single request.
+    let manager = get_or_build_jwt_manager(auth)?;
 
     let claims: serde_json::Value = manager
         .verify(token)
