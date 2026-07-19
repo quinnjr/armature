@@ -27,7 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HMR now runs a real WebSocket notification server for browser auto-refresh
 - OAuth2 `userinfo`/introspection validators (`armature-mcp`) and JWT tenant resolution (`armature-tenancy`) are implemented (previously placeholders)
 
+#### Auth & Security features (`armature-auth`, `armature-siem`, `armature-mcp`)
+- SAML `create_auth_request` resolves the IdP SSO endpoint from configured metadata (no more hardcoded `idp.example.com`) and signs the `AuthnRequest` when SP key/certificate are configured; `<AttributeStatement>` attributes are parsed from verified assertions. SP metadata (`SamlServiceProvider::get_metadata`) now includes a signing `KeyDescriptor`, `SingleLogoutService`, and `ContactPerson` when the corresponding config is set (previously silently dropped)
+- `armature-auth` strategies are real: `LocalStrategy` verifies passwords via bcrypt/argon2 (`PasswordHasher`), `JwtStrategy` verifies tokens via `armature-jwt`'s `JwtManager`; `AuthGuard::extract_user` reads the verified `UserContext` extension; Microsoft Entra Graph `/me` mapping (`id`→`sub`, `mail`/`userPrincipalName`→`email`, `displayName`→`name`); OIDC `id_token` is surfaced from the token endpoint; API keys enforce per-key rate limits
+- `armature-siem`: retry with exponential backoff (honoring `max_retries`/`retry_delay` and `RateLimited` retry-after), time-based batch flush, optional gzip request compression, custom CA (`ca_cert_path`) for the HTTP transport, Elastic `cloud_id` decoding, and distinct CEF custom-field slots (`cs1..cs6`/`cn1..cn3`) with JSON overflow. New `SiemConfig::workspace_id` field + builder method (the Log Analytics workspace ID used by Azure Sentinel SharedKey signing); `SiemConfig` is now `#[non_exhaustive]`
+- `armature-mcp`: cursor-based pagination for `tools/list` and `resources/list`; the `#[mcp]` attribute macro is exported and emits a function-pointer tool handler. `McpService::with_tool_provider`/`with_resource_provider` register dynamic `McpToolProvider`/`McpResourceProvider` implementations alongside the compile-time `#[mcp]` inventory — their tools/resources are merged into `tools/list`/`resources/list` and dispatched by `tools/call`/`resources/read` (compile-time registry names/URIs take precedence on collision)
+- `armature-jwt`: `JwtManager::verify_only` constructor (verification without a signing key) for consumers that only validate tokens
+
 ### Changed
+
+- **Breaking (`armature-auth`):** `AuthStrategy::authenticate`'s `credentials` parameter changed from `&dyn Any` to `&(dyn Any + Send + Sync)` (required for the `async_trait` `Send` future bound). `LocalStrategy::new()` now fails closed (returns `InvalidCredentials`) until a user store is attached via the new `LocalStrategy::with_store()`.
+- **JWT refresh tokens now have a distinct, longer expiry.** `generate_token_pair`/`refresh_token` previously issued a refresh token byte-identical to the access token with the same `exp`, so refresh could never succeed after expiry; refresh tokens now expire at `now + refresh_expires_in` and `refresh_token` re-issues with fresh expirations.
+- `armature-security` default hardening (Helmet parity): default `X-XSS-Protection` is now `0` (disabled), Expect-CT is no longer enabled by default (deprecated), and CSP supports report-only mode (`Content-Security-Policy-Report-Only`).
 
 - **Guards now enforce.** `RolesGuard` (core) and `RoleGuard`/`PermissionGuard` (`armature-auth`) previously returned `Ok(true)` for any bearer-shaped request. They now **fail closed**, requiring an authenticated `RequestRoles`/`UserContext` extension (attach it via the new `armature-auth` JWT middleware). Role/permission-protected routes will reject requests until an authentication layer populates the extension.
 - **Default request body limit is now 10 MB** (was unbounded). Raise it with `Application::with_max_body_size()`.
@@ -51,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+#### Auth & Security conformance (`armature-auth`, `armature-jwt`, `armature-security`, `armature-siem`, `armature-mcp`)
+
+Five crates advertised security controls their code did not implement. All are now real, each with a regression test that failed against the old code:
+
+- **SAML SSO bypass closed (`armature-auth`).** `SamlServiceProvider::validate_response` previously accepted *any* attacker-supplied base64 XML containing a `<NameID>` as a valid assertion. It now verifies the enveloped XML signature against the IdP certificate from the configured metadata (via `samael`, behind the `saml` feature), and enforces issuer, audience, `NotBefore`/`NotOnOrAfter`, and recipient/ACS — failing closed when a signature is required but no IdP certificate is configured. Session expiry now comes from the assertion's real `NotOnOrAfter`.
+- **MCP JWT auth bypass closed (`armature-mcp`).** `authenticate_jwt` only base64url-decoded the payload and discarded the signature — any forged `sub`/`scope`/`exp` passed. It now verifies the signature via `armature-jwt`'s `JwtManager`, with the algorithm **pinned** from `JwtAuth.algorithm` (rejects `alg: none` and RS256→HS256 confusion).
+- **Forgeable request-signing MAC fixed (`armature-security`).** `RequestSigner`'s "HMAC-SHA256" was actually `Sha256(secret || msg)`, a length-extension-forgeable prefix hash. It now uses a real `Hmac::<Sha256>` MAC with constant-time verification.
+- **SIEM plaintext downgrade closed (`armature-siem`).** The "TLS" syslog transport logged a warning and then sent security events over plaintext TCP. It now performs a real TLS handshake (tokio-rustls) honoring `tls_verify`/`ca_cert_path`, and returns an error rather than ever downgrading to plaintext.
+- **Azure Sentinel auth fixed (`armature-siem`).** The Sentinel transport sent the raw token as `Authorization`, so every send failed auth. It now implements the Azure Monitor SharedKey signing scheme (canonical string + HMAC-SHA256 over the base64-decoded key).
 - Fixed two unbounded-growth denial-of-service vectors reachable from network input: the Prometheus request-metrics middleware no longer labels series by raw request path (bounded/opt-in), and the in-memory rate-limit store now evicts idle entries via a scheduled prune task.
 - Removed a per-request `Box::leak` memory leak in `route_params`' wildcard matcher.
 

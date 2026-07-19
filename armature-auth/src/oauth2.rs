@@ -2,10 +2,10 @@
 
 use crate::{AuthError, Result};
 use async_trait::async_trait;
-use oauth2::basic::{BasicClient, BasicTokenType};
+use oauth2::basic::BasicTokenType;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointSet, RedirectUrl, Scope, StandardErrorResponse, StandardRevocableToken,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointSet, ExtraTokenFields,
+    RedirectUrl, Scope, StandardErrorResponse, StandardRevocableToken,
     StandardTokenIntrospectionResponse, StandardTokenResponse, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use url::Url;
 /// Type alias for a fully configured OAuth2 client
 type ConfiguredClient = oauth2::Client<
     StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
-    StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    StandardTokenIntrospectionResponse<EmptyExtraTokenFields, BasicTokenType>,
+    StandardTokenResponse<OidcExtraFields, BasicTokenType>,
+    StandardTokenIntrospectionResponse<OidcExtraFields, BasicTokenType>,
     StandardRevocableToken,
     StandardErrorResponse<oauth2::RevocationErrorResponseType>,
     EndpointSet,
@@ -56,12 +56,19 @@ pub struct OAuth2Token {
     pub id_token: Option<String>, // For OIDC
 }
 
-impl From<StandardTokenResponse<EmptyExtraTokenFields, oauth2::basic::BasicTokenType>>
-    for OAuth2Token
-{
-    fn from(
-        token: StandardTokenResponse<EmptyExtraTokenFields, oauth2::basic::BasicTokenType>,
-    ) -> Self {
+/// Extra token-endpoint fields beyond the OAuth2 base response, needed to
+/// surface the OIDC `id_token` that a plain `BasicClient` response discards.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OidcExtraFields {
+    #[serde(default)]
+    pub id_token: Option<String>,
+}
+
+impl ExtraTokenFields for OidcExtraFields {}
+
+impl From<StandardTokenResponse<OidcExtraFields, oauth2::basic::BasicTokenType>> for OAuth2Token {
+    fn from(token: StandardTokenResponse<OidcExtraFields, oauth2::basic::BasicTokenType>) -> Self {
+        let id_token = token.extra_fields().id_token.clone();
         Self {
             access_token: token.access_token().secret().clone(),
             token_type: token.token_type().as_ref().to_string(),
@@ -73,7 +80,7 @@ impl From<StandardTokenResponse<EmptyExtraTokenFields, oauth2::basic::BasicToken
                     .collect::<Vec<_>>()
                     .join(" ")
             }),
-            id_token: None, // BasicClient doesn't support OIDC by default
+            id_token,
         }
     }
 }
@@ -145,37 +152,45 @@ pub struct GenericOAuth2Provider {
     /// `reqwest::Client` allocates a connection pool and loads the TLS root
     /// store, so it must not be rebuilt per request.
     oauth_http_client: oauth2::reqwest::Client,
-    /// HTTP client used for the userinfo endpoint (crate reqwest, v0.13).
-    ///
-    /// Kept separate from `oauth_http_client` because the `oauth2` crate depends
-    /// on a different major version of `reqwest` than this crate does, making the
-    /// two `Client` types distinct. Also built once and reused.
-    user_info_client: reqwest::Client,
 }
 
 impl GenericOAuth2Provider {
+    /// The configured userinfo endpoint URL, if any.
+    pub(crate) fn user_info_url(&self) -> Option<&str> {
+        self.config.user_info_url.as_deref()
+    }
+
     pub fn new(name: String, config: OAuth2Config) -> Result<Self> {
-        let client = BasicClient::new(ClientId::new(config.client_id.clone()))
-            .set_client_secret(ClientSecret::new(config.client_secret.clone()))
-            .set_auth_uri(
-                AuthUrl::new(config.auth_url.clone())
-                    .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
-            )
-            .set_token_uri(
-                TokenUrl::new(config.token_url.clone())
-                    .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
-            )
-            .set_redirect_uri(
-                RedirectUrl::new(config.redirect_url.clone())
-                    .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
-            );
+        let client = oauth2::Client::<
+            StandardErrorResponse<oauth2::basic::BasicErrorResponseType>,
+            StandardTokenResponse<OidcExtraFields, BasicTokenType>,
+            StandardTokenIntrospectionResponse<OidcExtraFields, BasicTokenType>,
+            StandardRevocableToken,
+            StandardErrorResponse<oauth2::RevocationErrorResponseType>,
+        >::new(ClientId::new(config.client_id.clone()))
+        .set_client_secret(ClientSecret::new(config.client_secret.clone()))
+        .set_auth_uri(
+            AuthUrl::new(config.auth_url.clone())
+                .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
+        )
+        .set_token_uri(
+            TokenUrl::new(config.token_url.clone())
+                .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(config.redirect_url.clone())
+                .map_err(|e| AuthError::AuthenticationFailed(e.to_string()))?,
+        );
 
         Ok(Self {
             name,
             client,
             config,
-            oauth_http_client: oauth2::reqwest::Client::new(),
-            user_info_client: reqwest::Client::new(),
+            oauth_http_client: oauth2::reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| oauth2::reqwest::Client::new()),
         })
     }
 }
@@ -216,8 +231,7 @@ impl OAuth2Provider for GenericOAuth2Provider {
                 AuthError::AuthenticationFailed("No user info URL configured".into())
             })?;
 
-        let response = self
-            .user_info_client
+        let response = crate::providers::shared_http_client()
             .get(user_info_url)
             .bearer_auth(&token.access_token)
             .send()
@@ -271,5 +285,42 @@ mod tests {
         assert_eq!(config.client_id, "client_id");
         assert_eq!(config.scopes.len(), 2);
         assert!(config.user_info_url.is_some());
+    }
+
+    #[tokio::test]
+    async fn exchange_code_surfaces_oidc_id_token() {
+        let server = armature_testkit::StubServer::builder()
+            .route(
+                "POST",
+                "/token",
+                armature_testkit::StubResponse::json(
+                    200,
+                    r#"{
+                        "access_token": "at-123",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "id_token": "header.payload.signature"
+                    }"#,
+                ),
+            )
+            .start()
+            .await;
+
+        let config = OAuth2Config::new(
+            "client_id".to_string(),
+            "client_secret".to_string(),
+            format!("{}/authorize", server.url()),
+            format!("{}/token", server.url()),
+            "https://example.com/callback".to_string(),
+        );
+        let provider = GenericOAuth2Provider::new("test".to_string(), config).unwrap();
+
+        let token = provider
+            .exchange_code("some-code".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(token.access_token, "at-123");
+        assert_eq!(token.id_token.as_deref(), Some("header.payload.signature"));
     }
 }

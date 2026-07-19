@@ -4,14 +4,19 @@
 
 use crate::auth::{McpAuthConfig, McpAuthContext, authenticate};
 use crate::error::{McpError, Result};
-use crate::resource::McpResourceRegistry;
-use crate::tool::McpToolRegistry;
+use crate::resource::{McpResourceProvider, McpResourceRegistry};
+use crate::tool::{McpToolProvider, McpToolRegistry};
 use crate::types::*;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 /// MCP protocol version
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Maximum number of items returned per page by the `tools/list` and
+/// `resources/list` handlers.
+const LIST_PAGE_SIZE: usize = 100;
 
 /// Configuration for the MCP service
 #[derive(Clone)]
@@ -92,6 +97,63 @@ pub struct McpService {
     config: McpConfig,
     tool_registry: McpToolRegistry,
     resource_registry: McpResourceRegistry,
+    /// Dynamically-registered tool providers, plugged in alongside the
+    /// compile-time `#[mcp]` inventory via [`McpService::with_tool_provider`].
+    tool_providers: Vec<Arc<dyn McpToolProvider>>,
+    /// Dynamically-registered resource providers, plugged in alongside the
+    /// compile-time `#[mcp]` inventory via [`McpService::with_resource_provider`].
+    resource_providers: Vec<Arc<dyn McpResourceProvider>>,
+    /// Lazily-computed, merged & sorted cache of tool definitions (registry
+    /// and providers together, registry-precedence deduped by name). Built
+    /// once on first `tools/list` call since providers are registered
+    /// before serving and never mutated afterward.
+    merged_tools_cache: OnceLock<Vec<ToolDefinition>>,
+    /// Lazily-computed, merged & sorted cache of resource definitions
+    /// (registry and providers together, registry-precedence deduped by uri).
+    merged_resources_cache: OnceLock<Vec<ResourceDefinition>>,
+}
+
+/// Try a sequence of provider calls (each an expression awaiting a provider,
+/// e.g. `provider.call_tool(...)` / `provider.read_resource(...)`) after the
+/// primary lookup (inventory registry) reported "not found". Evaluates to
+/// the first `Ok`, or the first non-"not found" `Err` (short-circuiting), or
+/// — if every provider also reports "not found" — the initial "not found"
+/// error (updated to the most recent provider's own "not found" error as
+/// the loop progresses).
+///
+/// Shared by `McpService::handle_tools_call` and
+/// `McpService::handle_resources_read`, which previously duplicated this
+/// fallback-dispatch loop verbatim. A macro (rather than a generic async
+/// fn) avoids the two call sites' provider-future types acquiring an
+/// over-narrow inferred lifetime that trips higher-ranked-trait-bound
+/// checks elsewhere in the crate (observed as spurious "implementation of
+/// `FnOnce`/`Send` is not general enough" errors at unrelated call sites).
+macro_rules! dispatch_with_fallback {
+    ($initial_err:expr, $providers:expr, |$p:ident| $call:expr, $is_not_found:pat) => {{
+        let mut last_err = $initial_err;
+        let mut found = None;
+
+        for $p in $providers {
+            match $call.await {
+                Ok(v) => {
+                    found = Some(Ok(v));
+                    break;
+                }
+                Err(e @ $is_not_found) => {
+                    last_err = e;
+                }
+                Err(e) => {
+                    found = Some(Err(e));
+                    break;
+                }
+            }
+        }
+
+        match found {
+            Some(result) => result,
+            None => Err(last_err),
+        }
+    }};
 }
 
 impl McpService {
@@ -101,6 +163,10 @@ impl McpService {
             config: McpConfig::default(),
             tool_registry: McpToolRegistry::new(),
             resource_registry: McpResourceRegistry::new(),
+            tool_providers: Vec::new(),
+            resource_providers: Vec::new(),
+            merged_tools_cache: OnceLock::new(),
+            merged_resources_cache: OnceLock::new(),
         }
     }
 
@@ -110,7 +176,29 @@ impl McpService {
             config,
             tool_registry: McpToolRegistry::new(),
             resource_registry: McpResourceRegistry::new(),
+            tool_providers: Vec::new(),
+            resource_providers: Vec::new(),
+            merged_tools_cache: OnceLock::new(),
+            merged_resources_cache: OnceLock::new(),
         }
+    }
+
+    /// Register a dynamic tool provider. Providers are consulted by
+    /// `tools/list` (merged with the compile-time inventory, registry names
+    /// taking precedence) and by `tools/call` (tried in registration order
+    /// after the inventory registry reports no match).
+    pub fn with_tool_provider(mut self, provider: Arc<dyn McpToolProvider>) -> Self {
+        self.tool_providers.push(provider);
+        self
+    }
+
+    /// Register a dynamic resource provider. Providers are consulted by
+    /// `resources/list` (merged with the compile-time inventory, registry
+    /// URIs taking precedence) and by `resources/read` (tried in
+    /// registration order after the inventory registry reports no match).
+    pub fn with_resource_provider(mut self, provider: Arc<dyn McpResourceProvider>) -> Self {
+        self.resource_providers.push(provider);
+        self
     }
 
     /// Handle a JSON-RPC request and return a response
@@ -217,15 +305,38 @@ impl McpService {
     }
 
     /// Handle tools/list request
-    fn handle_tools_list(&self, _params: Option<Value>) -> Result<Value> {
-        let tools = self.tool_registry.list_tools();
+    fn handle_tools_list(&self, params: Option<Value>) -> Result<Value> {
+        let cursor = parse_list_cursor(params)?;
 
-        let result = ToolsListResult {
-            tools,
-            next_cursor: None,
+        let (tools, next_cursor) = if self.tool_providers.is_empty() {
+            self.tool_registry
+                .list_tools_page(cursor.as_deref(), LIST_PAGE_SIZE)
+        } else {
+            paginate_by(
+                self.merged_tools(),
+                cursor.as_deref(),
+                LIST_PAGE_SIZE,
+                |t| t.name.as_str(),
+            )
         };
 
+        let result = ToolsListResult { tools, next_cursor };
+
         serde_json::to_value(result).map_err(McpError::from)
+    }
+
+    /// Build (or fetch the cached) merged, name-sorted, deduped list of tool
+    /// definitions from the inventory registry plus all registered
+    /// providers. Registry entries take precedence over provider entries
+    /// with the same name.
+    fn merged_tools(&self) -> &[ToolDefinition] {
+        self.merged_tools_cache.get_or_init(|| {
+            merge_dedup_sorted(
+                self.tool_registry.list_tools(),
+                self.tool_providers.iter().flat_map(|p| p.tools()),
+                |t| t.name.as_str(),
+            )
+        })
     }
 
     /// Handle tools/call request
@@ -236,24 +347,61 @@ impl McpService {
                 serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
             })?;
 
-        let result = self
+        let result = match self
             .tool_registry
-            .call_tool(&params.name, params.arguments)
-            .await?;
+            .call_tool(&params.name, params.arguments.clone())
+            .await
+        {
+            Err(McpError::ToolNotFound(_)) => {
+                dispatch_with_fallback!(
+                    McpError::ToolNotFound(params.name.clone()),
+                    &self.tool_providers,
+                    |p| p.call_tool(&params.name, params.arguments.clone()),
+                    McpError::ToolNotFound(_)
+                )
+            }
+            other => other,
+        }?;
 
         serde_json::to_value(result).map_err(McpError::from)
     }
 
     /// Handle resources/list request
-    fn handle_resources_list(&self, _params: Option<Value>) -> Result<Value> {
-        let resources = self.resource_registry.list_resources();
+    fn handle_resources_list(&self, params: Option<Value>) -> Result<Value> {
+        let cursor = parse_list_cursor(params)?;
+
+        let (resources, next_cursor) = if self.resource_providers.is_empty() {
+            self.resource_registry
+                .list_resources_page(cursor.as_deref(), LIST_PAGE_SIZE)
+        } else {
+            paginate_by(
+                self.merged_resources(),
+                cursor.as_deref(),
+                LIST_PAGE_SIZE,
+                |r| r.uri.as_str(),
+            )
+        };
 
         let result = ResourcesListResult {
             resources,
-            next_cursor: None,
+            next_cursor,
         };
 
         serde_json::to_value(result).map_err(McpError::from)
+    }
+
+    /// Build (or fetch the cached) merged, uri-sorted, deduped list of
+    /// resource definitions from the inventory registry plus all registered
+    /// providers. Registry entries take precedence over provider entries
+    /// with the same uri.
+    fn merged_resources(&self) -> &[ResourceDefinition] {
+        self.merged_resources_cache.get_or_init(|| {
+            merge_dedup_sorted(
+                self.resource_registry.list_resources(),
+                self.resource_providers.iter().flat_map(|p| p.resources()),
+                |r| r.uri.as_str(),
+            )
+        })
     }
 
     /// Handle resources/read request
@@ -264,7 +412,17 @@ impl McpService {
                 serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
             })?;
 
-        let content = self.resource_registry.read_resource(&params.uri).await?;
+        let content = match self.resource_registry.read_resource(&params.uri).await {
+            Err(McpError::ResourceNotFound(_)) => {
+                dispatch_with_fallback!(
+                    McpError::ResourceNotFound(params.uri.clone()),
+                    &self.resource_providers,
+                    |p| p.read_resource(&params.uri),
+                    McpError::ResourceNotFound(_)
+                )
+            }
+            other => other,
+        }?;
 
         let result = ResourceReadResult {
             contents: vec![content],
@@ -293,6 +451,91 @@ impl Default for McpService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Parse the optional `cursor` field out of a `tools/list`/`resources/list`
+/// request's params. Missing params (or a missing/null `cursor`) means
+/// "start from the beginning".
+fn parse_list_cursor(params: Option<Value>) -> Result<Option<String>> {
+    match params {
+        None => Ok(None),
+        Some(value) => {
+            let params: ListParams = serde_json::from_value(value)
+                .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            Ok(params.cursor)
+        }
+    }
+}
+
+/// Paginate a pre-sorted slice of items using opaque-cursor semantics:
+/// `cursor` is the key of the last item on the previous page (or `None`
+/// to start from the beginning), and the returned `next_cursor` is the
+/// key of the last item on this page if more items remain, or `None` on
+/// the final page.
+///
+/// This is the single, shared cursor-pagination implementation for the
+/// crate: `McpToolRegistry::list_tools_page` (tool.rs) and
+/// `McpResourceRegistry::list_resources_page` (resource.rs) both delegate
+/// to it (paging their pre-sorted key vectors, then mapping keys to
+/// definitions), and [`McpService`] uses it directly here to page
+/// already-merged tool/resource definitions.
+pub(crate) fn paginate_by<T, K>(
+    items: &[T],
+    cursor: Option<&str>,
+    limit: usize,
+    key: K,
+) -> (Vec<T>, Option<String>)
+where
+    T: Clone,
+    K: Fn(&T) -> &str,
+{
+    let start = match cursor {
+        Some(c) => items.partition_point(|item| key(item) <= c),
+        None => 0,
+    };
+
+    let remaining = &items[start..];
+    let take = remaining.len().min(limit.max(1));
+    let page = &remaining[..take];
+
+    let next_cursor = if take < remaining.len() {
+        Some(key(&page[take - 1]).to_string())
+    } else {
+        None
+    };
+
+    (page.to_vec(), next_cursor)
+}
+
+/// Merge a "primary" collection (e.g. the compile-time inventory registry)
+/// with a "secondary" collection (e.g. dynamically-registered providers),
+/// deduplicating by `key` with primary entries taking precedence over
+/// secondary entries that share a key, then sort the result by `key`.
+///
+/// Shared by `McpService::merged_tools` and `McpService::merged_resources`,
+/// which previously duplicated this merge/dedup/sort logic verbatim for
+/// `ToolDefinition`/`name` and `ResourceDefinition`/`uri` respectively.
+fn merge_dedup_sorted<T>(
+    primary: Vec<T>,
+    secondary: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut merged: Vec<T> = Vec::new();
+
+    for item in primary {
+        seen.insert(key(&item).to_string());
+        merged.push(item);
+    }
+
+    for item in secondary {
+        if seen.insert(key(&item).to_string()) {
+            merged.push(item);
+        }
+    }
+
+    merged.sort_by(|a, b| key(a).cmp(key(b)));
+    merged
 }
 
 #[cfg(test)]
@@ -336,6 +579,57 @@ mod tests {
 
         assert!(response.error.is_none());
         assert!(response.result.is_some());
+
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        // No inventory-registered tools in the unit test binary, so the
+        // single (empty) page has no continuation.
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_list_with_cursor_param() {
+        let service = McpService::new();
+        let request = JsonRpcRequest::new("tools/list")
+            .with_params(serde_json::json!({ "cursor": "some_tool_name" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_handle_resources_list_with_cursor_param() {
+        let service = McpService::new();
+        let request = JsonRpcRequest::new("resources/list")
+            .with_params(serde_json::json!({ "cursor": "some_resource_uri" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[test]
+    fn test_parse_list_cursor_none_when_no_params() {
+        assert_eq!(parse_list_cursor(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_list_cursor_extracts_cursor() {
+        let params = serde_json::json!({ "cursor": "abc" });
+        assert_eq!(
+            parse_list_cursor(Some(params)).unwrap(),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_list_cursor_invalid_params_errors() {
+        let params = serde_json::json!({ "cursor": 123 });
+        assert!(parse_list_cursor(Some(params)).is_err());
     }
 
     #[tokio::test]
@@ -368,5 +662,229 @@ mod tests {
 
         assert!(response.contains("error"));
         assert!(response.contains("-32700")); // Parse error
+    }
+
+    struct EchoToolProvider;
+
+    #[async_trait::async_trait]
+    impl McpToolProvider for EchoToolProvider {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "echo".to_string(),
+                description: Some("Echoes back the input".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+            if name == "echo" {
+                Ok(ToolCallResult::text(arguments.to_string()))
+            } else {
+                Err(McpError::ToolNotFound(name.to_string()))
+            }
+        }
+    }
+
+    struct EchoResourceProvider;
+
+    #[async_trait::async_trait]
+    impl McpResourceProvider for EchoResourceProvider {
+        fn resources(&self) -> Vec<ResourceDefinition> {
+            vec![ResourceDefinition {
+                uri: "echo://resource".to_string(),
+                name: "echo".to_string(),
+                description: None,
+                mime_type: None,
+            }]
+        }
+
+        async fn read_resource(&self, uri: &str) -> Result<ResourceContent> {
+            if uri == "echo://resource" {
+                Ok(ResourceContent::text(uri, "echoed content"))
+            } else {
+                Err(McpError::ResourceNotFound(uri.to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_includes_registered_provider_tool() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/list");
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(result.tools.iter().any(|t| t.name == "echo"));
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_dispatches_to_provider() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/call")
+            .with_params(serde_json::json!({ "name": "echo", "arguments": {"a": 1} }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolCallResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_unknown_name_returns_tool_not_found_error() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/call")
+            .with_params(serde_json::json!({ "name": "does_not_exist", "arguments": {} }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, -32002);
+    }
+
+    #[tokio::test]
+    async fn test_resources_list_includes_registered_provider_resource() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/list");
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(result.resources.iter().any(|r| r.uri == "echo://resource"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_read_dispatches_to_provider() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/read")
+            .with_params(serde_json::json!({ "uri": "echo://resource" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourceReadResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.contents[0].text.as_deref(), Some("echoed content"));
+    }
+
+    struct NamedEchoToolProvider {
+        name: &'static str,
+        reply: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl McpToolProvider for NamedEchoToolProvider {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: self.name.to_string(),
+                description: Some(self.reply.to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn call_tool(&self, name: &str, _arguments: Value) -> Result<ToolCallResult> {
+            if name == self.name {
+                Ok(ToolCallResult::text(self.reply))
+            } else {
+                Err(McpError::ToolNotFound(name.to_string()))
+            }
+        }
+    }
+
+    struct NamedEchoResourceProvider {
+        uri: &'static str,
+        reply: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl McpResourceProvider for NamedEchoResourceProvider {
+        fn resources(&self) -> Vec<ResourceDefinition> {
+            vec![ResourceDefinition {
+                uri: self.uri.to_string(),
+                name: self.uri.to_string(),
+                description: Some(self.reply.to_string()),
+                mime_type: None,
+            }]
+        }
+
+        async fn read_resource(&self, uri: &str) -> Result<ResourceContent> {
+            if uri == self.uri {
+                Ok(ResourceContent::text(uri, self.reply))
+            } else {
+                Err(McpError::ResourceNotFound(uri.to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_dedups_colliding_provider_names_first_registered_wins() {
+        // Two providers both expose a tool named "shared". The merge/dedup
+        // logic (`merge_dedup_sorted`) must keep exactly one entry for the
+        // name, and — matching registry-vs-provider precedence — the
+        // first-registered provider's definition wins over later ones.
+        let service = McpService::new()
+            .with_tool_provider(Arc::new(NamedEchoToolProvider {
+                name: "shared",
+                reply: "first",
+            }))
+            .with_tool_provider(Arc::new(NamedEchoToolProvider {
+                name: "shared",
+                reply: "second",
+            }));
+
+        let request = JsonRpcRequest::new("tools/list");
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+
+        let matches: Vec<_> = result.tools.iter().filter(|t| t.name == "shared").collect();
+        assert_eq!(matches.len(), 1, "expected exactly one deduped entry");
+        assert_eq!(matches[0].description.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_list_dedups_colliding_provider_uris_first_registered_wins() {
+        // Symmetric to the tools case: two providers both expose a resource
+        // at the same URI; the merged `resources/list` must contain exactly
+        // one entry, with the first-registered provider's definition
+        // winning.
+        let service = McpService::new()
+            .with_resource_provider(Arc::new(NamedEchoResourceProvider {
+                uri: "shared://resource",
+                reply: "first",
+            }))
+            .with_resource_provider(Arc::new(NamedEchoResourceProvider {
+                uri: "shared://resource",
+                reply: "second",
+            }));
+
+        let request = JsonRpcRequest::new("resources/list");
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+
+        let matches: Vec<_> = result
+            .resources
+            .iter()
+            .filter(|r| r.uri == "shared://resource")
+            .collect();
+        assert_eq!(matches.len(), 1, "expected exactly one deduped entry");
+        assert_eq!(matches[0].description.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_read_unknown_uri_returns_resource_not_found_error() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/read")
+            .with_params(serde_json::json!({ "uri": "does://not-exist" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, -32002);
     }
 }

@@ -9,7 +9,7 @@ use crate::error::{McpError, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Authentication method for MCP access
@@ -111,7 +111,7 @@ impl ApiTokenAuth {
 }
 
 /// JWT authentication configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JwtAuth {
     /// Secret key for HMAC algorithms (HS256, HS384, HS512)
     pub secret: Option<String>,
@@ -127,6 +127,31 @@ pub struct JwtAuth {
     pub scope_claim: String,
     /// Algorithm (default: HS256)
     pub algorithm: String,
+    /// Lazily-built, cached verify-only `armature_jwt::JwtManager` for this
+    /// auth config. `JwtAuth` is a pure function of its other fields (which
+    /// never change after construction), so the manager - and the PEM
+    /// parsing / `Validation` construction it does internally - only needs
+    /// to be built once and reused across every `authenticate_jwt` call.
+    /// Wrapped in `Arc` so clones of `JwtAuth` (e.g. inside `McpAuthMethod`)
+    /// share the same cached manager rather than each re-initializing it.
+    jwt_manager: Arc<OnceLock<armature_jwt::JwtManager>>,
+}
+
+impl std::fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "public_key",
+                &self.public_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("required_scopes", &self.required_scopes)
+            .field("scope_claim", &self.scope_claim)
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 impl Default for JwtAuth {
@@ -139,6 +164,7 @@ impl Default for JwtAuth {
             required_scopes: Vec::new(),
             scope_claim: "scope".to_string(),
             algorithm: "HS256".to_string(),
+            jwt_manager: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -532,6 +558,64 @@ async fn authenticate_api_token(
     })
 }
 
+/// Build (on first use) and thereafter reuse the verify-only `JwtManager` for
+/// a given `JwtAuth`. The manager is a pure function of `auth`'s key
+/// material, issuer/audience, and algorithm - none of which change after
+/// construction - so it is safe to cache for the lifetime of the `JwtAuth`
+/// (and its clones, via the shared `Arc<OnceLock<_>>`).
+///
+/// Verification behavior is unchanged: same algorithm pinning, same
+/// signature/expiration checks performed by `armature_jwt`, same error
+/// mapping to `McpError::InvalidRequest` on construction failure.
+fn get_or_build_jwt_manager(auth: &JwtAuth) -> Result<&armature_jwt::JwtManager> {
+    if let Some(manager) = auth.jwt_manager.get() {
+        return Ok(manager);
+    }
+
+    let algorithm = parse_jwt_algorithm(&auth.algorithm)?;
+
+    let mut config = match algorithm {
+        armature_jwt::Algorithm::HS256
+        | armature_jwt::Algorithm::HS384
+        | armature_jwt::Algorithm::HS512 => {
+            let secret = auth.secret.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured secret".into())
+            })?;
+            armature_jwt::JwtConfig::new(secret).with_algorithm(algorithm)
+        }
+        _ => {
+            let public_key = auth.public_key.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured public key".into())
+            })?;
+            let mut config = armature_jwt::JwtConfig::new(String::new()).with_algorithm(algorithm);
+            config.secret = None;
+            config.public_key = Some(public_key);
+            config
+        }
+    };
+
+    if let Some(iss) = &auth.issuer {
+        config = config.with_issuer(iss.clone());
+    }
+    if let Some(aud) = &auth.audience {
+        config = config.with_audience(vec![aud.clone()]);
+    }
+
+    let manager = armature_jwt::JwtManager::verify_only(config)
+        .map_err(|e| McpError::InvalidRequest(format!("Invalid JWT auth configuration: {e}")))?;
+
+    // `OnceLock::get_or_init` would require an infallible closure; since
+    // building the manager is fallible, set explicitly. If another thread
+    // won the race, `set` returns the value back as `Err`, which is fine -
+    // both are equivalent managers for the same immutable config, so we just
+    // fall back to whatever ended up in the cell.
+    let _ = auth.jwt_manager.set(manager);
+    Ok(auth
+        .jwt_manager
+        .get()
+        .expect("jwt_manager was just set or already initialized"))
+}
+
 async fn authenticate_jwt(
     auth: &JwtAuth,
     headers: &std::collections::HashMap<String, String>,
@@ -548,19 +632,27 @@ async fn authenticate_jwt(
         .strip_prefix("Bearer ")
         .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
 
-    // Decode JWT (without full verification for now - integrate with armature-jwt for production)
-    // This is a simplified implementation - in production, use armature-jwt's JwtManager
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
+    // Reject anything that isn't even shaped like a JWT before doing any
+    // cryptographic work.
+    if token.split('.').count() != 3 {
         return Err(McpError::InvalidRequest("Invalid JWT format".into()));
     }
 
-    // Decode payload (base64url)
-    let payload = base64_decode_url_safe(parts[1])
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload encoding".into()))?;
+    // Build a verify-only armature-jwt manager from this JwtAuth's configured
+    // key material and algorithm, then VERIFY the signature (and expiration)
+    // before trusting anything in the payload. This is the only path into
+    // the claims below - a token that fails verification never reaches it.
+    //
+    // `JwtAuth` is a pure function of its (immutable, post-construction)
+    // fields, so the manager - which re-parses PEM key material and rebuilds
+    // a `Validation` internally - only needs to be built once per `JwtAuth`
+    // and reused across every call, instead of being rebuilt (and re-logged)
+    // on every single request.
+    let manager = get_or_build_jwt_manager(auth)?;
 
-    let claims: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload JSON".into()))?;
+    let claims: serde_json::Value = manager
+        .verify(token)
+        .map_err(|e| McpError::InvalidRequest(format!("JWT verification failed: {e}")))?;
 
     // Extract subject
     let subject = claims.get("sub").and_then(|v| v.as_str()).map(String::from);
@@ -794,6 +886,30 @@ async fn validate_oauth2_via_introspection(
     })
 }
 
+/// Parse a `JwtAuth::algorithm` string (e.g. `"HS256"`) into the
+/// `armature_jwt`/`jsonwebtoken` `Algorithm` enum used to actually verify
+/// tokens.
+fn parse_jwt_algorithm(algorithm: &str) -> Result<armature_jwt::Algorithm> {
+    use armature_jwt::Algorithm;
+    match algorithm {
+        "HS256" => Ok(Algorithm::HS256),
+        "HS384" => Ok(Algorithm::HS384),
+        "HS512" => Ok(Algorithm::HS512),
+        "RS256" => Ok(Algorithm::RS256),
+        "RS384" => Ok(Algorithm::RS384),
+        "RS512" => Ok(Algorithm::RS512),
+        "ES256" => Ok(Algorithm::ES256),
+        "ES384" => Ok(Algorithm::ES384),
+        "PS256" => Ok(Algorithm::PS256),
+        "PS384" => Ok(Algorithm::PS384),
+        "PS512" => Ok(Algorithm::PS512),
+        "EdDSA" => Ok(Algorithm::EdDSA),
+        other => Err(McpError::InvalidRequest(format!(
+            "Unsupported JWT algorithm: {other}"
+        ))),
+    }
+}
+
 fn extract_scopes(claims: &serde_json::Value, scope_claim: &str) -> Vec<String> {
     // Try the configured claim name
     if let Some(scope_value) = claims.get(scope_claim) {
@@ -819,47 +935,6 @@ fn parse_scope_value(value: &serde_json::Value) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-fn base64_decode_url_safe(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    // Add padding if needed
-    let padded = match input.len() % 4 {
-        2 => format!("{}==", input),
-        3 => format!("{}=", input),
-        _ => input.to_string(),
-    };
-
-    // Replace URL-safe characters
-    let standard = padded.replace('-', "+").replace('_', "/");
-
-    // Decode
-    base64_decode(&standard)
-}
-
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut output = Vec::new();
-    let mut buffer: u32 = 0;
-    let mut bits_collected = 0;
-
-    for c in input.chars() {
-        if c == '=' {
-            break;
-        }
-
-        let value = ALPHABET.iter().position(|&b| b == c as u8).ok_or(())?;
-        buffer = (buffer << 6) | (value as u32);
-        bits_collected += 6;
-
-        if bits_collected >= 8 {
-            bits_collected -= 8;
-            output.push((buffer >> bits_collected) as u8);
-            buffer &= (1 << bits_collected) - 1;
-        }
-    }
-
-    Ok(output)
 }
 
 #[cfg(test)]
@@ -906,12 +981,6 @@ mod tests {
         assert!(!ctx.has_scope("mcp:admin"));
     }
 
-    #[test]
-    fn test_base64_decode() {
-        let decoded = base64_decode_url_safe("SGVsbG8gV29ybGQ").unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World");
-    }
-
     #[tokio::test]
     async fn test_api_token_authentication() {
         let auth = ApiTokenAuth::new()
@@ -951,6 +1020,166 @@ mod tests {
 
         let result = authenticate(&config, &headers, "tools/call").await;
         assert!(result.is_ok());
+    }
+
+    /// Mint a signed HS256 JWT via armature-jwt, carrying an `exp` claim
+    /// `seconds_from_now` seconds in the future (negative for already-expired).
+    fn mint_jwt(secret: &str, sub: &str, scope: &str, seconds_from_now: i64) -> String {
+        let config = armature_jwt::JwtConfig::new(secret.to_string());
+        let manager = armature_jwt::JwtManager::new(config).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = serde_json::json!({
+            "sub": sub,
+            "scope": scope,
+            "exp": now + seconds_from_now,
+        });
+        manager.sign(&claims).unwrap()
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_bad_signature() {
+        // JwtAuth is configured with the correct secret, but the token is
+        // signed with a different one. This must NOT be accepted just
+        // because the payload happens to decode to well-formed JSON.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let forged = mint_jwt("wrong-secret", "attacker", "mcp:read mcp:write", 3600);
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&forged)).await;
+        assert!(
+            result.is_err(),
+            "a token signed with the wrong secret must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_accepts_valid_signature_and_enforces_exp() {
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        // Correctly signed, unexpired token -> accepted with the right claims.
+        let valid = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+        let ctx = authenticate_jwt(&auth, &bearer_headers(&valid))
+            .await
+            .expect("correctly signed, unexpired token should be accepted");
+        assert_eq!(ctx.subject, Some("user-42".to_string()));
+        assert_eq!(ctx.scopes, vec!["mcp:read".to_string()]);
+        assert_eq!(ctx.auth_method, "jwt");
+
+        // Correctly signed but expired token -> rejected.
+        let expired = mint_jwt("correct-secret", "user-42", "mcp:read", -3600);
+        let result = authenticate_jwt(&auth, &bearer_headers(&expired)).await;
+        assert!(result.is_err(), "an expired token must be rejected");
+    }
+
+    /// Base64url encode (no padding), used to hand-craft JWTs that no signing
+    /// helper would ever produce (e.g. `alg:none`), so we can assert the
+    /// verifier rejects them regardless of what the header *claims*.
+    fn b64url(input: &[u8]) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+            out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(CHARS[(n & 0x3F) as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_alg_none() {
+        // Classic "alg:none" algorithm-confusion attack: a token that
+        // declares no signature algorithm and carries an empty signature
+        // segment. A JwtAuth configured for HS256 must never accept this,
+        // no matter how well-formed the claims are.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let alg_none_token = format!("{header}.{payload}.");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&alg_none_token)).await;
+        assert!(
+            result.is_err(),
+            "an alg:none token with an empty signature must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_algorithm_mismatch() {
+        // The JwtAuth is configured for HS256, but the token's header claims
+        // a different algorithm (RS256). This must be rejected even before
+        // signature verification is attempted - accepting it would open the
+        // door to classic HMAC/RSA algorithm-confusion attacks.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        // Signature content is irrelevant - a mismatched `alg` must be
+        // rejected regardless of what's in the signature segment.
+        let mismatched_token = format!("{header}.{payload}.bm90LWEtcmVhbC1zaWc");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&mismatched_token)).await;
+        assert!(
+            result.is_err(),
+            "a token whose header alg doesn't match the configured algorithm must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_cached_manager_is_consistent() {
+        // The JwtManager backing a JwtAuth is built lazily and cached in an
+        // `Arc<OnceLock<..>>`. Repeated calls on the same JwtAuth must reuse
+        // that cached manager without capturing stale/wrong key material, so
+        // two sequential authentications of the same valid token must both
+        // succeed and produce identical claims.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let token = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+
+        let first = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("first call with a valid token should succeed");
+        let second = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("second call on the same JwtAuth with the same valid token should succeed");
+
+        assert_eq!(first.subject, second.subject);
+        assert_eq!(first.scopes, second.scopes);
+        assert_eq!(first.auth_method, second.auth_method);
     }
 
     /// Spawn a minimal HTTP/1.1 stub server that answers every connection

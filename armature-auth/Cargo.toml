@@ -33,7 +33,7 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync
 
 # SAML support (optional - requires openssl/xmlsec for XML signature verification)
 # Enable with `saml` feature. Note: This requires system libraries (libxml2, xmlsec1)
-samael = { version = "0.0.21", optional = true }
+samael = { version = "0.0.22", optional = true }
 
 # 2FA support
 totp-lite = { version = "2.0", optional = true }
@@ -66,6 +66,7 @@ webauthn = ["dep:webauthn-rs"]
 full = ["saml", "two-factor", "webauthn"]
 
 [dev-dependencies]
+armature-testkit = { path = "../armature-testkit" }
 tokio-test = "0.4"
 # Note: SAML tests require the `saml` feature to be enabled
 # Run with: cargo test --features saml

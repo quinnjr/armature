@@ -337,7 +337,7 @@ impl SizeTracker {
         // Use 90th percentile
         let mut sizes = self.recent_sizes.clone();
         sizes.sort_unstable();
-        let p90_idx = (sizes.len() * 90 / 100).max(0);
+        let p90_idx = sizes.len() * 90 / 100;
         let p90_size = sizes[p90_idx];
 
         Some(SerializationSize::estimate_from_hint(p90_size))
@@ -418,7 +418,7 @@ impl TypeSizeInfo {
 
         let mut sorted = self.recent.clone();
         sorted.sort_unstable();
-        let idx = (sorted.len() * 90 / 100).max(0);
+        let idx = sorted.len() * 90 / 100;
         sorted[idx]
     }
 

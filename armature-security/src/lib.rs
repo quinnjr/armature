@@ -120,7 +120,6 @@ pub mod request_signing;
 pub mod xss_filter;
 
 use armature_core::HttpResponse;
-use std::collections::HashMap;
 
 /// Main security middleware that combines all security features
 #[derive(Debug, Clone)]
@@ -132,6 +131,7 @@ pub struct SecurityMiddleware {
     pub dns_prefetch_control: dns_prefetch_control::DnsPrefetchControl,
 
     /// Expect-CT configuration
+    #[allow(deprecated)]
     pub expect_ct: Option<expect_ct::ExpectCtConfig>,
 
     /// Frame Guard (X-Frame-Options)
@@ -171,7 +171,10 @@ impl SecurityMiddleware {
             hsts: None,
             hide_powered_by: false,
             referrer_policy: referrer_policy::ReferrerPolicy::NoReferrer,
-            xss_filter: xss_filter::XssFilter::Enabled,
+            // Modern browsers have removed the legacy XSS auditor (it could itself introduce
+            // vulnerabilities), so it is disabled by default in line with Helmet's current
+            // recommendation. Prefer a strong Content-Security-Policy instead.
+            xss_filter: xss_filter::XssFilter::Disabled,
             content_type_options: content_type_options::ContentTypeOptions::NoSniff,
             download_options: download_options::DownloadOptions::NoOpen,
             permitted_cross_domain_policies:
@@ -195,6 +198,7 @@ impl SecurityMiddleware {
     }
 
     /// Enable Expect-CT
+    #[allow(deprecated)]
     pub fn with_expect_ct(mut self, config: expect_ct::ExpectCtConfig) -> Self {
         self.expect_ct = Some(config);
         self
@@ -232,72 +236,74 @@ impl SecurityMiddleware {
 
     /// Apply security headers to a response
     pub fn apply(&self, mut response: HttpResponse) -> HttpResponse {
-        let mut headers = HashMap::new();
-
         // Content Security Policy
         if let Some(ref csp) = self.csp {
-            headers.insert("Content-Security-Policy".to_string(), csp.to_header_value());
+            let header_name = if csp.report_only {
+                "Content-Security-Policy-Report-Only"
+            } else {
+                "Content-Security-Policy"
+            };
+            response
+                .headers
+                .insert(header_name.to_string(), csp.to_header_value());
         }
 
         // DNS Prefetch Control
-        headers.insert(
+        response.headers.insert(
             "X-DNS-Prefetch-Control".to_string(),
             self.dns_prefetch_control.to_header_value(),
         );
 
         // Expect-CT
         if let Some(ref expect_ct) = self.expect_ct {
-            headers.insert("Expect-CT".to_string(), expect_ct.to_header_value());
+            response
+                .headers
+                .insert("Expect-CT".to_string(), expect_ct.to_header_value());
         }
 
         // Frame Guard
-        headers.insert(
+        response.headers.insert(
             "X-Frame-Options".to_string(),
             self.frame_guard.to_header_value(),
         );
 
         // HSTS
         if let Some(ref hsts) = self.hsts {
-            headers.insert(
+            response.headers.insert(
                 "Strict-Transport-Security".to_string(),
                 hsts.to_header_value(),
             );
         }
 
         // Referrer Policy
-        headers.insert(
+        response.headers.insert(
             "Referrer-Policy".to_string(),
             self.referrer_policy.to_header_value(),
         );
 
         // XSS Filter
-        headers.insert(
+        response.headers.insert(
             "X-XSS-Protection".to_string(),
             self.xss_filter.to_header_value(),
         );
 
         // Content Type Options
-        headers.insert(
+        response.headers.insert(
             "X-Content-Type-Options".to_string(),
             self.content_type_options.to_header_value(),
         );
 
         // Download Options
-        headers.insert(
+        response.headers.insert(
             "X-Download-Options".to_string(),
             self.download_options.to_header_value(),
         );
 
         // Permitted Cross Domain Policies
-        headers.insert(
+        response.headers.insert(
             "X-Permitted-Cross-Domain-Policies".to_string(),
             self.permitted_cross_domain_policies.to_header_value(),
         );
-
-        // Apply all headers
-        for (key, value) in headers {
-            response.headers.insert(key, value);
-        }
 
         // Remove X-Powered-By if requested
         if self.hide_powered_by {
@@ -308,16 +314,22 @@ impl SecurityMiddleware {
     }
 
     /// Convenience method to enable all common security features (recommended defaults)
+    ///
+    /// Note: Expect-CT is intentionally *not* enabled here. The `Expect-CT` header is
+    /// deprecated and has been removed from all major browsers (since ~2023), so it is a
+    /// no-op in practice; use it explicitly via [`Self::with_expect_ct`] only if you have a
+    /// specific legacy requirement.
     pub fn enable_all(max_age_seconds: u64) -> Self {
         Self {
             csp: Some(content_security_policy::CspConfig::default()),
             dns_prefetch_control: dns_prefetch_control::DnsPrefetchControl::Off,
-            expect_ct: Some(expect_ct::ExpectCtConfig::new(max_age_seconds)),
+            expect_ct: None,
             frame_guard: frame_guard::FrameGuard::Deny,
             hsts: Some(hsts::HstsConfig::new(max_age_seconds)),
             hide_powered_by: true,
             referrer_policy: referrer_policy::ReferrerPolicy::NoReferrer,
-            xss_filter: xss_filter::XssFilter::Enabled,
+            // See `new()` for why this defaults to `Disabled`.
+            xss_filter: xss_filter::XssFilter::Disabled,
             content_type_options: content_type_options::ContentTypeOptions::NoSniff,
             download_options: download_options::DownloadOptions::NoOpen,
             permitted_cross_domain_policies:
@@ -403,6 +415,63 @@ mod tests {
         assert!(secured.headers.contains_key("X-XSS-Protection"));
         assert!(secured.headers.contains_key("Strict-Transport-Security"));
         assert!(secured.headers.contains_key("Content-Security-Policy"));
+    }
+
+    #[test]
+    fn test_xss_filter_defaults_to_disabled() {
+        // Modern browsers dropped the legacy XSS auditor; both `new()` and the
+        // recommended `enable_all`/`Default` configuration should disable it ("0")
+        // rather than opting into the deprecated, sometimes-exploitable filter ("1").
+        assert_eq!(
+            SecurityMiddleware::new().xss_filter,
+            xss_filter::XssFilter::Disabled
+        );
+        assert_eq!(
+            SecurityMiddleware::default().xss_filter,
+            xss_filter::XssFilter::Disabled
+        );
+
+        let secured = SecurityMiddleware::default().apply(HttpResponse::ok());
+        assert_eq!(
+            secured.headers.get("X-XSS-Protection"),
+            Some(&"0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_enable_all_does_not_enable_expect_ct() {
+        // Expect-CT is deprecated and removed from browsers; the recommended defaults
+        // should not send it.
+        let middleware = SecurityMiddleware::default();
+        assert!(middleware.expect_ct.is_none());
+
+        let secured = middleware.apply(HttpResponse::ok());
+        assert!(!secured.headers.contains_key("Expect-CT"));
+    }
+
+    #[test]
+    fn test_csp_header_name_depends_on_report_only() {
+        // Enforcing CSP uses the standard header name.
+        let enforcing =
+            SecurityMiddleware::new().with_csp(content_security_policy::CspConfig::default());
+        let secured = enforcing.apply(HttpResponse::ok());
+        assert!(secured.headers.contains_key("Content-Security-Policy"));
+        assert!(
+            !secured
+                .headers
+                .contains_key("Content-Security-Policy-Report-Only")
+        );
+
+        // report_only(true) must emit the header under the Report-Only name instead.
+        let report_only = SecurityMiddleware::new()
+            .with_csp(content_security_policy::CspConfig::default().report_only(true));
+        let secured = report_only.apply(HttpResponse::ok());
+        assert!(
+            secured
+                .headers
+                .contains_key("Content-Security-Policy-Report-Only")
+        );
+        assert!(!secured.headers.contains_key("Content-Security-Policy"));
     }
 
     #[test]

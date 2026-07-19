@@ -164,16 +164,35 @@ pub fn mcp_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Generate the tool registration
+    // Generate the tool registration. `McpToolEntry::new` takes a
+    // `ToolHandlerFnPtr` (a plain fn pointer, not an `Arc<dyn Fn>`) so
+    // that the entry can be built inside `inventory::submit!`'s static
+    // initializer. Mirror `register_mcp_tool!`: define a free `fn`
+    // that boxes the async wrapper's future, then coerce it to the
+    // fn-pointer type.
+    let fn_ptr_wrapper_name = syn::Ident::new(
+        &format!("__mcp_handler_fn_ptr_{}", fn_name_str),
+        proc_macro2::Span::call_site(),
+    );
     let registration = quote! {
+        fn #fn_ptr_wrapper_name(
+            args: ::serde_json::Value,
+        ) -> ::std::pin::Pin<
+            ::std::boxed::Box<
+                dyn ::std::future::Future<
+                    Output = ::armature_mcp::Result<::armature_mcp::ToolCallResult>,
+                > + ::std::marker::Send,
+            >,
+        > {
+            ::std::boxed::Box::pin(#wrapper_name(args))
+        }
+
         ::armature_mcp::inventory::submit! {
             ::armature_mcp::McpToolEntry::new::<#owner_type>(
                 #tool_name,
                 Some(#description),
                 #schema,
-                ::std::sync::Arc::new(move |args| {
-                    Box::pin(#wrapper_name(args))
-                }),
+                #fn_ptr_wrapper_name as ::armature_mcp::ToolHandlerFnPtr,
             )
         }
     };
