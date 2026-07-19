@@ -98,8 +98,7 @@ impl SiemClient {
             Ok(())
         } else {
             let formatted = self.formatter.format_batch(&events, &self.config)?;
-            self.transport
-                .send(&formatted, self.formatter.content_type())
+            self.send_with_retry(&formatted, self.formatter.content_type())
                 .await
         }
     }
@@ -107,9 +106,61 @@ impl SiemClient {
     /// Send an event immediately (bypassing batch)
     pub async fn send_immediate(&self, event: SiemEvent) -> SiemResult<()> {
         let formatted = self.formatter.format(&event, &self.config)?;
-        self.transport
-            .send(&formatted, self.formatter.content_type())
+        self.send_with_retry(&formatted, self.formatter.content_type())
             .await
+    }
+
+    /// Send `data` via the underlying transport, retrying transient failures
+    /// with exponential backoff.
+    ///
+    /// Total attempts made are `config.max_retries + 1` (the initial attempt
+    /// plus up to `max_retries` retries). Backoff between attempts starts at
+    /// `config.retry_delay` and doubles each subsequent attempt
+    /// (`retry_delay * 2^attempt`), unless the transport reports
+    /// [`SiemError::RateLimited`], in which case the server-provided
+    /// retry-after duration is honored instead. Errors that are clearly
+    /// permanent (bad configuration, auth failure, unsupported
+    /// provider/format, malformed data) are not retried.
+    async fn send_with_retry(&self, data: &str, content_type: &str) -> SiemResult<()> {
+        let max_retries = self.config.max_retries;
+        let mut attempt: u32 = 0;
+
+        loop {
+            match self.transport.send(data, content_type).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if attempt >= max_retries || !Self::is_retryable(&err) {
+                        return Err(err);
+                    }
+
+                    let delay = match &err {
+                        SiemError::RateLimited(retry_after_ms) => {
+                            std::time::Duration::from_millis(*retry_after_ms)
+                        }
+                        _ => self.config.retry_delay * 2u32.saturating_pow(attempt),
+                    };
+
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Whether an error from the transport represents a transient failure
+    /// worth retrying, as opposed to a permanent/configuration error that
+    /// will never succeed on retry.
+    fn is_retryable(err: &SiemError) -> bool {
+        !matches!(
+            err,
+            SiemError::Config(_)
+                | SiemError::Auth(_)
+                | SiemError::UnsupportedProvider(_)
+                | SiemError::UnsupportedFormat(_)
+                | SiemError::Serialization(_)
+                | SiemError::UrlParse(_)
+                | SiemError::BatchFull(_)
+        )
     }
 
     /// Add event to batch, flushing if full
@@ -143,8 +194,7 @@ impl SiemClient {
     /// Flush specific events
     async fn flush_events(&self, events: Vec<SiemEvent>) -> SiemResult<()> {
         let formatted = self.formatter.format_batch(&events, &self.config)?;
-        self.transport
-            .send(&formatted, self.formatter.content_type())
+        self.send_with_retry(&formatted, self.formatter.content_type())
             .await
     }
 
@@ -695,6 +745,145 @@ mod tests {
             );
             assert_eq!(recorded.header("x-ms-date"), Some(rfc1123_date.as_str()));
             assert!(recorded.header("Log-Type").is_some());
+        }
+    }
+
+    /// `send`/`send_immediate` retry behavior against a server that fails a
+    /// scripted number of times before succeeding (or never succeeds).
+    ///
+    /// `armature_testkit::StubServer` only scripts a single fixed response
+    /// per route (see `armature-testkit/src/http_stub.rs`), so it cannot
+    /// express "500, 500, then 200" for the same path. This module rolls a
+    /// minimal, `AtomicUsize`-backed HTTP/1.1 stub that returns the next
+    /// status off a scripted list (repeating the last entry once exhausted)
+    /// and counts how many requests it received.
+    #[cfg(feature = "http")]
+    mod retry_with_backoff {
+        use super::super::*;
+        use crate::SiemProvider;
+        use crate::config::SiemConfig;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        /// Spawn an HTTP/1.1 stub that responds to each accepted connection
+        /// with the next status code from `statuses` (clamped to the last
+        /// entry once exhausted), with an empty body. Returns the server's
+        /// base URL and a shared counter of requests received.
+        async fn spawn_scripted_stub(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted stub");
+            let port = listener.local_addr().unwrap().port();
+            let counter = Arc::new(AtomicUsize::new(0));
+            let statuses = Arc::new(statuses);
+
+            let counter_for_server = counter.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (stream, _) = match listener.accept().await {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let statuses = statuses.clone();
+                    let counter = counter_for_server.clone();
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        let (reader_half, mut writer_half) = stream.split();
+                        let mut reader = BufReader::new(reader_half);
+
+                        // Read the request line + headers, tracking Content-Length.
+                        let mut content_length: usize = 0;
+                        loop {
+                            let mut line = String::new();
+                            let n = reader.read_line(&mut line).await.unwrap_or(0);
+                            if n == 0 || line == "\r\n" {
+                                break;
+                            }
+                            if let Some(rest) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                content_length = rest.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        if content_length > 0 {
+                            let mut body = vec![0u8; content_length];
+                            let _ = reader.read_exact(&mut body).await;
+                        }
+
+                        let idx = counter.fetch_add(1, Ordering::SeqCst);
+                        let status = statuses
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(*statuses.last().unwrap());
+                        let response = format!(
+                            "HTTP/1.1 {status} status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = writer_half.write_all(response.as_bytes()).await;
+                        let _ = writer_half.flush().await;
+                    });
+                }
+            });
+
+            (format!("http://127.0.0.1:{port}"), counter)
+        }
+
+        fn test_config(endpoint: String, max_retries: u32) -> SiemConfig {
+            SiemConfig::builder()
+                .provider(SiemProvider::Custom)
+                .endpoint(endpoint)
+                .token("test-token")
+                .batching(false)
+                .max_retries(max_retries)
+                .retry_delay(Duration::from_millis(1))
+                .build()
+                .expect("valid config")
+        }
+
+        #[tokio::test]
+        async fn retries_transient_failures_until_success() {
+            // 500, 500, then 200: with max_retries >= 2 this must succeed
+            // and the server must have been hit exactly 3 times.
+            let (url, counter) = spawn_scripted_stub(vec![500, 500, 200]).await;
+            let config = test_config(url, 3);
+            let client = SiemClient::new(config).expect("build client");
+
+            let result = client.send(SiemEvent::new("auth.failure")).await;
+
+            assert!(
+                result.is_ok(),
+                "send should succeed once the server recovers: {:?}",
+                result
+            );
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                3,
+                "server should have been hit exactly 3 times (2 failures + 1 success)"
+            );
+        }
+
+        #[tokio::test]
+        async fn exhausts_retries_and_returns_error() {
+            // Server always returns 500: with max_retries = 2, the client
+            // must make exactly 3 attempts total (1 initial + 2 retries)
+            // and then surface the error instead of retrying forever.
+            let (url, counter) = spawn_scripted_stub(vec![500, 500, 500, 500, 500]).await;
+            let config = test_config(url, 2);
+            let client = SiemClient::new(config).expect("build client");
+
+            let result = client.send(SiemEvent::new("auth.failure")).await;
+
+            assert!(
+                result.is_err(),
+                "send should return an error once retries are exhausted"
+            );
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                3,
+                "server should have been hit exactly 3 times (1 initial + 2 retries)"
+            );
         }
     }
 
