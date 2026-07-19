@@ -16,7 +16,7 @@ pub fn docker_available() -> bool {
 #[macro_export]
 macro_rules! skip_if_no_docker {
     () => {
-        if !$crate::docker_available() {
+        if !$crate::docker::docker_available() {
             eprintln!("skipping: Docker not available");
             return;
         }
