@@ -18,6 +18,9 @@ pub enum FrameGuard {
     /// practice. It has been superseded by the `frame-ancestors` directive of
     /// Content-Security-Policy (see [`crate::content_security_policy::CspConfig`]), which
     /// is what you should use to restrict framing to specific origins.
+    #[deprecated(
+        note = "ALLOW-FROM is unstandardized and ignored by modern browsers; use CSP frame-ancestors instead."
+    )]
     AllowFrom(String),
 }
 
@@ -26,6 +29,7 @@ impl FrameGuard {
         match self {
             Self::Deny => "DENY".to_string(),
             Self::SameOrigin => "SAMEORIGIN".to_string(),
+            #[allow(deprecated)]
             Self::AllowFrom(origin) => format!("ALLOW-FROM {}", origin),
         }
     }
@@ -36,6 +40,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn test_frame_guard() {
         assert_eq!(FrameGuard::Deny.to_header_value(), "DENY");
         assert_eq!(FrameGuard::SameOrigin.to_header_value(), "SAMEORIGIN");

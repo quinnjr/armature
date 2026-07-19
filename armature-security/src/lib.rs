@@ -131,6 +131,7 @@ pub struct SecurityMiddleware {
     pub dns_prefetch_control: dns_prefetch_control::DnsPrefetchControl,
 
     /// Expect-CT configuration
+    #[allow(deprecated)]
     pub expect_ct: Option<expect_ct::ExpectCtConfig>,
 
     /// Frame Guard (X-Frame-Options)
@@ -197,6 +198,7 @@ impl SecurityMiddleware {
     }
 
     /// Enable Expect-CT
+    #[allow(deprecated)]
     pub fn with_expect_ct(mut self, config: expect_ct::ExpectCtConfig) -> Self {
         self.expect_ct = Some(config);
         self

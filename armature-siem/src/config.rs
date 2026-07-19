@@ -117,6 +117,7 @@ pub enum SyslogFacility {
 
 /// SIEM client configuration
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SiemConfig {
     /// Target SIEM provider
     pub provider: SiemProvider,

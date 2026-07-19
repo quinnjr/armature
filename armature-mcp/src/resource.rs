@@ -132,22 +132,13 @@ impl McpResourceRegistry {
             uris
         });
 
-        let start = match cursor {
-            Some(c) => uris.partition_point(|uri| uri.as_str() <= c),
-            None => 0,
-        };
+        // Delegate the actual cursor-pagination algorithm to the single
+        // shared implementation (see `crate::service::paginate_by`), then
+        // map the paged URIs back to their resource definitions.
+        let (page_uris, next_cursor) =
+            crate::service::paginate_by(uris, cursor, limit, |uri| uri.as_str());
 
-        let remaining = &uris[start..];
-        let take = remaining.len().min(limit.max(1));
-        let page = &remaining[..take];
-
-        let next_cursor = if take < remaining.len() {
-            Some(page[take - 1].clone())
-        } else {
-            None
-        };
-
-        let defs = page
+        let defs = page_uris
             .iter()
             .map(|uri| self.resources[uri.as_str()].to_definition())
             .collect();

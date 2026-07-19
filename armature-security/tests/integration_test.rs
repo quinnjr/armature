@@ -6,6 +6,7 @@ use armature_security::content_security_policy::CspConfig;
 use armature_security::content_type_options::ContentTypeOptions;
 use armature_security::dns_prefetch_control::DnsPrefetchControl;
 use armature_security::download_options::DownloadOptions;
+#[allow(deprecated)]
 use armature_security::expect_ct::ExpectCtConfig;
 use armature_security::frame_guard::FrameGuard;
 use armature_security::hsts::HstsConfig;
@@ -55,6 +56,7 @@ fn test_hsts_config() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_frame_guard_variants() {
     assert_eq!(FrameGuard::Deny.to_header_value(), "DENY");
     assert_eq!(FrameGuard::SameOrigin.to_header_value(), "SAMEORIGIN");
@@ -105,6 +107,7 @@ fn test_dns_prefetch_control() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_expect_ct_config() {
     let expect_ct = ExpectCtConfig::new(86400)
         .enforce(true)

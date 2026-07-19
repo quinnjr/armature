@@ -127,7 +127,14 @@ impl ElasticConfig {
             return None;
         }
 
-        Some(format!("https://{}.{}:443", es_uuid, host))
+        // The decoded host segment may itself embed an explicit port
+        // (`domain:port`). If so, reattach that port after the es_uuid
+        // subdomain instead of blindly appending the default `:443`, which
+        // would otherwise produce a malformed
+        // `https://{es_uuid}.domain:port:443` endpoint.
+        let (host_name, port) = host.rsplit_once(':').unwrap_or((host, "443"));
+
+        Some(format!("https://{}.{}:{}", es_uuid, host_name, port))
     }
 }
 
@@ -396,6 +403,26 @@ mod tests {
 
         assert_eq!(config.endpoint, "https://abc123.us-east-1.aws.found.io:443");
         assert_eq!(config.token, Some("test-api-key".to_string()));
+    }
+
+    #[test]
+    fn test_elastic_cloud_id_with_explicit_port_in_host() {
+        use base64::Engine as _;
+
+        // Some Elastic Cloud IDs (e.g. self-managed / non-default port
+        // deployments) encode a host segment that itself carries an
+        // explicit port. The resulting endpoint must reattach that port
+        // rather than appending the default `:443` after it, which would
+        // otherwise yield a malformed `https://{es}.domain:port:443`.
+        let payload = base64::engine::general_purpose::STANDARD
+            .encode("custom.example.com:9243$abc123$def456");
+        let cloud_id = format!("my-deployment:{}", payload);
+
+        let config = ElasticConfig::cloud(cloud_id, "test-api-key")
+            .build()
+            .expect("valid elastic cloud config");
+
+        assert_eq!(config.endpoint, "https://abc123.custom.example.com:9243");
     }
 
     #[test]

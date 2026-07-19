@@ -14,6 +14,9 @@
 
 /// Expect-CT configuration
 #[derive(Debug, Clone)]
+#[deprecated(
+    note = "Expect-CT is removed from all major browsers (~2023) and is a no-op; prefer CSP."
+)]
 pub struct ExpectCtConfig {
     /// Max age in seconds
     pub max_age: u64,
@@ -25,6 +28,7 @@ pub struct ExpectCtConfig {
     pub report_uri: Option<String>,
 }
 
+#[allow(deprecated)]
 impl ExpectCtConfig {
     /// Create a new Expect-CT configuration
     pub fn new(max_age: u64) -> Self {
@@ -64,6 +68,7 @@ impl ExpectCtConfig {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

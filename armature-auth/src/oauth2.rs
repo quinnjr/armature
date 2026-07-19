@@ -186,7 +186,11 @@ impl GenericOAuth2Provider {
             name,
             client,
             config,
-            oauth_http_client: oauth2::reqwest::Client::new(),
+            oauth_http_client: oauth2::reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| oauth2::reqwest::Client::new()),
         })
     }
 }

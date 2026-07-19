@@ -143,7 +143,16 @@ impl CefFormatter {
         let mut next_cn = cn_start;
         let mut overflow = serde_json::Map::new();
 
-        for (key, value) in &event.metadata {
+        // Iterate in a stable, sorted-by-key order rather than the
+        // HashMap's arbitrary (and run-to-run varying) iteration order, so
+        // slot assignment (cs1..cs6 / cn1..cn3 / overflow) is deterministic
+        // for a given set of metadata keys. This keeps CEF output
+        // reproducible, which SIEM correlation rules pinned on slot numbers
+        // depend on.
+        let mut entries: Vec<_> = event.metadata.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (key, value) in entries {
             let is_numeric = value.is_number();
 
             if is_numeric && next_cn <= MAX_CN {
@@ -334,6 +343,53 @@ mod tests {
             result.contains("cn1Label=risk_score"),
             "expected cn1Label to be set: {result}"
         );
+    }
+
+    #[test]
+    fn test_cef_metadata_slot_assignment_is_deterministic() {
+        let formatter = CefFormatter;
+        let config = sample_config();
+
+        // More than 6 string metadata keys, so slot assignment (which keys
+        // land in cs1..cs6 vs the additionalMetadata overflow) exercises
+        // the full assignment logic. Build the event fresh for each run to
+        // rule out any incidental HashMap ordering artifacts from reuse.
+        let build_event = || {
+            let mut event = sample_event();
+            for i in 1..=8 {
+                event = event.metadata(format!("key{i}"), serde_json::json!(format!("val{i}")));
+            }
+            event
+        };
+
+        let result_a = formatter.format(&build_event(), &config).unwrap();
+        let result_b = formatter.format(&build_event(), &config).unwrap();
+
+        // Compare only the metadata-slot portion (from cs1 onward); the
+        // rest of the extension (e.g. `externalId`, a per-event UUID) is
+        // expected to differ between two freshly built events and isn't
+        // relevant to slot-assignment determinism.
+        let slots_a = &result_a[result_a.find("cs1=").expect("cs1 present")..];
+        let slots_b = &result_b[result_b.find("cs1=").expect("cs1 present")..];
+        assert_eq!(
+            slots_a, slots_b,
+            "CEF slot assignment must be deterministic across runs for the same input"
+        );
+
+        // Since keys are sorted lexicographically before assignment,
+        // key1..key6 must land in cs1..cs6 respectively, and key7/key8 must
+        // overflow into additionalMetadata.
+        for i in 1..=6 {
+            assert!(
+                result_a.contains(&format!("cs{i}=val{i} cs{i}Label=key{i}")),
+                "expected key{i}/val{i} pinned to cs{i}: {result_a}"
+            );
+        }
+        assert!(
+            result_a.contains("additionalMetadata="),
+            "expected overflow for key7/key8: {result_a}"
+        );
+        assert!(result_a.contains("val7") && result_a.contains("val8"));
     }
 
     #[test]

@@ -144,22 +144,13 @@ impl McpToolRegistry {
             names
         });
 
-        let start = match cursor {
-            Some(c) => names.partition_point(|name| name.as_str() <= c),
-            None => 0,
-        };
+        // Delegate the actual cursor-pagination algorithm to the single
+        // shared implementation (see `crate::service::paginate_by`), then
+        // map the paged names back to their tool definitions.
+        let (page_names, next_cursor) =
+            crate::service::paginate_by(names, cursor, limit, |name| name.as_str());
 
-        let remaining = &names[start..];
-        let take = remaining.len().min(limit.max(1));
-        let page = &remaining[..take];
-
-        let next_cursor = if take < remaining.len() {
-            Some(page[take - 1].clone())
-        } else {
-            None
-        };
-
-        let defs = page
+        let defs = page_names
             .iter()
             .map(|name| self.tools[name.as_str()].to_definition())
             .collect();

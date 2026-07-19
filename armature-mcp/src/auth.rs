@@ -140,8 +140,11 @@ pub struct JwtAuth {
 impl std::fmt::Debug for JwtAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JwtAuth")
-            .field("secret", &self.secret)
-            .field("public_key", &self.public_key)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "public_key",
+                &self.public_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
             .field("required_scopes", &self.required_scopes)
@@ -1068,6 +1071,115 @@ mod tests {
         let expired = mint_jwt("correct-secret", "user-42", "mcp:read", -3600);
         let result = authenticate_jwt(&auth, &bearer_headers(&expired)).await;
         assert!(result.is_err(), "an expired token must be rejected");
+    }
+
+    /// Base64url encode (no padding), used to hand-craft JWTs that no signing
+    /// helper would ever produce (e.g. `alg:none`), so we can assert the
+    /// verifier rejects them regardless of what the header *claims*.
+    fn b64url(input: &[u8]) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+            out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(CHARS[(n & 0x3F) as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_alg_none() {
+        // Classic "alg:none" algorithm-confusion attack: a token that
+        // declares no signature algorithm and carries an empty signature
+        // segment. A JwtAuth configured for HS256 must never accept this,
+        // no matter how well-formed the claims are.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let alg_none_token = format!("{header}.{payload}.");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&alg_none_token)).await;
+        assert!(
+            result.is_err(),
+            "an alg:none token with an empty signature must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_algorithm_mismatch() {
+        // The JwtAuth is configured for HS256, but the token's header claims
+        // a different algorithm (RS256). This must be rejected even before
+        // signature verification is attempted - accepting it would open the
+        // door to classic HMAC/RSA algorithm-confusion attacks.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        // Signature content is irrelevant - a mismatched `alg` must be
+        // rejected regardless of what's in the signature segment.
+        let mismatched_token = format!("{header}.{payload}.bm90LWEtcmVhbC1zaWc");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&mismatched_token)).await;
+        assert!(
+            result.is_err(),
+            "a token whose header alg doesn't match the configured algorithm must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_cached_manager_is_consistent() {
+        // The JwtManager backing a JwtAuth is built lazily and cached in an
+        // `Arc<OnceLock<..>>`. Repeated calls on the same JwtAuth must reuse
+        // that cached manager without capturing stale/wrong key material, so
+        // two sequential authentications of the same valid token must both
+        // succeed and produce identical claims.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let token = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+
+        let first = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("first call with a valid token should succeed");
+        let second = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("second call on the same JwtAuth with the same valid token should succeed");
+
+        assert_eq!(first.subject, second.subject);
+        assert_eq!(first.scopes, second.scopes);
+        assert_eq!(first.auth_method, second.auth_method);
     }
 
     /// Spawn a minimal HTTP/1.1 stub server that answers every connection

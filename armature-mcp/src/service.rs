@@ -113,6 +113,49 @@ pub struct McpService {
     merged_resources_cache: OnceLock<Vec<ResourceDefinition>>,
 }
 
+/// Try a sequence of provider calls (each an expression awaiting a provider,
+/// e.g. `provider.call_tool(...)` / `provider.read_resource(...)`) after the
+/// primary lookup (inventory registry) reported "not found". Evaluates to
+/// the first `Ok`, or the first non-"not found" `Err` (short-circuiting), or
+/// — if every provider also reports "not found" — the initial "not found"
+/// error (updated to the most recent provider's own "not found" error as
+/// the loop progresses).
+///
+/// Shared by `McpService::handle_tools_call` and
+/// `McpService::handle_resources_read`, which previously duplicated this
+/// fallback-dispatch loop verbatim. A macro (rather than a generic async
+/// fn) avoids the two call sites' provider-future types acquiring an
+/// over-narrow inferred lifetime that trips higher-ranked-trait-bound
+/// checks elsewhere in the crate (observed as spurious "implementation of
+/// `FnOnce`/`Send` is not general enough" errors at unrelated call sites).
+macro_rules! dispatch_with_fallback {
+    ($initial_err:expr, $providers:expr, |$p:ident| $call:expr, $is_not_found:pat) => {{
+        let mut last_err = $initial_err;
+        let mut found = None;
+
+        for $p in $providers {
+            match $call.await {
+                Ok(v) => {
+                    found = Some(Ok(v));
+                    break;
+                }
+                Err(e @ $is_not_found) => {
+                    last_err = e;
+                }
+                Err(e) => {
+                    found = Some(Err(e));
+                    break;
+                }
+            }
+        }
+
+        match found {
+            Some(result) => result,
+            None => Err(last_err),
+        }
+    }};
+}
+
 impl McpService {
     /// Create a new MCP service with default configuration
     pub fn new() -> Self {
@@ -288,24 +331,11 @@ impl McpService {
     /// with the same name.
     fn merged_tools(&self) -> &[ToolDefinition] {
         self.merged_tools_cache.get_or_init(|| {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut merged: Vec<ToolDefinition> = Vec::new();
-
-            for def in self.tool_registry.list_tools() {
-                seen.insert(def.name.clone());
-                merged.push(def);
-            }
-
-            for provider in &self.tool_providers {
-                for def in provider.tools() {
-                    if seen.insert(def.name.clone()) {
-                        merged.push(def);
-                    }
-                }
-            }
-
-            merged.sort_by(|a, b| a.name.cmp(&b.name));
-            merged
+            merge_dedup_sorted(
+                self.tool_registry.list_tools(),
+                self.tool_providers.iter().flat_map(|p| p.tools()),
+                |t| t.name.as_str(),
+            )
         })
     }
 
@@ -323,32 +353,12 @@ impl McpService {
             .await
         {
             Err(McpError::ToolNotFound(_)) => {
-                let mut last_err = McpError::ToolNotFound(params.name.clone());
-                let mut found = None;
-
-                for provider in &self.tool_providers {
-                    match provider
-                        .call_tool(&params.name, params.arguments.clone())
-                        .await
-                    {
-                        Ok(result) => {
-                            found = Some(Ok(result));
-                            break;
-                        }
-                        Err(McpError::ToolNotFound(name)) => {
-                            last_err = McpError::ToolNotFound(name);
-                        }
-                        Err(e) => {
-                            found = Some(Err(e));
-                            break;
-                        }
-                    }
-                }
-
-                match found {
-                    Some(result) => result,
-                    None => Err(last_err),
-                }
+                dispatch_with_fallback!(
+                    McpError::ToolNotFound(params.name.clone()),
+                    &self.tool_providers,
+                    |p| p.call_tool(&params.name, params.arguments.clone()),
+                    McpError::ToolNotFound(_)
+                )
             }
             other => other,
         }?;
@@ -386,24 +396,11 @@ impl McpService {
     /// with the same uri.
     fn merged_resources(&self) -> &[ResourceDefinition] {
         self.merged_resources_cache.get_or_init(|| {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut merged: Vec<ResourceDefinition> = Vec::new();
-
-            for def in self.resource_registry.list_resources() {
-                seen.insert(def.uri.clone());
-                merged.push(def);
-            }
-
-            for provider in &self.resource_providers {
-                for def in provider.resources() {
-                    if seen.insert(def.uri.clone()) {
-                        merged.push(def);
-                    }
-                }
-            }
-
-            merged.sort_by(|a, b| a.uri.cmp(&b.uri));
-            merged
+            merge_dedup_sorted(
+                self.resource_registry.list_resources(),
+                self.resource_providers.iter().flat_map(|p| p.resources()),
+                |r| r.uri.as_str(),
+            )
         })
     }
 
@@ -417,29 +414,12 @@ impl McpService {
 
         let content = match self.resource_registry.read_resource(&params.uri).await {
             Err(McpError::ResourceNotFound(_)) => {
-                let mut last_err = McpError::ResourceNotFound(params.uri.clone());
-                let mut found = None;
-
-                for provider in &self.resource_providers {
-                    match provider.read_resource(&params.uri).await {
-                        Ok(content) => {
-                            found = Some(Ok(content));
-                            break;
-                        }
-                        Err(McpError::ResourceNotFound(uri)) => {
-                            last_err = McpError::ResourceNotFound(uri);
-                        }
-                        Err(e) => {
-                            found = Some(Err(e));
-                            break;
-                        }
-                    }
-                }
-
-                match found {
-                    Some(result) => result,
-                    None => Err(last_err),
-                }
+                dispatch_with_fallback!(
+                    McpError::ResourceNotFound(params.uri.clone()),
+                    &self.resource_providers,
+                    |p| p.read_resource(&params.uri),
+                    McpError::ResourceNotFound(_)
+                )
             }
             other => other,
         }?;
@@ -487,13 +467,19 @@ fn parse_list_cursor(params: Option<Value>) -> Result<Option<String>> {
     }
 }
 
-/// Paginate a pre-sorted slice of items using the same opaque-cursor
-/// semantics as `McpToolRegistry::list_tools_page` /
-/// `McpResourceRegistry::list_resources_page`: `cursor` is the key of the
-/// last item on the previous page (or `None` to start from the beginning),
-/// and the returned `next_cursor` is the key of the last item on this page
-/// if more items remain, or `None` on the final page.
-fn paginate_by<T, K>(
+/// Paginate a pre-sorted slice of items using opaque-cursor semantics:
+/// `cursor` is the key of the last item on the previous page (or `None`
+/// to start from the beginning), and the returned `next_cursor` is the
+/// key of the last item on this page if more items remain, or `None` on
+/// the final page.
+///
+/// This is the single, shared cursor-pagination implementation for the
+/// crate: `McpToolRegistry::list_tools_page` (tool.rs) and
+/// `McpResourceRegistry::list_resources_page` (resource.rs) both delegate
+/// to it (paging their pre-sorted key vectors, then mapping keys to
+/// definitions), and [`McpService`] uses it directly here to page
+/// already-merged tool/resource definitions.
+pub(crate) fn paginate_by<T, K>(
     items: &[T],
     cursor: Option<&str>,
     limit: usize,
@@ -519,6 +505,37 @@ where
     };
 
     (page.to_vec(), next_cursor)
+}
+
+/// Merge a "primary" collection (e.g. the compile-time inventory registry)
+/// with a "secondary" collection (e.g. dynamically-registered providers),
+/// deduplicating by `key` with primary entries taking precedence over
+/// secondary entries that share a key, then sort the result by `key`.
+///
+/// Shared by `McpService::merged_tools` and `McpService::merged_resources`,
+/// which previously duplicated this merge/dedup/sort logic verbatim for
+/// `ToolDefinition`/`name` and `ResourceDefinition`/`uri` respectively.
+fn merge_dedup_sorted<T>(
+    primary: Vec<T>,
+    secondary: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut merged: Vec<T> = Vec::new();
+
+    for item in primary {
+        seen.insert(key(&item).to_string());
+        merged.push(item);
+    }
+
+    for item in secondary {
+        if seen.insert(key(&item).to_string()) {
+            merged.push(item);
+        }
+    }
+
+    merged.sort_by(|a, b| key(a).cmp(key(b)));
+    merged
 }
 
 #[cfg(test)]
@@ -750,6 +767,113 @@ mod tests {
         assert!(response.error.is_none());
         let result: ResourceReadResult = serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(result.contents[0].text.as_deref(), Some("echoed content"));
+    }
+
+    struct NamedEchoToolProvider {
+        name: &'static str,
+        reply: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl McpToolProvider for NamedEchoToolProvider {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: self.name.to_string(),
+                description: Some(self.reply.to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn call_tool(&self, name: &str, _arguments: Value) -> Result<ToolCallResult> {
+            if name == self.name {
+                Ok(ToolCallResult::text(self.reply))
+            } else {
+                Err(McpError::ToolNotFound(name.to_string()))
+            }
+        }
+    }
+
+    struct NamedEchoResourceProvider {
+        uri: &'static str,
+        reply: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl McpResourceProvider for NamedEchoResourceProvider {
+        fn resources(&self) -> Vec<ResourceDefinition> {
+            vec![ResourceDefinition {
+                uri: self.uri.to_string(),
+                name: self.uri.to_string(),
+                description: Some(self.reply.to_string()),
+                mime_type: None,
+            }]
+        }
+
+        async fn read_resource(&self, uri: &str) -> Result<ResourceContent> {
+            if uri == self.uri {
+                Ok(ResourceContent::text(uri, self.reply))
+            } else {
+                Err(McpError::ResourceNotFound(uri.to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_dedups_colliding_provider_names_first_registered_wins() {
+        // Two providers both expose a tool named "shared". The merge/dedup
+        // logic (`merge_dedup_sorted`) must keep exactly one entry for the
+        // name, and — matching registry-vs-provider precedence — the
+        // first-registered provider's definition wins over later ones.
+        let service = McpService::new()
+            .with_tool_provider(Arc::new(NamedEchoToolProvider {
+                name: "shared",
+                reply: "first",
+            }))
+            .with_tool_provider(Arc::new(NamedEchoToolProvider {
+                name: "shared",
+                reply: "second",
+            }));
+
+        let request = JsonRpcRequest::new("tools/list");
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+
+        let matches: Vec<_> = result.tools.iter().filter(|t| t.name == "shared").collect();
+        assert_eq!(matches.len(), 1, "expected exactly one deduped entry");
+        assert_eq!(matches[0].description.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_list_dedups_colliding_provider_uris_first_registered_wins() {
+        // Symmetric to the tools case: two providers both expose a resource
+        // at the same URI; the merged `resources/list` must contain exactly
+        // one entry, with the first-registered provider's definition
+        // winning.
+        let service = McpService::new()
+            .with_resource_provider(Arc::new(NamedEchoResourceProvider {
+                uri: "shared://resource",
+                reply: "first",
+            }))
+            .with_resource_provider(Arc::new(NamedEchoResourceProvider {
+                uri: "shared://resource",
+                reply: "second",
+            }));
+
+        let request = JsonRpcRequest::new("resources/list");
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+
+        let matches: Vec<_> = result
+            .resources
+            .iter()
+            .filter(|r| r.uri == "shared://resource")
+            .collect();
+        assert_eq!(matches.len(), 1, "expected exactly one deduped entry");
+        assert_eq!(matches[0].description.as_deref(), Some("first"));
     }
 
     #[tokio::test]

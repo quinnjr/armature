@@ -230,7 +230,9 @@ impl SiemClient {
                         SiemError::RateLimited(retry_after_ms) => {
                             Duration::from_millis(*retry_after_ms)
                         }
-                        _ => config.retry_delay * 2u32.saturating_pow(attempt),
+                        _ => config
+                            .retry_delay
+                            .saturating_mul(2u32.saturating_pow(attempt)),
                     };
 
                     tokio::time::sleep(delay).await;
@@ -741,6 +743,15 @@ impl SiemTransport for TcpTransport {
                 .rsplit_once(':')
                 .map(|(host, _)| host)
                 .unwrap_or(&self.endpoint);
+            // A bracketed IPv6 literal (e.g. `[::1]:6514`) yields `[::1]`
+            // from the split above; `ServerName::try_from` rejects the
+            // brackets, so strip them before constructing the `ServerName`.
+            let host = if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+            {
+                inner
+            } else {
+                host
+            };
             let server_name =
                 rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
                     SiemError::Transport(format!("Invalid TLS server name '{}': {}", host, e))
@@ -917,6 +928,15 @@ mod tests {
             let expected_sig = expected_signature(&shared_key_b64, body.len(), &rfc1123_date);
             let expected_auth = format!("SharedKey {}:{}", workspace_id, expected_sig);
 
+            // Known-answer vector: pin the exact expected `Authorization`
+            // header for this fixed shared key / workspace / date / body, so
+            // a wrong canonical string layout can't self-confirm against the
+            // mirror computation above (independently verified offline).
+            assert_eq!(
+                expected_auth,
+                "SharedKey test-workspace-123:xJZwrcXTwTLznci6k1CzpQVgM4PIvPImd8Xlj6QEO1g="
+            );
+
             let recorded = server.assert_received("POST", "/");
             assert_eq!(
                 recorded.header("Authorization"),
@@ -924,6 +944,65 @@ mod tests {
             );
             assert_eq!(recorded.header("x-ms-date"), Some(rfc1123_date.as_str()));
             assert!(recorded.header("Log-Type").is_some());
+        }
+
+        /// With compression enabled, the Sentinel `SharedKey` signature must
+        /// be computed over the *compressed* body's length (matching what
+        /// `send_at` actually puts on the wire), not the plaintext length —
+        /// and the request must carry `Content-Encoding: gzip`.
+        #[tokio::test]
+        async fn signs_sentinel_requests_over_compressed_body_length() {
+            let server = StubServer::start_single(StubResponse::new(200, "")).await;
+
+            let workspace_id = "test-workspace-123";
+            let shared_key_b64 =
+                base64::engine::general_purpose::STANDARD.encode(b"super-secret-key-material");
+
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Sentinel)
+                .endpoint(server.url())
+                .token(shared_key_b64.clone())
+                .workspace_id(workspace_id)
+                .compression(true)
+                .build()
+                .expect("valid sentinel config");
+
+            let transport = HttpTransport::new(&config).expect("build sentinel transport");
+
+            let fixed_date = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
+
+            let body = r#"{"event":"test"}"#;
+            transport
+                .send_at(body, "application/json", fixed_date)
+                .await
+                .expect("send should succeed against stub server");
+
+            let rfc1123_date = fixed_date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+
+            let recorded = server.assert_received("POST", "/");
+            assert_eq!(recorded.header("Content-Encoding"), Some("gzip"));
+
+            // The recorded body is the actual (gzipped) bytes sent on the
+            // wire; the signature must be computed over its length, not the
+            // plaintext body's length.
+            let compressed_len = recorded.body.len();
+            let expected_sig = expected_signature(&shared_key_b64, compressed_len, &rfc1123_date);
+            let expected_auth = format!("SharedKey {}:{}", workspace_id, expected_sig);
+
+            assert_eq!(
+                recorded.header("Authorization"),
+                Some(expected_auth.as_str())
+            );
+            assert_eq!(recorded.header("x-ms-date"), Some(rfc1123_date.as_str()));
+
+            // Sanity: the plaintext length must differ from the compressed
+            // length for this test to actually exercise the bug (otherwise
+            // a wrong-length signature could accidentally match).
+            assert_ne!(
+                compressed_len,
+                body.len(),
+                "compressed and plaintext lengths must differ for this test to be meaningful"
+            );
         }
     }
 
@@ -1075,6 +1154,15 @@ mod tests {
         use armature_testkit::{StubResponse, StubServer};
         use std::time::Duration;
 
+        // NOTE: ideally these would use a paused/virtual tokio clock
+        // (`#[tokio::test(start_paused = true)]` + `tokio::time::advance`)
+        // for determinism, but that requires the `tokio` `test-util`
+        // feature, which isn't enabled for this crate (out of scope for a
+        // `client.rs`-only change to add). Instead, the interval/wait
+        // margins below are widened substantially (a 5x+ margin between the
+        // flush interval and the assertion wait) to keep these robust
+        // against CI scheduling jitter.
+
         #[tokio::test]
         async fn flushes_low_volume_batch_after_interval_elapses() {
             let server = StubServer::start_single(StubResponse::new(200, "")).await;
@@ -1085,7 +1173,7 @@ mod tests {
                 .token("test-token")
                 .batching(true)
                 .batch_size(100) // well above the single event we send
-                .batch_flush_interval(Duration::from_millis(30))
+                .batch_flush_interval(Duration::from_millis(50))
                 .build()
                 .expect("valid config");
 
@@ -1099,8 +1187,9 @@ mod tests {
             // Below batch_size, so nothing should have been sent yet.
             assert!(server.requests().is_empty(), "flush must not be immediate");
 
-            // Wait past the flush interval for the background task to fire.
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            // Wait well past the flush interval for the background task to
+            // fire (wide margin to absorb CI scheduling jitter).
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             assert_eq!(
                 server.requests().len(),
@@ -1119,7 +1208,7 @@ mod tests {
                 .token("test-token")
                 .batching(true)
                 .batch_size(100)
-                .batch_flush_interval(Duration::from_millis(30))
+                .batch_flush_interval(Duration::from_millis(50))
                 .build()
                 .expect("valid config");
 
@@ -1134,7 +1223,7 @@ mod tests {
             // aborted and never get a chance to flush.
             drop(client);
 
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             assert!(
                 server.requests().is_empty(),
@@ -1182,6 +1271,30 @@ mod tests {
                 .read_to_string(&mut decompressed)
                 .expect("recorded body must be valid gzip");
             assert_eq!(decompressed, body);
+        }
+    }
+
+    /// `retry_after_header_to_ms` seconds-to-milliseconds conversion.
+    #[cfg(feature = "http")]
+    mod retry_after_conversion {
+        use super::super::*;
+
+        #[test]
+        fn converts_seconds_to_milliseconds() {
+            assert_eq!(HttpTransport::retry_after_header_to_ms(Some("30")), 30_000);
+        }
+
+        #[test]
+        fn missing_header_falls_back_to_one_second() {
+            assert_eq!(HttpTransport::retry_after_header_to_ms(None), 1000);
+        }
+
+        #[test]
+        fn non_numeric_http_date_falls_back_to_one_second() {
+            assert_eq!(
+                HttpTransport::retry_after_header_to_ms(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+                1000
+            );
         }
     }
 

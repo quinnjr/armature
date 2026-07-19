@@ -26,6 +26,13 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 url = "2.5"
 base64 = "0.22"
 hostname = "0.4"
+# NOTE: hmac 0.13 / sha2 0.11 are the current RustCrypto 0.13/0.11 line, and
+# tokio-rustls 0.26 pulls in rustls 0.23 (ring-backed). These are
+# intentionally newer than versions some transitive deps still resolve to
+# (e.g. 0.12/0.10/0.24), which can cause duplicate builds of the same crate
+# family in `cargo tree`. Unifying isn't practical since the older pins are
+# held by transitive dependencies we don't control; this is documented,
+# accepted debt rather than an oversight.
 hmac = "0.13.0"
 sha2 = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

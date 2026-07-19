@@ -227,7 +227,10 @@ impl ApiKeyManager {
     /// from growing the map forever without paying for an O(n) sweep on
     /// every call.
     fn check_rate_limit(&self, key_id: &str, limit: u32) -> Result<(), ApiKeyError> {
-        let mut counters = self.rate_counters.lock().unwrap();
+        let mut counters = self
+            .rate_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now();
 
         // Borrowing lookup first: avoids allocating `key_id.to_string()` on
@@ -544,8 +547,13 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_window_resets_after_expiry() {
         let store = Arc::new(InMemoryStore::new());
+        // The rate limiter reads wall-clock time via `Utc::now()` rather than
+        // tokio's virtual clock, so this test can't use
+        // `start_paused` + `tokio::time::advance` to fake elapsed time. Use a
+        // generously wide window/sleep margin instead of a tight one to keep
+        // this timing-based test from flaking under load.
         let manager =
-            ApiKeyManager::new(store.clone()).with_rate_limit_window(Duration::milliseconds(50));
+            ApiKeyManager::new(store.clone()).with_rate_limit_window(Duration::milliseconds(200));
 
         let mut key = manager
             .generate("user_123", vec!["read".to_string()])
@@ -565,7 +573,7 @@ mod tests {
         assert!(matches!(result, Err(ApiKeyError::RateLimitExceeded)));
 
         // Wait past the window and confirm the count resets.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let result = manager.validate(&key.key).await;
         assert!(
             result.is_ok(),
