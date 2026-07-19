@@ -31,8 +31,11 @@
 //! ```
 
 use armature_core::{Error, HttpRequest, HttpResponse, Middleware};
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Request signing errors
 #[derive(Debug, thiserror::Error)]
@@ -101,10 +104,10 @@ impl RequestSigner {
 
     /// Generate HMAC-SHA256
     fn hmac_sha256(&self, message: &str) -> String {
-        let mut mac = Sha256::new();
-        mac.update(self.secret.as_bytes());
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
+            .expect("HMAC accepts any key length");
         mac.update(message.as_bytes());
-        hex::encode(mac.finalize())
+        hex::encode(mac.finalize().into_bytes())
     }
 }
 
@@ -397,6 +400,18 @@ mod tests {
         let result = verifier.verify("POST", "/api/test", "body", old_timestamp, "signature");
 
         assert!(matches!(result, Err(SigningError::RequestExpired)));
+    }
+
+    #[test]
+    fn sign_is_real_hmac_sha256() {
+        // Reference value computed independently via Python's hmac module:
+        // hmac.new(b"secret", b"POST:/api/test:test body:1700000000", hashlib.sha256).hexdigest()
+        let signer = RequestSigner::new("secret");
+        let sig = signer.sign("POST", "/api/test", "test body", 1700000000);
+        assert_eq!(
+            sig,
+            "b6979fc53be88b92dba411138047627e6b501ca24b1ae6f55dd7e87ee524755c"
+        );
     }
 
     #[test]
