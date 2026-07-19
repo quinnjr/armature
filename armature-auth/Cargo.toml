@@ -33,7 +33,7 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync
 
 # SAML support (optional - requires openssl/xmlsec for XML signature verification)
 # Enable with `saml` feature. Note: This requires system libraries (libxml2, xmlsec1)
-samael = { version = "0.0.21", optional = true }
+samael = { version = "0.0.22", optional = true }
 
 # 2FA support
 totp-lite = { version = "2.0", optional = true }

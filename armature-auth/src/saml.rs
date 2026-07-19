@@ -233,27 +233,23 @@ impl SamlProvider for SamlServiceProvider {
     }
 
     async fn validate_response(&self, saml_response: &str) -> Result<SamlAssertion> {
-        // Decode base64
-        let decoded = general_purpose::STANDARD
-            .decode(saml_response)
-            .map_err(|e| AuthError::InvalidToken(format!("Invalid base64: {}", e)))?;
+        #[cfg(feature = "saml")]
+        {
+            self.validate_response_verified(saml_response)
+        }
 
-        let xml = String::from_utf8(decoded)
-            .map_err(|e| AuthError::InvalidToken(format!("Invalid UTF-8: {}", e)))?;
-
-        // Simple XML parsing to extract basic information
-        // In production, you'd use a proper SAML library with full validation
-        let name_id = extract_name_id(&xml)?;
-        let attributes = extract_attributes(&xml);
-
-        Ok(SamlAssertion {
-            name_id,
-            name_id_format: None,
-            session_index: None,
-            attributes,
-            issue_instant: Utc::now(),
-            not_on_or_after: Some(Utc::now() + chrono::Duration::hours(1)),
-        })
+        // Without the `saml` feature there is no XML-signature verification available.
+        // A SAML validator that cannot verify signatures is worse than an explicit
+        // unsupported error, so refuse rather than accept an unverified assertion.
+        #[cfg(not(feature = "saml"))]
+        {
+            let _ = saml_response;
+            Err(AuthError::SamlValidation(
+                "SAML response validation requires the `saml` feature (XML signature \
+                 verification); refusing to validate without it"
+                    .to_string(),
+            ))
+        }
     }
 
     fn get_metadata(&self) -> Result<String> {
@@ -275,28 +271,154 @@ impl SamlProvider for SamlServiceProvider {
     }
 }
 
-/// Extract NameID from SAML response (simplified)
-fn extract_name_id(xml: &str) -> Result<String> {
-    // Simple extraction - in production use proper XML parser
-    if let Some(start) = xml.find("<saml:NameID")
-        && let Some(content_start) = xml[start..].find('>')
-    {
-        let content_start = start + content_start + 1;
-        if let Some(content_end) = xml[content_start..].find("</saml:NameID>") {
-            let name_id = xml[content_start..content_start + content_end].trim();
-            return Ok(name_id.to_string());
+/// Real SAML response verification (enveloped XML signature + SAML conditions).
+///
+/// This is the security-critical path: it parses the base64 SAML Response, verifies
+/// the enveloped XML digital signature against the IdP signing certificate taken from
+/// the configured IdP metadata, and enforces the SAML conditions (issuer, audience,
+/// `NotBefore`/`NotOnOrAfter`, subject confirmation) via samael before returning any
+/// assertion data. Any failure results in an `Err` — an assertion is never trusted
+/// without a verified signature unless `allow_unsigned_assertions` is explicitly set.
+#[cfg(feature = "saml")]
+impl SamlServiceProvider {
+    fn validate_response_verified(&self, saml_response: &str) -> Result<SamlAssertion> {
+        use samael::metadata::EntityDescriptor;
+        use samael::service_provider::ServiceProviderBuilder;
+
+        // 1. Obtain IdP metadata XML and parse it into an EntityDescriptor. The signing
+        //    certificate(s) used to verify the response signature live in this metadata.
+        let idp_xml = match &self.config.idp_metadata {
+            IdpMetadata::Xml(xml) => xml.clone(),
+            IdpMetadata::Url(_) => {
+                return Err(AuthError::SamlValidation(
+                    "IdP metadata must be provided as XML for response validation; \
+                     URL-based metadata fetching is not implemented here"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let mut idp_metadata: EntityDescriptor = idp_xml.parse().map_err(|e| {
+            AuthError::SamlValidation(format!("Failed to parse IdP metadata XML: {e}"))
+        })?;
+
+        // When unsigned assertions are explicitly allowed, strip the IdP signing
+        // certificates so samael skips signature verification. Conditions (issuer,
+        // audience, expiry, subject confirmation) are still fully enforced below.
+        if self.config.allow_unsigned_assertions
+            && let Some(descriptors) = idp_metadata.idp_sso_descriptors.as_mut()
+        {
+            for descriptor in descriptors {
+                descriptor.key_descriptors.clear();
+            }
         }
+
+        let sp = ServiceProviderBuilder::default()
+            .entity_id(Some(self.config.entity_id.clone()))
+            .acs_url(Some(self.config.acs_url.clone()))
+            .idp_metadata(idp_metadata)
+            // The trait's validate_response does not carry the original AuthnRequest ID,
+            // so we accept IdP-initiated flows. Signature, issuer, audience and expiry
+            // remain fully enforced; only the InResponseTo correlation is relaxed.
+            .allow_idp_initiated(true)
+            .build()
+            .map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to build SAML service provider: {e}"))
+            })?;
+
+        // 2. Fail closed: if signatures are required (the default) but the IdP metadata
+        //    carries no signing certificate, refuse rather than silently skipping the
+        //    signature check (which samael would do when no certs are present).
+        if !self.config.allow_unsigned_assertions {
+            let signing_certs = sp.idp_signing_certs().map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to read IdP signing certificates: {e}"))
+            })?;
+            if signing_certs.is_none() {
+                return Err(AuthError::SamlValidation(
+                    "IdP metadata contains no signing certificate; refusing to validate a \
+                     SAML response without signature verification"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // 3. Verify the enveloped XML signature and enforce SAML conditions. This is the
+        //    single call that closes the SSO bypass: it rejects unsigned, tampered,
+        //    expired, wrong-audience and wrong-issuer responses.
+        let assertion = sp.parse_base64_response(saml_response, None).map_err(|e| {
+            AuthError::SamlValidation(format!(
+                "SAML response signature/condition check failed: {e}"
+            ))
+        })?;
+
+        // 4. Extract attributes and enforce required attributes.
+        let attributes = extract_saml_attributes(&assertion);
+        for required in &self.config.required_attributes {
+            if !attributes.contains_key(required) {
+                return Err(AuthError::SamlValidation(format!(
+                    "Required SAML attribute '{required}' is missing from the assertion"
+                )));
+            }
+        }
+
+        // 5. Build the returned assertion from verified data (real NotOnOrAfter, not now()+1h).
+        let subject = assertion.subject.as_ref();
+        let name_id = subject
+            .and_then(|s| s.name_id.as_ref())
+            .map(|n| n.value.clone())
+            .ok_or_else(|| {
+                AuthError::SamlValidation("SAML assertion is missing a NameID".to_string())
+            })?;
+        let name_id_format = subject
+            .and_then(|s| s.name_id.as_ref())
+            .and_then(|n| n.format.clone());
+
+        let session_index = assertion
+            .authn_statements
+            .as_ref()
+            .and_then(|statements| statements.first())
+            .and_then(|statement| statement.session_index.clone());
+
+        let not_on_or_after = assertion
+            .conditions
+            .as_ref()
+            .and_then(|conditions| conditions.not_on_or_after);
+
+        Ok(SamlAssertion {
+            name_id,
+            name_id_format,
+            session_index,
+            attributes,
+            issue_instant: assertion.issue_instant,
+            not_on_or_after,
+        })
     }
-    Err(AuthError::InvalidToken(
-        "No NameID found in SAML response".to_string(),
-    ))
 }
 
-/// Extract attributes from SAML response (simplified)
-fn extract_attributes(_xml: &str) -> HashMap<String, Vec<String>> {
-    // Simplified attribute extraction
-    // In production, use proper XML parser
-    HashMap::new()
+/// Collect SAML attributes from a verified assertion into a name -> values map.
+#[cfg(feature = "saml")]
+fn extract_saml_attributes(assertion: &samael::schema::Assertion) -> HashMap<String, Vec<String>> {
+    let mut attributes: HashMap<String, Vec<String>> = HashMap::new();
+    if let Some(statements) = &assertion.attribute_statements {
+        for statement in statements {
+            for attribute in &statement.attributes {
+                let Some(name) = attribute
+                    .name
+                    .clone()
+                    .or_else(|| attribute.friendly_name.clone())
+                else {
+                    continue;
+                };
+                let values = attribute
+                    .values
+                    .iter()
+                    .filter_map(|v| v.value.clone())
+                    .collect::<Vec<_>>();
+                attributes.entry(name).or_default().extend(values);
+            }
+        }
+    }
+    attributes
 }
 
 #[cfg(test)]
@@ -328,5 +450,316 @@ mod tests {
         };
 
         assert_eq!(contact.email, "john@example.com");
+    }
+}
+
+/// Security tests for real SAML signature + condition verification (closes SSO bypass).
+///
+/// Fixtures are minted deterministically at runtime: a fresh RSA key/cert acts as the
+/// IdP, we build a SAML Response, set its validity windows, and sign it with that key.
+/// The matching certificate is embedded in the IdP metadata handed to the validator, so
+/// no brittle external fixtures are needed and every reject-case is exercised end to end.
+#[cfg(all(test, feature = "saml"))]
+mod saml_verification_tests {
+    use super::*;
+    use base64::engine::general_purpose;
+    use chrono::{Duration, Utc};
+    use samael::crypto::{Crypto, CryptoProvider};
+    use samael::idp::response_builder::{ResponseAttribute, build_response_template};
+    use samael::idp::sp_extractor::RequiredAttribute;
+    use samael::idp::{CertificateParams, IdentityProvider, KeyType, Rsa};
+    use samael::traits::ToXml;
+
+    const IDP_ENTITY_ID: &str = "https://idp.example.test/metadata";
+    const SP_ENTITY_ID: &str = "https://sp.example.test/metadata";
+    const ACS_URL: &str = "https://sp.example.test/saml/acs";
+    const NAME_ID: &str = "user@example.test";
+
+    /// Options controlling how a fixture Response is minted.
+    struct MintOptions {
+        issuer: String,
+        audience: String,
+        conditions_not_on_or_after: chrono::DateTime<Utc>,
+        subject_not_on_or_after: chrono::DateTime<Utc>,
+        /// When false, produce a genuinely unsigned Response (no signature at all).
+        sign: bool,
+    }
+
+    impl Default for MintOptions {
+        fn default() -> Self {
+            let future = Utc::now() + Duration::hours(1);
+            Self {
+                issuer: IDP_ENTITY_ID.to_string(),
+                audience: SP_ENTITY_ID.to_string(),
+                conditions_not_on_or_after: future,
+                subject_not_on_or_after: future,
+                sign: true,
+            }
+        }
+    }
+
+    /// A minted fixture: the base64-encoded SAML Response plus the IdP metadata XML
+    /// (containing the signing certificate) that a validator must be configured with.
+    struct Fixture {
+        response_b64: String,
+        idp_metadata_xml: String,
+    }
+
+    fn mint(opts: MintOptions) -> Fixture {
+        let idp = IdentityProvider::generate_new(KeyType::Rsa(Rsa::Rsa2048))
+            .expect("failed to generate IdP key");
+        let cert = idp
+            .create_certificate(&CertificateParams {
+                common_name: IDP_ENTITY_ID,
+                issuer_name: IDP_ENTITY_ID,
+                days_until_expiration: 3650,
+            })
+            .expect("failed to mint IdP certificate");
+
+        let attrs = vec![
+            ResponseAttribute {
+                required_attribute: RequiredAttribute {
+                    name: "email".to_string(),
+                    format: Some("urn:oasis:names:tc:SAML:2.0:attrname-format:basic".to_string()),
+                },
+                value: NAME_ID,
+            },
+            ResponseAttribute {
+                required_attribute: RequiredAttribute {
+                    name: "role".to_string(),
+                    format: Some("urn:oasis:names:tc:SAML:2.0:attrname-format:basic".to_string()),
+                },
+                value: "admin",
+            },
+        ];
+
+        let mut response = build_response_template(
+            &cert,
+            NAME_ID,
+            &opts.audience,
+            &opts.issuer,
+            ACS_URL,
+            "_test_request_id",
+            &attrs,
+        );
+
+        // Set the validity windows on the assertion before signing so that the signature
+        // covers them (the template leaves them empty, which SP validation rejects).
+        let not_before = Utc::now() - Duration::minutes(5);
+        if let Some(assertion) = response.assertion.as_mut() {
+            if let Some(conditions) = assertion.conditions.as_mut() {
+                conditions.not_before = Some(not_before);
+                conditions.not_on_or_after = Some(opts.conditions_not_on_or_after);
+            }
+            if let Some(confirmations) = assertion
+                .subject
+                .as_mut()
+                .and_then(|s| s.subject_confirmations.as_mut())
+            {
+                for confirmation in confirmations {
+                    if let Some(data) = confirmation.subject_confirmation_data.as_mut() {
+                        data.not_before = Some(not_before);
+                        data.not_on_or_after = Some(opts.subject_not_on_or_after);
+                    }
+                }
+            }
+        }
+
+        if !opts.sign {
+            // Genuinely unsigned: drop the signature template entirely.
+            response.signature = None;
+        }
+
+        let unsigned_xml = response.to_string().expect("failed to serialize Response");
+        let response_xml = if opts.sign {
+            Crypto::sign_xml(
+                unsigned_xml.as_str(),
+                idp.export_private_key_der()
+                    .expect("failed to export IdP key")
+                    .as_slice(),
+            )
+            .expect("failed to sign Response")
+        } else {
+            unsigned_xml
+        };
+
+        let cert_b64 = general_purpose::STANDARD.encode(cert.der_data());
+        let idp_metadata_xml = format!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY_ID}">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>{cert_b64}</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>"#
+        );
+
+        Fixture {
+            response_b64: general_purpose::STANDARD.encode(response_xml.as_bytes()),
+            idp_metadata_xml,
+        }
+    }
+
+    fn provider_from(idp_metadata_xml: &str, allow_unsigned: bool) -> SamlServiceProvider {
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(idp_metadata_xml.to_string()),
+        )
+        .allow_unsigned(allow_unsigned)
+        .with_required_attributes(vec!["email".to_string()]);
+        SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build failed")
+    }
+
+    async fn validate(fixture: &Fixture, allow_unsigned: bool) -> Result<SamlAssertion> {
+        let provider = provider_from(&fixture.idp_metadata_xml, allow_unsigned);
+        provider.validate_response(&fixture.response_b64).await
+    }
+
+    // (a) A validly-signed response is accepted, and the returned NameID, attributes and
+    //     expiry match what was minted.
+    #[tokio::test]
+    async fn valid_signed_response_is_accepted() {
+        let expiry = Utc::now() + Duration::hours(2);
+        let fixture = mint(MintOptions {
+            conditions_not_on_or_after: expiry,
+            ..Default::default()
+        });
+
+        let assertion = validate(&fixture, false)
+            .await
+            .expect("validly-signed response must be accepted");
+
+        assert_eq!(assertion.name_id, NAME_ID);
+        assert_eq!(
+            assertion.attributes.get("email"),
+            Some(&vec![NAME_ID.to_string()])
+        );
+        assert_eq!(
+            assertion.attributes.get("role"),
+            Some(&vec!["admin".to_string()])
+        );
+        // The real NotOnOrAfter from the assertion is returned (not now()+1h).
+        let returned = assertion.not_on_or_after.expect("expiry should be present");
+        assert!((returned - expiry).num_seconds().abs() < 2);
+    }
+
+    // (b) An unsigned response with allow_unsigned_assertions=false is rejected.
+    #[tokio::test]
+    async fn unsigned_response_is_rejected_when_signatures_required() {
+        let fixture = mint(MintOptions {
+            sign: false,
+            ..Default::default()
+        });
+        let err = validate(&fixture, false)
+            .await
+            .expect_err("unsigned response must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // (c) A response whose signed content was tampered after signing is rejected.
+    #[tokio::test]
+    async fn tampered_response_is_rejected() {
+        let fixture = mint(MintOptions::default());
+        // Decode, swap the signed NameID for an attacker identity, re-encode: the
+        // enveloped signature no longer matches the (now altered) signed content.
+        let xml = String::from_utf8(
+            general_purpose::STANDARD
+                .decode(&fixture.response_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(xml.contains(NAME_ID), "fixture should contain the NameID");
+        let tampered = xml.replace(NAME_ID, "attacker@evil.test");
+        let tampered_fixture = Fixture {
+            response_b64: general_purpose::STANDARD.encode(tampered.as_bytes()),
+            idp_metadata_xml: fixture.idp_metadata_xml,
+        };
+
+        let err = validate(&tampered_fixture, false)
+            .await
+            .expect_err("tampered response must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // (d) A response whose NotOnOrAfter has already passed is rejected.
+    #[tokio::test]
+    async fn expired_response_is_rejected() {
+        let past = Utc::now() - Duration::hours(1);
+        let fixture = mint(MintOptions {
+            conditions_not_on_or_after: past,
+            subject_not_on_or_after: past,
+            ..Default::default()
+        });
+        let err = validate(&fixture, false)
+            .await
+            .expect_err("expired response must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // (e1) A response addressed to the wrong audience is rejected.
+    #[tokio::test]
+    async fn wrong_audience_is_rejected() {
+        let fixture = mint(MintOptions {
+            audience: "https://attacker.example.test/metadata".to_string(),
+            ..Default::default()
+        });
+        let err = validate(&fixture, false)
+            .await
+            .expect_err("wrong-audience response must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // (e2) A response from the wrong issuer is rejected.
+    #[tokio::test]
+    async fn wrong_issuer_is_rejected() {
+        let fixture = mint(MintOptions {
+            issuer: "https://attacker.example.test/metadata".to_string(),
+            ..Default::default()
+        });
+        let err = validate(&fixture, false)
+            .await
+            .expect_err("wrong-issuer response must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // Guard: signatures required but the IdP metadata has no signing certificate -> refuse.
+    #[tokio::test]
+    async fn missing_idp_cert_is_rejected_when_signatures_required() {
+        let metadata = format!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY_ID}">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"/>
+</md:EntityDescriptor>"#
+        );
+        let fixture = mint(MintOptions::default());
+        let provider = provider_from(&metadata, false);
+        let err = provider
+            .validate_response(&fixture.response_b64)
+            .await
+            .expect_err("must refuse when no signing cert is configured");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // A missing required attribute is rejected even for an otherwise-valid signed response.
+    #[tokio::test]
+    async fn missing_required_attribute_is_rejected() {
+        let fixture = mint(MintOptions::default());
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(fixture.idp_metadata_xml.clone()),
+        )
+        .with_required_attributes(vec!["department".to_string()]);
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+        let err = provider
+            .validate_response(&fixture.response_b64)
+            .await
+            .expect_err("missing required attribute must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
     }
 }
