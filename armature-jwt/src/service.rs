@@ -55,12 +55,23 @@ impl JwtService {
     }
 
     /// Generate a token pair (access + refresh)
+    ///
+    /// The access and refresh tokens carry the same custom claims but each gets its own
+    /// `exp`, computed fresh from `config.expires_in` / `config.refresh_expires_in`. This
+    /// guarantees the refresh token always outlives the access token and that the two
+    /// tokens are never byte-identical.
     pub fn generate_token_pair<T: Serialize + Clone>(&self, claims: &T) -> Result<TokenPair> {
-        // Generate access token
-        let access_token = self.sign(claims)?;
+        let now = chrono::Utc::now().timestamp();
 
-        // Generate refresh token (same claims, but longer expiration)
-        let refresh_token = self.sign(claims)?;
+        let access_claims =
+            Self::claims_with_expiration(claims, now + self.config.expires_in.as_secs() as i64)?;
+        let refresh_claims = Self::claims_with_expiration(
+            claims,
+            now + self.config.refresh_expires_in.as_secs() as i64,
+        )?;
+
+        let access_token = self.sign(&access_claims)?;
+        let refresh_token = self.sign(&refresh_claims)?;
 
         Ok(TokenPair::new(
             access_token,
@@ -71,6 +82,10 @@ impl JwtService {
     }
 
     /// Refresh an access token
+    ///
+    /// Verifies the incoming refresh token, then re-issues a brand new token pair from its
+    /// claims. Both the new access and refresh tokens get freshly computed expirations (via
+    /// `generate_token_pair`), regardless of the `exp` carried by the old refresh token.
     pub fn refresh_token<T: DeserializeOwned + Serialize + Clone>(
         &self,
         refresh_token: &str,
@@ -78,8 +93,25 @@ impl JwtService {
         // Verify the refresh token
         let claims: T = self.verify(refresh_token)?;
 
-        // Generate new token pair
+        // Generate new token pair with fresh expirations
         self.generate_token_pair(&claims)
+    }
+
+    /// Serialize `claims` to a JSON object with its `exp` field set (added or overwritten) to
+    /// the given Unix timestamp.
+    fn claims_with_expiration<T: Serialize>(claims: &T, exp: i64) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(claims)
+            .map_err(|e| JwtError::SerializationError(e.to_string()))?;
+
+        match value.as_object_mut() {
+            Some(obj) => {
+                obj.insert("exp".to_string(), serde_json::Value::from(exp));
+                Ok(value)
+            }
+            None => Err(JwtError::SerializationError(
+                "claims must serialize to a JSON object to carry an exp field".to_string(),
+            )),
+        }
     }
 
     /// Sign with standard claims
@@ -134,6 +166,19 @@ mod tests {
         sub: String,
         name: String,
         exp: i64,
+    }
+
+    fn test_config() -> JwtConfig {
+        JwtConfig::new("test-secret".to_string())
+    }
+
+    fn test_claims() -> TestClaims {
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        TestClaims {
+            sub: "123".to_string(),
+            name: "Test".to_string(),
+            exp,
+        }
     }
 
     #[test]
@@ -196,6 +241,51 @@ mod tests {
         assert!(!pair.access_token.is_empty());
         assert!(!pair.refresh_token.is_empty());
         assert_eq!(pair.token_type, "Bearer");
+    }
+
+    #[test]
+    fn refresh_token_outlives_access_token() {
+        let service = JwtService::new(test_config()).unwrap();
+        let claims = test_claims();
+
+        let pair = service.generate_token_pair(&claims).unwrap();
+        let access: serde_json::Value = service.verify(&pair.access_token).unwrap();
+        let refresh: serde_json::Value = service.verify(&pair.refresh_token).unwrap();
+
+        let a_exp = access.get("exp").and_then(|v| v.as_i64()).unwrap();
+        let r_exp = refresh.get("exp").and_then(|v| v.as_i64()).unwrap();
+
+        assert!(
+            r_exp > a_exp,
+            "refresh exp {r_exp} must exceed access exp {a_exp}"
+        );
+        assert_ne!(pair.access_token, pair.refresh_token);
+    }
+
+    #[test]
+    fn refresh_reissues_a_fresh_access_token() {
+        let service = JwtService::new(test_config()).unwrap();
+        let claims = test_claims();
+
+        let pair = service.generate_token_pair(&claims).unwrap();
+        let new_pair = service
+            .refresh_token::<TestClaims>(&pair.refresh_token)
+            .unwrap();
+
+        assert!(
+            service
+                .verify::<serde_json::Value>(&new_pair.access_token)
+                .is_ok()
+        );
+
+        let old_access: serde_json::Value = service.verify(&pair.access_token).unwrap();
+        let new_access: serde_json::Value = service.verify(&new_pair.access_token).unwrap();
+        let old_exp = old_access.get("exp").and_then(|v| v.as_i64()).unwrap();
+        let new_exp = new_access.get("exp").and_then(|v| v.as_i64()).unwrap();
+        assert!(
+            new_exp >= old_exp,
+            "refreshed access token exp should not regress"
+        );
     }
 
     #[test]
