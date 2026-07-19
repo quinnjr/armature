@@ -27,16 +27,20 @@ impl AuthGuard {
         Self
     }
 
-    /// Extract user from request
-    pub fn extract_user<T: AuthUser>(&self, _request: &HttpRequest) -> Result<T> {
-        // In a real implementation, this would:
-        // 1. Extract JWT token from Authorization header
-        // 2. Verify the token
-        // 3. Extract user info from claims
-        // 4. Load user from database if needed
-
-        // For now, return error - this should be implemented by the application
-        Err(AuthError::Unauthorized)
+    /// Extract the verified user identity from the request.
+    ///
+    /// Reads the `T` extension attached by an authentication layer that has
+    /// already verified the caller's token — in practice
+    /// [`crate::JwtAuthMiddleware`], which inserts a [`UserContext`] built
+    /// from the token's verified claims. Returns
+    /// [`AuthError::Unauthorized`] if no such extension is present, e.g.
+    /// because `JwtAuthMiddleware` (or an equivalent) did not run first.
+    pub fn extract_user<T: AuthUser + Clone + 'static>(&self, request: &HttpRequest) -> Result<T> {
+        request
+            .extensions
+            .get::<T>()
+            .cloned()
+            .ok_or(AuthError::Unauthorized)
     }
 }
 
@@ -263,6 +267,28 @@ mod tests {
 
         let guard = RoleGuard::all(vec!["admin".to_string(), "guest".to_string()]);
         assert!(!guard.check_roles(&user));
+    }
+
+    #[test]
+    fn extract_user_returns_user_context_from_extension() {
+        let guard = AuthGuard::new();
+        let mut request = HttpRequest::new("GET".to_string(), "/me".to_string());
+        request
+            .extensions
+            .insert(UserContext::new("user123".to_string()).with_roles(vec!["admin".to_string()]));
+
+        let user = guard.extract_user::<UserContext>(&request).unwrap();
+        assert_eq!(user.user_id, "user123");
+        assert!(user.has_role("admin"));
+    }
+
+    #[test]
+    fn extract_user_errors_without_extension() {
+        let guard = AuthGuard::new();
+        let request = HttpRequest::new("GET".to_string(), "/me".to_string());
+
+        let result = guard.extract_user::<UserContext>(&request);
+        assert!(matches!(result, Err(AuthError::Unauthorized)));
     }
 
     fn authenticated_request() -> HttpRequest {

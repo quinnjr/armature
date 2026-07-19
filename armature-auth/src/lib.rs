@@ -134,7 +134,7 @@
 //!     required_attributes: vec![],
 //! };
 //!
-//! let provider = SamlServiceProvider::new(config);
+//! let provider = SamlServiceProvider::new("my-sp".to_string(), config)?;
 //!
 //! // Generate SAML auth request
 //! let auth_request = provider.create_auth_request()?;

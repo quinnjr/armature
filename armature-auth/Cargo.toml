@@ -66,6 +66,7 @@ webauthn = ["dep:webauthn-rs"]
 full = ["saml", "two-factor", "webauthn"]
 
 [dev-dependencies]
+armature-testkit = { path = "../armature-testkit" }
 tokio-test = "0.4"
 # Note: SAML tests require the `saml` feature to be enabled
 # Run with: cargo test --features saml

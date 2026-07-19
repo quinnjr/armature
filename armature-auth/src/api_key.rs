@@ -54,7 +54,8 @@ use chrono::{DateTime, Duration, Utc};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// API Key errors
@@ -148,6 +149,12 @@ pub struct ApiKeyManager {
     store: Arc<dyn ApiKeyStore>,
     key_prefix: String,
     default_expiration: Option<Duration>,
+    /// Rolling window used to enforce each key's `rate_limit` (requests per
+    /// window). Defaults to one minute, matching the "requests per minute"
+    /// documented on [`ApiKey::rate_limit`].
+    rate_limit_window: Duration,
+    /// Per-key request counters: `(window_start, count_in_window)`.
+    rate_counters: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
 impl ApiKeyManager {
@@ -178,6 +185,8 @@ impl ApiKeyManager {
             store,
             key_prefix: "ak".to_string(),
             default_expiration: Some(Duration::days(365)),
+            rate_limit_window: Duration::minutes(1),
+            rate_counters: Mutex::new(HashMap::new()),
         }
     }
 
@@ -191,6 +200,33 @@ impl ApiKeyManager {
     pub fn with_expiration(mut self, duration: Option<Duration>) -> Self {
         self.default_expiration = duration;
         self
+    }
+
+    /// Override the rolling window used to enforce each key's `rate_limit`
+    /// (default: 1 minute). Mainly useful for tests that need a short window.
+    pub fn with_rate_limit_window(mut self, window: Duration) -> Self {
+        self.rate_limit_window = window;
+        self
+    }
+
+    /// Record a request against `key_id`'s rate limit window and check it
+    /// against `limit` (requests per window). Returns
+    /// [`ApiKeyError::RateLimitExceeded`] once the count exceeds `limit`.
+    fn check_rate_limit(&self, key_id: &str, limit: u32) -> Result<(), ApiKeyError> {
+        let mut counters = self.rate_counters.lock().unwrap();
+        let now = Utc::now();
+        let entry = counters.entry(key_id.to_string()).or_insert((now, 0));
+
+        if now - entry.0 > self.rate_limit_window {
+            *entry = (now, 0);
+        }
+
+        entry.1 += 1;
+        if entry.1 > limit {
+            Err(ApiKeyError::RateLimitExceeded)
+        } else {
+            Ok(())
+        }
     }
 
     /// Generate a new API key
@@ -260,6 +296,11 @@ impl ApiKeyManager {
             && Utc::now() > expires_at
         {
             return Err(ApiKeyError::Expired);
+        }
+
+        // Enforce per-key rate limit, if configured.
+        if let Some(rate_limit) = api_key.rate_limit {
+            self.check_rate_limit(&api_key.id, rate_limit)?;
         }
 
         // Update last used timestamp
@@ -337,7 +378,11 @@ mod tests {
     impl ApiKeyStore for InMemoryStore {
         async fn save(&self, key: &ApiKey) -> Result<(), ApiKeyError> {
             let mut keys = self.keys.lock().unwrap();
-            keys.push(key.clone());
+            if let Some(existing) = keys.iter_mut().find(|k| k.id == key.id) {
+                *existing = key.clone();
+            } else {
+                keys.push(key.clone());
+            }
             Ok(())
         }
 
@@ -409,6 +454,44 @@ mod tests {
 
         assert!(validated.is_some());
         assert_eq!(validated.unwrap().user_id, "user_123");
+    }
+
+    #[tokio::test]
+    async fn validate_enforces_rate_limit_per_key() {
+        let store = Arc::new(InMemoryStore::new());
+        let manager = ApiKeyManager::new(store.clone());
+
+        let mut key = manager
+            .generate("user_123", vec!["read".to_string()])
+            .await
+            .unwrap();
+        key.rate_limit = Some(3);
+        store.save(&key).await.unwrap();
+
+        // First 3 calls (the limit) succeed.
+        for _ in 0..3 {
+            let result = manager.validate(&key.key).await;
+            assert!(result.is_ok(), "expected call within limit to succeed");
+        }
+
+        // The 4th call within the same window is rejected.
+        let result = manager.validate(&key.key).await;
+        assert!(matches!(result, Err(ApiKeyError::RateLimitExceeded)));
+    }
+
+    #[tokio::test]
+    async fn validate_without_rate_limit_is_unbounded() {
+        let store = Arc::new(InMemoryStore::new());
+        let manager = ApiKeyManager::new(store);
+
+        let key = manager
+            .generate("user_123", vec!["read".to_string()])
+            .await
+            .unwrap();
+
+        for _ in 0..10 {
+            assert!(manager.validate(&key.key).await.unwrap().is_some());
+        }
     }
 
     #[tokio::test]
