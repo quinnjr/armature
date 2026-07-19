@@ -10,32 +10,32 @@ use std::pin::Pin;
 
 /// Extension trait for transaction management.
 pub trait TransactionExt {
-    /// Execute a closure within a transaction.
+    /// Begin a new database transaction and return the raw [`DatabaseTransaction`].
     ///
-    /// If the closure returns an error, the transaction is rolled back.
-    /// Otherwise, the transaction is committed.
+    /// This does **not** take a closure and does **not** auto-commit or
+    /// auto-rollback: the caller is responsible for calling `.commit()` or
+    /// `.rollback()` on the returned transaction. For closure-scoped
+    /// transactions that commit on `Ok` and roll back on `Err` automatically,
+    /// use [`run_transaction`] (or [`run_transaction_with_isolation`]) instead.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use sea_orm::TransactionTrait;
-    ///
-    /// db.connection().transaction(|txn| {
-    ///     Box::pin(async move {
-    ///         let user = user::ActiveModel {
-    ///             name: Set("Alice".to_owned()),
-    ///             ..Default::default()
-    ///         };
-    ///         user.insert(txn).await?;
-    ///         Ok(())
-    ///     })
-    /// }).await?;
+    /// let txn = db.begin_transaction().await?;
+    /// // ... do work with txn ...
+    /// txn.commit().await?;
     /// ```
     fn begin_transaction(
         &self,
     ) -> impl Future<Output = Result<DatabaseTransaction, sea_orm::DbErr>> + Send;
 
-    /// Execute a closure within a transaction with custom isolation level.
+    /// Begin a new database transaction with a custom isolation level and
+    /// return the raw [`DatabaseTransaction`].
+    ///
+    /// As with [`TransactionExt::begin_transaction`], no closure is taken and
+    /// no auto-commit/auto-rollback occurs; the caller commits or rolls back
+    /// explicitly. See [`run_transaction_with_isolation`] for the
+    /// closure-based, auto-committing equivalent.
     fn begin_transaction_with_isolation(
         &self,
         isolation: IsolationLevel,
