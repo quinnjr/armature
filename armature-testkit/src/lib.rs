@@ -1,6 +1,8 @@
 //! Deterministic, offline test harnesses for verifying Armature integrations.
 
 #[cfg(feature = "containers")]
+pub mod acme;
+#[cfg(feature = "containers")]
 pub mod containers;
 pub mod docker;
 pub mod http_stub;
