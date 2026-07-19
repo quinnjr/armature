@@ -265,10 +265,72 @@ impl SiemTransport for HttpTransport {
     }
 }
 
+/// Certificate verifier that disables server certificate validation.
+///
+/// Only used when `SiemConfig::tls_verify` is explicitly set to `false`.
+/// SIEM/syslog endpoints are frequently internal, self-signed collectors,
+/// so this is an intentional, opt-in escape hatch — it must never be the
+/// default and must never be selected implicitly.
+#[derive(Debug)]
+struct NoServerCertVerification(rustls::crypto::CryptoProvider);
+
+impl NoServerCertVerification {
+    fn new(provider: rustls::crypto::CryptoProvider) -> Arc<Self> {
+        Arc::new(Self(provider))
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for NoServerCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
 /// TCP transport (for Syslog, QRadar, ArcSight)
 pub struct TcpTransport {
     endpoint: String,
     tls: bool,
+    tls_verify: bool,
+    ca_cert_path: Option<String>,
 }
 
 impl TcpTransport {
@@ -277,7 +339,63 @@ impl TcpTransport {
         Ok(Self {
             endpoint: config.endpoint.clone(),
             tls: config.transport == Transport::Tls,
+            tls_verify: config.tls_verify,
+            ca_cert_path: config.ca_cert_path.clone(),
         })
+    }
+
+    /// Build a rustls-based TLS connector honoring `tls_verify` / `ca_cert_path`.
+    ///
+    /// Never falls back to a permissive default: verification is only
+    /// disabled when `tls_verify` is explicitly `false`.
+    fn build_tls_connector(&self) -> SiemResult<tokio_rustls::TlsConnector> {
+        let provider = rustls::crypto::ring::default_provider();
+
+        let client_config = if !self.tls_verify {
+            rustls::ClientConfig::builder_with_provider(Arc::new(provider.clone()))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| {
+                    SiemError::Transport(format!("Failed to configure TLS protocol: {}", e))
+                })?
+                .dangerous()
+                .with_custom_certificate_verifier(NoServerCertVerification::new(provider))
+                .with_no_client_auth()
+        } else {
+            let mut roots = rustls::RootCertStore::empty();
+
+            if let Some(ca_path) = &self.ca_cert_path {
+                let file = std::fs::File::open(ca_path).map_err(|e| {
+                    SiemError::Transport(format!(
+                        "Failed to open CA certificate '{}': {}",
+                        ca_path, e
+                    ))
+                })?;
+                let mut reader = std::io::BufReader::new(file);
+                for cert in rustls_pemfile::certs(&mut reader) {
+                    let cert = cert.map_err(|e| {
+                        SiemError::Transport(format!("Failed to parse CA certificate: {}", e))
+                    })?;
+                    roots.add(cert).map_err(|e| {
+                        SiemError::Transport(format!(
+                            "Failed to add CA certificate to root store: {}",
+                            e
+                        ))
+                    })?;
+                }
+            } else {
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            }
+
+            rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| {
+                    SiemError::Transport(format!("Failed to configure TLS protocol: {}", e))
+                })?
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
+
+        Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
     }
 }
 
@@ -287,17 +405,37 @@ impl SiemTransport for TcpTransport {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
 
-        let mut stream = TcpStream::connect(&self.endpoint).await?;
+        let stream = TcpStream::connect(&self.endpoint).await?;
 
-        // For TLS, we would wrap with TLS here
-        // For now, plain TCP
         if self.tls {
-            tracing::warn!("TLS transport requested but not fully implemented, using plain TCP");
-        }
+            let connector = self.build_tls_connector()?;
 
-        stream.write_all(data.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        stream.flush().await?;
+            let host = self
+                .endpoint
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .unwrap_or(&self.endpoint);
+            let server_name =
+                rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
+                    SiemError::Transport(format!("Invalid TLS server name '{}': {}", host, e))
+                })?;
+
+            // On any TLS setup/handshake failure this returns Err and never
+            // falls back to writing the event over the plaintext `stream`.
+            let mut tls_stream = connector
+                .connect(server_name, stream)
+                .await
+                .map_err(|e| SiemError::Transport(format!("TLS handshake failed: {}", e)))?;
+
+            tls_stream.write_all(data.as_bytes()).await?;
+            tls_stream.write_all(b"\n").await?;
+            tls_stream.flush().await?;
+        } else {
+            let mut stream = stream;
+            stream.write_all(data.as_bytes()).await?;
+            stream.write_all(b"\n").await?;
+            stream.flush().await?;
+        }
 
         Ok(())
     }
@@ -397,5 +535,109 @@ mod tests {
         let messages = transport.get_messages().await;
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0], "test message");
+    }
+
+    /// Build a self-signed rustls `ServerConfig` for `localhost` using rcgen,
+    /// for standing up an in-test TLS listener.
+    fn self_signed_server_config() -> rustls::ServerConfig {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
+
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap()
+    }
+
+    fn tcp_tls_transport(endpoint: String, tls_verify: bool) -> TcpTransport {
+        TcpTransport {
+            endpoint,
+            tls: true,
+            tls_verify,
+            ca_cert_path: None,
+        }
+    }
+
+    /// A `tls=true` transport must complete a real TLS handshake and deliver
+    /// the event over the encrypted stream, not plaintext TCP.
+    #[tokio::test]
+    async fn test_tls_transport_delivers_over_encrypted_channel() {
+        use tokio::net::TcpListener;
+
+        let server_config = Arc::new(self_signed_server_config());
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls_stream = acceptor.accept(stream).await.unwrap();
+
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut reader = BufReader::new(&mut tls_stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            line
+        });
+
+        // tls_verify=false: the listener uses a self-signed cert not in any
+        // root store, so verification must be explicitly disabled for this
+        // test to exercise the encrypted round trip.
+        let transport = tcp_tls_transport(format!("localhost:{}", port), false);
+
+        transport
+            .send("encrypted security event", "text/plain")
+            .await
+            .expect("TLS send should succeed and complete a handshake");
+
+        let received = server.await.unwrap();
+        assert_eq!(received.trim_end(), "encrypted security event");
+    }
+
+    /// A `tls=true` transport pointed at a plaintext listener must NOT
+    /// deliver the event in cleartext: the listener should observe a TLS
+    /// ClientHello (not the raw event bytes), and `send` must return an
+    /// error rather than silently downgrading to plaintext.
+    #[tokio::test]
+    async fn test_tls_transport_never_falls_back_to_plaintext() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 512];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            buf[..n].to_vec()
+        });
+
+        let transport = tcp_tls_transport(format!("127.0.0.1:{}", port), false);
+
+        let result = transport.send("top secret event", "text/plain").await;
+        assert!(
+            result.is_err(),
+            "TLS transport against a non-TLS peer must error, never fall back to plaintext"
+        );
+
+        let received = server.await.unwrap();
+        let plaintext_needle = b"top secret event";
+        assert!(
+            !received
+                .windows(plaintext_needle.len())
+                .any(|w| w == plaintext_needle),
+            "plaintext event bytes must never appear on the wire when tls=true"
+        );
+        // A real TLS ClientHello starts with record type 0x16 (handshake).
+        assert_eq!(
+            received.first(),
+            Some(&0x16u8),
+            "expected a TLS ClientHello on the wire, got: {:?}",
+            received
+        );
     }
 }
