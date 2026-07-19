@@ -14,7 +14,7 @@ publish = false
 default = []
 # Docker-backed helpers (testcontainers, Pebble ACME). Off by default so the
 # standard `cargo test` never requires Docker.
-containers = []
+containers = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
@@ -22,6 +22,8 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+testcontainers = { version = "0.27.3", optional = true }
+testcontainers-modules = { version = "0.15.0", features = ["redis", "postgres"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
