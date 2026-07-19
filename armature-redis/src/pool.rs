@@ -9,6 +9,62 @@ use tracing::{info, warn};
 
 use crate::{RedisConfig, RedisError, Result};
 
+/// Issue `CLIENT SETNAME` on a freshly-established physical connection, if a
+/// connection name is configured. Shared by
+/// `NamedRedisConnectionManager::connect` and
+/// `RedisClusterConnectionManager::connect` so the naming logic (and its
+/// failure handling) lives in exactly one place.
+async fn apply_connection_name(conn: &mut impl ConnectionLike, name: Option<&str>) {
+    if let Some(name) = name {
+        let result: std::result::Result<(), redis::RedisError> = redis::cmd("CLIENT")
+            .arg("SETNAME")
+            .arg(name)
+            .query_async(conn)
+            .await;
+        if let Err(e) = result {
+            warn!(error = %e, connection_name = %name, "failed to set Redis connection name");
+        }
+    }
+}
+
+/// Upgrade a `redis://` seed node URL to `rediss://` for TLS, leaving
+/// already-`rediss://` (or otherwise-schemed) entries untouched.
+///
+/// Used to fix a cluster TLS downgrade: `RedisConfig::connection_url()`
+/// upgrades the scheme for the single-node/fallback path, but explicit
+/// `cluster_nodes` entries bypass that method entirely, so without this an
+/// operator setting `.tls(true)` together with `.cluster_nodes([...])` would
+/// silently get an unencrypted cluster connection carrying credentials.
+fn upgrade_node_to_tls(node: &str) -> String {
+    if let Some(rest) = node.strip_prefix("redis://") {
+        format!("rediss://{rest}")
+    } else {
+        node.to_string()
+    }
+}
+
+/// Redact userinfo (`user:pass@`) from a node URL for safe logging. Never
+/// log a value derived from `RedisConfig::connection_url()` (which may
+/// embed credentials) without passing it through this first.
+fn redact_node_for_logging(node: &str) -> String {
+    if let Some(scheme_end) = node.find("://") {
+        let after_scheme = scheme_end + 3;
+        // The authority (userinfo@host[:port]) ends at the next `/`, if any.
+        // Search for `@` within that span and take the *last* occurrence, so
+        // a `@` embedded in (unencoded) userinfo doesn't cause us to stop
+        // early and leave part of the credentials in the output.
+        let authority_end = node[after_scheme..]
+            .find('/')
+            .map(|i| after_scheme + i)
+            .unwrap_or(node.len());
+        if let Some(at) = node[after_scheme..authority_end].rfind('@') {
+            let host_start = after_scheme + at + 1;
+            return format!("{}{}", &node[..after_scheme], &node[host_start..]);
+        }
+    }
+    node.to_string()
+}
+
 /// A `bb8::ManageConnection` for `redis::cluster::ClusterClient`.
 ///
 /// This mirrors `bb8_redis::RedisConnectionManager` but produces cluster-aware
@@ -50,16 +106,7 @@ impl ManageConnection for RedisClusterConnectionManager {
 
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
         let mut conn = self.client.get_async_connection().await?;
-        if let Some(name) = &self.connection_name {
-            let result: std::result::Result<(), redis::RedisError> = redis::cmd("CLIENT")
-                .arg("SETNAME")
-                .arg(name.as_str())
-                .query_async(&mut conn)
-                .await;
-            if let Err(e) = result {
-                warn!(error = %e, connection_name = %name, "failed to set Redis connection name");
-            }
-        }
+        apply_connection_name(&mut conn, self.connection_name.as_deref()).await;
         Ok(conn)
     }
 
@@ -106,16 +153,7 @@ impl ManageConnection for NamedRedisConnectionManager {
 
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
         let mut conn = self.inner.connect().await?;
-        if let Some(name) = &self.connection_name {
-            let result: std::result::Result<(), redis::RedisError> = redis::cmd("CLIENT")
-                .arg("SETNAME")
-                .arg(name.as_str())
-                .query_async(&mut conn)
-                .await;
-            if let Err(e) = result {
-                warn!(error = %e, connection_name = %name, "failed to set Redis connection name");
-            }
-        }
+        apply_connection_name(&mut conn, self.connection_name.as_deref()).await;
         Ok(conn)
     }
 
@@ -297,6 +335,17 @@ impl RedisPoolBuilder {
     async fn build_cluster(self) -> Result<RedisPool> {
         let nodes = if self.config.cluster_nodes.is_empty() {
             vec![self.config.connection_url()]
+        } else if self.config.tls {
+            // `RedisConfig::connection_url()` upgrades `redis://` -> `rediss://`
+            // when `tls` is set, but that only touches `config.url` — explicit
+            // `cluster_nodes` bypass it entirely. Without this, `.tls(true)`
+            // combined with `.cluster_nodes([...])` would silently build an
+            // unencrypted cluster connection carrying credentials.
+            self.config
+                .cluster_nodes
+                .iter()
+                .map(|n| upgrade_node_to_tls(n))
+                .collect()
         } else {
             self.config.cluster_nodes.clone()
         };
@@ -324,9 +373,14 @@ impl RedisPoolBuilder {
                 .map_err(|e| RedisError::Connection(e.to_string()))?;
         }
 
+        // Never log `nodes` directly: when `cluster_nodes` was empty, it was
+        // built from `connection_url()`, which may embed `user:pass@`
+        // credentials. Redact userinfo before logging.
+        let redacted_nodes: Vec<String> =
+            nodes.iter().map(|n| redact_node_for_logging(n)).collect();
         info!(
             pool_size = self.config.pool_size,
-            nodes = ?nodes,
+            nodes = ?redacted_nodes,
             "Redis cluster connection pool created"
         );
 
@@ -420,6 +474,64 @@ mod tests {
     fn non_cluster_config_defaults_to_single_node() {
         let config = RedisConfig::builder().url("redis://127.0.0.1:6379").build();
         assert!(!config.cluster);
+    }
+
+    /// Regression test for the cluster TLS downgrade: `RedisConfig::tls(true)`
+    /// combined with explicit `cluster_nodes` must still upgrade each
+    /// `redis://` node to `rediss://` before it reaches
+    /// `RedisClusterConnectionManager::new`. Before the fix, `build_cluster`
+    /// passed `cluster_nodes` through unchanged, so a TLS-enabled cluster
+    /// config with plain `redis://` seed nodes silently built an unencrypted
+    /// connection.
+    #[test]
+    fn cluster_nodes_are_upgraded_to_tls_when_tls_enabled() {
+        let config = RedisConfig {
+            tls: true,
+            cluster: true,
+            cluster_nodes: vec![
+                "redis://127.0.0.1:7000".to_string(),
+                "rediss://127.0.0.1:7001".to_string(),
+                "redis://user:pass@127.0.0.1:7002".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let nodes = if config.tls {
+            config
+                .cluster_nodes
+                .iter()
+                .map(|n| upgrade_node_to_tls(n))
+                .collect::<Vec<_>>()
+        } else {
+            config.cluster_nodes.clone()
+        };
+
+        assert_eq!(
+            nodes,
+            vec![
+                "rediss://127.0.0.1:7000".to_string(),
+                "rediss://127.0.0.1:7001".to_string(),
+                "rediss://user:pass@127.0.0.1:7002".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_node_to_tls_leaves_already_tls_nodes_unchanged() {
+        assert_eq!(
+            upgrade_node_to_tls("rediss://h:7000"),
+            "rediss://h:7000".to_string()
+        );
+    }
+
+    #[test]
+    fn redact_node_for_logging_strips_userinfo() {
+        assert_eq!(
+            redact_node_for_logging("redis://user:p@ss@h:6379/2"),
+            "redis://h:6379/2"
+        );
+        // No userinfo present: unchanged.
+        assert_eq!(redact_node_for_logging("redis://h:6379"), "redis://h:6379");
     }
 
     /// A live cluster smoke test would require an actual multi-node Redis

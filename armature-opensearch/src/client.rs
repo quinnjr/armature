@@ -4,7 +4,7 @@ use crate::{
     bulk::{BulkOperation, BulkResponse},
     config::OpenSearchConfig,
     document::Document,
-    error::{OpenSearchError, Result, error_reason},
+    error::{OpenSearchError, Result, json_or_error},
     index::IndexManager,
     search::SearchBuilder,
 };
@@ -232,18 +232,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        let body = json_or_error(response).await?;
 
         Ok(body["_id"].as_str().unwrap_or(id).to_string())
     }
@@ -263,18 +252,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        let body = json_or_error(response).await?;
 
         Ok(body["_id"].as_str().unwrap_or("").to_string())
     }
@@ -336,25 +314,14 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::DocumentNotFound {
                 index: index.to_string(),
                 id: id.to_string(),
             });
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -375,25 +342,14 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::DocumentNotFound {
                 index: index.to_string(),
                 id: id.to_string(),
             });
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -409,22 +365,11 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Ok(false);
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(true)
     }
@@ -440,12 +385,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        let body = json_or_error(response).await?;
 
         let deleted = body["deleted"].as_u64().unwrap_or(0);
 
@@ -603,12 +543,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let result: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(error_reason(&result)));
-        }
+        let result = json_or_error(response).await?;
 
         Ok(serde_json::from_value(result)?)
     }
@@ -628,10 +563,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -645,12 +577,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        let body = json_or_error(response).await?;
 
         Ok(body)
     }

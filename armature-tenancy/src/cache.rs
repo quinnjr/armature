@@ -52,6 +52,17 @@ pub trait CacheProvider: Send + Sync {
     /// The default implementation reports the operation as unsupported so
     /// existing `CacheProvider` implementations keep compiling without any
     /// changes.
+    ///
+    /// **Implementor caveats**: because callers such as
+    /// [`TenantCache::clear_tenant`] match keys with a plain string-prefix
+    /// test, a real implementation should preserve `starts_with` semantics
+    /// exactly (no normalization/case-folding that could widen the match)
+    /// to avoid over-matching keys belonging to another tenant whose prefix
+    /// happens to share a leading substring. Implementations backed by a
+    /// `SCAN`-style API are typically non-atomic with respect to concurrent
+    /// writes (keys inserted or removed during the scan may or may not be
+    /// observed) and can be `O(keyspace)` rather than `O(matching keys)`
+    /// unless the backend supports true prefix indexing.
     async fn keys_with_prefix(&self, _prefix: &str) -> Result<Vec<String>, CacheError> {
         Err(CacheError::Error(
             "keys_with_prefix is not implemented by this cache provider".to_string(),
@@ -139,7 +150,28 @@ impl<P: CacheProvider> TenantCache<P> {
     /// **Warning**: This clears ALL keys for the tenant!
     ///
     /// Scans the provider for every key under this tenant's prefix (via
-    /// [`CacheProvider::keys_with_prefix`]) and deletes each one.
+    /// [`CacheProvider::keys_with_prefix`]) and deletes each one (via
+    /// [`CacheProvider::delete_many`]).
+    ///
+    /// **Caveats** (inherited from the prefix-scan strategy, see
+    /// [`CacheProvider::keys_with_prefix`]):
+    /// - This is a scan-then-delete-by-key operation, not a single atomic
+    ///   command. It is `O(matching keys)` (and on providers whose default
+    ///   `keys_with_prefix`/`delete_many` fall back to scanning the whole
+    ///   keyspace or issuing one round-trip per key, effectively
+    ///   `O(keyspace)`), and other operations against the same tenant's keys
+    ///   that race with a `clear_tenant` call are not isolated from it —
+    ///   keys written concurrently mid-scan may or may not be included.
+    /// - Correctness depends on the tenant's cache-key prefix
+    ///   (`"tenant:{id}:"`, see [`Tenant::cache_key`]) being collision-free.
+    ///   Because prefix matching is a plain `starts_with` check, a tenant
+    ///   whose `id` is itself a prefix of another tenant's `id` (e.g.
+    ///   `"acme"` vs. `"acme-2"`) would NOT collide here since the literal
+    ///   `:` separators are part of the prefix — but a `CacheProvider`
+    ///   implementation that stores unrelated keys sharing the same
+    ///   `tenant:{id}:` string (or that ignores the trailing separator) can
+    ///   still over-match and delete keys that do not belong to this
+    ///   tenant.
     pub async fn clear_tenant(&self, tenant: &Tenant) -> Result<(), CacheError> {
         let prefix = tenant.cache_key("");
         let keys = self.provider.keys_with_prefix(&prefix).await?;

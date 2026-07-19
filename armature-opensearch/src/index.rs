@@ -1,6 +1,6 @@
 //! Index management for OpenSearch.
 
-use crate::error::{OpenSearchError, Result, error_reason};
+use crate::error::{OpenSearchError, Result, error_reason, json_or_error};
 use armature_log::{debug, info};
 use opensearch::OpenSearch;
 use serde::{Deserialize, Serialize};
@@ -47,10 +47,7 @@ impl IndexManager {
             return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -66,16 +63,11 @@ impl IndexManager {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::IndexNotFound(name.to_string()));
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -126,10 +118,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -146,10 +135,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -165,10 +151,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -184,10 +167,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -203,10 +183,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -222,10 +199,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -244,10 +218,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -266,10 +237,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(error_reason(&body)));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }

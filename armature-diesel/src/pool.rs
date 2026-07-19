@@ -140,9 +140,15 @@ impl PgPool {
         // deadpool has no direct `min_idle` / `max_lifetime` / `idle_timeout`
         // knobs (it lazily creates connections and has no background reaper);
         // those fields are only honored on the bb8 backend (`PgPoolBb8`).
+        // `wait_timeout` bounds how long `pool.get()` will wait for a
+        // connection to free up once the pool is saturated (max_size
+        // connections all checked out); without it, `get()` can block
+        // indefinitely under load. There is no separate pool-acquire-timeout
+        // field on `DieselConfig`, so reuse `connect_timeout` for both.
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
             .create_timeout(Some(config.connect_timeout))
+            .wait_timeout(Some(config.connect_timeout))
             .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;
@@ -280,9 +286,14 @@ impl MysqlPool {
         // without adding `mysql_async` as a direct dependency of this crate.
         // deadpool also has no `min_idle` / `max_lifetime` / `idle_timeout`
         // knobs (see the PostgreSQL deadpool path above for details).
+        // See the PostgreSQL deadpool path above: `wait_timeout` bounds how
+        // long `pool.get()` waits for a connection once the pool is
+        // saturated. Reuse `connect_timeout` since there is no separate
+        // pool-acquire-timeout field on `DieselConfig`.
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
             .create_timeout(Some(config.connect_timeout))
+            .wait_timeout(Some(config.connect_timeout))
             .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;

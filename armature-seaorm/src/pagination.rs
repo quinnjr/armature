@@ -286,8 +286,10 @@ where
     /// returned model when more rows remain (`has_more`).
     /// For [`CursorDirection::Backward`], results are still ordered descending
     /// (nearest the supplied cursor first), so `prev_cursor` — the cursor that
-    /// continues paging further backward — is derived from the *first*
-    /// returned model when more rows remain further back.
+    /// continues paging further backward — is derived from the *last*
+    /// returned model (the smallest value seen, i.e. farthest from the
+    /// supplied cursor) when more rows remain further back. Using the first
+    /// (nearest) model would re-fetch rows already returned on this page.
     async fn keyset_paginate<C, F>(
         self,
         db: &impl sea_orm::ConnectionTrait,
@@ -420,7 +422,7 @@ where
     };
 
     let prev_cursor = if matches!(direction, CursorDirection::Backward) && has_more {
-        items.first().map(&id_of)
+        items.last().map(&id_of)
     } else {
         None
     };
@@ -619,10 +621,15 @@ mod tests {
 
         assert!(result.has_more);
         assert_eq!(result.items, vec![97, 96, 95]);
+        // prev_cursor must be the SMALLEST value seen (95, the last/farthest
+        // returned row), not the nearest (97). Continuing backward means
+        // `column < prev_cursor`: with 95 that yields [94, 93, 92] (no
+        // overlap with this page); with the buggy 97 it would yield
+        // [96, 95, 94], re-returning rows already served on this page.
         assert_eq!(
             result.prev_cursor,
-            Some("97".to_string()),
-            "prev_cursor should come from the first returned model"
+            Some("95".to_string()),
+            "prev_cursor should come from the last (smallest/farthest) returned model"
         );
         assert_eq!(
             result.next_cursor, None,
@@ -638,5 +645,42 @@ mod tests {
 
         assert!(!result.has_more);
         assert_eq!(result.prev_cursor, None);
+    }
+
+    #[test]
+    fn finish_keyset_page_backward_prev_cursor_continues_without_overlap() {
+        // Simulates two consecutive backward pages over ids 100..=1 with
+        // limit = 3. First page: `column < 100 ORDER BY column DESC LIMIT 4`
+        // returns [99, 98, 97, 96] (the 96 is the probe row proving more
+        // remain). The corrected prev_cursor is derived from the *last*
+        // item (97, after truncation) rather than the first (99).
+        let first_page_rows = vec![99, 98, 97, 96];
+        let first_page = finish_keyset_page(first_page_rows, CursorDirection::Backward, 3, |id| {
+            id.to_string()
+        });
+
+        assert!(first_page.has_more);
+        assert_eq!(first_page.items, vec![99, 98, 97]);
+        assert_eq!(first_page.prev_cursor, Some("97".to_string()));
+
+        // Continuing backward with prev_cursor = 97 means the next query is
+        // `column < 97 ORDER BY column DESC LIMIT 4`, which (over the same
+        // id space) returns [96, 95, 94, 93].
+        let second_page_rows = vec![96, 95, 94, 93];
+        let second_page =
+            finish_keyset_page(second_page_rows, CursorDirection::Backward, 3, |id| {
+                id.to_string()
+            });
+
+        assert_eq!(second_page.items, vec![96, 95, 94]);
+
+        // The two pages must not share any rows.
+        for id in &second_page.items {
+            assert!(
+                !first_page.items.contains(id),
+                "second page item {id} overlaps with first page {:?}",
+                first_page.items
+            );
+        }
     }
 }

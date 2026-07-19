@@ -6,7 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Tenant information
+///
+/// Marked `#[non_exhaustive]` so new fields can be added without breaking
+/// downstream callers that construct or match on `Tenant`. Downstream code
+/// must build a `Tenant` via [`Tenant::new`] plus the `with_*` builder
+/// methods rather than a struct literal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tenant {
     /// Unique tenant identifier
     pub id: String,

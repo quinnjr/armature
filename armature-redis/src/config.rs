@@ -132,24 +132,29 @@ impl RedisConfig {
             url = url.replacen("redis://", "rediss://", 1);
         }
 
-        // Add auth if provided
+        // Add auth if provided. Username/password are percent-encoded before
+        // splicing into the URL: an un-encoded password containing `@`, `/`,
+        // `?`, `#`, or whitespace would otherwise corrupt the URL (e.g. be
+        // parsed as a path/query separator or a second userinfo boundary).
         if let Some(password) = &self.password {
+            let encoded_password = percent_encode(password);
             if let Some(username) = &self.username {
                 // Redis 6+ ACL format: redis://username:password@host
+                let encoded_username = percent_encode(username);
                 url = url.replacen(
                     "redis://",
-                    &format!("redis://{}:{}@", username, password),
+                    &format!("redis://{}:{}@", encoded_username, encoded_password),
                     1,
                 );
                 url = url.replacen(
                     "rediss://",
-                    &format!("rediss://{}:{}@", username, password),
+                    &format!("rediss://{}:{}@", encoded_username, encoded_password),
                     1,
                 );
             } else {
                 // Legacy format: redis://:password@host
-                url = url.replacen("redis://", &format!("redis://:{}@", password), 1);
-                url = url.replacen("rediss://", &format!("rediss://:{}@", password), 1);
+                url = url.replacen("redis://", &format!("redis://:{}@", encoded_password), 1);
+                url = url.replacen("rediss://", &format!("rediss://:{}@", encoded_password), 1);
             }
         }
 
@@ -158,10 +163,18 @@ impl RedisConfig {
         // prefix. A bare `redis://host:port` always contains `/` (from the
         // scheme separator), so checking `url.contains('/')` against the
         // *whole* URL never appends the database; we must only look past the
-        // scheme separator for an actual path segment.
+        // scheme separator for an actual path segment. The scan must also
+        // skip past any userinfo (`user:pass@`) segment — a `/` inside
+        // percent-encoded (or, before encoding was added, raw) credentials
+        // would otherwise be mistaken for a path separator and wrongly
+        // suppress the database append.
         if let Some(db) = self.database {
             let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
-            let has_db_segment = url[scheme_end..].contains('/');
+            let after_auth = url[scheme_end..]
+                .find('@')
+                .map(|i| scheme_end + i + 1)
+                .unwrap_or(scheme_end);
+            let has_db_segment = url[after_auth..].contains('/');
             if !has_db_segment {
                 url = format!("{}/{}", url.trim_end_matches('/'), db);
             }
@@ -169,6 +182,23 @@ impl RedisConfig {
 
         url
     }
+}
+
+/// Percent-encode a string for safe use in the userinfo (username/password)
+/// segment of a Redis URL, escaping everything outside
+/// `[A-Za-z0-9\-_.~]`. Mirrors the equivalent helper in
+/// `armature-diesel/src/pool.rs`.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Builder for Redis configuration.
@@ -335,6 +365,53 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.connection_url(), "rediss://h:6379/5");
+    }
+
+    #[test]
+    fn connection_url_percent_encodes_password_with_special_chars() {
+        // A raw `@` or `/` in the password must not be spliced verbatim —
+        // that would corrupt the URL (e.g. introduce a bogus userinfo
+        // boundary or path segment). It must come through percent-encoded.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            password: Some("p@ss/word".to_string()),
+            ..Default::default()
+        };
+        let url = config.connection_url();
+        assert_eq!(url, "redis://:p%40ss%2Fword@h:6379");
+        assert!(!url.contains("p@ss/word"));
+    }
+
+    #[test]
+    fn connection_url_percent_encodes_username_and_password() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            username: Some("us/er".to_string()),
+            password: Some("pa:ss@word".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.connection_url(),
+            "redis://us%2Fer:pa%3Ass%40word@h:6379"
+        );
+    }
+
+    #[test]
+    fn connection_url_password_with_slash_still_appends_database() {
+        // Before the fix, `has_db_segment` scanned the whole
+        // `scheme://user:pass@host` string, so a `/` inside the raw
+        // (pre-encoding) password would be mistaken for a path separator and
+        // wrongly suppress the database append. Even now that passwords are
+        // percent-encoded (so a literal `/` can no longer reach the URL via
+        // password), this guards the userinfo-skip logic itself: the scan
+        // must start after the `@` boundary, not from the scheme end.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            password: Some("p/ss".to_string()),
+            database: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://:p%2Fss@h:6379/4");
     }
 }
 

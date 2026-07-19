@@ -88,6 +88,28 @@ async fn index_close_surfaces_failure_status() {
 }
 
 #[tokio::test]
+async fn index_flush_surfaces_failure_status() {
+    let server = StubServer::builder()
+        .route(
+            "GET",
+            "/test_docs/_flush",
+            StubResponse::json(500, ERROR_BODY),
+        )
+        .start()
+        .await;
+
+    let config = OpenSearchConfig::new(server.url());
+    let client = OpenSearchClient::new(config).expect("client construction");
+
+    let err = client
+        .indices()
+        .flush("test_docs")
+        .await
+        .expect_err("a 500 response must surface as an error, not Ok(())");
+    assert!(format!("{err}").contains("boom"), "unexpected error: {err}");
+}
+
+#[tokio::test]
 async fn index_create_alias_surfaces_failure_status() {
     let server = StubServer::builder()
         .route(

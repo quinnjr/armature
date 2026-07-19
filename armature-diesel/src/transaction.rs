@@ -341,6 +341,79 @@ impl<'a, C> Drop for TransactionGuard<'a, C> {
     }
 }
 
+/// Docker-free unit tests for the `IsolationLevel` -> SQL text mapping.
+///
+/// `transaction_with_isolation` builds its `SET TRANSACTION ISOLATION LEVEL
+/// ...` statement from `IsolationLevel::to_pg_sql`/`to_mysql_sql`; that
+/// string-building step is pure and needs no live database connection. The
+/// existing `isolation_level_tests` module below proves the level is
+/// actually *applied* by the server, but self-skips without Docker, so
+/// Docker-free CI never exercises the enum -> SQL contract at all. These
+/// tests close that gap by asserting the mapping directly.
+#[cfg(test)]
+mod isolation_level_sql_mapping_tests {
+    use super::IsolationLevel;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn to_pg_sql_maps_every_level_to_the_expected_sql_keyword() {
+        assert_eq!(
+            IsolationLevel::ReadUncommitted.to_pg_sql(),
+            "READ UNCOMMITTED"
+        );
+        assert_eq!(IsolationLevel::ReadCommitted.to_pg_sql(), "READ COMMITTED");
+        assert_eq!(
+            IsolationLevel::RepeatableRead.to_pg_sql(),
+            "REPEATABLE READ"
+        );
+        assert_eq!(IsolationLevel::Serializable.to_pg_sql(), "SERIALIZABLE");
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn to_mysql_sql_maps_every_level_to_the_expected_sql_keyword() {
+        assert_eq!(
+            IsolationLevel::ReadUncommitted.to_mysql_sql(),
+            "READ UNCOMMITTED"
+        );
+        assert_eq!(
+            IsolationLevel::ReadCommitted.to_mysql_sql(),
+            "READ COMMITTED"
+        );
+        assert_eq!(
+            IsolationLevel::RepeatableRead.to_mysql_sql(),
+            "REPEATABLE READ"
+        );
+        assert_eq!(IsolationLevel::Serializable.to_mysql_sql(), "SERIALIZABLE");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_isolation_sql_statement_matches_the_exact_syntax_the_server_expects() {
+        // Mirrors the `format!` call in `transaction_with_isolation` for
+        // Postgres verbatim, so a change to that statement's shape (e.g. a
+        // typo'd keyword or missing "LEVEL") fails here without Docker.
+        let sql = format!(
+            "SET TRANSACTION ISOLATION LEVEL {}",
+            IsolationLevel::Serializable.to_pg_sql()
+        );
+        assert_eq!(sql, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_isolation_sql_statement_matches_the_exact_syntax_the_server_expects() {
+        // Mirrors the `format!` call in `transaction_with_isolation` for
+        // MySQL verbatim (see the note there about issuing this *before*
+        // `BEGIN`, unlike Postgres).
+        let sql = format!(
+            "SET TRANSACTION ISOLATION LEVEL {}",
+            IsolationLevel::RepeatableRead.to_mysql_sql()
+        );
+        assert_eq!(sql, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    }
+}
+
 #[cfg(all(test, feature = "postgres", feature = "deadpool"))]
 mod isolation_level_tests {
     use super::*;
