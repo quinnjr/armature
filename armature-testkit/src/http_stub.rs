@@ -326,7 +326,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // We can now bind the same port (proves the listener was released).
-        let bound = tokio::net::TcpListener::bind(addr.parse::<std::net::SocketAddr>().unwrap()).await;
+        let bound =
+            tokio::net::TcpListener::bind(addr.parse::<std::net::SocketAddr>().unwrap()).await;
         assert!(bound.is_ok(), "port was not released after StubServer drop");
     }
 }

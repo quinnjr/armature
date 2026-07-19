@@ -14,7 +14,10 @@ pub struct RedisContainer {
 impl RedisContainer {
     /// Start a Redis container and wait until it is ready.
     pub async fn start() -> RedisContainer {
-        let container = Redis::default().start().await.expect("start redis container");
+        let container = Redis::default()
+            .start()
+            .await
+            .expect("start redis container");
         RedisContainer { container }
     }
 
@@ -37,7 +40,10 @@ pub struct PostgresContainer {
 impl PostgresContainer {
     /// Start a Postgres container (default `postgres`/`postgres` credentials).
     pub async fn start() -> PostgresContainer {
-        let container = Postgres::default().start().await.expect("start postgres container");
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("start postgres container");
         PostgresContainer { container }
     }
 
