@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -40,8 +39,9 @@ pub struct LeaderElection {
     /// Refresh interval (should be less than TTL)
     refresh_interval: Duration,
 
-    /// Redis connection
-    conn: Arc<RwLock<redis::aio::ConnectionManager>>,
+    /// Redis connection. `ConnectionManager` is `Clone` and internally
+    /// multiplexed, so each call site clones it instead of locking.
+    conn: redis::aio::ConnectionManager,
 
     /// Is this node the leader?
     is_leader: Arc<AtomicBool>,
@@ -82,7 +82,7 @@ impl LeaderElection {
             node_id: Uuid::new_v4().to_string(),
             ttl,
             refresh_interval,
-            conn: Arc::new(RwLock::new(conn)),
+            conn,
             is_leader: Arc::new(AtomicBool::new(false)),
             on_elected: None,
             on_revoked: None,
@@ -194,7 +194,7 @@ impl LeaderElection {
 
     /// Try to become or maintain leadership
     async fn try_become_leader(&self) -> Result<bool, LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
         let ttl_ms = self.ttl.as_millis() as usize;
 
         // Use Lua script for atomic operation
@@ -212,7 +212,7 @@ impl LeaderElection {
             .key(&self.key)
             .arg(&self.node_id)
             .arg(ttl_ms)
-            .invoke_async(&mut *conn)
+            .invoke_async(&mut conn)
             .await?;
 
         Ok(result == 1)
@@ -220,21 +220,14 @@ impl LeaderElection {
 
     /// Resign from leadership
     async fn resign(&self) -> Result<(), LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
 
-        // Only delete if we're still the leader
-        let script = r#"
-            if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("del", KEYS[1])
-            else
-                return 0
-            end
-        "#;
-
-        let _: i32 = redis::Script::new(script)
+        // Only delete if we're still the leader (token-guarded release,
+        // shared with the distributed-lock release path).
+        let _: i32 = redis::Script::new(crate::RELEASE_SCRIPT)
             .key(&self.key)
             .arg(&self.node_id)
-            .invoke_async(&mut *conn)
+            .invoke_async(&mut conn)
             .await?;
 
         self.is_leader.store(false, Ordering::Release);
@@ -245,7 +238,7 @@ impl LeaderElection {
 
     /// Get current leader node ID
     pub async fn get_leader(&self) -> Result<Option<String>, LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
         let leader: Option<String> = conn.get(&self.key).await?;
         Ok(leader)
     }
@@ -315,5 +308,46 @@ mod tests {
 
         assert_eq!(builder.key, "test-leader");
         assert_eq!(builder.ttl, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn single_leader_among_two_contenders() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let client = redis::Client::open(container.url()).expect("open redis client");
+        let conn1 = client
+            .get_connection_manager()
+            .await
+            .expect("get connection manager");
+        let conn2 = client
+            .get_connection_manager()
+            .await
+            .expect("get connection manager");
+
+        let ttl = Duration::from_secs(3);
+        let e1 = Arc::new(LeaderElection::new("wf3-single-leader", ttl, conn1));
+        let e2 = Arc::new(LeaderElection::new("wf3-single-leader", ttl, conn2));
+
+        let e1_run = e1.clone();
+        let h1 = tokio::spawn(async move { e1_run.start().await });
+        let e2_run = e2.clone();
+        let h2 = tokio::spawn(async move { e2_run.start().await });
+
+        // Give both contenders several rounds to converge on a single leader.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert_ne!(
+            e1.is_leader(),
+            e2.is_leader(),
+            "exactly one of the two contenders should hold leadership"
+        );
+
+        e1.stop().await;
+        e2.stop().await;
+        let _ = h1.await;
+        let _ = h2.await;
     }
 }

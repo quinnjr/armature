@@ -76,6 +76,10 @@ impl Worker {
 
     /// Register a job handler.
     ///
+    /// The handler is inserted synchronously before this call returns, so a
+    /// `register_handler(...).await` immediately followed by `start()` never
+    /// races a worker that dequeues a job before the handler is present.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -85,17 +89,17 @@ impl Worker {
     /// let queue = Queue::new("redis://localhost:6379", "default").await?;
     /// let mut worker = Worker::new(queue);
     ///
-    /// worker.register_handler("send_email", |job| {
-    ///     Box::pin(async move {
+    /// worker
+    ///     .register_handler("send_email", |job| async move {
     ///         // Send email logic
     ///         println!("Sending email: {:?}", job.data);
     ///         Ok(())
     ///     })
-    /// });
+    ///     .await;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn register_handler<F, Fut>(&mut self, job_type: impl Into<String>, handler: F)
+    pub async fn register_handler<F, Fut>(&mut self, job_type: impl Into<String>, handler: F)
     where
         F: Fn(Job) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = QueueResult<()>> + Send + 'static,
@@ -106,13 +110,13 @@ impl Worker {
             },
         );
 
-        let job_type = job_type.into();
-        let handlers = self.handlers.clone();
-
-        tokio::spawn(async move {
-            let mut handlers = handlers.write().await;
-            handlers.insert(job_type, wrapped_handler);
-        });
+        // Insert synchronously: the handler must be present the moment this
+        // call returns, so a subsequent `start()` cannot dequeue a job whose
+        // handler has not been registered yet.
+        self.handlers
+            .write()
+            .await
+            .insert(job_type.into(), wrapped_handler);
     }
 
     /// Start the worker.
@@ -234,7 +238,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Stop the worker.
     /// Process multiple jobs of the same type in parallel
     ///
     /// This method dequeues and processes multiple jobs of the same type
@@ -272,8 +275,12 @@ impl Worker {
                     if job.job_type == job_type {
                         jobs.push(job);
                     } else {
-                        // Different job type - we can't batch it, skip for now
-                        // In a real implementation, you might want to re-queue it
+                        // Different job type: `dequeue()` already popped this
+                        // job, started_processing it, and put it in the
+                        // `processing` set. Batching stops here, so we must
+                        // re-enqueue it — otherwise it is orphaned in
+                        // `processing` forever (data loss).
+                        self.queue.requeue(&job).await?;
                         break;
                     }
                 }
@@ -285,12 +292,12 @@ impl Worker {
             return Ok(Vec::new());
         }
 
+        // Capture the true batch size before `jobs` is consumed below, so the
+        // completion log can report real succeeded/total counts.
+        let total = jobs.len();
+
         if self.config.log_execution {
-            println!(
-                "[BATCH] Processing {} jobs of type '{}'",
-                jobs.len(),
-                job_type
-            );
+            println!("[BATCH] Processing {} jobs of type '{}'", total, job_type);
         }
 
         // Get handler
@@ -362,7 +369,7 @@ impl Worker {
             println!(
                 "[BATCH] Batch complete: {}/{} jobs succeeded",
                 processed.len(),
-                processed.len()
+                total
             );
         }
 
@@ -379,16 +386,21 @@ impl Worker {
     /// ```no_run
     /// # use armature_queue::*;
     /// # async fn example(worker: &mut Worker) {
-    /// worker.register_cpu_intensive_handler("resize_image", |job| {
-    ///     // CPU-intensive work here
-    ///     let image_path = job.data["path"].as_str().unwrap();
-    ///     // ... resize image ...
-    ///     Ok(())
-    /// });
+    /// worker
+    ///     .register_cpu_intensive_handler("resize_image", |job| {
+    ///         // CPU-intensive work here
+    ///         let image_path = job.data["path"].as_str().unwrap();
+    ///         // ... resize image ...
+    ///         Ok(())
+    ///     })
+    ///     .await;
     /// # }
     /// ```
-    pub fn register_cpu_intensive_handler<F>(&mut self, job_type: impl Into<String>, handler: F)
-    where
+    pub async fn register_cpu_intensive_handler<F>(
+        &mut self,
+        job_type: impl Into<String>,
+        handler: F,
+    ) where
         F: Fn(Job) -> QueueResult<()> + Send + Sync + 'static,
     {
         let handler = Arc::new(handler);
@@ -403,10 +415,12 @@ impl Worker {
             }) as Pin<Box<dyn Future<Output = QueueResult<()>> + Send>>
         });
 
-        let mut handlers = tokio::runtime::Handle::current().block_on(self.handlers.write());
-        handlers.insert(job_type.into(), wrapped);
+        // Insert via `.await`, never `block_on`: this method is documented as
+        // being called from an async context, where `Handle::block_on` panics.
+        self.handlers.write().await.insert(job_type.into(), wrapped);
     }
 
+    /// Stop the worker.
     pub async fn stop(&mut self) -> QueueResult<()> {
         let mut running = self.running.write().await;
         if !*running {

@@ -11,8 +11,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Message, MessageBroker, MessageHandler, MessagingError, ProcessingResult, PublishOptions,
-    SubscribeOptions, Subscription, config::AwsConfig,
+    AckMode, Message, MessageBroker, MessageHandler, MessagingError, ProcessingResult,
+    PublishOptions, SubscribeOptions, Subscription, config::AwsConfig,
 };
 
 /// AWS SQS/SNS message broker
@@ -321,22 +321,47 @@ impl MessageBroker for AwsBroker {
             .await
     }
 
+    /// Subscribe to an SQS queue.
+    ///
+    /// Only [`SubscribeOptions::ack_mode`] is honored: `AckMode::None` leaves
+    /// received messages in the queue (they become visible again after the
+    /// visibility timeout), while `Auto`/`Manual` delete a message once the
+    /// handler reports success. The remaining options are not applicable to
+    /// SQS and are ignored: `prefetch_count`/`from_beginning`/`filter` have no
+    /// SQS equivalent (batch size and long-poll behavior come from
+    /// [`AwsConfig`]), and `concurrency` is not yet implemented (messages are
+    /// dispatched sequentially).
     async fn subscribe_with_options(
         &self,
         topic: &str,
         handler: Arc<dyn MessageHandler>,
-        _options: SubscribeOptions,
+        options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        if let Some(concurrency) = options.concurrency
+            && concurrency > 1
+        {
+            warn!(
+                concurrency,
+                "SubscribeOptions::concurrency is not implemented for SQS; messages are dispatched sequentially"
+            );
+        }
+
         let queue_url = self.get_queue_url(topic).await?;
         let active = Arc::new(AtomicBool::new(true));
+        let ack_mode = options.ack_mode;
 
         let subscription = AwsSubscription {
             queue_url: queue_url.clone(),
             active: active.clone(),
         };
 
-        // Store active flag for cleanup
-        self.active_consumers.write().await.push(active.clone());
+        // Store active flag for cleanup, pruning any flags whose consumer task
+        // has already stopped so the vec does not grow unbounded.
+        {
+            let mut consumers = self.active_consumers.write().await;
+            consumers.retain(|flag| flag.load(Ordering::SeqCst));
+            consumers.push(active.clone());
+        }
 
         // Spawn consumer task
         let sqs_client = self.sqs_client.clone();
@@ -344,7 +369,16 @@ impl MessageBroker for AwsBroker {
         let topic_owned = topic.to_string();
 
         tokio::spawn(async move {
-            poll_messages(sqs_client, queue_url, handler, config, &topic_owned, active).await;
+            poll_messages(
+                sqs_client,
+                queue_url,
+                handler,
+                config,
+                &topic_owned,
+                ack_mode,
+                active,
+            )
+            .await;
         });
 
         info!(queue = topic, "Subscribed to SQS queue");
@@ -375,6 +409,7 @@ async fn poll_messages(
     handler: Arc<dyn MessageHandler>,
     config: AwsConfig,
     topic: &str,
+    ack_mode: AckMode,
     active: Arc<AtomicBool>,
 ) {
     while active.load(Ordering::SeqCst) {
@@ -398,8 +433,13 @@ async fn poll_messages(
                         match handler.handle(message).await {
                             Ok(result) => match result {
                                 ProcessingResult::Success => {
-                                    // Delete the message
-                                    if let Some(handle) = receipt_handle
+                                    // Delete the message to acknowledge it. In
+                                    // `AckMode::None` no acknowledgment is
+                                    // performed, so the message is left in the
+                                    // queue and becomes visible again after the
+                                    // visibility timeout (at-least-once redelivery).
+                                    if ack_mode != AckMode::None
+                                        && let Some(handle) = receipt_handle
                                         && let Err(e) = client
                                             .delete_message()
                                             .queue_url(&queue_url)

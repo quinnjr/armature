@@ -5,7 +5,9 @@
 //! ## Features
 //!
 //! - **Event Bus** - Publish/subscribe event system
-//! - **Event Handlers** - Decorator-based event handling
+//! - **Event Handlers** - Trait-based event handling: implement [`EventHandler<E>`] for your
+//!   handler type, then register it with [`EventBus::subscribe`] by wrapping it in
+//!   [`TypedEventHandler::new`]
 //! - **Type-safe** - Strong typing with compile-time safety
 //! - **Async** - Full async/await support
 //! - **Flexible** - Sync and async handler execution

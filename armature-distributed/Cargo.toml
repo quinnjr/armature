@@ -1,6 +1,6 @@
 [package]
 name = "armature-distributed"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -27,4 +27,5 @@ rand = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 

@@ -1,12 +1,11 @@
 //! Cron job scheduling for Armature framework.
 //!
 //! Provides a robust cron job scheduler with support for:
-//! - ⏰ Standard cron expressions
+//! - ⏰ Standard 6-field cron expressions (with seconds)
 //! - 📛 Named jobs with metadata
 //! - 🚀 Async job execution
-//! - 🪝 Job lifecycle hooks
-//! - ❌ Error handling and retry logic
 //! - 🔒 Job overlap prevention
+//! - 🎚️ Bounded concurrency via `max_concurrent_jobs`
 //!
 //! ## Quick Start - Cron Expressions
 //!
@@ -58,7 +57,7 @@
 //!             println!("Running cleanup job");
 //!             Ok(())
 //!         })
-//!     )?;
+//!     ).await?;
 //!
 //!     // Start the scheduler
 //!     scheduler.start().await?;

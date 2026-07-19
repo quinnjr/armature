@@ -1,5 +1,6 @@
 //! Webhook signature generation and verification
 
+use crate::config::SigningAlgorithm;
 use crate::{Result, WebhookError};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha512};
@@ -11,30 +12,56 @@ type HmacSha512 = Hmac<Sha512>;
 #[derive(Debug, Clone)]
 pub struct WebhookSignature {
     secret: String,
+    algorithm: SigningAlgorithm,
 }
 
 impl WebhookSignature {
     /// Create a new signature utility with the given secret
+    ///
+    /// Uses HMAC-SHA256 by default. Use [`WebhookSignature::with_algorithm`]
+    /// to select a different signing algorithm (e.g. HMAC-SHA512).
     pub fn new(secret: impl Into<String>) -> Self {
         Self {
             secret: secret.into(),
+            algorithm: SigningAlgorithm::HmacSha256,
         }
     }
 
-    /// Generate a signature for the given payload using HMAC-SHA256
+    /// Set the signing algorithm to use for signing and verification
+    pub fn with_algorithm(mut self, algorithm: SigningAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
+    /// Generate a signature for the given payload using the configured algorithm
     pub fn sign(&self, payload: &[u8]) -> String {
         self.sign_with_timestamp(payload, &Self::current_timestamp())
     }
 
     /// Generate a signature with a specific timestamp
     pub fn sign_with_timestamp(&self, payload: &[u8], timestamp: &str) -> String {
-        let signed_payload = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
-        let signature = self.compute_hmac_sha256(signed_payload.as_bytes());
+        let signature = self.compute_hmac_over_timestamped_payload(timestamp.as_bytes(), payload);
         format!("t={},v1={}", timestamp, signature)
     }
 
     /// Verify a signature against the payload
+    ///
+    /// Supports two signature schemes:
+    /// - Stripe-style `t=<timestamp>,v1=<hex>`: verified with timestamp-tolerance
+    ///   replay protection.
+    /// - GitHub-style `sha256=<hex>` (no timestamp): verified as a timestampless
+    ///   HMAC-SHA256 over the raw body. Since there is no timestamp, replay
+    ///   protection does not apply to this scheme.
     pub fn verify(&self, payload: &[u8], signature: &str, tolerance_secs: u64) -> Result<bool> {
+        if let Some(hex_sig) = signature.strip_prefix("sha256=") {
+            // GitHub-style signature: timestampless HMAC-SHA256 over the raw body.
+            let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
+                .expect("HMAC can take any size key");
+            mac.update(payload);
+            let expected = hex::encode(mac.finalize().into_bytes());
+            return Ok(constant_time_compare(hex_sig, &expected));
+        }
+
         let parts = Self::parse_signature(signature)?;
 
         // Verify timestamp is within tolerance
@@ -54,28 +81,53 @@ impl WebhookSignature {
         }
 
         // Compute expected signature
-        let signed_payload = format!("{}.{}", parts.timestamp, String::from_utf8_lossy(payload));
-        let expected = self.compute_hmac_sha256(signed_payload.as_bytes());
+        let expected =
+            self.compute_hmac_over_timestamped_payload(parts.timestamp.as_bytes(), payload);
 
         // Constant-time comparison to prevent timing attacks
         Ok(constant_time_compare(&parts.signature, &expected))
     }
 
-    /// Compute HMAC-SHA256 signature
-    fn compute_hmac_sha256(&self, data: &[u8]) -> String {
+    /// Compute the HMAC over `timestamp || "." || payload`, using the configured
+    /// signing algorithm, feeding raw bytes directly into the MAC (no lossy
+    /// UTF-8 conversion or intermediate `String` allocation).
+    fn compute_hmac_over_timestamped_payload(&self, timestamp: &[u8], payload: &[u8]) -> String {
+        match self.algorithm {
+            SigningAlgorithm::HmacSha256 => {
+                self.compute_hmac_sha256_over_timestamped_payload(timestamp, payload)
+            }
+            SigningAlgorithm::HmacSha512 => {
+                self.compute_hmac_sha512_over_timestamped_payload(timestamp, payload)
+            }
+        }
+    }
+
+    /// Compute HMAC-SHA256 over `timestamp || "." || payload`
+    fn compute_hmac_sha256_over_timestamped_payload(
+        &self,
+        timestamp: &[u8],
+        payload: &[u8],
+    ) -> String {
         let mut mac =
             HmacSha256::new_from_slice(self.secret.as_bytes()).expect("HMAC can take any size key");
-        mac.update(data);
+        mac.update(timestamp);
+        mac.update(b".");
+        mac.update(payload);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
 
-    /// Compute HMAC-SHA512 signature
-    #[allow(dead_code)]
-    fn compute_hmac_sha512(&self, data: &[u8]) -> String {
+    /// Compute HMAC-SHA512 over `timestamp || "." || payload`
+    fn compute_hmac_sha512_over_timestamped_payload(
+        &self,
+        timestamp: &[u8],
+        payload: &[u8],
+    ) -> String {
         let mut mac =
             HmacSha512::new_from_slice(self.secret.as_bytes()).expect("HMAC can take any size key");
-        mac.update(data);
+        mac.update(timestamp);
+        mac.update(b".");
+        mac.update(payload);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
@@ -215,6 +267,76 @@ mod tests {
         // Should fail with small tolerance
         let result = signer.verify(payload, &signature, 60);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sha512_algorithm_selection_produces_sha512_signature() {
+        let secret = "test-secret";
+        let payload = b"test payload";
+        let timestamp = "1234567890";
+
+        let sha256_signer = WebhookSignature::new(secret);
+        let sha512_signer =
+            WebhookSignature::new(secret).with_algorithm(SigningAlgorithm::HmacSha512);
+
+        let sha256_sig = sha256_signer.sign_with_timestamp(payload, timestamp);
+        let sha512_sig = sha512_signer.sign_with_timestamp(payload, timestamp);
+
+        // The two algorithms must produce different signatures
+        assert_ne!(sha256_sig, sha512_sig);
+
+        // Compute the expected raw HMAC-SHA512 value directly and confirm it's embedded
+        let expected_sha512 = sha512_signer
+            .compute_hmac_sha512_over_timestamped_payload(timestamp.as_bytes(), payload);
+        assert!(sha512_sig.contains(&expected_sha512));
+
+        // SHA-512 hex digest is 128 chars, SHA-256 is 64 chars
+        let v1_sha512 = sha512_sig.split("v1=").nth(1).unwrap();
+        let v1_sha256 = sha256_sig.split("v1=").nth(1).unwrap();
+        assert_eq!(v1_sha512.len(), 128);
+        assert_eq!(v1_sha256.len(), 64);
+
+        // And verification round-trips correctly for the sha512 signer
+        // (use a fresh, current-timestamp signature so it's within tolerance)
+        let live_sha512_sig = sha512_signer.sign(payload);
+        let result = sha512_signer.verify(payload, &live_sha512_sig, 300);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // A sha256 signer must reject a sha512-produced signature (mismatched digest)
+        let cross_result = sha256_signer.verify(payload, &live_sha512_sig, 300);
+        assert!(cross_result.is_ok());
+        assert!(!cross_result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_github_style_sha256_signature() {
+        // GitHub sends `X-Hub-Signature-256: sha256=<hex>` with no timestamp:
+        // a raw HMAC-SHA256 over the exact request body.
+        let secret = "test-secret";
+        let signer = WebhookSignature::new(secret);
+        let payload = b"{\"action\":\"opened\"}";
+
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take any size key");
+        mac.update(payload);
+        let expected_hex = hex::encode(mac.finalize().into_bytes());
+        let github_signature = format!("sha256={}", expected_hex);
+
+        let result = signer.verify(payload, &github_signature, 300);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // Wrong secret must not verify
+        let wrong_signer = WebhookSignature::new("wrong-secret");
+        let wrong_result = wrong_signer.verify(payload, &github_signature, 300);
+        assert!(wrong_result.is_ok());
+        assert!(!wrong_result.unwrap());
+
+        // Tampered payload must not verify
+        let tampered_result = signer.verify(b"{\"action\":\"closed\"}", &github_signature, 300);
+        assert!(tampered_result.is_ok());
+        assert!(!tampered_result.unwrap());
     }
 
     #[test]

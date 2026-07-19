@@ -129,15 +129,15 @@ armature-testing = { path = "armature-testing", version = "0.1.1", optional = tr
 armature-validation = { path = "armature-validation", version = "0.1.1", optional = true }
 armature-openapi = { path = "armature-openapi", version = "0.1.1", optional = true }
 armature-cache = { path = "armature-cache", version = "0.1.0", optional = true }
-armature-cron = { path = "armature-cron", version = "0.1.1", optional = true }
-armature-queue = { path = "armature-queue", version = "0.1.1", optional = true }
+armature-cron = { path = "armature-cron", version = "0.2.0", optional = true }
+armature-queue = { path = "armature-queue", version = "0.2.0", optional = true }
 armature-opentelemetry = { path = "armature-opentelemetry", version = "0.1.1", optional = true }
 armature-security = { path = "armature-security", version = "0.1.1", optional = true }
 armature-acme = { path = "armature-acme", version = "0.1.1", optional = true }
 armature-ratelimit = { path = "armature-ratelimit", version = "0.1.1", optional = true }
 armature-compression = { path = "armature-compression", version = "0.1.1", optional = true }
-armature-webhooks = { path = "armature-webhooks", version = "0.1.1", optional = true }
-armature-messaging = { path = "armature-messaging", version = "0.1.0", optional = true }
+armature-webhooks = { path = "armature-webhooks", version = "0.2.0", optional = true }
+armature-messaging = { path = "armature-messaging", version = "0.2.0", optional = true }
 
 # Re-export core functionality
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }

@@ -349,7 +349,13 @@ impl KafkaConfig {
 }
 
 /// NATS-specific configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `credentials_file`, `jwt`, and `nkey_seed` are authentication secrets: they
+/// are redacted from the [`Debug`] output (custom `impl` below) and skipped
+/// when serializing (`#[serde(skip_serializing)]`), so a `{:?}` log line or a
+/// serialized config snapshot cannot leak the signing material. They still
+/// deserialize normally, so loading a config from a file is unaffected.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NatsConfig {
     /// Base messaging config
     #[serde(flatten)]
@@ -365,12 +371,33 @@ pub struct NatsConfig {
     /// Use JetStream
     #[serde(default)]
     pub jetstream: bool,
-    /// NATS credentials file path
+    /// NATS credentials file path (secret: redacted from `Debug`, not serialized)
+    #[serde(skip_serializing)]
     pub credentials_file: Option<String>,
-    /// JWT token
+    /// JWT token (secret: redacted from `Debug`, not serialized)
+    #[serde(skip_serializing)]
     pub jwt: Option<String>,
-    /// NKey seed
+    /// NKey seed (secret: redacted from `Debug`, not serialized)
+    #[serde(skip_serializing)]
     pub nkey_seed: Option<String>,
+}
+
+impl std::fmt::Debug for NatsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the secret fields: show only whether each is set, never its
+        // value, so a `{:?}` of this config cannot leak credentials.
+        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "<redacted>");
+        f.debug_struct("NatsConfig")
+            .field("base", &self.base)
+            .field("name", &self.name)
+            .field("max_reconnects", &self.max_reconnects)
+            .field("reconnect_wait", &self.reconnect_wait)
+            .field("jetstream", &self.jetstream)
+            .field("credentials_file", &redact(&self.credentials_file))
+            .field("jwt", &redact(&self.jwt))
+            .field("nkey_seed", &redact(&self.nkey_seed))
+            .finish()
+    }
 }
 
 fn default_max_reconnects() -> usize {
@@ -525,5 +552,70 @@ impl AwsConfig {
         Self::new("us-east-1")
             .with_endpoint("http://localhost:4566")
             .with_credentials("test", "test")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nats_config_debug_redacts_secrets() {
+        let config = NatsConfig::new("nats://localhost:4222")
+            .with_jwt_nkey(
+                "super-secret-jwt",
+                "SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+            .with_credentials_file("/etc/nats/app.creds");
+
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("super-secret-jwt"),
+            "Debug output leaked the JWT: {debug}"
+        );
+        assert!(
+            !debug.contains("SUAAAA"),
+            "Debug output leaked the NKey seed: {debug}"
+        );
+        assert!(
+            !debug.contains("/etc/nats/app.creds"),
+            "Debug output leaked the credentials file path: {debug}"
+        );
+        // The presence of a secret is still visible (Some vs None), just redacted.
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn nats_config_serialize_omits_secrets() {
+        let config = NatsConfig::new("nats://localhost:4222")
+            .with_jwt_nkey("super-secret-jwt", "super-secret-seed")
+            .with_credentials_file("/etc/nats/app.creds");
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("super-secret-jwt"), "serialized JWT leaked");
+        assert!(
+            !json.contains("super-secret-seed"),
+            "serialized seed leaked"
+        );
+        assert!(
+            !json.contains("/etc/nats/app.creds"),
+            "serialized credentials file path leaked"
+        );
+    }
+
+    #[test]
+    fn nats_config_deserialize_still_reads_secrets() {
+        // `skip_serializing` must not disable deserialization: loading a config
+        // that supplies these fields must still populate them.
+        let json = r#"{
+            "url": "nats://localhost:4222",
+            "jwt": "the-jwt",
+            "nkey_seed": "the-seed",
+            "credentials_file": "/path/to.creds"
+        }"#;
+        let config: NatsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.jwt.as_deref(), Some("the-jwt"));
+        assert_eq!(config.nkey_seed.as_deref(), Some("the-seed"));
+        assert_eq!(config.credentials_file.as_deref(), Some("/path/to.creds"));
     }
 }

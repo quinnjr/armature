@@ -8,43 +8,119 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use lapin::{
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, options::*,
-    types::FieldTable,
+    types::FieldTable, uri::AMQPUri,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     AckMode, Message, MessageBroker, MessageHandler, MessagingConfig, MessagingError,
-    ProcessingResult, PublishOptions, SubscribeOptions, Subscription,
+    ProcessingResult, PublishOptions, SubscribeOptions, Subscription, config::RabbitMqConfig,
 };
 
 /// RabbitMQ message broker
 pub struct RabbitMqBroker {
     connection: Arc<Connection>,
-    channels: Arc<RwLock<Vec<Channel>>>,
+    /// Consumer channels keyed by subscription id. Inserted on `subscribe` and
+    /// removed (and closed) on `unsubscribe`, so the map does not grow
+    /// unbounded across subscribe/unsubscribe cycles.
+    channels: Arc<RwLock<HashMap<String, Channel>>>,
+    /// Channels pre-created at connect time per `RabbitMqConfig::channel_pool_size`,
+    /// handed out by `subscribe_with_options` before falling back to creating a
+    /// fresh channel. This avoids paying for an extra channel-open round trip
+    /// on every subscription when the config asked for a warm pool.
+    channel_pool: Arc<Mutex<Vec<Channel>>>,
     publish_channel: Channel,
     connected: Arc<AtomicBool>,
 }
 
-impl RabbitMqBroker {
-    /// Connect to RabbitMQ
-    pub async fn connect(config: &MessagingConfig) -> Result<Self, MessagingError> {
-        info!(url = %config.url, "Connecting to RabbitMQ");
+/// Parse `config.base.url` into an [`AMQPUri`] and apply `config.vhost`.
+///
+/// Broken out as a pure function so the vhost-application logic can be
+/// unit-tested without needing a live broker connection.
+///
+/// The error deliberately does not include the parser's message: AMQP URLs
+/// embed `user:pass@` credentials and the underlying `AMQPUri` parser echoes
+/// the full input URL back in its error string (`Invalid URL: '<url>'`), so
+/// forwarding it would leak the credentials into whatever logs the error.
+fn build_amqp_uri(config: &RabbitMqConfig) -> Result<AMQPUri, MessagingError> {
+    let mut uri: AMQPUri = config.base.url.parse().map_err(|_| {
+        MessagingError::Configuration("invalid AMQP URL (could not be parsed)".to_string())
+    })?;
+    uri.vhost = config.vhost.clone();
+    Ok(uri)
+}
 
-        let connection = Connection::connect(&config.url, ConnectionProperties::default()).await?;
+/// Build a [`RabbitMqConfig`] for the compat `connect(&MessagingConfig)` path,
+/// seeding `vhost` from any vhost embedded in the URL (e.g.
+/// `amqp://host/production` -> vhost `production`) instead of unconditionally
+/// forcing the `"/"` default. Deliberate callers who want to override the vhost
+/// use `connect_with_config` with an explicit `RabbitMqConfig::vhost`.
+///
+/// Broken out as a pure function so it can be unit-tested without a broker.
+fn config_from_messaging(config: &MessagingConfig) -> Result<RabbitMqConfig, MessagingError> {
+    let parsed: AMQPUri = config.url.parse().map_err(|_| {
+        // See `build_amqp_uri`: the parser error echoes the raw URL, which
+        // carries credentials, so it must not be forwarded.
+        MessagingError::Configuration("invalid AMQP URL (could not be parsed)".to_string())
+    })?;
+    Ok(RabbitMqConfig {
+        base: config.clone(),
+        vhost: parsed.vhost,
+        ..Default::default()
+    })
+}
+
+impl RabbitMqBroker {
+    /// Connect to RabbitMQ.
+    ///
+    /// Any vhost embedded in the URL is preserved (`amqp://host/production`
+    /// connects to vhost `production`, not the `"/"` default). To set the vhost
+    /// explicitly, use [`connect_with_config`](Self::connect_with_config).
+    pub async fn connect(config: &MessagingConfig) -> Result<Self, MessagingError> {
+        let rabbitmq_config = config_from_messaging(config)?;
+        Self::connect_with_config(rabbitmq_config).await
+    }
+
+    /// Connect with RabbitMQ-specific configuration, honoring `vhost`,
+    /// `publisher_confirms`, and `channel_pool_size`.
+    pub async fn connect_with_config(config: RabbitMqConfig) -> Result<Self, MessagingError> {
+        let uri = build_amqp_uri(&config)?;
+
+        // Never log the raw URL: it carries `user:pass@` credentials. Log only
+        // the non-secret host/port/vhost parsed out of it.
+        info!(
+            host = %uri.authority.host,
+            port = uri.authority.port,
+            vhost = %uri.vhost,
+            "Connecting to RabbitMQ"
+        );
+
+        let connection = Connection::connect_uri(uri, ConnectionProperties::default()).await?;
 
         let publish_channel = connection.create_channel().await?;
 
-        // Enable publisher confirms if requested
-        publish_channel
-            .confirm_select(ConfirmSelectOptions::default())
-            .await?;
+        // Enable publisher confirms only if requested
+        if config.publisher_confirms {
+            publish_channel
+                .confirm_select(ConfirmSelectOptions::default())
+                .await?;
+        }
+
+        // Pre-warm a pool of channels for subscriptions to draw from (the
+        // publish channel above counts toward the configured pool size).
+        let pool_size = config.channel_pool_size.saturating_sub(1);
+        let mut channel_pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            channel_pool.push(connection.create_channel().await?);
+        }
 
         info!("Connected to RabbitMQ successfully");
 
         Ok(Self {
             connection: Arc::new(connection),
-            channels: Arc::new(RwLock::new(Vec::new())),
+            channels: Arc::new(RwLock::new(HashMap::new())),
+            channel_pool: Arc::new(Mutex::new(channel_pool)),
             publish_channel,
             connected: Arc::new(AtomicBool::new(true)),
         })
@@ -209,7 +285,26 @@ impl MessageBroker for RabbitMqBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        let channel = self.connection.create_channel().await?;
+        // `concurrency` is not yet implemented: messages are dispatched to the
+        // handler sequentially. Warn rather than silently ignore a non-1 value.
+        if let Some(concurrency) = options.concurrency
+            && concurrency > 1
+        {
+            warn!(
+                concurrency,
+                "SubscribeOptions::concurrency is not implemented for RabbitMQ; messages are dispatched sequentially"
+            );
+        }
+
+        // Draw a pre-warmed channel from the pool if one is available;
+        // otherwise fall back to creating a fresh one on demand.
+        let channel = {
+            let mut pool = self.channel_pool.lock().await;
+            match pool.pop() {
+                Some(channel) => channel,
+                None => self.connection.create_channel().await?,
+            }
+        };
 
         // Set prefetch count if specified
         if let Some(prefetch) = options.prefetch_count {
@@ -247,15 +342,22 @@ impl MessageBroker for RabbitMqBroker {
             .await?;
 
         let active = Arc::new(AtomicBool::new(true));
+        let subscription_id = uuid::Uuid::new_v4().to_string();
         let subscription = RabbitMqSubscription {
             topic: topic.to_string(),
             consumer_tag: consumer_tag.clone(),
             channel: channel.clone(),
             active: active.clone(),
+            id: subscription_id.clone(),
+            channels: self.channels.clone(),
         };
 
-        // Store channel for cleanup
-        self.channels.write().await.push(channel.clone());
+        // Store channel keyed by subscription id so `unsubscribe` can prune and
+        // close it (the map would otherwise grow unbounded).
+        self.channels
+            .write()
+            .await
+            .insert(subscription_id, channel.clone());
 
         // Spawn consumer task
         let topic_owned = topic.to_string();
@@ -278,7 +380,7 @@ impl MessageBroker for RabbitMqBroker {
 
         // Close all channels
         let channels = self.channels.read().await;
-        for channel in channels.iter() {
+        for channel in channels.values() {
             if let Err(e) = channel.close(200, "Normal shutdown".into()).await {
                 warn!(error = %e, "Error closing channel");
             }
@@ -420,6 +522,12 @@ pub struct RabbitMqSubscription {
     consumer_tag: String,
     channel: Channel,
     active: Arc<AtomicBool>,
+    /// Id under which this subscription's channel is tracked in
+    /// `RabbitMqBroker::channels`.
+    id: String,
+    /// Handle to the broker's channel registry so `unsubscribe` can prune this
+    /// subscription's channel and keep the map bounded.
+    channels: Arc<RwLock<HashMap<String, Channel>>>,
 }
 
 #[async_trait]
@@ -432,6 +540,14 @@ impl Subscription for RabbitMqSubscription {
                 BasicCancelOptions::default(),
             )
             .await?;
+
+        // Drop the tracked channel from the registry and close it so neither
+        // the map nor the broker's open-channel count grows unbounded.
+        self.channels.write().await.remove(&self.id);
+        if let Err(e) = self.channel.close(200, "Unsubscribed".into()).await {
+            warn!(error = %e, "Error closing channel on unsubscribe");
+        }
+
         info!(consumer_tag = %self.consumer_tag, "Unsubscribed from queue");
         Ok(())
     }
@@ -442,5 +558,75 @@ impl Subscription for RabbitMqSubscription {
 
     fn topic(&self) -> &str {
         &self.topic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RabbitMqConfig;
+
+    #[test]
+    fn build_amqp_uri_applies_configured_vhost() {
+        let config = RabbitMqConfig::new("amqp://localhost:5672").with_vhost("/my-vhost");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "/my-vhost");
+    }
+
+    #[test]
+    fn build_amqp_uri_defaults_to_slash_vhost() {
+        let config = RabbitMqConfig::new("amqp://localhost:5672");
+        assert_eq!(config.vhost, "/");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "/");
+    }
+
+    #[test]
+    fn build_amqp_uri_overrides_vhost_embedded_in_url() {
+        // Even if the URL string already encodes a vhost path, the explicit
+        // `RabbitMqConfig::vhost` must win, since that's the field users are
+        // expected to configure.
+        let config = RabbitMqConfig::new("amqp://localhost:5672/original-vhost")
+            .with_vhost("override-vhost");
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "override-vhost");
+    }
+
+    #[test]
+    fn build_amqp_uri_rejects_invalid_url() {
+        let config = RabbitMqConfig::new("not a valid amqp url");
+        assert!(build_amqp_uri(&config).is_err());
+    }
+
+    #[test]
+    fn compat_connect_preserves_url_embedded_vhost() {
+        // The compat `connect(&MessagingConfig)` path must not clobber a vhost
+        // embedded in the URL with the `"/"` default.
+        let base = MessagingConfig::new("amqp://localhost:5672/production");
+        let config = config_from_messaging(&base).unwrap();
+        assert_eq!(config.vhost, "production");
+
+        // And the final URI carries it through.
+        let uri = build_amqp_uri(&config).unwrap();
+        assert_eq!(uri.vhost, "production");
+    }
+
+    #[test]
+    fn compat_connect_defaults_vhost_when_url_has_none() {
+        let base = MessagingConfig::new("amqp://localhost:5672");
+        let config = config_from_messaging(&base).unwrap();
+        assert_eq!(config.vhost, "/");
+    }
+
+    #[test]
+    fn build_amqp_uri_error_does_not_leak_credentials() {
+        // A malformed-but-credential-bearing URL must not have its userinfo
+        // echoed into the error message.
+        let config = RabbitMqConfig::new("amqp://user:secretpass@ bad host/vh");
+        let err = build_amqp_uri(&config).unwrap_err().to_string();
+        assert!(
+            !err.contains("secretpass"),
+            "error message leaked credentials: {err}"
+        );
     }
 }

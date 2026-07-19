@@ -82,6 +82,18 @@ pub mod lock;
 pub use leader::{LeaderElection, LeaderElectionBuilder, LeaderError};
 pub use lock::{DistributedLock, LockBuilder, LockError, LockGuard, RedisLock};
 
+/// Lua script that only deletes the key if the caller's token still matches
+/// the stored value, so a lock is never released out from under another
+/// holder. Shared by [`lock::LockGuard`] release paths and by
+/// [`leader::LeaderElection::resign`] (their scripts were byte-identical).
+pub(crate) const RELEASE_SCRIPT: &str = r#"
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+    else
+        return 0
+    end
+"#;
+
 #[cfg(test)]
 mod tests {
     #[test]

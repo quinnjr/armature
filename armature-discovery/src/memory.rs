@@ -64,11 +64,10 @@ impl ServiceDiscovery for InMemoryDiscovery {
             .cloned()
             .collect();
 
-        if instances.is_empty() {
-            Err(DiscoveryError::ServiceNotFound(service_name.to_string()))
-        } else {
-            Ok(instances)
-        }
+        // An empty result is a normal discovery outcome, not an error —
+        // matches Consul's contract, and ServiceResolver::resolve is the
+        // place that turns "no instances" into ServiceNotFound.
+        Ok(instances)
     }
 
     async fn get_service(&self, service_id: &str) -> Result<ServiceInstance, DiscoveryError> {
@@ -120,10 +119,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_service_not_found() {
+    async fn discover_returns_ok_empty_for_unregistered_service_name() {
         let discovery = InMemoryDiscovery::new();
 
-        let result = discovery.discover("nonexistent").await;
-        assert!(result.is_err());
+        let instances = discovery.discover("nonexistent").await.unwrap();
+        assert!(
+            instances.is_empty(),
+            "discover() of an unregistered name must return Ok(vec![]), matching the other backends"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_service_still_errors_for_an_unknown_id() {
+        let discovery = InMemoryDiscovery::new();
+
+        let result = discovery.get_service("missing").await;
+        assert!(matches!(result, Err(DiscoveryError::ServiceNotFound(_))));
     }
 }
