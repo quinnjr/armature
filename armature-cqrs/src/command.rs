@@ -164,4 +164,54 @@ mod tests {
         let result = bus.execute(command).await.unwrap();
         assert_eq!(result, "user-alice@example.com");
     }
+
+    #[tokio::test]
+    async fn test_command_bus_handler_not_found() {
+        let bus = CommandBus::new();
+
+        let command = CreateUserCommand {
+            email: "bob@example.com".to_string(),
+        };
+
+        let err = bus.execute(command).await.unwrap_err();
+        assert!(matches!(err, CommandError::HandlerNotFound));
+    }
+
+    struct AnotherCommand {
+        value: u32,
+    }
+
+    impl Command for AnotherCommand {
+        type Result = u32;
+    }
+
+    struct AnotherCommandHandler;
+
+    #[async_trait]
+    impl CommandHandler<AnotherCommand> for AnotherCommandHandler {
+        async fn handle(&self, command: AnotherCommand) -> Result<u32, CommandError> {
+            Ok(command.value)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_bus_independent_types_do_not_collide() {
+        // Two distinct command types registered on the same bus must be
+        // routed to their own handlers without triggering the downcast
+        // "type mismatch" error path.
+        let bus = CommandBus::new();
+        bus.register::<CreateUserCommand, _>(CreateUserHandler);
+        bus.register::<AnotherCommand, _>(AnotherCommandHandler);
+
+        let user_result = bus
+            .execute(CreateUserCommand {
+                email: "carol@example.com".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(user_result, "user-carol@example.com");
+
+        let another_result = bus.execute(AnotherCommand { value: 42 }).await.unwrap();
+        assert_eq!(another_result, 42);
+    }
 }
