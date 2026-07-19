@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { docs, docFile, docsByCategory, getDoc } from '../src/lib/docs';
-import { DOCS_DIR, renderDocMarkdown } from '../src/lib/markdown';
+import { categories as overviewCategories } from '../src/lib/overview';
+import { DOCS_DIR, renderDocMarkdown, rewriteDocLink } from '../src/lib/markdown';
 
 describe('docs registry', () => {
   it('has unique ids', () => {
@@ -50,6 +51,16 @@ describe('docs registry', () => {
   });
 });
 
+describe('docs overview', () => {
+  it('links only to docs that exist in the registry (no dead /docs routes)', () => {
+    const registryIds = new Set(docs.map((d) => d.id));
+    const dead = overviewCategories
+      .flatMap((category) => category.docs.map((doc) => doc.id))
+      .filter((id) => !registryIds.has(id));
+    expect(dead).toEqual([]);
+  });
+});
+
 describe('markdown rendering', () => {
   it('renders a documentation file to HTML', () => {
     const html = renderDocMarkdown('auth-guide.md');
@@ -57,12 +68,48 @@ describe('markdown rendering', () => {
     expect(html.length).toBeGreaterThan(1000);
   });
 
-  it('renders every markdown-backed doc without throwing', () => {
+  it('renders every markdown-backed doc to non-trivial HTML', () => {
     for (const doc of docs) {
       const file = docFile(doc);
       if (file !== null) {
-        expect(() => renderDocMarkdown(file), `failed rendering ${file}`).not.toThrow();
+        const html = renderDocMarkdown(file);
+        expect(typeof html, `rendering ${file}`).toBe('string');
+        expect(html.length, `rendering ${file}`).toBeGreaterThan(100);
+        expect(html, `rendering ${file}`).not.toContain('[object Promise]');
       }
+    }
+  });
+
+  it('rewrites intra-doc markdown links to site routes', () => {
+    expect(rewriteDocLink('auth-guide.md')).toBe('/docs/auth-guide');
+    expect(rewriteDocLink('./config-guide.md')).toBe('/docs/config-guide');
+    expect(rewriteDocLink('README.md')).toBe('/docs/readme');
+    expect(rewriteDocLink('di-guide.md#usage')).toBe('/docs/di-guide#usage');
+  });
+
+  it('sends non-docs markdown files to GitHub and leaves other links alone', () => {
+    // ../README.md escapes docs/ — it is the repo README, not docs/README.md
+    expect(rewriteDocLink('../README.md')).toBe('https://github.com/pegasusheavy/armature/blob/main/README.md');
+    expect(rewriteDocLink('../armature-macros/README.md')).toBe(
+      'https://github.com/pegasusheavy/armature/blob/main/armature-macros/README.md'
+    );
+    expect(rewriteDocLink('plans/some-plan.md')).toBe(
+      'https://github.com/pegasusheavy/armature/blob/main/docs/plans/some-plan.md'
+    );
+    expect(rewriteDocLink('https://example.com/x.md')).toBe('https://example.com/x.md');
+    expect(rewriteDocLink('#section')).toBe('#section');
+    expect(rewriteDocLink('/docs/auth-guide')).toBe('/docs/auth-guide');
+  });
+
+  it('no rendered doc contains a relative .md href', () => {
+    for (const doc of docs) {
+      const file = docFile(doc);
+      if (file === null) continue;
+      const html = renderDocMarkdown(file);
+      const badLinks = [...html.matchAll(/href="([^"]+\.md[^"]*)"/g)]
+        .map((m) => m[1])
+        .filter((href) => !href.startsWith('http'));
+      expect(badLinks, `in ${file}`).toEqual([]);
     }
   });
 });

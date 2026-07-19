@@ -9,7 +9,7 @@ Allow: /
 Crawl-delay: 1
 
 # Sitemap location
-Sitemap: https://pegasusheavy.github.io/armature/sitemap.xml
+Sitemap: https://pegasusheavy.github.io/armature/sitemap-index.xml
 
 # =============================================================================
 # AI Crawlers & LLM Bots

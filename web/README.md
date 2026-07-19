@@ -48,13 +48,14 @@ This project uses Tailwind CSS 4's CSS-first configuration approach. No `tailwin
 
 ### How it works:
 
-1. **Direct CSS Import**: Tailwind and the Tailswatch Oxide theme are imported in `src/styles/global.scss`:
-   ```scss
-   @use "tailwindcss";
-   @use "@pegasusheavy/tailswatch/themes/oxide";
+1. **Direct CSS Import**: Tailwind and the Tailswatch Oxide theme are imported in `src/styles/global.css`:
+   ```css
+   @import 'tailwindcss';
+   @import '@pegasusheavy/tailswatch/themes/oxide';
    ```
+   (Keep this file plain CSS — a sass entry point would compile the imports away before Tailwind's Vite plugin runs, silently dropping every utility class.)
 
-2. **Theme Configuration**: Custom theme extensions are defined using the `@theme` directive with CSS variables (see the rust/stone color aliases in `global.scss`).
+2. **Theme Configuration**: Custom theme extensions are defined using the `@theme` directive with CSS variables (see the rust/stone color aliases in `global.css`).
 
 3. **Utility Classes**: Use Tailwind utilities directly in `.astro` templates.
 
@@ -108,12 +109,14 @@ web/
 │   │       └── [id].astro      # Statically generated from ../docs/*.md
 │   ├── lib/
 │   │   ├── docs.ts             # Doc registry (ids, titles, categories, files)
-│   │   ├── markdown.ts         # Build-time markdown rendering
+│   │   ├── overview.ts         # Docs overview page data
+│   │   ├── markdown.ts         # Build-time markdown rendering + link rewriting
+│   │   ├── nav.ts              # Nav links + active-path logic
+│   │   ├── schema.ts           # JSON-LD structured data constants
 │   │   └── url.ts              # Base-path-aware link helper
 │   └── styles/
-│       ├── global.scss         # Tailwind + Tailswatch Oxide theme + overrides
-│       ├── docs.scss           # Docs shell + markdown typography
-│       └── doc-content.scss    # Shared doc component styles
+│       ├── global.css          # Tailwind + Tailswatch Oxide theme + overrides
+│       └── docs.scss           # Docs shell + markdown typography
 ├── tests/                      # Vitest tests
 ├── public/                     # Static assets (favicon, logos, manifest, ...)
 └── astro.config.mjs            # Astro configuration
@@ -123,9 +126,9 @@ web/
 
 ### Adding Custom Colors
 
-Edit `src/styles/global.scss`:
+Edit `src/styles/global.css`:
 
-```scss
+```css
 @theme {
   --color-accent-500: #f59e0b;
   --color-accent-600: #d97706;

@@ -2,19 +2,33 @@
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 import { url } from '../lib/url';
+import {
+  SOFTWARE_APPLICATION_SCHEMA,
+  ORGANIZATION_SCHEMA,
+  WEBSITE_SCHEMA,
+  FAQ_PAGE_SCHEMA,
+  BREADCRUMB_SCHEMA,
+} from '../lib/schema';
 import '../styles/global.css';
 
 interface Props {
   title?: string;
   description?: string;
+  /** Site-absolute path (without base) to canonicalize this page to, e.g. '/docs'. */
+  canonicalPath?: string;
+  /** Emit the home-page-only schemas (SoftwareApplication, FAQPage, BreadcrumbList). */
+  richSchemas?: boolean;
 }
 
 const {
   title = 'Armature Framework - Enterprise Rust Web Framework | NestJS Alternative',
   description = 'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Build production-ready APIs with dependency injection, decorators, JWT/OAuth2 auth, and 150+ features. 8-15x faster than Node.js.',
+  canonicalPath,
+  richSchemas = false,
 } = Astro.props;
 
-const canonical = 'https://pegasusheavy.github.io/armature/';
+const site = Astro.site ?? new URL('https://pegasusheavy.github.io');
+const canonical = new URL(canonicalPath ? url(canonicalPath) : Astro.url.pathname, site).href;
 ---
 
 <!doctype html>
@@ -87,194 +101,16 @@ const canonical = 'https://pegasusheavy.github.io/armature/';
 
     <!-- Google Fonts - Inter & Fira Code -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Fira+Code:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap"
       rel="stylesheet"
     />
 
     <!-- Structured Data / JSON-LD for Search Engines and LLMs -->
-    <script
-      type="application/ld+json"
-      set:html={JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type': 'SoftwareApplication',
-        name: 'Armature Framework',
-        alternateName: ['Armature', 'armature-rs'],
-        applicationCategory: 'DeveloperApplication',
-        applicationSubCategory: 'Web Framework',
-        operatingSystem: 'Linux, macOS, Windows',
-        programmingLanguage: {
-          '@type': 'ComputerLanguage',
-          name: 'Rust',
-          url: 'https://www.rust-lang.org/',
-        },
-        description:
-          'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Features dependency injection, decorators, middleware, JWT/OAuth2/SAML authentication, validation, caching, job queues, GraphQL, and 150+ enterprise features.',
-        url: 'https://pegasusheavy.github.io/armature/',
-        softwareVersion: '0.1.0',
-        releaseNotes: 'https://github.com/pegasusheavy/armature/releases',
-        license: 'https://opensource.org/licenses/Apache-2.0',
-        author: {
-          '@type': 'Person',
-          name: 'Joseph R. Quinn',
-          email: 'pegasusheavyindustries@gmail.com',
-          url: 'https://github.com/quinnjr',
-        },
-        publisher: {
-          '@type': 'Organization',
-          name: 'Pegasus Heavy Industries',
-          url: 'https://github.com/pegasusheavy',
-        },
-        codeRepository: 'https://github.com/pegasusheavy/armature',
-        downloadUrl: 'https://crates.io/crates/armature',
-        installUrl: 'https://pegasusheavy.github.io/armature/getting-started',
-        softwareHelp: 'https://pegasusheavy.github.io/armature/docs',
-        programmingModel: 'Async/Await',
-        runtimePlatform: 'Tokio',
-        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-        aggregateRating: {
-          '@type': 'AggregateRating',
-          ratingValue: '5',
-          ratingCount: '1',
-          bestRating: '5',
-          worstRating: '1',
-        },
-        keywords:
-          'rust, web framework, http server, nestjs alternative, express alternative, actix-web, rocket, axum, dependency injection, async rust, type-safe, middleware, jwt, oauth2, saml, graphql, openapi, swagger, enterprise, production-ready',
-        featureList: [
-          'Dependency Injection Container',
-          'Decorator-based routing (#[controller], #[get], #[post])',
-          'Module system for code organization',
-          'Guards and Interceptors',
-          'JWT Authentication',
-          'OAuth2/OIDC (10+ providers)',
-          'SAML 2.0 Enterprise SSO',
-          'Two-Factor Authentication (TOTP/HOTP)',
-          'Passwordless Auth (Magic Links, WebAuthn)',
-          'API Key Management',
-          'Rate Limiting (Token Bucket, Sliding Window)',
-          'Data Validation Framework',
-          'OpenAPI/Swagger Integration',
-          'GraphQL Support',
-          'WebSocket and Server-Sent Events',
-          'Background Job Queues (Redis)',
-          'Cron Scheduling',
-          'Multi-tier Caching (Redis, Memcached)',
-          'OpenTelemetry Observability',
-          'Prometheus Metrics',
-          'Health Checks (Kubernetes probes)',
-          'AWS SDK Integration',
-          'GCP SDK Integration',
-          'Azure SDK Integration',
-          'Serverless (Lambda, Cloud Run, Azure Functions)',
-          'File Storage (S3, GCS, Azure Blob)',
-          'Email (SMTP, SendGrid, SES, Mailgun)',
-          'Push Notifications (Web Push, FCM, APNS)',
-          'Security Headers (CSP, HSTS, CORS)',
-        ],
-        sameAs: ['https://github.com/pegasusheavy/armature', 'https://crates.io/crates/armature'],
-      })}
-    />
-
-    <!-- Organization Schema -->
-    <script
-      type="application/ld+json"
-      set:html={JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type': 'Organization',
-        name: 'Pegasus Heavy Industries',
-        url: 'https://github.com/pegasusheavy',
-        logo: 'https://pegasusheavy.github.io/armature/assets/armature-logo.svg',
-        sameAs: ['https://github.com/pegasusheavy'],
-      })}
-    />
-
-    <!-- WebSite Schema with SearchAction -->
-    <script
-      type="application/ld+json"
-      set:html={JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type': 'WebSite',
-        name: 'Armature Framework',
-        url: 'https://pegasusheavy.github.io/armature/',
-        potentialAction: {
-          '@type': 'SearchAction',
-          target: 'https://pegasusheavy.github.io/armature/docs?q={search_term_string}',
-          'query-input': 'required name=search_term_string',
-        },
-      })}
-    />
-
-    <!-- FAQ Schema -->
-    <script
-      type="application/ld+json"
-      set:html={JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type': 'FAQPage',
-        mainEntity: [
-          {
-            '@type': 'Question',
-            name: 'Is Armature a good NestJS alternative for Rust?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: "Yes! Armature is specifically designed to bring NestJS's architectural patterns to Rust. It features dependency injection, decorators (via Rust macros), modules, guards, interceptors, and pipes - all concepts familiar to NestJS developers.",
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'How does Armature compare to Express or Koa?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: "Armature provides Express's simplicity and Koa's async/await patterns, but adds type safety, dependency injection, and compile-time error catching. The middleware system will feel familiar, but you get Rust's performance (8-15x faster) and memory safety guarantees.",
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'Why choose Armature over Actix-web, Rocket, or Axum?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'Armature focuses on enterprise features and developer experience. While Actix-web, Rocket, and Axum are excellent low-level frameworks, Armature provides built-in authentication (JWT, OAuth2, SAML), validation, caching, job queues, and OpenAPI generation - reducing the need for external crates.',
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'How fast is Armature compared to Node.js?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'Armature is 8-15x faster than Node.js frameworks like Express and NestJS, with ~3x less memory usage and sub-2ms p99 latency for typical API endpoints.',
-            },
-          },
-        ],
-      })}
-    />
-
-    <!-- BreadcrumbList Schema -->
-    <script
-      type="application/ld+json"
-      set:html={JSON.stringify({
-        '@context': 'https://schema.org',
-        '@type': 'BreadcrumbList',
-        itemListElement: [
-          {
-            '@type': 'ListItem',
-            position: 1,
-            name: 'Home',
-            item: 'https://pegasusheavy.github.io/armature/',
-          },
-          {
-            '@type': 'ListItem',
-            position: 2,
-            name: 'Documentation',
-            item: 'https://pegasusheavy.github.io/armature/docs',
-          },
-          {
-            '@type': 'ListItem',
-            position: 3,
-            name: 'Getting Started',
-            item: 'https://pegasusheavy.github.io/armature/getting-started',
-          },
-        ],
-      })}
-    />
+    {richSchemas && <script type="application/ld+json" set:html={SOFTWARE_APPLICATION_SCHEMA} />}
+    <script type="application/ld+json" set:html={ORGANIZATION_SCHEMA} />
+    <script type="application/ld+json" set:html={WEBSITE_SCHEMA} />
+    {richSchemas && <script type="application/ld+json" set:html={FAQ_PAGE_SCHEMA} />}
+    {richSchemas && <script type="application/ld+json" set:html={BREADCRUMB_SCHEMA} />}
   </head>
   <body>
     <Nav />

@@ -1371,38 +1371,28 @@ const completedFeatures = [
   'CLI: Code Gen, Templates, Dev Server, REPL, Route Listing',
 ];
 
+const STATUS_CLASSES: Record<string, string> = {
+  completed: 'bg-emerald-900/50 text-emerald-400 border border-emerald-800',
+  critical: 'bg-red-900/50 text-red-400 border border-red-800',
+  high: 'bg-orange-900/50 text-orange-400 border border-orange-800',
+  medium: 'bg-yellow-900/50 text-yellow-400 border border-yellow-800',
+  low: 'bg-green-900/50 text-green-400 border border-green-800',
+};
+
 function getStatusClass(status: string): string {
-  switch (status) {
-    case 'completed':
-      return 'bg-emerald-900/50 text-emerald-400 border border-emerald-800';
-    case 'critical':
-      return 'bg-red-900/50 text-red-400 border border-red-800';
-    case 'high':
-      return 'bg-orange-900/50 text-orange-400 border border-orange-800';
-    case 'medium':
-      return 'bg-yellow-900/50 text-yellow-400 border border-yellow-800';
-    case 'low':
-      return 'bg-green-900/50 text-green-400 border border-green-800';
-    default:
-      return 'bg-stone-800 text-stone-400 border border-stone-700';
-  }
+  return STATUS_CLASSES[status] ?? 'bg-stone-800 text-stone-400 border border-stone-700';
 }
 
+const STATUS_ICONS: Record<string, string> = {
+  completed: '✅',
+  critical: '🔴',
+  high: '🟠',
+  medium: '🟡',
+  low: '🟢',
+};
+
 function getStatusIcon(status: string): string {
-  switch (status) {
-    case 'completed':
-      return '✅';
-    case 'critical':
-      return '🔴';
-    case 'high':
-      return '🟠';
-    case 'medium':
-      return '🟡';
-    case 'low':
-      return '🟢';
-    default:
-      return '⚪';
-  }
+  return STATUS_ICONS[status] ?? '⚪';
 }
 
 function getCompletedCount(items: RoadmapItem[]): number {
@@ -1414,38 +1404,8 @@ function getProgress(items: { feature: string; status: string }[]): number {
   return Math.round((completed / items.length) * 100);
 }
 
-function getTotalCompleted(): number {
-  return categories.reduce((sum, cat) => sum + getCompletedCount(cat.items), 0);
-}
-
-function getTotalFeatures(): number {
-  return categories.reduce((sum, cat) => sum + cat.items.length, 0);
-}
-
-// Performance roadmap helpers
-function getPerformanceCompletedCount(): number {
-  return performanceCategories.reduce((sum, cat) => sum + getCompletedCount(cat.items), 0);
-}
-
-function getPerformanceTotalCount(): number {
-  return performanceCategories.reduce((sum, cat) => sum + cat.items.length, 0);
-}
-
-function getAxumCompletedCount(): number {
-  return axumCategories.reduce((sum, cat) => sum + getCompletedCount(cat.items), 0);
-}
-
-function getAxumTotalCount(): number {
-  return axumCategories.reduce((sum, cat) => sum + cat.items.length, 0);
-}
-
-function getActixCompletedCount(): number {
-  return actixCategories.reduce((sum, cat) => sum + getCompletedCount(cat.items), 0);
-}
-
-function getActixTotalCount(): number {
-  return actixCategories.reduce((sum, cat) => sum + cat.items.length, 0);
-}
+const completedIn = (cats: RoadmapCategory[]) => cats.reduce((s, c) => s + getCompletedCount(c.items), 0);
+const totalIn = (cats: RoadmapCategory[]) => cats.reduce((s, c) => s + c.items.length, 0);
 
 function getCriticalCount(items: RoadmapItem[]): number {
   return items.filter((item) => item.status === 'critical').length;
@@ -1455,7 +1415,7 @@ function getHighCount(items: RoadmapItem[]): number {
   return items.filter((item) => item.status === 'high').length;
 }
 
-// Equivalent of Angular's titlecase pipe for the single-word status values
+// Title-case each word of a status label
 function titlecase(value: string): string {
   return value.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
 }
@@ -1476,18 +1436,18 @@ function titlecase(value: string): string {
         <div class="bg-stone-800/50 rounded-xl p-6 border border-stone-700 max-w-xl">
           <div class="flex items-center justify-between mb-3">
             <span class="text-lg font-semibold text-white">Overall Progress</span>
-            <span class="text-2xl font-bold text-emerald-400">{getTotalCompleted()}/{getTotalFeatures()}</span>
+            <span class="text-2xl font-bold text-emerald-400">{completedIn(categories)}/{totalIn(categories)}</span>
           </div>
           <div class="w-full bg-stone-700 rounded-full h-3 mb-2">
             <div
               class="bg-gradient-to-r from-emerald-500 to-emerald-400 h-3 rounded-full transition-all duration-500"
-              style={`width: ${(getTotalCompleted() / getTotalFeatures()) * 100}%`}
+              style={`width: ${(completedIn(categories) / totalIn(categories)) * 100}%`}
             >
             </div>
           </div>
           <p class="text-stone-400 text-sm">
-            {((getTotalCompleted() / getTotalFeatures()) * 100).toFixed(0)}% complete — Only i18n and Grafana dashboards
-            remaining!
+            {((completedIn(categories) / totalIn(categories)) * 100).toFixed(0)}% complete — Only i18n and Grafana
+            dashboards remaining!
           </p>
         </div>
       </div>
@@ -1582,34 +1542,36 @@ function titlecase(value: string): string {
           <div class="bg-stone-900/80 rounded-xl p-6 border border-stone-700">
             <div class="text-sm text-stone-400 mb-1">Profiling & Setup</div>
             <div class="text-2xl font-bold text-emerald-400">
-              {getPerformanceCompletedCount()}/{getPerformanceTotalCount()}
+              {completedIn(performanceCategories)}/{totalIn(performanceCategories)}
             </div>
             <div class="w-full bg-stone-700 rounded-full h-2 mt-2">
               <div
                 class="bg-emerald-500 h-2 rounded-full"
-                style={`width: ${(getPerformanceCompletedCount() / getPerformanceTotalCount()) * 100}%`}
+                style={`width: ${(completedIn(performanceCategories) / totalIn(performanceCategories)) * 100}%`}
               >
               </div>
             </div>
           </div>
           <div class="bg-stone-900/80 rounded-xl p-6 border border-stone-700">
             <div class="text-sm text-stone-400 mb-1">Axum-Competitive</div>
-            <div class="text-2xl font-bold text-orange-400">{getAxumCompletedCount()}/{getAxumTotalCount()}</div>
+            <div class="text-2xl font-bold text-orange-400">
+              {completedIn(axumCategories)}/{totalIn(axumCategories)}
+            </div>
             <div class="w-full bg-stone-700 rounded-full h-2 mt-2">
               <div
                 class="bg-orange-500 h-2 rounded-full"
-                style={`width: ${(getAxumCompletedCount() / getAxumTotalCount()) * 100}%`}
+                style={`width: ${(completedIn(axumCategories) / totalIn(axumCategories)) * 100}%`}
               >
               </div>
             </div>
           </div>
           <div class="bg-stone-900/80 rounded-xl p-6 border border-stone-700">
             <div class="text-sm text-stone-400 mb-1">Actix-web Competitive</div>
-            <div class="text-2xl font-bold text-red-400">{getActixCompletedCount()}/{getActixTotalCount()}</div>
+            <div class="text-2xl font-bold text-red-400">{completedIn(actixCategories)}/{totalIn(actixCategories)}</div>
             <div class="w-full bg-stone-700 rounded-full h-2 mt-2">
               <div
                 class="bg-red-500 h-2 rounded-full"
-                style={`width: ${(getActixCompletedCount() / getActixTotalCount()) * 100}%`}
+                style={`width: ${(completedIn(actixCategories) / totalIn(actixCategories)) * 100}%`}
               >
               </div>
             </div>
@@ -1839,6 +1801,7 @@ function titlecase(value: string): string {
           <a
             href="https://github.com/pegasusheavy/armature/blob/develop/CONTRIBUTING.md"
             target="_blank"
+            rel="noopener noreferrer"
             class="btn-primary"
           >
             Contributing Guide
@@ -1846,6 +1809,7 @@ function titlecase(value: string): string {
           <a
             href="https://github.com/pegasusheavy/armature/issues"
             target="_blank"
+            rel="noopener noreferrer"
             class="bg-stone-800 hover:bg-stone-700 text-white font-medium px-6 py-3 rounded-lg transition-colors border border-stone-700"
           >
             View Issues

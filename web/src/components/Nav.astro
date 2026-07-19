@@ -2,22 +2,12 @@
 import { faGithub } from '@fortawesome/free-brands-svg-icons';
 import Icon from './Icon.astro';
 import { url } from '../lib/url';
-
-const links = [
-  { href: '/', label: 'Home', mobileLabel: 'Home', exact: true },
-  { href: '/docs', label: 'Docs', mobileLabel: 'Documentation', exact: false },
-  { href: '/comparisons', label: 'Comparisons', mobileLabel: 'Comparisons', exact: false },
-  { href: '/roadmap', label: 'Roadmap', mobileLabel: 'Roadmap', exact: false },
-  { href: '/getting-started', label: 'Getting Started', mobileLabel: 'Getting Started', exact: false },
-  { href: '/faq', label: 'FAQ', mobileLabel: 'FAQ', exact: false },
-];
+import { navLinks as links, isActivePath, type NavLink } from '../lib/nav';
 
 const currentPath = Astro.url.pathname;
 
-function isActive(link: { href: string; exact: boolean }): boolean {
-  const target = url(link.href).replace(/\/+$/, '') || '/';
-  const path = currentPath.replace(/\/+$/, '') || '/';
-  return link.exact ? path === target : path === target || path.startsWith(`${target}/`);
+function isActive(link: NavLink): boolean {
+  return isActivePath(currentPath, url(link.href), link.exact);
 }
 ---
 
@@ -53,6 +43,7 @@ function isActive(link: { href: string; exact: boolean }): boolean {
         <a
           href="https://github.com/pegasusheavy/armature"
           target="_blank"
+          rel="noopener noreferrer"
           class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"
         >
           <Icon icon={faGithub} />
@@ -101,6 +92,7 @@ function isActive(link: { href: string; exact: boolean }): boolean {
         <a
           href="https://github.com/pegasusheavy/armature"
           target="_blank"
+          rel="noopener noreferrer"
           class="btn-primary flex items-center justify-center gap-2 w-full"
         >
           <Icon icon={faGithub} />

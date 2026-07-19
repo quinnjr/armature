@@ -13,11 +13,18 @@ export function getStaticPaths() {
 
 const { id } = Astro.params;
 const doc = getDoc(id!)!;
+
+// Doc pages rendered from hand-built components instead of markdown. A
+// hasComponent doc missing from this set would otherwise build a blank page.
+const WIRED_COMPONENTS = new Set(['readme', 'profiling-guide']);
+if (doc.hasComponent && !WIRED_COMPONENTS.has(doc.id)) {
+  throw new Error(`doc "${doc.id}" is marked hasComponent but has no component wired in [id].astro`);
+}
 const file = docFile(doc);
 const html = doc.hasComponent ? null : file ? renderDocMarkdown(file) : null;
 ---
 
-<BaseLayout title={`${doc.title} - Documentation - Armature`}>
+<BaseLayout title={`${doc.title} - Documentation - Armature`} canonicalPath={doc.id === 'readme' ? '/docs' : undefined}>
   <DocsShell activeId={doc.id}>
     {doc.id === 'readme' && <DocsOverview />}
     {doc.id === 'profiling-guide' && <ProfilingGuide />}
@@ -34,14 +41,14 @@ const html = doc.hasComponent ? null : file ? renderDocMarkdown(file) : null;
             </li>
             <li>
               Visit our{' '}
-              <a href="https://github.com/pegasusheavy/armature" target="_blank">
+              <a href="https://github.com/pegasusheavy/armature" target="_blank" rel="noopener noreferrer">
                 GitHub repository
               </a>{' '}
               for source code
             </li>
             <li>
               See the{' '}
-              <a href="https://docs.rs/armature" target="_blank">
+              <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer">
                 API documentation
               </a>{' '}
               on docs.rs

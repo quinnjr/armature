@@ -161,8 +161,8 @@ function formatNumber(num: number): string {
 }
 
 function getRatioVsArmature(framework: BenchmarkData): string {
-  const armature = rustFrameworks.find((f) => f.name === 'Armature');
-  if (!armature || framework.name === 'Armature') return '-';
+  if (framework.name === 'Armature') return '-';
+  const armature = rustFrameworks.find((f) => f.name === 'Armature')!;
 
   const ratio = framework.plaintextRps / armature.plaintextRps;
   if (ratio > 1) {

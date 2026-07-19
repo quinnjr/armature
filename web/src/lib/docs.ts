@@ -66,6 +66,7 @@ export const docs: DocMetadata[] = [
   },
   { id: 'response-caching', title: 'HTTP Caching', category: 'API Features', file: 'response-caching-guide.md' },
   { id: 'etag-conditional', title: 'ETags', category: 'API Features', file: 'etag-conditional-requests-guide.md' },
+  { id: 'openapi-guide', title: 'OpenAPI/Swagger', category: 'API Features' },
 
   // 7. Data & Caching - Persistence layer
   {
@@ -106,7 +107,7 @@ export const docs: DocMetadata[] = [
   { id: 'debug-logging', title: 'Debug Logging', category: 'Observability', file: 'debug-logging-guide.md' },
   { id: 'health-check', title: 'Health Checks', category: 'Observability', file: 'health-check-guide.md' },
   { id: 'metrics-guide', title: 'Metrics', category: 'Observability' },
-  { id: 'grafana-dashboards', title: 'Grafana Dashboards', category: 'Observability', file: null },
+  { id: 'grafana-dashboards', title: 'Grafana Dashboards', category: 'Observability' },
   { id: 'opentelemetry-guide', title: 'OpenTelemetry', category: 'Observability' },
   { id: 'error-correlation', title: 'Error Tracking', category: 'Observability', file: 'error-correlation-guide.md' },
   { id: 'audit-guide', title: 'Audit Logging', category: 'Observability' },
@@ -114,6 +115,7 @@ export const docs: DocMetadata[] = [
   // 13. Testing - Quality assurance
   { id: 'testing-guide', title: 'Testing', category: 'Testing' },
   { id: 'testing-coverage', title: 'Coverage', category: 'Testing' },
+  { id: 'testing-documentation', title: 'Testing Best Practices', category: 'Testing' },
 
   // 14. Performance - Optimization tools
   { id: 'profiling-guide', title: 'CPU Profiling', category: 'Performance', file: null, hasComponent: true },
