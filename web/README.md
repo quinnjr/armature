@@ -36,7 +36,7 @@ This is the official documentation website for the Armature Framework, built wit
 
 - **Astro**: 5.x (static site generation)
 - **Tailwind CSS**: 4.1+ (CSS-first configuration) via `@tailwindcss/vite`
-- **Theme**: [`@pegasusheavy/tailswatch`](https://github.com/pegasusheavy/tailswatch) Oxide theme
+- **Theme**: [`@pegasusheavy/tailswatch`](https://github.com/quinnjr/tailswatch) Oxide theme
 - **SCSS**: For enhanced styling capabilities
 - **TypeScript**: 5.9+
 - **Package Manager**: pnpm
@@ -156,7 +156,7 @@ Output will be in `dist/`.
 The site is configured for automatic deployment via GitHub Actions (`.github/workflows/docs.yml`).
 The `build:gh-pages` script sets the `/armature` base path.
 
-Live site: https://pegasusheavy.github.io/armature/
+Live site: https://quinnjr.github.io/armature/
 
 ## Browser Support
 

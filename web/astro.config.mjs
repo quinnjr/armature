@@ -7,7 +7,7 @@ import tailwindcss from '@tailwindcss/vite';
 // File output + no trailing slash preserves the pre-Astro URL contract
 // (/armature/docs/auth-guide, exact, no redirect) on GitHub Pages.
 export default defineConfig({
-  site: 'https://pegasusheavy.github.io',
+  site: 'https://quinnjr.github.io',
   base: process.env.ASTRO_BASE ?? '/',
   trailingSlash: 'never',
   build: {

@@ -89,12 +89,12 @@ describe('markdown rendering', () => {
 
   it('sends non-docs markdown files to GitHub and leaves other links alone', () => {
     // ../README.md escapes docs/ — it is the repo README, not docs/README.md
-    expect(rewriteDocLink('../README.md')).toBe('https://github.com/pegasusheavy/armature/blob/main/README.md');
+    expect(rewriteDocLink('../README.md')).toBe('https://github.com/quinnjr/armature/blob/main/README.md');
     expect(rewriteDocLink('../armature-macros/README.md')).toBe(
-      'https://github.com/pegasusheavy/armature/blob/main/armature-macros/README.md'
+      'https://github.com/quinnjr/armature/blob/main/armature-macros/README.md'
     );
     expect(rewriteDocLink('plans/some-plan.md')).toBe(
-      'https://github.com/pegasusheavy/armature/blob/main/docs/plans/some-plan.md'
+      'https://github.com/quinnjr/armature/blob/main/docs/plans/some-plan.md'
     );
     expect(rewriteDocLink('https://example.com/x.md')).toBe('https://example.com/x.md');
     expect(rewriteDocLink('#section')).toBe('#section');

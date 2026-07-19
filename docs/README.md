@@ -336,4 +336,4 @@ This documentation is for Armature version 0.1.0.
 
 ---
 
-For the latest updates, visit the [GitHub repository](https://github.com/pegasusheavy/armature).
+For the latest updates, visit the [GitHub repository](https://github.com/quinnjr/armature).

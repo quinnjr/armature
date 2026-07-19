@@ -44,7 +44,7 @@ export function rewriteDocLink(href: string): string {
     }
   }
   // Not a registered doc (or outside docs/) — link to the file on GitHub.
-  return `https://github.com/pegasusheavy/armature/blob/main/${repoPath}${suffix}`;
+  return `https://github.com/quinnjr/armature/blob/main/${repoPath}${suffix}`;
 }
 
 marked.use({

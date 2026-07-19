@@ -2,13 +2,13 @@
 # https://securitytxt.org/
 
 Contact: mailto:pegasusheavyindustries@gmail.com
-Contact: https://github.com/pegasusheavy/armature/security/advisories/new
+Contact: https://github.com/quinnjr/armature/security/advisories/new
 Expires: 2026-12-31T23:59:59.000Z
 Encryption: https://github.com/quinnjr.gpg
 Preferred-Languages: en
-Canonical: https://pegasusheavy.github.io/armature/.well-known/security.txt
-Policy: https://github.com/pegasusheavy/armature/security/policy
-Hiring: https://github.com/pegasusheavy
+Canonical: https://quinnjr.github.io/armature/.well-known/security.txt
+Policy: https://github.com/quinnjr/armature/security/policy
+Hiring: https://github.com/quinnjr
 
 # We appreciate responsible disclosure of security vulnerabilities.
 # Please report any security issues via GitHub Security Advisories.

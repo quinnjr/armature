@@ -17,7 +17,7 @@ Language: English
 Standards: HTML5, CSS3, TypeScript, Rust
 Framework: Armature (Rust), Astro (Frontend)
 Hosting: GitHub Pages
-Repository: https://github.com/pegasusheavy/armature
+Repository: https://github.com/quinnjr/armature
 
 /* TECHNOLOGY */
 Backend Framework: Armature (Rust)

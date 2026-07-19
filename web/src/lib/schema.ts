@@ -19,9 +19,9 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   },
   description:
     'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Features dependency injection, decorators, middleware, JWT/OAuth2/SAML authentication, validation, caching, job queues, GraphQL, and 150+ enterprise features.',
-  url: 'https://pegasusheavy.github.io/armature/',
+  url: 'https://quinnjr.github.io/armature/',
   softwareVersion: '0.1.0',
-  releaseNotes: 'https://github.com/pegasusheavy/armature/releases',
+  releaseNotes: 'https://github.com/quinnjr/armature/releases',
   license: 'https://opensource.org/licenses/Apache-2.0',
   author: {
     '@type': 'Person',
@@ -32,12 +32,12 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   publisher: {
     '@type': 'Organization',
     name: 'Pegasus Heavy Industries',
-    url: 'https://github.com/pegasusheavy',
+    url: 'https://github.com/quinnjr',
   },
-  codeRepository: 'https://github.com/pegasusheavy/armature',
+  codeRepository: 'https://github.com/quinnjr/armature',
   downloadUrl: 'https://crates.io/crates/armature',
-  installUrl: 'https://pegasusheavy.github.io/armature/getting-started',
-  softwareHelp: 'https://pegasusheavy.github.io/armature/docs',
+  installUrl: 'https://quinnjr.github.io/armature/getting-started',
+  softwareHelp: 'https://quinnjr.github.io/armature/docs',
   programmingModel: 'Async/Await',
   runtimePlatform: 'Tokio',
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
@@ -81,26 +81,26 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
     'Push Notifications (Web Push, FCM, APNS)',
     'Security Headers (CSP, HSTS, CORS)',
   ],
-  sameAs: ['https://github.com/pegasusheavy/armature', 'https://crates.io/crates/armature'],
+  sameAs: ['https://github.com/quinnjr/armature', 'https://crates.io/crates/armature'],
 });
 
 export const ORGANIZATION_SCHEMA = JSON.stringify({
   '@context': 'https://schema.org',
   '@type': 'Organization',
   name: 'Pegasus Heavy Industries',
-  url: 'https://github.com/pegasusheavy',
-  logo: 'https://pegasusheavy.github.io/armature/assets/armature-logo.svg',
-  sameAs: ['https://github.com/pegasusheavy'],
+  url: 'https://github.com/quinnjr',
+  logo: 'https://quinnjr.github.io/armature/assets/armature-logo.svg',
+  sameAs: ['https://github.com/quinnjr'],
 });
 
 export const WEBSITE_SCHEMA = JSON.stringify({
   '@context': 'https://schema.org',
   '@type': 'WebSite',
   name: 'Armature Framework',
-  url: 'https://pegasusheavy.github.io/armature/',
+  url: 'https://quinnjr.github.io/armature/',
   potentialAction: {
     '@type': 'SearchAction',
-    target: 'https://pegasusheavy.github.io/armature/docs?q={search_term_string}',
+    target: 'https://quinnjr.github.io/armature/docs?q={search_term_string}',
     'query-input': 'required name=search_term_string',
   },
 });
@@ -152,19 +152,19 @@ export const BREADCRUMB_SCHEMA = JSON.stringify({
       '@type': 'ListItem',
       position: 1,
       name: 'Home',
-      item: 'https://pegasusheavy.github.io/armature/',
+      item: 'https://quinnjr.github.io/armature/',
     },
     {
       '@type': 'ListItem',
       position: 2,
       name: 'Documentation',
-      item: 'https://pegasusheavy.github.io/armature/docs',
+      item: 'https://quinnjr.github.io/armature/docs',
     },
     {
       '@type': 'ListItem',
       position: 3,
       name: 'Getting Started',
-      item: 'https://pegasusheavy.github.io/armature/getting-started',
+      item: 'https://quinnjr.github.io/armature/getting-started',
     },
   ],
 });

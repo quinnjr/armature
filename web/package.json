@@ -6,9 +6,9 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pegasusheavy/armature.git"
+    "url": "https://github.com/quinnjr/armature.git"
   },
-  "homepage": "https://pegasusheavy.github.io/armature",
+  "homepage": "https://quinnjr.github.io/armature",
   "type": "module",
   "scripts": {
     "start": "astro dev",
