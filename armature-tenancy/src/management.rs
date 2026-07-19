@@ -637,7 +637,7 @@ impl TenantManager {
 
         // Apply updates
         if let Some(name) = request.display_name {
-            managed.tenant.name = name;
+            managed.tenant.display_name = Some(name);
         }
         if let Some(domain) = request.domain {
             managed.tenant.domain = domain;
@@ -991,6 +991,30 @@ mod tests {
             tenant.tenant.display_name.as_deref(),
             Some("Acme Inc"),
             "display_name from CreateTenantRequest must be persisted, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_writes_display_name_not_slug() {
+        let store = Arc::new(InMemoryManagedTenantStore::new());
+        let manager = TenantManager::with_store(store);
+
+        let request = CreateTenantRequest::new("acme");
+        let created = manager.create(request).await.unwrap();
+        assert_eq!(created.tenant.name, "acme");
+        assert_eq!(created.tenant.display_name, None);
+
+        let update = UpdateTenantRequest::new().with_display_name("Acme Corp");
+        let updated = manager.update(&created.tenant.id, update).await.unwrap();
+
+        assert_eq!(
+            updated.tenant.display_name.as_deref(),
+            Some("Acme Corp"),
+            "update() must write display_name into the display_name field"
+        );
+        assert_eq!(
+            updated.tenant.name, "acme",
+            "update() must not overwrite the tenant slug when only display_name changes"
         );
     }
 
