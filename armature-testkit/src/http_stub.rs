@@ -314,4 +314,19 @@ mod tests {
             .map(|(_, b)| b.to_string())
             .unwrap_or_default()
     }
+
+    #[tokio::test]
+    async fn port_is_released_after_drop() {
+        let addr = {
+            let server = super::StubServer::start_single(super::StubResponse::new(200, "x")).await;
+            server.url().trim_start_matches("http://").to_string()
+        }; // server dropped here
+
+        // Give the aborted accept loop a moment to release the socket.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // We can now bind the same port (proves the listener was released).
+        let bound = tokio::net::TcpListener::bind(addr.parse::<std::net::SocketAddr>().unwrap()).await;
+        assert!(bound.is_ok(), "port was not released after StubServer drop");
+    }
 }
