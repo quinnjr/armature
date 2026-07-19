@@ -120,7 +120,6 @@ pub mod request_signing;
 pub mod xss_filter;
 
 use armature_core::HttpResponse;
-use std::collections::HashMap;
 
 /// Main security middleware that combines all security features
 #[derive(Debug, Clone)]
@@ -235,8 +234,6 @@ impl SecurityMiddleware {
 
     /// Apply security headers to a response
     pub fn apply(&self, mut response: HttpResponse) -> HttpResponse {
-        let mut headers = HashMap::new();
-
         // Content Security Policy
         if let Some(ref csp) = self.csp {
             let header_name = if csp.report_only {
@@ -244,68 +241,67 @@ impl SecurityMiddleware {
             } else {
                 "Content-Security-Policy"
             };
-            headers.insert(header_name.to_string(), csp.to_header_value());
+            response
+                .headers
+                .insert(header_name.to_string(), csp.to_header_value());
         }
 
         // DNS Prefetch Control
-        headers.insert(
+        response.headers.insert(
             "X-DNS-Prefetch-Control".to_string(),
             self.dns_prefetch_control.to_header_value(),
         );
 
         // Expect-CT
         if let Some(ref expect_ct) = self.expect_ct {
-            headers.insert("Expect-CT".to_string(), expect_ct.to_header_value());
+            response
+                .headers
+                .insert("Expect-CT".to_string(), expect_ct.to_header_value());
         }
 
         // Frame Guard
-        headers.insert(
+        response.headers.insert(
             "X-Frame-Options".to_string(),
             self.frame_guard.to_header_value(),
         );
 
         // HSTS
         if let Some(ref hsts) = self.hsts {
-            headers.insert(
+            response.headers.insert(
                 "Strict-Transport-Security".to_string(),
                 hsts.to_header_value(),
             );
         }
 
         // Referrer Policy
-        headers.insert(
+        response.headers.insert(
             "Referrer-Policy".to_string(),
             self.referrer_policy.to_header_value(),
         );
 
         // XSS Filter
-        headers.insert(
+        response.headers.insert(
             "X-XSS-Protection".to_string(),
             self.xss_filter.to_header_value(),
         );
 
         // Content Type Options
-        headers.insert(
+        response.headers.insert(
             "X-Content-Type-Options".to_string(),
             self.content_type_options.to_header_value(),
         );
 
         // Download Options
-        headers.insert(
+        response.headers.insert(
             "X-Download-Options".to_string(),
             self.download_options.to_header_value(),
         );
 
         // Permitted Cross Domain Policies
-        headers.insert(
+        response.headers.insert(
             "X-Permitted-Cross-Domain-Policies".to_string(),
             self.permitted_cross_domain_policies.to_header_value(),
         );
-
-        // Apply all headers
-        for (key, value) in headers {
-            response.headers.insert(key, value);
-        }
 
         // Remove X-Powered-By if requested
         if self.hide_powered_by {

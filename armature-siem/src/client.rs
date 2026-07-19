@@ -632,13 +632,6 @@ impl rustls::client::danger::ServerCertVerifier for NoServerCertVerification {
 pub struct TcpTransport {
     endpoint: String,
     tls: bool,
-    /// Retained for diagnostics/tests; the effective TLS config is now baked
-    /// into `tls_connector` at construction time, so these are no longer
-    /// read on the send path.
-    #[allow(dead_code)]
-    tls_verify: bool,
-    #[allow(dead_code)]
-    ca_cert_path: Option<String>,
     /// Pre-built TLS connector (only present when `tls` is true), built once
     /// in `new()` rather than per-`send` so that the CA file isn't re-read
     /// and the `rustls::ClientConfig` isn't rebuilt on every event.
@@ -663,8 +656,6 @@ impl TcpTransport {
         Ok(Self {
             endpoint: config.endpoint.clone(),
             tls,
-            tls_verify,
-            ca_cert_path,
             tls_connector,
         })
     }
@@ -1267,8 +1258,6 @@ mod tests {
         TcpTransport {
             endpoint,
             tls: true,
-            tls_verify,
-            ca_cert_path: None,
             tls_connector: Some(tls_connector),
         }
     }

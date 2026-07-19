@@ -4,11 +4,12 @@
 
 use crate::auth::{McpAuthConfig, McpAuthContext, authenticate};
 use crate::error::{McpError, Result};
-use crate::resource::McpResourceRegistry;
-use crate::tool::McpToolRegistry;
+use crate::resource::{McpResourceProvider, McpResourceRegistry};
+use crate::tool::{McpToolProvider, McpToolRegistry};
 use crate::types::*;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 /// MCP protocol version
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -96,6 +97,20 @@ pub struct McpService {
     config: McpConfig,
     tool_registry: McpToolRegistry,
     resource_registry: McpResourceRegistry,
+    /// Dynamically-registered tool providers, plugged in alongside the
+    /// compile-time `#[mcp]` inventory via [`McpService::with_tool_provider`].
+    tool_providers: Vec<Arc<dyn McpToolProvider>>,
+    /// Dynamically-registered resource providers, plugged in alongside the
+    /// compile-time `#[mcp]` inventory via [`McpService::with_resource_provider`].
+    resource_providers: Vec<Arc<dyn McpResourceProvider>>,
+    /// Lazily-computed, merged & sorted cache of tool definitions (registry
+    /// and providers together, registry-precedence deduped by name). Built
+    /// once on first `tools/list` call since providers are registered
+    /// before serving and never mutated afterward.
+    merged_tools_cache: OnceLock<Vec<ToolDefinition>>,
+    /// Lazily-computed, merged & sorted cache of resource definitions
+    /// (registry and providers together, registry-precedence deduped by uri).
+    merged_resources_cache: OnceLock<Vec<ResourceDefinition>>,
 }
 
 impl McpService {
@@ -105,6 +120,10 @@ impl McpService {
             config: McpConfig::default(),
             tool_registry: McpToolRegistry::new(),
             resource_registry: McpResourceRegistry::new(),
+            tool_providers: Vec::new(),
+            resource_providers: Vec::new(),
+            merged_tools_cache: OnceLock::new(),
+            merged_resources_cache: OnceLock::new(),
         }
     }
 
@@ -114,7 +133,29 @@ impl McpService {
             config,
             tool_registry: McpToolRegistry::new(),
             resource_registry: McpResourceRegistry::new(),
+            tool_providers: Vec::new(),
+            resource_providers: Vec::new(),
+            merged_tools_cache: OnceLock::new(),
+            merged_resources_cache: OnceLock::new(),
         }
+    }
+
+    /// Register a dynamic tool provider. Providers are consulted by
+    /// `tools/list` (merged with the compile-time inventory, registry names
+    /// taking precedence) and by `tools/call` (tried in registration order
+    /// after the inventory registry reports no match).
+    pub fn with_tool_provider(mut self, provider: Arc<dyn McpToolProvider>) -> Self {
+        self.tool_providers.push(provider);
+        self
+    }
+
+    /// Register a dynamic resource provider. Providers are consulted by
+    /// `resources/list` (merged with the compile-time inventory, registry
+    /// URIs taking precedence) and by `resources/read` (tried in
+    /// registration order after the inventory registry reports no match).
+    pub fn with_resource_provider(mut self, provider: Arc<dyn McpResourceProvider>) -> Self {
+        self.resource_providers.push(provider);
+        self
     }
 
     /// Handle a JSON-RPC request and return a response
@@ -224,13 +265,48 @@ impl McpService {
     fn handle_tools_list(&self, params: Option<Value>) -> Result<Value> {
         let cursor = parse_list_cursor(params)?;
 
-        let (tools, next_cursor) = self
-            .tool_registry
-            .list_tools_page(cursor.as_deref(), LIST_PAGE_SIZE);
+        let (tools, next_cursor) = if self.tool_providers.is_empty() {
+            self.tool_registry
+                .list_tools_page(cursor.as_deref(), LIST_PAGE_SIZE)
+        } else {
+            paginate_by(
+                self.merged_tools(),
+                cursor.as_deref(),
+                LIST_PAGE_SIZE,
+                |t| t.name.as_str(),
+            )
+        };
 
         let result = ToolsListResult { tools, next_cursor };
 
         serde_json::to_value(result).map_err(McpError::from)
+    }
+
+    /// Build (or fetch the cached) merged, name-sorted, deduped list of tool
+    /// definitions from the inventory registry plus all registered
+    /// providers. Registry entries take precedence over provider entries
+    /// with the same name.
+    fn merged_tools(&self) -> &[ToolDefinition] {
+        self.merged_tools_cache.get_or_init(|| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut merged: Vec<ToolDefinition> = Vec::new();
+
+            for def in self.tool_registry.list_tools() {
+                seen.insert(def.name.clone());
+                merged.push(def);
+            }
+
+            for provider in &self.tool_providers {
+                for def in provider.tools() {
+                    if seen.insert(def.name.clone()) {
+                        merged.push(def);
+                    }
+                }
+            }
+
+            merged.sort_by(|a, b| a.name.cmp(&b.name));
+            merged
+        })
     }
 
     /// Handle tools/call request
@@ -241,10 +317,41 @@ impl McpService {
                 serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
             })?;
 
-        let result = self
+        let result = match self
             .tool_registry
-            .call_tool(&params.name, params.arguments)
-            .await?;
+            .call_tool(&params.name, params.arguments.clone())
+            .await
+        {
+            Err(McpError::ToolNotFound(_)) => {
+                let mut last_err = McpError::ToolNotFound(params.name.clone());
+                let mut found = None;
+
+                for provider in &self.tool_providers {
+                    match provider
+                        .call_tool(&params.name, params.arguments.clone())
+                        .await
+                    {
+                        Ok(result) => {
+                            found = Some(Ok(result));
+                            break;
+                        }
+                        Err(McpError::ToolNotFound(name)) => {
+                            last_err = McpError::ToolNotFound(name);
+                        }
+                        Err(e) => {
+                            found = Some(Err(e));
+                            break;
+                        }
+                    }
+                }
+
+                match found {
+                    Some(result) => result,
+                    None => Err(last_err),
+                }
+            }
+            other => other,
+        }?;
 
         serde_json::to_value(result).map_err(McpError::from)
     }
@@ -253,9 +360,17 @@ impl McpService {
     fn handle_resources_list(&self, params: Option<Value>) -> Result<Value> {
         let cursor = parse_list_cursor(params)?;
 
-        let (resources, next_cursor) = self
-            .resource_registry
-            .list_resources_page(cursor.as_deref(), LIST_PAGE_SIZE);
+        let (resources, next_cursor) = if self.resource_providers.is_empty() {
+            self.resource_registry
+                .list_resources_page(cursor.as_deref(), LIST_PAGE_SIZE)
+        } else {
+            paginate_by(
+                self.merged_resources(),
+                cursor.as_deref(),
+                LIST_PAGE_SIZE,
+                |r| r.uri.as_str(),
+            )
+        };
 
         let result = ResourcesListResult {
             resources,
@@ -263,6 +378,33 @@ impl McpService {
         };
 
         serde_json::to_value(result).map_err(McpError::from)
+    }
+
+    /// Build (or fetch the cached) merged, uri-sorted, deduped list of
+    /// resource definitions from the inventory registry plus all registered
+    /// providers. Registry entries take precedence over provider entries
+    /// with the same uri.
+    fn merged_resources(&self) -> &[ResourceDefinition] {
+        self.merged_resources_cache.get_or_init(|| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut merged: Vec<ResourceDefinition> = Vec::new();
+
+            for def in self.resource_registry.list_resources() {
+                seen.insert(def.uri.clone());
+                merged.push(def);
+            }
+
+            for provider in &self.resource_providers {
+                for def in provider.resources() {
+                    if seen.insert(def.uri.clone()) {
+                        merged.push(def);
+                    }
+                }
+            }
+
+            merged.sort_by(|a, b| a.uri.cmp(&b.uri));
+            merged
+        })
     }
 
     /// Handle resources/read request
@@ -273,7 +415,34 @@ impl McpService {
                 serde_json::from_value(v).map_err(|e| McpError::InvalidParams(e.to_string()))
             })?;
 
-        let content = self.resource_registry.read_resource(&params.uri).await?;
+        let content = match self.resource_registry.read_resource(&params.uri).await {
+            Err(McpError::ResourceNotFound(_)) => {
+                let mut last_err = McpError::ResourceNotFound(params.uri.clone());
+                let mut found = None;
+
+                for provider in &self.resource_providers {
+                    match provider.read_resource(&params.uri).await {
+                        Ok(content) => {
+                            found = Some(Ok(content));
+                            break;
+                        }
+                        Err(McpError::ResourceNotFound(uri)) => {
+                            last_err = McpError::ResourceNotFound(uri);
+                        }
+                        Err(e) => {
+                            found = Some(Err(e));
+                            break;
+                        }
+                    }
+                }
+
+                match found {
+                    Some(result) => result,
+                    None => Err(last_err),
+                }
+            }
+            other => other,
+        }?;
 
         let result = ResourceReadResult {
             contents: vec![content],
@@ -316,6 +485,40 @@ fn parse_list_cursor(params: Option<Value>) -> Result<Option<String>> {
             Ok(params.cursor)
         }
     }
+}
+
+/// Paginate a pre-sorted slice of items using the same opaque-cursor
+/// semantics as `McpToolRegistry::list_tools_page` /
+/// `McpResourceRegistry::list_resources_page`: `cursor` is the key of the
+/// last item on the previous page (or `None` to start from the beginning),
+/// and the returned `next_cursor` is the key of the last item on this page
+/// if more items remain, or `None` on the final page.
+fn paginate_by<T, K>(
+    items: &[T],
+    cursor: Option<&str>,
+    limit: usize,
+    key: K,
+) -> (Vec<T>, Option<String>)
+where
+    T: Clone,
+    K: Fn(&T) -> &str,
+{
+    let start = match cursor {
+        Some(c) => items.partition_point(|item| key(item) <= c),
+        None => 0,
+    };
+
+    let remaining = &items[start..];
+    let take = remaining.len().min(limit.max(1));
+    let page = &remaining[..take];
+
+    let next_cursor = if take < remaining.len() {
+        Some(key(&page[take - 1]).to_string())
+    } else {
+        None
+    };
+
+    (page.to_vec(), next_cursor)
 }
 
 #[cfg(test)]
@@ -442,5 +645,122 @@ mod tests {
 
         assert!(response.contains("error"));
         assert!(response.contains("-32700")); // Parse error
+    }
+
+    struct EchoToolProvider;
+
+    #[async_trait::async_trait]
+    impl McpToolProvider for EchoToolProvider {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "echo".to_string(),
+                description: Some("Echoes back the input".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+            if name == "echo" {
+                Ok(ToolCallResult::text(arguments.to_string()))
+            } else {
+                Err(McpError::ToolNotFound(name.to_string()))
+            }
+        }
+    }
+
+    struct EchoResourceProvider;
+
+    #[async_trait::async_trait]
+    impl McpResourceProvider for EchoResourceProvider {
+        fn resources(&self) -> Vec<ResourceDefinition> {
+            vec![ResourceDefinition {
+                uri: "echo://resource".to_string(),
+                name: "echo".to_string(),
+                description: None,
+                mime_type: None,
+            }]
+        }
+
+        async fn read_resource(&self, uri: &str) -> Result<ResourceContent> {
+            if uri == "echo://resource" {
+                Ok(ResourceContent::text(uri, "echoed content"))
+            } else {
+                Err(McpError::ResourceNotFound(uri.to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_includes_registered_provider_tool() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/list");
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(result.tools.iter().any(|t| t.name == "echo"));
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_dispatches_to_provider() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/call")
+            .with_params(serde_json::json!({ "name": "echo", "arguments": {"a": 1} }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolCallResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_unknown_name_returns_tool_not_found_error() {
+        let service = McpService::new().with_tool_provider(Arc::new(EchoToolProvider));
+        let request = JsonRpcRequest::new("tools/call")
+            .with_params(serde_json::json!({ "name": "does_not_exist", "arguments": {} }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, -32002);
+    }
+
+    #[tokio::test]
+    async fn test_resources_list_includes_registered_provider_resource() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/list");
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(result.resources.iter().any(|r| r.uri == "echo://resource"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_read_dispatches_to_provider() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/read")
+            .with_params(serde_json::json!({ "uri": "echo://resource" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourceReadResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.contents[0].text.as_deref(), Some("echoed content"));
+    }
+
+    #[tokio::test]
+    async fn test_resources_read_unknown_uri_returns_resource_not_found_error() {
+        let service = McpService::new().with_resource_provider(Arc::new(EchoResourceProvider));
+        let request = JsonRpcRequest::new("resources/read")
+            .with_params(serde_json::json!({ "uri": "does://not-exist" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, -32002);
     }
 }
