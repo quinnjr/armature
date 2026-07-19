@@ -20,6 +20,71 @@ use diesel_async::pooled_connection::deadpool::Object as DeadpoolObject;
 use diesel_async::pooled_connection::bb8::Pool as Bb8Pool;
 
 // ============================================================================
+// Configuration helpers
+// ============================================================================
+
+/// Build the PostgreSQL connection URL used to establish new connections,
+/// appending `application_name` / `sslmode` as libpq connection options when
+/// configured.
+///
+/// Note: `tokio-postgres` only recognizes `sslmode` values of `disable`,
+/// `prefer`, or `require` when parsed from a URL (unlike libpq's full set,
+/// e.g. `verify-ca` / `verify-full`); other values will fail to parse when
+/// the connection is established.
+#[cfg(feature = "postgres")]
+fn pg_connection_url(config: &DieselConfig) -> String {
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(name) = &config.application_name {
+        params.push(format!("application_name={}", urlencoding::encode(name)));
+    }
+
+    if let Some(mode) = &config.ssl_mode {
+        params.push(format!("sslmode={}", urlencoding::encode(mode)));
+    }
+
+    if params.is_empty() {
+        return config.database_url.clone();
+    }
+
+    let separator = if config.database_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+
+    format!("{}{separator}{}", config.database_url, params.join("&"))
+}
+
+/// Build a [`diesel_async::pooled_connection::ManagerConfig`] that honors
+/// [`DieselConfig::test_on_checkout`].
+///
+/// `AsyncDieselConnectionManager::new` (used with no config) always defaults
+/// to [`RecyclingMethod::Verified`] regardless of what
+/// `DieselConfig::test_on_checkout` was set to, which left that field dead:
+/// setting it to `false` had no effect. Wiring it here makes
+/// `test_on_checkout = false` actually select the cheaper
+/// [`RecyclingMethod::Fast`] path (only checks for an open transaction, no
+/// round-trip query), while `true` keeps the query-based validation.
+#[cfg(any(feature = "deadpool", feature = "bb8"))]
+fn recycling_manager_config<C>(
+    test_on_checkout: bool,
+) -> diesel_async::pooled_connection::ManagerConfig<C>
+where
+    C: diesel_async::AsyncConnection + 'static,
+{
+    use diesel_async::pooled_connection::{ManagerConfig, RecyclingMethod};
+
+    let mut manager_config = ManagerConfig::default();
+    manager_config.recycling_method = if test_on_checkout {
+        RecyclingMethod::Verified
+    } else {
+        RecyclingMethod::Fast
+    };
+    manager_config
+}
+
+// ============================================================================
 // PostgreSQL Pool
 // ============================================================================
 
@@ -46,10 +111,25 @@ impl PgPool {
                 .unwrap_or(config.database_url.len())]
         );
 
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database_url);
+        let connection_url = pg_connection_url(&config);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+            &connection_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
+        // deadpool has no direct `min_idle` / `max_lifetime` / `idle_timeout`
+        // knobs (it lazily creates connections and has no background reaper);
+        // those fields are only honored on the bb8 backend (`PgPoolBb8`).
+        // `wait_timeout` bounds how long `pool.get()` will wait for a
+        // connection to free up once the pool is saturated (max_size
+        // connections all checked out); without it, `get()` can block
+        // indefinitely under load. There is no separate pool-acquire-timeout
+        // field on `DieselConfig`, so reuse `connect_timeout` for both.
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
+            .create_timeout(Some(config.connect_timeout))
+            .wait_timeout(Some(config.connect_timeout))
+            .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;
 
@@ -102,11 +182,23 @@ impl PgPoolBb8 {
 
         info!("Creating PostgreSQL bb8 connection pool");
 
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database_url);
+        let connection_url = pg_connection_url(&config);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+            &connection_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
         let pool = Bb8Pool::builder()
             .max_size(config.pool_size as u32)
             .connection_timeout(config.connect_timeout)
+            .min_idle(config.min_idle.map(|n| n as u32))
+            .max_lifetime(
+                (config.max_lifetime != std::time::Duration::ZERO).then_some(config.max_lifetime),
+            )
+            .idle_timeout(
+                (config.idle_timeout != std::time::Duration::ZERO).then_some(config.idle_timeout),
+            )
+            .test_on_check_out(config.test_on_checkout)
             .build(manager)
             .await
             .map_err(|e| DieselError::Pool(e.to_string()))?;
@@ -167,11 +259,26 @@ impl MysqlPool {
 
         info!("Creating MySQL connection pool");
 
-        let manager =
-            AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(&config.database_url);
+        let manager = AsyncDieselConnectionManager::<AsyncMysqlConnection>::new_with_config(
+            &config.database_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
+        // `application_name` / `ssl_mode` are not wired here: they are
+        // libpq/PostgreSQL connection-URL options (see `pg_connection_url`)
+        // with no equivalent reachable through `mysql_async`'s URL parsing
+        // without adding `mysql_async` as a direct dependency of this crate.
+        // deadpool also has no `min_idle` / `max_lifetime` / `idle_timeout`
+        // knobs (see the PostgreSQL deadpool path above for details).
+        // See the PostgreSQL deadpool path above: `wait_timeout` bounds how
+        // long `pool.get()` waits for a connection once the pool is
+        // saturated. Reuse `connect_timeout` since there is no separate
+        // pool-acquire-timeout field on `DieselConfig`.
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
+            .create_timeout(Some(config.connect_timeout))
+            .wait_timeout(Some(config.connect_timeout))
+            .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;
 
@@ -227,7 +334,7 @@ impl PoolStatus {
         if self.max_size == 0 {
             0.0
         } else {
-            ((self.size - self.available) as f64 / self.max_size as f64) * 100.0
+            (self.size.saturating_sub(self.available) as f64 / self.max_size as f64) * 100.0
         }
     }
 
@@ -248,3 +355,193 @@ pub type DieselPool = PgPool;
 /// Default MySQL pool type.
 #[cfg(all(feature = "mysql", feature = "deadpool", not(feature = "postgres")))]
 pub type DieselPool = MysqlPool;
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod pool_status_tests {
+    use super::PoolStatus;
+
+    #[test]
+    fn utilization_does_not_panic_when_available_exceeds_size() {
+        // `available` should never legitimately exceed `size`, but the pool
+        // backends are free-form counters read from separate atomics, so a
+        // transient race could momentarily observe `available > size`. The
+        // naive `size - available` subtraction on `usize` would panic
+        // (`attempt to subtract with overflow` in debug builds); this must
+        // saturate instead.
+        let status = PoolStatus {
+            size: 2,
+            available: 5,
+            waiting: 0,
+            max_size: 10,
+        };
+
+        assert_eq!(status.utilization(), 0.0);
+    }
+
+    #[test]
+    fn utilization_reports_expected_percentage() {
+        let status = PoolStatus {
+            size: 10,
+            available: 4,
+            waiting: 0,
+            max_size: 10,
+        };
+
+        assert_eq!(status.utilization(), 60.0);
+    }
+}
+
+#[cfg(all(test, any(feature = "deadpool", feature = "bb8")))]
+mod recycling_manager_config_tests {
+    use super::recycling_manager_config;
+    use diesel_async::pooled_connection::RecyclingMethod;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_on_checkout_true_selects_verified_recycling() {
+        let config = recycling_manager_config::<diesel_async::AsyncPgConnection>(true);
+        assert!(matches!(config.recycling_method, RecyclingMethod::Verified));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_on_checkout_false_selects_fast_recycling() {
+        let config = recycling_manager_config::<diesel_async::AsyncPgConnection>(false);
+        assert!(matches!(config.recycling_method, RecyclingMethod::Fast));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod pg_connection_url_tests {
+    use super::pg_connection_url;
+    use crate::DieselConfig;
+
+    #[test]
+    fn appends_application_name_and_sslmode_as_query_params() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db")
+            .application_name("armature test app")
+            .ssl_mode("require");
+
+        let url = pg_connection_url(&config);
+
+        assert_eq!(
+            url,
+            "postgres://user:pass@localhost/db?application_name=armature%20test%20app&sslmode=require"
+        );
+    }
+
+    #[test]
+    fn leaves_url_untouched_when_neither_is_set() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db");
+        assert_eq!(pg_connection_url(&config), config.database_url);
+    }
+
+    #[test]
+    fn appends_with_ampersand_when_url_already_has_a_query_string() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db?connect_timeout=5")
+            .ssl_mode("disable");
+
+        let url = pg_connection_url(&config);
+
+        assert_eq!(
+            url,
+            "postgres://user:pass@localhost/db?connect_timeout=5&sslmode=disable"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "mysql", feature = "deadpool"))]
+mod mysql_pool_config_tests {
+    use crate::{DieselConfig, MysqlPool};
+    use std::time::Duration;
+
+    // No MySQL container is available in `armature-testkit`, so this only
+    // proves the builder accepts and does not silently drop `connect_timeout`
+    // (a real connection would be needed to prove it reaches the server).
+    #[tokio::test]
+    async fn pool_construction_honors_connect_timeout_without_a_live_server() {
+        let config = DieselConfig::new("mysql://user:pass@127.0.0.1:1/nonexistent_db")
+            .pool_size(1)
+            .connect_timeout(Duration::from_millis(50));
+
+        // deadpool creates connections lazily, so building the pool itself
+        // must succeed even though nothing is listening on that port.
+        let pool = MysqlPool::new(config).await;
+        assert!(pool.is_ok(), "pool construction should not eagerly connect");
+    }
+}
+
+#[cfg(all(test, feature = "postgres", feature = "bb8"))]
+mod bb8_pool_config_tests {
+    use crate::{DieselConfig, PgPoolBb8};
+    use std::time::Duration;
+
+    // bb8's `.max_lifetime(Some(Duration::ZERO))` / `.idle_timeout(Some(Duration::ZERO))`
+    // panic ("must be greater than zero!"), but `Duration::ZERO` is the only
+    // way `DieselConfig` (whose fields are non-`Option` `Duration`s) can
+    // express "disabled". `PgPoolBb8::new` must map zero to `None` before
+    // passing it to bb8's builder, so building a pool with zero
+    // `max_lifetime`/`idle_timeout` must not panic (nor require a live
+    // server, since bb8 with no `min_idle` set does not eagerly connect).
+    #[tokio::test]
+    async fn pool_construction_does_not_panic_on_zero_max_lifetime_and_idle_timeout() {
+        let config = DieselConfig::new("postgres://user:pass@127.0.0.1:1/nonexistent_db")
+            .pool_size(1)
+            .connect_timeout(Duration::from_millis(50))
+            .max_lifetime(Duration::ZERO)
+            .idle_timeout(Duration::ZERO);
+
+        let pool = PgPoolBb8::new(config).await;
+        assert!(
+            pool.is_ok(),
+            "bb8 pool construction should not panic or fail on zero max_lifetime/idle_timeout"
+        );
+    }
+}
+
+/// Requires Docker; skips itself when unavailable (see `armature_testkit::docker_available`).
+#[cfg(all(test, feature = "postgres", feature = "deadpool"))]
+mod pg_pool_config_integration_tests {
+    use crate::{DieselConfig, PgPool};
+    use diesel::QueryableByName;
+    use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl;
+    use std::time::Duration;
+
+    #[derive(QueryableByName)]
+    struct ApplicationNameRow {
+        #[diesel(sql_type = Text)]
+        application_name: String,
+    }
+
+    #[tokio::test]
+    async fn application_name_reaches_the_server() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: docker not available");
+            return;
+        }
+
+        let container = armature_testkit::containers::PostgresContainer::start().await;
+        let config = DieselConfig::new(container.url())
+            .application_name("armature_test")
+            .connect_timeout(Duration::from_secs(5));
+
+        let pool = PgPool::new(config).await.expect("failed to build pg pool");
+        let mut conn = pool.get().await.expect("failed to get connection");
+
+        let rows: Vec<ApplicationNameRow> = diesel::sql_query("SHOW application_name")
+            .load(&mut conn)
+            .await
+            .expect("SHOW application_name failed");
+
+        assert_eq!(
+            rows.into_iter().next().unwrap().application_name,
+            "armature_test"
+        );
+    }
+}

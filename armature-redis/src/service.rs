@@ -58,8 +58,24 @@ impl RedisService {
 
     /// Get a connection from the pool.
     pub async fn get(&self) -> Result<RedisConnection<'_>> {
-        let conn = self.pool.get().await?;
-        Ok(RedisConnection::new(conn))
+        self.pool.get().await
+    }
+
+    /// Bound a single command's execution by `RedisConfig::command_timeout`.
+    ///
+    /// Every convenience method below runs its Redis round-trip through this
+    /// wrapper so `command_timeout` (documented on `RedisConfig` but
+    /// previously never read anywhere) actually bounds command latency,
+    /// instead of only pool checkout being bounded by `connection_timeout`.
+    async fn with_timeout<T>(
+        &self,
+        fut: impl std::future::Future<Output = std::result::Result<T, redis::RedisError>>,
+    ) -> Result<T> {
+        match tokio::time::timeout(self.config.command_timeout, fut).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Err(RedisError::Timeout),
+        }
     }
 
     /// Get or lazily build the reusable dedicated `redis::Client`.
@@ -99,10 +115,9 @@ impl RedisService {
     /// Check if the connection is healthy.
     pub async fn health_check(&self) -> Result<()> {
         let mut conn = self.get().await?;
-        let _: String = redis::cmd("PING")
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| RedisError::Connection(e.to_string()))?;
+        let _: String = self
+            .with_timeout(redis::cmd("PING").query_async(&mut conn))
+            .await?;
         Ok(())
     }
 
@@ -120,7 +135,7 @@ impl RedisService {
     /// Get a value.
     pub async fn get_value<T: redis::FromRedisValue>(&self, key: &str) -> Result<Option<T>> {
         let mut conn = self.get().await?;
-        let value: Option<T> = conn.get(key).await?;
+        let value: Option<T> = self.with_timeout(conn.get(key)).await?;
         Ok(value)
     }
 
@@ -132,10 +147,8 @@ impl RedisService {
     ) -> Result<()> {
         let mut conn = self.get().await?;
         // Use redis::cmd to avoid ToSingleRedisArg requirement
-        let _: () = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .query_async(&mut *conn)
+        let _: () = self
+            .with_timeout(redis::cmd("SET").arg(key).arg(value).query_async(&mut conn))
             .await?;
         Ok(())
     }
@@ -149,12 +162,15 @@ impl RedisService {
     ) -> Result<()> {
         let mut conn = self.get().await?;
         // Use set with EX option instead of set_ex which requires ToSingleRedisArg
-        let _: () = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("EX")
-            .arg(ttl.as_secs())
-            .query_async(&mut *conn)
+        let _: () = self
+            .with_timeout(
+                redis::cmd("SET")
+                    .arg(key)
+                    .arg(value)
+                    .arg("EX")
+                    .arg(ttl.as_secs())
+                    .query_async(&mut conn),
+            )
             .await?;
         Ok(())
     }
@@ -162,28 +178,30 @@ impl RedisService {
     /// Delete a key.
     pub async fn delete(&self, key: &str) -> Result<bool> {
         let mut conn = self.get().await?;
-        let deleted: u32 = conn.del(key).await?;
+        let deleted: u32 = self.with_timeout(conn.del(key)).await?;
         Ok(deleted > 0)
     }
 
     /// Check if a key exists.
     pub async fn exists(&self, key: &str) -> Result<bool> {
         let mut conn = self.get().await?;
-        let exists: bool = conn.exists(key).await?;
+        let exists: bool = self.with_timeout(conn.exists(key)).await?;
         Ok(exists)
     }
 
     /// Set expiration on a key.
     pub async fn expire(&self, key: &str, ttl: Duration) -> Result<bool> {
         let mut conn = self.get().await?;
-        let result: bool = conn.expire(key, ttl.as_secs() as i64).await?;
+        let result: bool = self
+            .with_timeout(conn.expire(key, ttl.as_secs() as i64))
+            .await?;
         Ok(result)
     }
 
     /// Get TTL of a key.
     pub async fn ttl(&self, key: &str) -> Result<Option<Duration>> {
         let mut conn = self.get().await?;
-        let ttl: i64 = conn.ttl(key).await?;
+        let ttl: i64 = self.with_timeout(conn.ttl(key)).await?;
         if ttl < 0 {
             Ok(None)
         } else {
@@ -194,7 +212,7 @@ impl RedisService {
     /// Increment a counter.
     pub async fn incr(&self, key: &str, delta: i64) -> Result<i64> {
         let mut conn = self.get().await?;
-        let value: i64 = conn.incr(key, delta).await?;
+        let value: i64 = self.with_timeout(conn.incr(key, delta)).await?;
         Ok(value)
     }
 
@@ -205,7 +223,7 @@ impl RedisService {
         field: &str,
     ) -> Result<Option<T>> {
         let mut conn = self.get().await?;
-        let value: Option<T> = conn.hget(key, field).await?;
+        let value: Option<T> = self.with_timeout(conn.hget(key, field)).await?;
         Ok(value)
     }
 
@@ -218,11 +236,14 @@ impl RedisService {
     ) -> Result<()> {
         let mut conn = self.get().await?;
         // Use redis::cmd to avoid ToSingleRedisArg requirement
-        let _: () = redis::cmd("HSET")
-            .arg(key)
-            .arg(field)
-            .arg(value)
-            .query_async(&mut *conn)
+        let _: () = self
+            .with_timeout(
+                redis::cmd("HSET")
+                    .arg(key)
+                    .arg(field)
+                    .arg(value)
+                    .query_async(&mut conn),
+            )
             .await?;
         Ok(())
     }
@@ -230,7 +251,7 @@ impl RedisService {
     /// Hash get all.
     pub async fn hgetall<T: redis::FromRedisValue>(&self, key: &str) -> Result<T> {
         let mut conn = self.get().await?;
-        let value: T = conn.hgetall(key).await?;
+        let value: T = self.with_timeout(conn.hgetall(key)).await?;
         Ok(value)
     }
 
@@ -241,18 +262,25 @@ impl RedisService {
         values: &[T],
     ) -> Result<u64> {
         let mut conn = self.get().await?;
-        let len: u64 = conn.lpush(key, values).await?;
+        let len: u64 = self.with_timeout(conn.lpush(key, values)).await?;
         Ok(len)
     }
 
     /// List pop (right).
     pub async fn rpop<T: redis::FromRedisValue>(&self, key: &str) -> Result<Option<T>> {
         let mut conn = self.get().await?;
-        let value: Option<T> = conn.rpop(key, None).await?;
+        let value: Option<T> = self.with_timeout(conn.rpop(key, None)).await?;
         Ok(value)
     }
 
     /// Blocking list pop.
+    ///
+    /// Deliberately **not** wrapped in `with_timeout`/`command_timeout`: the
+    /// caller-supplied `timeout` already bounds how long this blocks, and it
+    /// may legitimately be longer than `command_timeout` (which defaults to
+    /// 30s and is meant to bound ordinary, non-blocking round-trips).
+    /// Wrapping this in `command_timeout` too would silently truncate a
+    /// caller's longer block wait.
     pub async fn brpop<T: redis::FromRedisValue>(
         &self,
         key: &str,
@@ -270,14 +298,14 @@ impl RedisService {
         members: &[T],
     ) -> Result<u64> {
         let mut conn = self.get().await?;
-        let added: u64 = conn.sadd(key, members).await?;
+        let added: u64 = self.with_timeout(conn.sadd(key, members)).await?;
         Ok(added)
     }
 
     /// Set members.
     pub async fn smembers<T: redis::FromRedisValue>(&self, key: &str) -> Result<Vec<T>> {
         let mut conn = self.get().await?;
-        let members: Vec<T> = conn.smembers(key).await?;
+        let members: Vec<T> = self.with_timeout(conn.smembers(key)).await?;
         Ok(members)
     }
 
@@ -289,10 +317,13 @@ impl RedisService {
     ) -> Result<bool> {
         let mut conn = self.get().await?;
         // Use redis::cmd to avoid ToSingleRedisArg requirement
-        let is_member: bool = redis::cmd("SISMEMBER")
-            .arg(key)
-            .arg(member)
-            .query_async(&mut *conn)
+        let is_member: bool = self
+            .with_timeout(
+                redis::cmd("SISMEMBER")
+                    .arg(key)
+                    .arg(member)
+                    .query_async(&mut conn),
+            )
             .await?;
         Ok(is_member)
     }
@@ -306,7 +337,9 @@ impl RedisService {
     ) -> Result<T> {
         let mut conn = self.get().await?;
         let script = redis::Script::new(script);
-        let result: T = script.key(keys).arg(args).invoke_async(&mut *conn).await?;
+        let result: T = self
+            .with_timeout(script.key(keys).arg(args).invoke_async(&mut conn))
+            .await?;
         Ok(result)
     }
 
@@ -321,7 +354,9 @@ impl RedisService {
             return Ok(Vec::new());
         }
         let mut conn = self.get().await?;
-        let values: Vec<Option<T>> = redis::cmd("MGET").arg(keys).query_async(&mut *conn).await?;
+        let values: Vec<Option<T>> = self
+            .with_timeout(redis::cmd("MGET").arg(keys).query_async(&mut conn))
+            .await?;
         Ok(values)
     }
 
@@ -341,7 +376,7 @@ impl RedisService {
         for (key, value) in items {
             cmd.arg(*key).arg(value);
         }
-        let _: () = cmd.query_async(&mut *conn).await?;
+        let _: () = self.with_timeout(cmd.query_async(&mut conn)).await?;
         Ok(())
     }
 
@@ -353,7 +388,9 @@ impl RedisService {
             return Ok(0);
         }
         let mut conn = self.get().await?;
-        let deleted: u64 = redis::cmd("DEL").arg(keys).query_async(&mut *conn).await?;
+        let deleted: u64 = self
+            .with_timeout(redis::cmd("DEL").arg(keys).query_async(&mut conn))
+            .await?;
         Ok(deleted)
     }
 
@@ -386,7 +423,7 @@ impl RedisService {
         let mut conn = self.get().await?;
         let mut pipe = redis::pipe();
         build(&mut pipe);
-        let result: T = pipe.query_async(&mut *conn).await?;
+        let result: T = self.with_timeout(pipe.query_async(&mut conn)).await?;
         Ok(result)
     }
 }
@@ -403,6 +440,88 @@ pub struct PoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unit-level proof that `with_timeout` actually enforces
+    /// `command_timeout`, without needing a live server: a future that never
+    /// resolves within the configured window must come back as
+    /// `RedisError::Timeout`, and one that resolves in time must pass its
+    /// value through unchanged.
+    #[tokio::test]
+    async fn with_timeout_enforces_command_timeout() {
+        let config = RedisConfig::builder()
+            .command_timeout(Duration::from_millis(20))
+            .build();
+        let redis = RedisService::from_pool(
+            config,
+            crate::pool::RedisPool::Single(bb8::Pool::builder().build_unchecked(
+                crate::pool::NamedRedisConnectionManager::new(
+                    bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:1").unwrap(),
+                    None,
+                ),
+            )),
+        );
+
+        // A future that resolves immediately must pass through untouched.
+        let fast: std::result::Result<i32, redis::RedisError> = Ok(42);
+        let result = redis.with_timeout(async { fast }).await;
+        assert_eq!(result.unwrap(), 42);
+
+        // A future that outlives `command_timeout` must time out.
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok::<i32, redis::RedisError>(1)
+        };
+        let result = redis.with_timeout(slow).await;
+        assert!(
+            matches!(result, Err(RedisError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
+    }
+
+    /// End-to-end proof (requires Docker) that `command_timeout` bounds real
+    /// command execution: a fast command against a live server succeeds, and
+    /// a Lua script that intentionally blocks the server past
+    /// `command_timeout` (via `DEBUG SLEEP`) comes back as a timeout error
+    /// rather than hanging or succeeding after the configured window.
+    #[tokio::test]
+    async fn command_timeout_bounds_live_command_execution() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let config = RedisConfig::builder()
+            .url(container.url())
+            .command_timeout(Duration::from_millis(200))
+            .build();
+        let redis = RedisService::new(config).await.unwrap();
+
+        // Fast command comfortably within the timeout succeeds.
+        redis.set_value("wf2:timeout_test", "v").await.unwrap();
+        let value: Option<String> = redis.get_value("wf2:timeout_test").await.unwrap();
+        assert_eq!(value, Some("v".to_string()));
+
+        // `DEBUG SLEEP` blocks the server for 1s; routed through the same
+        // `with_timeout` wrapper every convenience method uses, it must time
+        // out against a 200ms command_timeout instead of hanging or
+        // eventually succeeding. (Note: `DEBUG SLEEP` can't be called from a
+        // Lua script via `eval` — Redis disallows it there — so we exercise
+        // `with_timeout` directly here, exactly as `eval`/`get_value`/etc do
+        // internally.)
+        let mut conn = redis.get().await.unwrap();
+        let result: Result<()> = redis
+            .with_timeout(
+                redis::cmd("DEBUG")
+                    .arg("SLEEP")
+                    .arg(1)
+                    .query_async(&mut conn),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(RedisError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires Redis"]

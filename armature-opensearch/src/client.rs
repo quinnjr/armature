@@ -1,13 +1,14 @@
 //! OpenSearch client implementation.
 
 use crate::{
+    bulk::{BulkOperation, BulkResponse},
     config::OpenSearchConfig,
     document::Document,
-    error::{OpenSearchError, Result},
+    error::{OpenSearchError, Result, error_reason, json_or_error},
     index::IndexManager,
     search::SearchBuilder,
 };
-use armature_log::{debug, info};
+use armature_log::{debug, info, warn};
 use opensearch::{
     OpenSearch,
     http::transport::{SingleNodeConnectionPool, TransportBuilder},
@@ -15,6 +16,7 @@ use opensearch::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// OpenSearch client for document operations.
 #[derive(Clone)]
@@ -36,11 +38,70 @@ impl OpenSearchClient {
         let url = opensearch::http::Url::parse(url)
             .map_err(|e| OpenSearchError::Validation(format!("Invalid URL: {}", e)))?;
 
+        // Refuse to send mTLS client certificates or AWS SigV4 credentials over a
+        // non-TLS connection: both are secrets/identity material, and sending them
+        // in cleartext over the network defeats the point of authenticating at all.
+        // Loopback is exempted so local stub/integration tests (which never speak
+        // TLS) keep working.
+        #[cfg(feature = "aws-auth")]
+        let aws_auth_configured = config.aws_region.is_some();
+        #[cfg(not(feature = "aws-auth"))]
+        let aws_auth_configured = false;
+
+        if (config.tls.is_some() || aws_auth_configured) && url.scheme() != "https" {
+            let host = url.host_str().unwrap_or("");
+            let is_loopback =
+                host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
+            if !is_loopback {
+                return Err(OpenSearchError::Validation(format!(
+                    "config.url '{}' uses scheme '{}', but TLS client certificates and/or AWS \
+                     SigV4 credentials must not be sent over a non-https connection; use an \
+                     https:// URL (loopback hosts are exempt for local testing)",
+                    url,
+                    url.scheme()
+                )));
+            }
+        }
+
+        // Basic auth and AWS SigV4 auth are mutually exclusive: the opensearch
+        // crate's TransportBuilder can only hold a single Credentials value, so
+        // configuring both would silently discard basic auth in favor of SigV4.
+        #[cfg(feature = "aws-auth")]
+        if config.aws_region.is_some() && config.username.is_some() && config.password.is_some() {
+            return Err(OpenSearchError::Validation(
+                "Basic auth (username/password) cannot be combined with AWS SigV4 auth \
+                 (aws_region): the opensearch crate's TransportBuilder can only hold a single \
+                 Credentials value at a time; configure one or the other"
+                    .to_string(),
+            ));
+        }
+
         let conn_pool = SingleNodeConnectionPool::new(url);
         let mut builder = TransportBuilder::new(conn_pool);
 
         // Configure timeouts
         builder = builder.timeout(config.request_timeout).disable_proxy();
+
+        // `TransportBuilder` only exposes a single overall request timeout, covering
+        // everything from connect until the response body finishes; it has no separate
+        // connect-phase timeout. `connect_timeout` therefore can't be applied independently.
+        if config.connect_timeout != Duration::from_secs(10) {
+            warn!(
+                "OpenSearchConfig::connect_timeout ({:?}) is not applied: the opensearch crate's \
+                 TransportBuilder has no separate connect-phase timeout, only the combined \
+                 `request_timeout` ({:?}) is honored",
+                config.connect_timeout, config.request_timeout
+            );
+        }
+
+        // Response gzip decompression is always-on (the `opensearch` crate is built with
+        // reqwest's `gzip` feature) and `TransportBuilder` exposes no way to disable it.
+        if !config.compression {
+            warn!(
+                "OpenSearchConfig::compression = false is not applied: the opensearch crate's \
+                 TransportBuilder cannot disable gzip response decompression"
+            );
+        }
 
         // Configure basic auth
         if let (Some(user), Some(pass)) = (&config.username, &config.password) {
@@ -48,6 +109,106 @@ impl OpenSearchClient {
                 user.clone(),
                 pass.clone(),
             ));
+        }
+
+        // Configure AWS SigV4 auth for AWS OpenSearch Service / Serverless.
+        // Every outgoing request is signed by the `opensearch` crate's own
+        // `aws-auth` support (opensearch::http::transport signs via
+        // aws-sigv4 immediately before send, using the service name "es").
+        #[cfg(feature = "aws-auth")]
+        if let Some(region) = &config.aws_region {
+            let provider = config.aws_credentials_provider.clone().ok_or_else(|| {
+                OpenSearchError::Validation(
+                    "aws_region is set but no aws_credentials_provider was configured; \
+                     call OpenSearchConfig::with_aws_credentials_provider to sign requests, \
+                     or unset aws_region to use unauthenticated/basic auth"
+                        .to_string(),
+                )
+            })?;
+
+            builder = builder.auth(opensearch::auth::Credentials::AwsSigV4(
+                provider,
+                aws_types::region::Region::new(region.clone()),
+            ));
+        }
+
+        // Configure TLS: CA trust and mutual-TLS client certificates.
+        #[cfg(any(feature = "rustls", feature = "native-tls"))]
+        if let Some(tls) = &config.tls {
+            use opensearch::{
+                auth::{ClientCertificate, Credentials as OsCredentials},
+                cert::{Certificate as OsCertificate, CertificateValidation},
+            };
+
+            if tls.danger_accept_invalid_certs {
+                if tls.ca_cert.is_some() {
+                    warn!(
+                        "TlsConfig::ca_cert is ignored because danger_accept_invalid_certs is \
+                         set; certificate validation is fully disabled"
+                    );
+                }
+                builder = builder.cert_validation(CertificateValidation::None);
+            } else if let Some(ca_cert_path) = &tls.ca_cert {
+                let pem = std::fs::read(ca_cert_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::ca_cert '{}': {}",
+                        ca_cert_path, e
+                    ))
+                })?;
+                let cert = OsCertificate::from_pem(&pem).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Invalid TlsConfig::ca_cert PEM at '{}': {}",
+                        ca_cert_path, e
+                    ))
+                })?;
+                builder = builder.cert_validation(CertificateValidation::Full(cert));
+            }
+
+            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                if config.username.is_some() && config.password.is_some() {
+                    return Err(OpenSearchError::Validation(
+                        "TlsConfig client_cert/client_key (mTLS) cannot be combined with basic \
+                         auth: the opensearch crate's TransportBuilder can only hold a single \
+                         Credentials value at a time; configure one or the other"
+                            .to_string(),
+                    ));
+                }
+
+                #[cfg(feature = "aws-auth")]
+                if config.aws_region.is_some() {
+                    return Err(OpenSearchError::Validation(
+                        "TlsConfig client_cert/client_key (mTLS) cannot be combined with AWS \
+                         SigV4 auth: the opensearch crate's TransportBuilder can only hold a \
+                         single Credentials value at a time; configure one or the other"
+                            .to_string(),
+                    ));
+                }
+
+                let mut pem = std::fs::read(cert_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::client_cert '{}': {}",
+                        cert_path, e
+                    ))
+                })?;
+                let mut key_pem = std::fs::read(key_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::client_key '{}': {}",
+                        key_path, e
+                    ))
+                })?;
+                pem.push(b'\n');
+                pem.append(&mut key_pem);
+
+                builder = builder.auth(OsCredentials::Certificate(ClientCertificate::Pem(pem)));
+            }
+        }
+
+        #[cfg(not(any(feature = "rustls", feature = "native-tls")))]
+        if config.tls.is_some() {
+            warn!(
+                "OpenSearchConfig::tls is set but neither the `rustls` nor `native-tls` feature \
+                 is enabled on armature-opensearch; TLS options are not applied"
+            );
         }
 
         let transport = builder
@@ -100,18 +261,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        let body = json_or_error(response).await?;
 
         Ok(body["_id"].as_str().unwrap_or(id).to_string())
     }
@@ -131,18 +281,7 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-        let body: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        let body = json_or_error(response).await?;
 
         Ok(body["_id"].as_str().unwrap_or("").to_string())
     }
@@ -204,25 +343,14 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::DocumentNotFound {
                 index: index.to_string(),
                 id: id.to_string(),
             });
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -243,25 +371,14 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::DocumentNotFound {
                 index: index.to_string(),
                 id: id.to_string(),
             });
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -277,22 +394,11 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Ok(false);
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body.get("error")
-                    .and_then(|e| e.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(true)
     }
@@ -308,7 +414,8 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        let body: Value = response.json().await?;
+        let body = json_or_error(response).await?;
+
         let deleted = body["deleted"].as_u64().unwrap_or(0);
 
         Ok(deleted)
@@ -342,7 +449,12 @@ impl OpenSearchClient {
             .send()
             .await?;
 
+        let status = response.status_code();
         let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
 
         if result["errors"].as_bool().unwrap_or(false) {
             let items = result["items"].as_array();
@@ -397,7 +509,12 @@ impl OpenSearchClient {
             .send()
             .await?;
 
+        let status = response.status_code();
         let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
 
         if result["errors"].as_bool().unwrap_or(false) {
             let items = result["items"].as_array();
@@ -429,6 +546,47 @@ impl OpenSearchClient {
         Ok(ids.len())
     }
 
+    /// Execute a batch of mixed bulk operations (index/create/update/delete) in a
+    /// single request, in the order given, using [`BulkOperation::to_bulk_lines`]
+    /// to render each operation's NDJSON action/data lines.
+    ///
+    /// Unlike [`Self::bulk_index`] and [`Self::bulk_delete`], this returns the raw
+    /// [`BulkResponse`] (including per-item results) rather than failing the whole
+    /// call when some items error; inspect `BulkResponse::errors` and
+    /// `BulkResponse::items` to see individual outcomes.
+    pub async fn bulk_execute<T: Document>(
+        &self,
+        operations: Vec<BulkOperation<T>>,
+    ) -> Result<BulkResponse> {
+        if operations.is_empty() {
+            return Ok(BulkResponse {
+                took: 0,
+                errors: false,
+                items: Vec::new(),
+            });
+        }
+
+        debug!("Executing {} bulk operations", operations.len());
+
+        let mut body: Vec<opensearch::http::request::JsonBody<Value>> = Vec::new();
+        for op in &operations {
+            for line in op.to_bulk_lines()? {
+                body.push(line.into());
+            }
+        }
+
+        let response = self
+            .client
+            .bulk(opensearch::BulkParts::None)
+            .body(body)
+            .send()
+            .await?;
+
+        let result = json_or_error(response).await?;
+
+        Ok(serde_json::from_value(result)?)
+    }
+
     // =========================================================================
     // Utility Methods
     // =========================================================================
@@ -437,11 +595,14 @@ impl OpenSearchClient {
     pub async fn refresh(&self, index: &str) -> Result<()> {
         debug!("Refreshing index {}", index);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .refresh(opensearch::indices::IndicesRefreshParts::Index(&[index]))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -455,13 +616,15 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        Ok(response.json().await?)
+        let body = json_or_error(response).await?;
+
+        Ok(body)
     }
 
     /// Ping the cluster.
     pub async fn ping(&self) -> Result<bool> {
-        let response = self.client.ping().send().await;
-        Ok(response.is_ok())
+        let response = self.client.ping().send().await?;
+        Ok(response.status_code().is_success())
     }
 }
 
@@ -470,5 +633,101 @@ impl std::fmt::Debug for OpenSearchClient {
         f.debug_struct("OpenSearchClient")
             .field("urls", &self.config.urls)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TlsConfig;
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn mtls_conflicts_with_basic_auth() {
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_basic_auth("user", "pass")
+            .with_tls(TlsConfig::default().with_client_cert("cert.pem", "key.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("mTLS client cert combined with basic auth must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("basic auth") || msg.contains("mTLS"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[cfg(all(feature = "aws-auth", any(feature = "rustls", feature = "native-tls")))]
+    #[test]
+    fn mtls_conflicts_with_sigv4_auth() {
+        let provider = aws_credential_types::provider::SharedCredentialsProvider::new(
+            aws_credential_types::Credentials::for_tests(),
+        );
+
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_aws_region("us-east-1")
+            .with_aws_credentials_provider(provider)
+            .with_tls(TlsConfig::default().with_client_cert("cert.pem", "key.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("mTLS client cert combined with AWS SigV4 auth must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("SigV4"), "unexpected error: {msg}");
+    }
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn ca_cert_missing_file_produces_read_error() {
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_tls(TlsConfig::with_ca_cert("/no/such/path/ca.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("a missing ca_cert file must fail client construction");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to read"),
+            "expected a read-failure message, got: {msg}"
+        );
+    }
+
+    #[cfg(any(feature = "rustls", feature = "native-tls"))]
+    #[test]
+    fn tls_over_non_loopback_http_requires_https() {
+        let config = OpenSearchConfig::new("http://example.com:9200")
+            .with_tls(TlsConfig::with_ca_cert("/no/such/path/ca.pem"));
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("TLS config over a non-https, non-loopback URL must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("https"), "unexpected error: {msg}");
+    }
+
+    #[cfg(feature = "aws-auth")]
+    #[test]
+    fn sigv4_over_non_loopback_http_requires_https() {
+        let config = OpenSearchConfig::new("http://example.com:9200").with_aws_region("us-east-1");
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("AWS SigV4 over a non-https, non-loopback URL must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("https"), "unexpected error: {msg}");
+    }
+
+    #[cfg(feature = "aws-auth")]
+    #[test]
+    fn basic_auth_conflicts_with_sigv4_auth() {
+        let provider = aws_credential_types::provider::SharedCredentialsProvider::new(
+            aws_credential_types::Credentials::for_tests(),
+        );
+
+        let config = OpenSearchConfig::new("https://localhost:9200")
+            .with_basic_auth("user", "pass")
+            .with_aws_region("us-east-1")
+            .with_aws_credentials_provider(provider);
+
+        let err = OpenSearchClient::new(config)
+            .expect_err("basic auth combined with AWS SigV4 auth must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("SigV4"), "unexpected error: {msg}");
     }
 }

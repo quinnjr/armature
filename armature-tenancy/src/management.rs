@@ -569,8 +569,23 @@ impl TenantManager {
         // Generate ID
         let id = uuid::Uuid::new_v4().to_string();
 
+        // `Tenant::cache_key`/`TenantCache::clear_tenant` match keys with a
+        // plain `starts_with("tenant:{id}:")` prefix test (see cache.rs), so
+        // a tenant `id` containing ':' could over-match and delete/read keys
+        // belonging to another tenant. Server-generated IDs are UUIDv4
+        // strings (hex digits and '-' only), so this can never fire in
+        // practice; the assert documents and guards the invariant in case
+        // the ID generation strategy ever changes.
+        debug_assert!(
+            !id.contains(':'),
+            "generated tenant id must not contain ':' (breaks cache key prefix matching)"
+        );
+
         // Create core tenant
         let mut tenant = Tenant::new(&id, &request.slug);
+        if let Some(display_name) = &request.display_name {
+            tenant = tenant.with_display_name(display_name.clone());
+        }
         if let Some(domain) = &request.domain {
             tenant = tenant.with_domain(domain);
         }
@@ -597,10 +612,12 @@ impl TenantManager {
                 self.store.update(&managed).await?;
             }
             Err(e) => {
-                // Provisioning failed - mark as terminated and clean up
-                managed.status = TenantStatus::Terminated;
-                managed.suspension_reason = Some(format!("Provisioning failed: {}", e));
-                self.store.update(&managed).await?;
+                // Provisioning failed. Delete the just-created record instead
+                // of leaving a Terminated tombstone around: a tombstone would
+                // permanently block the slug, since `get_by_slug` above finds
+                // records regardless of status. Deleting frees the slug for
+                // a subsequent create() to reclaim it.
+                self.store.delete(&managed.tenant.id).await?;
                 return Err(e);
             }
         }
@@ -632,7 +649,7 @@ impl TenantManager {
 
         // Apply updates
         if let Some(name) = request.display_name {
-            managed.tenant.name = name;
+            managed.tenant.display_name = Some(name);
         }
         if let Some(domain) = request.domain {
             managed.tenant.domain = domain;
@@ -809,6 +826,56 @@ impl InMemoryManagedTenantStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Shared filter predicate used by both `filtered` (which clones matches
+    /// for `list`) and `filtered_count` (which counts without cloning).
+    fn matches(filter: &TenantFilter, t: &ManagedTenant) -> bool {
+        if let Some(status) = filter.status {
+            if t.status != status {
+                return false;
+            }
+        }
+        if let Some(plan) = filter.plan {
+            if t.plan != plan {
+                return false;
+            }
+        }
+        if let Some(ref owner) = filter.owner_id {
+            if t.owner_id.as_ref() != Some(owner) {
+                return false;
+            }
+        }
+        if let Some(ref search) = filter.search {
+            if !t.tenant.name.contains(search) && !t.tenant.id.contains(search) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Apply the filter predicate to every stored tenant, without pagination.
+    ///
+    /// Shared by `list` (which additionally paginates the result) and
+    /// `count` (which must report the full filtered size, not a page size).
+    fn filtered(&self, filter: &TenantFilter) -> Vec<ManagedTenant> {
+        let tenants = self.tenants.read();
+        tenants
+            .values()
+            .filter(|t| Self::matches(filter, t))
+            .cloned()
+            .collect()
+    }
+
+    /// Count stored tenants matching the filter without cloning any of
+    /// them (unlike `filtered().len()`, which clones every matching
+    /// `ManagedTenant` just to discard it after counting).
+    fn filtered_count(&self, filter: &TenantFilter) -> usize {
+        let tenants = self.tenants.read();
+        tenants
+            .values()
+            .filter(|t| Self::matches(filter, t))
+            .count()
+    }
 }
 
 #[async_trait]
@@ -853,34 +920,7 @@ impl ManagedTenantStore for InMemoryManagedTenantStore {
     }
 
     async fn list(&self, filter: &TenantFilter) -> Result<Vec<ManagedTenant>, TenantError> {
-        let tenants = self.tenants.read();
-        let mut results: Vec<_> = tenants
-            .values()
-            .filter(|t| {
-                if let Some(status) = filter.status {
-                    if t.status != status {
-                        return false;
-                    }
-                }
-                if let Some(plan) = filter.plan {
-                    if t.plan != plan {
-                        return false;
-                    }
-                }
-                if let Some(ref owner) = filter.owner_id {
-                    if t.owner_id.as_ref() != Some(owner) {
-                        return false;
-                    }
-                }
-                if let Some(ref search) = filter.search {
-                    if !t.tenant.name.contains(search) && !t.tenant.id.contains(search) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .cloned()
-            .collect();
+        let mut results = self.filtered(filter);
 
         // Sort by created_at descending
         results.sort_by_key(|r| std::cmp::Reverse(r.created_at));
@@ -892,8 +932,12 @@ impl ManagedTenantStore for InMemoryManagedTenantStore {
     }
 
     async fn count(&self, filter: &TenantFilter) -> Result<u64, TenantError> {
-        let list = self.list(filter).await?;
-        Ok(list.len() as u64)
+        // Count the full filtered set BEFORE pagination is applied - `list`
+        // truncates to a page, which previously made `count` report the
+        // page size instead of the total number of matches. Uses
+        // `filtered_count`, which counts under the read lock without
+        // cloning every matching `ManagedTenant`.
+        Ok(self.filtered_count(filter) as u64)
     }
 
     async fn update_usage(&self, id: &str, usage: &TenantUsage) -> Result<(), TenantError> {
@@ -961,6 +1005,109 @@ mod tests {
 
         let violations = usage.exceeds_limits(&limits);
         assert!(!violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_persists_display_name() {
+        let store = Arc::new(InMemoryManagedTenantStore::new());
+        let manager = TenantManager::with_store(store);
+
+        let request = CreateTenantRequest::new("acme-corp").with_display_name("Acme Inc");
+
+        let tenant = manager.create(request).await.unwrap();
+        assert_eq!(tenant.tenant.name, "acme-corp");
+        assert_eq!(
+            tenant.tenant.display_name.as_deref(),
+            Some("Acme Inc"),
+            "display_name from CreateTenantRequest must be persisted, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_writes_display_name_not_slug() {
+        let store = Arc::new(InMemoryManagedTenantStore::new());
+        let manager = TenantManager::with_store(store);
+
+        let request = CreateTenantRequest::new("acme");
+        let created = manager.create(request).await.unwrap();
+        assert_eq!(created.tenant.name, "acme");
+        assert_eq!(created.tenant.display_name, None);
+
+        let update = UpdateTenantRequest::new().with_display_name("Acme Corp");
+        let updated = manager.update(&created.tenant.id, update).await.unwrap();
+
+        assert_eq!(
+            updated.tenant.display_name.as_deref(),
+            Some("Acme Corp"),
+            "update() must write display_name into the display_name field"
+        );
+        assert_eq!(
+            updated.tenant.name, "acme",
+            "update() must not overwrite the tenant slug when only display_name changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_returns_full_filtered_size_not_page_size() {
+        let store = Arc::new(InMemoryManagedTenantStore::new());
+        let manager = TenantManager::with_store(store);
+
+        for i in 0..200 {
+            manager
+                .create(
+                    CreateTenantRequest::new(format!("tenant-{i}"))
+                        .with_plan(TenantPlan::Professional),
+                )
+                .await
+                .unwrap();
+        }
+
+        let filter = TenantFilter::new()
+            .with_plan(TenantPlan::Professional)
+            .with_pagination(0, 50);
+
+        let page = manager.list(&filter).await.unwrap();
+        assert_eq!(page.len(), 50, "page should be limited by pagination");
+
+        let total = manager.count(&filter).await.unwrap();
+        assert_eq!(
+            total, 200,
+            "count() must reflect the full filtered set, not the paginated page size"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provisioning_failure_reclaims_slug() {
+        struct FailingProvisioner;
+
+        #[async_trait]
+        impl TenantProvisioner for FailingProvisioner {
+            async fn provision(&self, _tenant: &ManagedTenant) -> Result<(), TenantError> {
+                Err(TenantError::Invalid("provisioning boom".to_string()))
+            }
+            async fn deprovision(&self, _tenant: &ManagedTenant) -> Result<(), TenantError> {
+                Ok(())
+            }
+        }
+
+        let store = Arc::new(InMemoryManagedTenantStore::new());
+        let failing_manager = TenantManager::new(store.clone(), Arc::new(FailingProvisioner));
+
+        let request = CreateTenantRequest::new("reclaim-me");
+        let result = failing_manager.create(request).await;
+        assert!(result.is_err(), "provisioning failure should surface");
+
+        // Slug must be reclaimable after the failed provisioning attempt.
+        let working_manager = TenantManager::with_store(store);
+        let retried = working_manager
+            .create(CreateTenantRequest::new("reclaim-me"))
+            .await;
+        assert!(
+            retried.is_ok(),
+            "slug should be reclaimable after provisioning failure, got: {:?}",
+            retried.err()
+        );
+        assert_eq!(retried.unwrap().status, TenantStatus::Active);
     }
 
     #[tokio::test]

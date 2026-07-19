@@ -280,7 +280,16 @@ where
     ///
     /// Fetches `limit + 1` rows to compute [`CursorPaginated::has_more`], then
     /// truncates back to `limit`. The `id_of` closure derives the opaque
-    /// `next_cursor` string from the last returned model.
+    /// cursor string from a returned model.
+    ///
+    /// For [`CursorDirection::Forward`], `next_cursor` is derived from the last
+    /// returned model when more rows remain (`has_more`).
+    /// For [`CursorDirection::Backward`], results are still ordered descending
+    /// (nearest the supplied cursor first), so `prev_cursor` — the cursor that
+    /// continues paging further backward — is derived from the *last*
+    /// returned model (the smallest value seen, i.e. farthest from the
+    /// supplied cursor) when more rows remain further back. Using the first
+    /// (nearest) model would re-fetch rows already returned on this page.
     async fn keyset_paginate<C, F>(
         self,
         db: &impl sea_orm::ConnectionTrait,
@@ -376,24 +385,49 @@ where
         F: Fn(&E::Model) -> String + Send,
         E::Model: Sync,
     {
-        let mut items = self
+        let items = self
             .keyset_query(column, cursor, direction, limit + 1)
             .all(db)
             .await?;
 
-        let has_more = items.len() as u64 > limit;
-        if has_more {
-            items.truncate(limit as usize);
-        }
-
-        let next_cursor = if has_more {
-            items.last().map(&id_of)
-        } else {
-            None
-        };
-
-        Ok(CursorPaginated::new(items, next_cursor, None, has_more))
+        Ok(finish_keyset_page(items, direction, limit, id_of))
     }
+}
+
+/// Pure helper that turns the raw `limit + 1` rows fetched by a keyset query
+/// into a [`CursorPaginated`] result: truncates the probe row, computes
+/// `has_more`, and derives `next_cursor` (forward) / `prev_cursor` (backward)
+/// from the appropriate end of the page.
+///
+/// Factored out of [`PaginateExt::keyset_paginate`] so the cursor arithmetic
+/// can be unit-tested without a database connection.
+fn finish_keyset_page<M, F>(
+    mut items: Vec<M>,
+    direction: CursorDirection,
+    limit: u64,
+    id_of: F,
+) -> CursorPaginated<M>
+where
+    F: Fn(&M) -> String,
+{
+    let has_more = items.len() as u64 > limit;
+    if has_more {
+        items.truncate(limit as usize);
+    }
+
+    let next_cursor = if matches!(direction, CursorDirection::Forward) && has_more {
+        items.last().map(&id_of)
+    } else {
+        None
+    };
+
+    let prev_cursor = if matches!(direction, CursorDirection::Backward) && has_more {
+        items.last().map(&id_of)
+    } else {
+        None
+    };
+
+    CursorPaginated::new(items, next_cursor, prev_cursor, has_more)
 }
 
 #[cfg(test)]
@@ -420,6 +454,52 @@ mod tests {
     }
 
     use item::{Column, Entity as Item};
+
+    #[test]
+    fn paginated_new_computes_total_pages_and_first_page_flags() {
+        // 95 items at 20/page => 5 pages (div_ceil). Page 1: no prev, has next.
+        let page = Paginated::new(vec!["a"], 1, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(page.meta.has_next);
+        assert!(!page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_middle_page_has_next_and_prev() {
+        let page = Paginated::<&str>::new(vec![], 3, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(page.meta.has_next);
+        assert!(page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_last_page_has_no_next() {
+        let page = Paginated::<&str>::new(vec![], 5, 20, 95);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(!page.meta.has_next);
+        assert!(page.meta.has_prev);
+    }
+
+    #[test]
+    fn paginated_new_exact_multiple_total_does_not_add_extra_page() {
+        // 100 items at 20/page => exactly 5 pages, not 6.
+        let page = Paginated::<&str>::new(vec![], 5, 20, 100);
+
+        assert_eq!(page.meta.total_pages, 5);
+        assert!(!page.meta.has_next);
+    }
+
+    #[test]
+    fn paginated_new_zero_total_items_has_no_next_or_prev() {
+        let page = Paginated::<&str>::new(vec![], 1, 20, 0);
+
+        assert_eq!(page.meta.total_pages, 0);
+        assert!(!page.meta.has_next);
+        assert!(!page.meta.has_prev);
+    }
 
     #[test]
     fn no_count_query_fetches_per_page_plus_one_without_count() {
@@ -503,5 +583,104 @@ mod tests {
             "no cursor means no WHERE clause: {sql}"
         );
         assert!(sql.contains("ORDER BY"), "still orders by the key: {sql}");
+    }
+
+    #[test]
+    fn finish_keyset_page_forward_sets_next_cursor_when_more_remain() {
+        // limit = 3, the query fetches limit + 1 = 4 rows to probe for more.
+        let rows = vec![1, 2, 3, 4];
+
+        let result = finish_keyset_page(rows, CursorDirection::Forward, 3, |id| id.to_string());
+
+        assert!(result.has_more);
+        assert_eq!(result.items, vec![1, 2, 3]);
+        assert_eq!(result.next_cursor, Some("3".to_string()));
+        assert_eq!(
+            result.prev_cursor, None,
+            "forward pagination does not set prev_cursor"
+        );
+    }
+
+    #[test]
+    fn finish_keyset_page_forward_no_next_cursor_when_no_more_remain() {
+        let rows = vec![1, 2, 3];
+
+        let result = finish_keyset_page(rows, CursorDirection::Forward, 3, |id| id.to_string());
+
+        assert!(!result.has_more);
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[test]
+    fn finish_keyset_page_backward_sets_prev_cursor_when_more_remain() {
+        // Backward keyset queries order DESC, so rows arrive largest-id-first.
+        // limit = 3, 4 rows fetched -> has_more, truncated to the first 3.
+        let rows = vec![97, 96, 95, 94];
+
+        let result = finish_keyset_page(rows, CursorDirection::Backward, 3, |id| id.to_string());
+
+        assert!(result.has_more);
+        assert_eq!(result.items, vec![97, 96, 95]);
+        // prev_cursor must be the SMALLEST value seen (95, the last/farthest
+        // returned row), not the nearest (97). Continuing backward means
+        // `column < prev_cursor`: with 95 that yields [94, 93, 92] (no
+        // overlap with this page); with the buggy 97 it would yield
+        // [96, 95, 94], re-returning rows already served on this page.
+        assert_eq!(
+            result.prev_cursor,
+            Some("95".to_string()),
+            "prev_cursor should come from the last (smallest/farthest) returned model"
+        );
+        assert_eq!(
+            result.next_cursor, None,
+            "backward pagination does not set next_cursor"
+        );
+    }
+
+    #[test]
+    fn finish_keyset_page_backward_no_prev_cursor_when_no_more_remain() {
+        let rows = vec![97, 96, 95];
+
+        let result = finish_keyset_page(rows, CursorDirection::Backward, 3, |id| id.to_string());
+
+        assert!(!result.has_more);
+        assert_eq!(result.prev_cursor, None);
+    }
+
+    #[test]
+    fn finish_keyset_page_backward_prev_cursor_continues_without_overlap() {
+        // Simulates two consecutive backward pages over ids 100..=1 with
+        // limit = 3. First page: `column < 100 ORDER BY column DESC LIMIT 4`
+        // returns [99, 98, 97, 96] (the 96 is the probe row proving more
+        // remain). The corrected prev_cursor is derived from the *last*
+        // item (97, after truncation) rather than the first (99).
+        let first_page_rows = vec![99, 98, 97, 96];
+        let first_page = finish_keyset_page(first_page_rows, CursorDirection::Backward, 3, |id| {
+            id.to_string()
+        });
+
+        assert!(first_page.has_more);
+        assert_eq!(first_page.items, vec![99, 98, 97]);
+        assert_eq!(first_page.prev_cursor, Some("97".to_string()));
+
+        // Continuing backward with prev_cursor = 97 means the next query is
+        // `column < 97 ORDER BY column DESC LIMIT 4`, which (over the same
+        // id space) returns [96, 95, 94, 93].
+        let second_page_rows = vec![96, 95, 94, 93];
+        let second_page =
+            finish_keyset_page(second_page_rows, CursorDirection::Backward, 3, |id| {
+                id.to_string()
+            });
+
+        assert_eq!(second_page.items, vec![96, 95, 94]);
+
+        // The two pages must not share any rows.
+        for id in &second_page.items {
+            assert!(
+                !first_page.items.contains(id),
+                "second page item {id} overlaps with first page {:?}",
+                first_page.items
+            );
+        }
     }
 }

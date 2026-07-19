@@ -9,10 +9,12 @@
 //!
 //! - **Multiple Backends**: PostgreSQL, MySQL, and SQLite support
 //! - **Connection Pooling**: Built-in connection pooling via SQLx
-//! - **Transaction Management**: Easy-to-use transaction helpers
-//! - **DI Integration**: Works with Armature's dependency injection
-//! - **Migration Support**: Integrated migration system
-//! - **Active Record**: Entity-based CRUD operations
+//! - **Transaction Management**: Easy-to-use transaction helpers, including
+//!   isolation levels, read-only access mode, and (PostgreSQL) `DEFERRABLE`
+//!   via [`TransactionOptions`]
+//! - **Pagination**: Offset-based ([`Paginate`]) and count-free / keyset
+//!   ([`PaginateExt`]) pagination helpers
+//! - **Active Record**: Entity-based CRUD operations (via re-exported SeaORM)
 //!
 //! ## Quick Start
 //!
@@ -21,28 +23,29 @@
 //!
 //! // Create configuration
 //! let config = DatabaseConfig::new("postgres://user:pass@localhost/db")
-//!     .max_connections(10)
-//!     .connect_timeout(Duration::from_secs(5));
+//!     .max_connections(10);
 //!
 //! // Connect to database
 //! let db = Database::connect(config).await?;
 //!
 //! // Query entities
-//! let users = User::find().all(&db).await?;
+//! let users = User::find().all(db.connection()).await?;
 //! ```
 //!
 //! ## With Transactions
 //!
 //! ```rust,ignore
-//! use armature_seaorm::TransactionExt;
+//! use armature_seaorm::run_transaction;
 //!
-//! db.transaction(|txn| async move {
-//!     let user = user::ActiveModel {
-//!         name: Set("Alice".to_owned()),
-//!         ..Default::default()
-//!     };
-//!     user.insert(&txn).await?;
-//!     Ok(())
+//! let result = run_transaction(db.connection(), |txn| {
+//!     Box::pin(async move {
+//!         let user = user::ActiveModel {
+//!             name: Set("Alice".to_owned()),
+//!             ..Default::default()
+//!         };
+//!         user.insert(txn).await?;
+//!         Ok::<_, sea_orm::DbErr>(())
+//!     })
 //! }).await?;
 //! ```
 

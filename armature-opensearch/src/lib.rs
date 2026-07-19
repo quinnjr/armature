@@ -3,7 +3,7 @@
 //! This crate provides a high-level client for OpenSearch with support for:
 //! - Document indexing, searching, and management
 //! - Index lifecycle management
-//! - Bulk operations with streaming support
+//! - Mixed bulk operations (index/create/update/delete) via [`OpenSearchClient::bulk_execute`]
 //! - Query DSL builder
 //! - AWS OpenSearch Service authentication
 //!
@@ -56,6 +56,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+mod bulk;
 mod client;
 mod config;
 mod document;
@@ -64,9 +65,9 @@ mod index;
 mod query;
 mod search;
 
-#[cfg(feature = "bulk-stream")]
-mod bulk;
-
+pub use bulk::{
+    BulkItem, BulkItemError, BulkItemResult, BulkItemStatus, BulkOperation, BulkResponse,
+};
 pub use client::OpenSearchClient;
 pub use config::{OpenSearchConfig, TlsConfig};
 pub use document::Document;
@@ -74,9 +75,6 @@ pub use error::{OpenSearchError, Result};
 pub use index::{FieldType, IndexManager, IndexSettings, Mapping, MappingField};
 pub use query::{BoolQuery, MatchQuery, Query, QueryBuilder, RangeQuery, TermQuery};
 pub use search::{Aggregation, AggregationResult, Hit, SearchBuilder, SearchResult};
-
-#[cfg(feature = "bulk-stream")]
-pub use bulk::{BulkItem, BulkOperation, BulkResponse};
 
 /// Prelude for common imports.
 pub mod prelude {

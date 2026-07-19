@@ -21,11 +21,53 @@ pub trait CacheProvider: Send + Sync {
     /// Delete value from cache
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
 
+    /// Delete multiple keys from cache.
+    ///
+    /// Used by bulk operations such as [`TenantCache::clear_tenant`] to
+    /// avoid one round-trip per key. The default implementation simply
+    /// loops over [`Self::delete`], so existing `CacheProvider`
+    /// implementations keep compiling and behaving identically without any
+    /// changes. Providers with a native batch/variadic delete (e.g. Redis
+    /// `DEL`/`UNLINK`) should override this for a real performance win.
+    async fn delete_many(&self, keys: &[String]) -> Result<(), CacheError> {
+        for key in keys {
+            self.delete(key).await?;
+        }
+        Ok(())
+    }
+
     /// Check if key exists
     async fn exists(&self, key: &str) -> Result<bool, CacheError>;
 
     /// Clear all keys (use with caution!)
     async fn clear(&self) -> Result<(), CacheError>;
+
+    /// List all keys matching a given prefix.
+    ///
+    /// Used to support prefix-scoped bulk operations such as
+    /// [`TenantCache::clear_tenant`]. Providers that support pattern/prefix
+    /// scanning (e.g. Redis `SCAN`) should override this; an in-memory
+    /// provider can simply filter its keyspace by prefix.
+    ///
+    /// The default implementation reports the operation as unsupported so
+    /// existing `CacheProvider` implementations keep compiling without any
+    /// changes.
+    ///
+    /// **Implementor caveats**: because callers such as
+    /// [`TenantCache::clear_tenant`] match keys with a plain string-prefix
+    /// test, a real implementation should preserve `starts_with` semantics
+    /// exactly (no normalization/case-folding that could widen the match)
+    /// to avoid over-matching keys belonging to another tenant whose prefix
+    /// happens to share a leading substring. Implementations backed by a
+    /// `SCAN`-style API are typically non-atomic with respect to concurrent
+    /// writes (keys inserted or removed during the scan may or may not be
+    /// observed) and can be `O(keyspace)` rather than `O(matching keys)`
+    /// unless the backend supports true prefix indexing.
+    async fn keys_with_prefix(&self, _prefix: &str) -> Result<Vec<String>, CacheError> {
+        Err(CacheError::Error(
+            "keys_with_prefix is not implemented by this cache provider".to_string(),
+        ))
+    }
 }
 
 /// Cache errors
@@ -106,13 +148,35 @@ impl<P: CacheProvider> TenantCache<P> {
     /// Clear all tenant keys
     ///
     /// **Warning**: This clears ALL keys for the tenant!
+    ///
+    /// Scans the provider for every key under this tenant's prefix (via
+    /// [`CacheProvider::keys_with_prefix`]) and deletes each one (via
+    /// [`CacheProvider::delete_many`]).
+    ///
+    /// **Caveats** (inherited from the prefix-scan strategy, see
+    /// [`CacheProvider::keys_with_prefix`]):
+    /// - This is a scan-then-delete-by-key operation, not a single atomic
+    ///   command. It is `O(matching keys)` (and on providers whose default
+    ///   `keys_with_prefix`/`delete_many` fall back to scanning the whole
+    ///   keyspace or issuing one round-trip per key, effectively
+    ///   `O(keyspace)`), and other operations against the same tenant's keys
+    ///   that race with a `clear_tenant` call are not isolated from it —
+    ///   keys written concurrently mid-scan may or may not be included.
+    /// - Correctness depends on the tenant's cache-key prefix
+    ///   (`"tenant:{id}:"`, see [`Tenant::cache_key`]) being collision-free.
+    ///   Because prefix matching is a plain `starts_with` check, a tenant
+    ///   whose `id` is itself a prefix of another tenant's `id` (e.g.
+    ///   `"acme"` vs. `"acme-2"`) would NOT collide here since the literal
+    ///   `:` separators are part of the prefix — but a `CacheProvider`
+    ///   implementation that stores unrelated keys sharing the same
+    ///   `tenant:{id}:` string (or that ignores the trailing separator) can
+    ///   still over-match and delete keys that do not belong to this
+    ///   tenant.
     pub async fn clear_tenant(&self, tenant: &Tenant) -> Result<(), CacheError> {
-        // In a real implementation, this would use pattern matching
-        // For now, just document the limitation
-        let _ = tenant;
-        Err(CacheError::Error(
-            "clear_tenant requires pattern matching support from cache provider".to_string(),
-        ))
+        let prefix = tenant.cache_key("");
+        let keys = self.provider.keys_with_prefix(&prefix).await?;
+        self.provider.delete_many(&keys).await?;
+        Ok(())
     }
 
     /// Get value with JSON deserialization
@@ -233,6 +297,15 @@ mod tests {
             data.clear();
             Ok(())
         }
+
+        async fn keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>, CacheError> {
+            let data = self.data.lock().await;
+            Ok(data
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
     }
 
     #[tokio::test]
@@ -314,6 +387,42 @@ mod tests {
             .build_for_tenant(&tenant);
 
         assert_eq!(key, "tenant:tenant-123:users:1:profile");
+    }
+
+    #[tokio::test]
+    async fn test_clear_tenant_removes_all_tenant_keys_by_prefix() {
+        let provider = MockCacheProvider::new();
+        let cache = TenantCache::new(provider);
+
+        let tenant = Tenant::new("tenant-1", "acme");
+        let other_tenant = Tenant::new("tenant-2", "globex");
+
+        // N keys for the target tenant.
+        const N: usize = 25;
+        for i in 0..N {
+            cache
+                .set(&tenant, &format!("key-{i}"), b"value".to_vec(), None)
+                .await
+                .unwrap();
+        }
+        // A key for a different tenant that must survive.
+        cache
+            .set(&other_tenant, "key-0", b"other".to_vec(), None)
+            .await
+            .unwrap();
+
+        cache.clear_tenant(&tenant).await.unwrap();
+
+        for i in 0..N {
+            assert!(
+                !cache.exists(&tenant, &format!("key-{i}")).await.unwrap(),
+                "key-{i} should have been cleared"
+            );
+        }
+        assert!(
+            cache.exists(&other_tenant, "key-0").await.unwrap(),
+            "other tenant's key must not be affected"
+        );
     }
 
     #[tokio::test]

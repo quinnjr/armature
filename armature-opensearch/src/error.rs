@@ -68,3 +68,37 @@ pub enum OpenSearchError {
 
 /// Result type alias for OpenSearch operations.
 pub type Result<T> = std::result::Result<T, OpenSearchError>;
+
+/// Extract a human-readable reason from an OpenSearch error response body,
+/// e.g. `{"error": {"reason": "..."}}`.
+pub(crate) fn error_reason(body: &serde_json::Value) -> String {
+    body["error"]["reason"]
+        .as_str()
+        .unwrap_or("Unknown error")
+        .to_string()
+}
+
+/// Parse an OpenSearch HTTP response body as JSON and, if the response's
+/// status code is not a success, translate it into an
+/// [`OpenSearchError::Internal`] carrying the server's `error.reason`.
+///
+/// This is the common tail of nearly every OpenSearch call: send the
+/// request, check the status, and on failure surface the body's reason.
+/// Callers that need special-case status handling (e.g. mapping 404 to a
+/// domain-specific "not found" error) should inspect
+/// `response.status_code()` *before* calling this, since it consumes the
+/// response. On success, the parsed JSON body is returned so callers that
+/// need data out of it (e.g. `_id`, `deleted`, cluster health) don't have
+/// to parse it again.
+pub(crate) async fn json_or_error(
+    response: opensearch::http::response::Response,
+) -> Result<serde_json::Value> {
+    let status = response.status_code();
+    let body: serde_json::Value = response.json().await?;
+
+    if !status.is_success() {
+        return Err(OpenSearchError::Internal(error_reason(&body)));
+    }
+
+    Ok(body)
+}

@@ -2,7 +2,7 @@
 
 use crate::{
     document::{Document, DocumentMeta, DocumentWithMeta},
-    error::{OpenSearchError, Result},
+    error::{OpenSearchError, Result, json_or_error},
     query::Query,
 };
 use armature_log::debug;
@@ -353,8 +353,9 @@ impl SearchBuilder {
             .unwrap_or("eq")
             .to_string();
 
-        // Parse aggregations
-        let aggregations = result.get("aggs").cloned();
+        // Parse aggregations. OpenSearch responses put them under the
+        // top-level "aggregations" key; only the *request* body uses "aggs".
+        let aggregations = result.get("aggregations").cloned();
 
         Ok(SearchResult {
             total,
@@ -383,7 +384,8 @@ impl SearchBuilder {
             .send()
             .await?;
 
-        let result: Value = response.json().await?;
+        let result = json_or_error(response).await?;
+
         Ok(result["count"].as_u64().unwrap_or(0))
     }
 }

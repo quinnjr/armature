@@ -104,10 +104,30 @@
 //!
 //! ## Snapshots
 //!
+//! `with_snapshots` only configures the snapshot *frequency* on the repository;
+//! it does not by itself cause snapshots to be taken. The base [`AggregateRepository::save`]
+//! method's internal snapshot step is a deliberate no-op (a generic `Aggregate` has
+//! no serde bound, so it cannot be serialized). To actually persist periodic
+//! snapshots, the aggregate must implement `Serialize + DeserializeOwned` and you
+//! must call [`AggregateRepository::save_with_snapshot`] instead of `save`:
+//!
 //! ```rust,ignore
-//! // Enable snapshots every 10 events
+//! // Aggregate must derive Serialize + DeserializeOwned for snapshotting to work.
+//! #[derive(Serialize, Deserialize)]
+//! struct UserAggregate { /* ... */ }
+//!
+//! // Enable snapshots every 10 events.
 //! let repo = AggregateRepository::<UserAggregate, _>::with_snapshots(store, 10);
+//!
+//! // Use `save_with_snapshot` (not `save`) so a real snapshot is persisted
+//! // whenever the aggregate's version is a multiple of the configured frequency.
+//! repo.save_with_snapshot(&mut user).await?;
 //! ```
+//!
+//! Snapshot-aware reads use [`AggregateRepository::load_snapshotted`], which seeds
+//! the aggregate from the latest snapshot (if any) and replays only the events
+//! recorded after it, falling back to a full replay via [`AggregateRepository::load`]
+//! when no snapshot exists.
 
 pub mod aggregate;
 pub mod repository;

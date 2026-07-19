@@ -4,6 +4,7 @@ use std::time::Duration;
 
 /// OpenSearch client configuration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OpenSearchConfig {
     /// OpenSearch URL(s).
     pub urls: Vec<String>,
@@ -20,10 +21,14 @@ pub struct OpenSearchConfig {
     /// AWS region (for AWS OpenSearch Service).
     #[cfg(feature = "aws-auth")]
     pub aws_region: Option<String>,
+    /// Credentials provider used to sign requests with AWS SigV4 when
+    /// [`OpenSearchConfig::aws_region`] is set. Required for AWS OpenSearch
+    /// Service / OpenSearch Serverless authentication; without it, requests
+    /// are sent unsigned even if `aws_region` is configured.
+    #[cfg(feature = "aws-auth")]
+    pub aws_credentials_provider: Option<aws_credential_types::provider::SharedCredentialsProvider>,
     /// Enable request compression.
     pub compression: bool,
-    /// Maximum number of retries.
-    pub max_retries: u32,
 }
 
 impl OpenSearchConfig {
@@ -38,8 +43,9 @@ impl OpenSearchConfig {
             tls: None,
             #[cfg(feature = "aws-auth")]
             aws_region: None,
+            #[cfg(feature = "aws-auth")]
+            aws_credentials_provider: None,
             compression: true,
-            max_retries: 3,
         }
     }
 
@@ -63,6 +69,9 @@ impl OpenSearchConfig {
     }
 
     /// Set connection timeout.
+    ///
+    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
+    /// express it); see `OpenSearchClient::new`.
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
@@ -81,21 +90,39 @@ impl OpenSearchConfig {
     }
 
     /// Set AWS region for AWS OpenSearch Service.
+    ///
+    /// This alone does not enable request signing: pair it with
+    /// [`OpenSearchConfig::with_aws_credentials_provider`] so `OpenSearchClient::new`
+    /// has credentials to sign with. If a region is set without a credentials
+    /// provider, `OpenSearchClient::new` returns a validation error rather than
+    /// silently sending unsigned requests.
     #[cfg(feature = "aws-auth")]
     pub fn with_aws_region(mut self, region: impl Into<String>) -> Self {
         self.aws_region = Some(region.into());
         self
     }
 
-    /// Enable or disable compression.
-    pub fn with_compression(mut self, enabled: bool) -> Self {
-        self.compression = enabled;
+    /// Set the credentials provider used to sign requests with AWS SigV4.
+    ///
+    /// Callers typically obtain a provider from `aws-config`'s default chain,
+    /// e.g. `aws_config::load_defaults(BehaviorVersion::latest()).await.credentials_provider()`,
+    /// or supply a fixed/test provider via
+    /// `aws_credential_types::provider::SharedCredentialsProvider::new(...)`.
+    #[cfg(feature = "aws-auth")]
+    pub fn with_aws_credentials_provider(
+        mut self,
+        provider: aws_credential_types::provider::SharedCredentialsProvider,
+    ) -> Self {
+        self.aws_credentials_provider = Some(provider);
         self
     }
 
-    /// Set maximum retries.
-    pub fn with_max_retries(mut self, retries: u32) -> Self {
-        self.max_retries = retries;
+    /// Enable or disable compression.
+    ///
+    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
+    /// express it); see `OpenSearchClient::new`.
+    pub fn with_compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
         self
     }
 }

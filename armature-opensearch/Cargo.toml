@@ -1,6 +1,6 @@
 [package]
 name = "armature-opensearch"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -17,9 +17,7 @@ default = ["rustls"]
 rustls = ["opensearch/rustls-tls"]
 native-tls = ["opensearch/native-tls"]
 # AWS authentication
-aws-auth = ["dep:aws-config", "dep:aws-credential-types"]
-# Bulk operations with streaming
-bulk-stream = ["dep:futures"]
+aws-auth = ["dep:aws-config", "dep:aws-credential-types", "dep:aws-types", "opensearch/aws-auth"]
 
 [dependencies]
 armature-core = { path = "../armature-core", version = "0.2.1" }
@@ -42,10 +40,10 @@ thiserror = "2.0"
 # Optional AWS auth
 aws-config = { version = "1", optional = true }
 aws-credential-types = { version = "1", optional = true }
-
-# Optional streaming
-futures = { version = "0.3", optional = true }
+aws-types = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+armature-testkit = { path = "../armature-testkit" }
+aws-credential-types = { version = "1", features = ["test-util"] }
 
