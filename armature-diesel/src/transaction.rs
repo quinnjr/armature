@@ -239,18 +239,33 @@ impl TransactionExt<AsyncMysqlConnection> for crate::MysqlPool {
 }
 
 /// Transaction guard for manual transaction management.
-#[allow(dead_code)]
+///
+/// This wraps a connection that already has an open transaction (e.g. after
+/// issuing a raw `BEGIN`) and tracks whether it has been explicitly finished.
+///
+/// **Important:** unlike a typical RAII guard, dropping a [`TransactionGuard`]
+/// without calling [`commit`](Self::commit) or [`rollback`](Self::rollback)
+/// does **not** roll back the transaction. Both `COMMIT` and `ROLLBACK` are
+/// async database round-trips, and Rust's [`Drop`] is a synchronous callback,
+/// so there is no way to `.await` a rollback query from it. Because a
+/// lending async close over `&mut C` can't be driven from `Drop`, this type
+/// cannot honestly offer rollback-on-drop: instead, `commit()`/`rollback()`
+/// issue the real `COMMIT`/`ROLLBACK` SQL themselves, and `Drop` only logs a
+/// warning if neither was called, so the outstanding transaction is never
+/// silently forgotten. Callers must call one of them explicitly before the
+/// guard goes out of scope.
 pub struct TransactionGuard<'a, C> {
     conn: &'a mut C,
-    committed: bool,
+    finished: bool,
 }
 
 impl<'a, C> TransactionGuard<'a, C> {
-    /// Create a new transaction guard.
+    /// Create a new transaction guard around a connection with an already
+    /// open transaction.
     pub fn new(conn: &'a mut C) -> Self {
         Self {
             conn,
-            committed: false,
+            finished: false,
         }
     }
 
@@ -258,15 +273,73 @@ impl<'a, C> TransactionGuard<'a, C> {
     pub fn conn(&mut self) -> &mut C {
         self.conn
     }
+}
 
-    /// Commit the transaction.
-    pub fn commit(mut self) {
-        self.committed = true;
+#[cfg(feature = "postgres")]
+impl<'a> TransactionGuard<'a, AsyncPgConnection> {
+    /// Commit the transaction by issuing `COMMIT`.
+    pub async fn commit(mut self) -> DieselResult<()> {
+        use diesel_async::RunQueryDsl;
+
+        diesel::sql_query("COMMIT")
+            .execute(self.conn)
+            .await
+            .map_err(|e| DieselError::Transaction(e.to_string()))?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Roll back the transaction by issuing `ROLLBACK`.
+    pub async fn rollback(mut self) -> DieselResult<()> {
+        use diesel_async::RunQueryDsl;
+
+        diesel::sql_query("ROLLBACK")
+            .execute(self.conn)
+            .await
+            .map_err(|e| DieselError::Transaction(e.to_string()))?;
+        self.finished = true;
+        Ok(())
     }
 }
 
-// On drop, if not committed, the transaction will be rolled back
-// (handled by the connection's transaction scope)
+#[cfg(feature = "mysql")]
+impl<'a> TransactionGuard<'a, AsyncMysqlConnection> {
+    /// Commit the transaction by issuing `COMMIT`.
+    pub async fn commit(mut self) -> DieselResult<()> {
+        use diesel_async::RunQueryDsl;
+
+        diesel::sql_query("COMMIT")
+            .execute(self.conn)
+            .await
+            .map_err(|e| DieselError::Transaction(e.to_string()))?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Roll back the transaction by issuing `ROLLBACK`.
+    pub async fn rollback(mut self) -> DieselResult<()> {
+        use diesel_async::RunQueryDsl;
+
+        diesel::sql_query("ROLLBACK")
+            .execute(self.conn)
+            .await
+            .map_err(|e| DieselError::Transaction(e.to_string()))?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl<'a, C> Drop for TransactionGuard<'a, C> {
+    fn drop(&mut self) {
+        if !self.finished {
+            armature_log::warn!(
+                "TransactionGuard dropped without calling commit() or rollback(); \
+                 the open transaction was NOT rolled back (async rollback cannot run \
+                 from a synchronous Drop) - call commit() or rollback() explicitly"
+            );
+        }
+    }
+}
 
 #[cfg(all(test, feature = "postgres", feature = "deadpool"))]
 mod isolation_level_tests {
@@ -304,5 +377,104 @@ mod isolation_level_tests {
             .expect("transaction_with_isolation failed");
 
         assert_eq!(observed, "serializable");
+    }
+}
+
+#[cfg(all(test, feature = "postgres", feature = "deadpool"))]
+mod transaction_guard_tests {
+    use super::*;
+    use crate::{DieselConfig, PgPool};
+    use diesel::QueryableByName;
+    use diesel::sql_types::BigInt;
+    use diesel_async::RunQueryDsl;
+
+    #[derive(QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = BigInt)]
+        count: i64,
+    }
+
+    async fn row_count(conn: &mut AsyncPgConnection) -> i64 {
+        let rows: Vec<CountRow> = diesel::sql_query("SELECT COUNT(*) AS count FROM tg_test")
+            .load(conn)
+            .await
+            .expect("count query failed");
+        rows.into_iter().next().unwrap().count
+    }
+
+    #[tokio::test]
+    async fn rollback_actually_reverts_the_change() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: docker not available");
+            return;
+        }
+
+        let container = armature_testkit::containers::PostgresContainer::start().await;
+        let config = DieselConfig::new(container.url());
+        let pool = PgPool::new(config).await.expect("failed to build pg pool");
+        let mut conn = pool.get().await.expect("failed to get connection");
+        let conn: &mut AsyncPgConnection = &mut conn;
+
+        diesel::sql_query("CREATE TABLE tg_test (id INT)")
+            .execute(conn)
+            .await
+            .expect("create table failed");
+
+        diesel::sql_query("BEGIN")
+            .execute(conn)
+            .await
+            .expect("begin failed");
+
+        let mut guard = TransactionGuard::new(conn);
+        diesel::sql_query("INSERT INTO tg_test (id) VALUES (1)")
+            .execute(guard.conn())
+            .await
+            .expect("insert failed");
+
+        guard.rollback().await.expect("rollback failed");
+
+        assert_eq!(
+            row_count(conn).await,
+            0,
+            "row inserted before rollback() should not be visible after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_actually_persists_the_change() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: docker not available");
+            return;
+        }
+
+        let container = armature_testkit::containers::PostgresContainer::start().await;
+        let config = DieselConfig::new(container.url());
+        let pool = PgPool::new(config).await.expect("failed to build pg pool");
+        let mut conn = pool.get().await.expect("failed to get connection");
+        let conn: &mut AsyncPgConnection = &mut conn;
+
+        diesel::sql_query("CREATE TABLE tg_test (id INT)")
+            .execute(conn)
+            .await
+            .expect("create table failed");
+
+        diesel::sql_query("BEGIN")
+            .execute(conn)
+            .await
+            .expect("begin failed");
+
+        let mut guard = TransactionGuard::new(conn);
+        diesel::sql_query("INSERT INTO tg_test (id) VALUES (1)")
+            .execute(guard.conn())
+            .await
+            .expect("insert failed");
+
+        guard.commit().await.expect("commit failed");
+
+        assert_eq!(
+            row_count(conn).await,
+            1,
+            "row inserted before commit() should be visible after it"
+        );
     }
 }

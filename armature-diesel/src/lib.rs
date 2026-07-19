@@ -38,7 +38,7 @@
 //! ```rust,ignore
 //! use armature_diesel::TransactionExt;
 //!
-//! pool.transaction(|conn| async move {
+//! pool.transaction(async |conn| {
 //!     diesel::insert_into(users::table)
 //!         .values(&new_user)
 //!         .execute(conn)

@@ -76,6 +76,34 @@ fn pg_connection_url(config: &DieselConfig) -> String {
     format!("{}{separator}{}", config.database_url, params.join("&"))
 }
 
+/// Build a [`diesel_async::pooled_connection::ManagerConfig`] that honors
+/// [`DieselConfig::test_on_checkout`].
+///
+/// `AsyncDieselConnectionManager::new` (used with no config) always defaults
+/// to [`RecyclingMethod::Verified`] regardless of what
+/// `DieselConfig::test_on_checkout` was set to, which left that field dead:
+/// setting it to `false` had no effect. Wiring it here makes
+/// `test_on_checkout = false` actually select the cheaper
+/// [`RecyclingMethod::Fast`] path (only checks for an open transaction, no
+/// round-trip query), while `true` keeps the query-based validation.
+#[cfg(any(feature = "deadpool", feature = "bb8"))]
+fn recycling_manager_config<C>(
+    test_on_checkout: bool,
+) -> diesel_async::pooled_connection::ManagerConfig<C>
+where
+    C: diesel_async::AsyncConnection + 'static,
+{
+    use diesel_async::pooled_connection::{ManagerConfig, RecyclingMethod};
+
+    let mut manager_config = ManagerConfig::default();
+    manager_config.recycling_method = if test_on_checkout {
+        RecyclingMethod::Verified
+    } else {
+        RecyclingMethod::Fast
+    };
+    manager_config
+}
+
 // ============================================================================
 // PostgreSQL Pool
 // ============================================================================
@@ -104,7 +132,10 @@ impl PgPool {
         );
 
         let connection_url = pg_connection_url(&config);
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&connection_url);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+            &connection_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
         // deadpool has no direct `min_idle` / `max_lifetime` / `idle_timeout`
         // knobs (it lazily creates connections and has no background reaper);
@@ -166,7 +197,10 @@ impl PgPoolBb8 {
         info!("Creating PostgreSQL bb8 connection pool");
 
         let connection_url = pg_connection_url(&config);
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&connection_url);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+            &connection_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
         let pool = Bb8Pool::builder()
             .max_size(config.pool_size as u32)
@@ -174,6 +208,7 @@ impl PgPoolBb8 {
             .min_idle(config.min_idle.map(|n| n as u32))
             .max_lifetime(Some(config.max_lifetime))
             .idle_timeout(Some(config.idle_timeout))
+            .test_on_check_out(config.test_on_checkout)
             .build(manager)
             .await
             .map_err(|e| DieselError::Pool(e.to_string()))?;
@@ -234,8 +269,10 @@ impl MysqlPool {
 
         info!("Creating MySQL connection pool");
 
-        let manager =
-            AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(&config.database_url);
+        let manager = AsyncDieselConnectionManager::<AsyncMysqlConnection>::new_with_config(
+            &config.database_url,
+            recycling_manager_config(config.test_on_checkout),
+        );
 
         // `application_name` / `ssl_mode` are not wired here: they are
         // libpq/PostgreSQL connection-URL options (see `pg_connection_url`)
@@ -302,7 +339,7 @@ impl PoolStatus {
         if self.max_size == 0 {
             0.0
         } else {
-            ((self.size - self.available) as f64 / self.max_size as f64) * 100.0
+            (self.size.saturating_sub(self.available) as f64 / self.max_size as f64) * 100.0
         }
     }
 
@@ -327,6 +364,61 @@ pub type DieselPool = MysqlPool;
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod pool_status_tests {
+    use super::PoolStatus;
+
+    #[test]
+    fn utilization_does_not_panic_when_available_exceeds_size() {
+        // `available` should never legitimately exceed `size`, but the pool
+        // backends are free-form counters read from separate atomics, so a
+        // transient race could momentarily observe `available > size`. The
+        // naive `size - available` subtraction on `usize` would panic
+        // (`attempt to subtract with overflow` in debug builds); this must
+        // saturate instead.
+        let status = PoolStatus {
+            size: 2,
+            available: 5,
+            waiting: 0,
+            max_size: 10,
+        };
+
+        assert_eq!(status.utilization(), 0.0);
+    }
+
+    #[test]
+    fn utilization_reports_expected_percentage() {
+        let status = PoolStatus {
+            size: 10,
+            available: 4,
+            waiting: 0,
+            max_size: 10,
+        };
+
+        assert_eq!(status.utilization(), 60.0);
+    }
+}
+
+#[cfg(all(test, any(feature = "deadpool", feature = "bb8")))]
+mod recycling_manager_config_tests {
+    use super::recycling_manager_config;
+    use diesel_async::pooled_connection::RecyclingMethod;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_on_checkout_true_selects_verified_recycling() {
+        let config = recycling_manager_config::<diesel_async::AsyncPgConnection>(true);
+        assert!(matches!(config.recycling_method, RecyclingMethod::Verified));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_on_checkout_false_selects_fast_recycling() {
+        let config = recycling_manager_config::<diesel_async::AsyncPgConnection>(false);
+        assert!(matches!(config.recycling_method, RecyclingMethod::Fast));
+    }
+}
 
 #[cfg(test)]
 #[cfg(feature = "postgres")]
