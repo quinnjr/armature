@@ -33,11 +33,6 @@ impl RecordedRequest {
             .map(|(_, v)| v.as_str())
     }
 
-    /// The query string (e.g., `trace=1` from `/path?trace=1`), if present.
-    pub fn query(&self) -> Option<&str> {
-        self.query.as_deref()
-    }
-
     /// The body decoded as UTF-8 (lossy).
     pub fn body_string(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -69,6 +64,12 @@ impl StubResponse {
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
         }
+    }
+
+    /// Add a response header.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
     }
 }
 
@@ -158,8 +159,9 @@ impl StubServerBuilder {
         let requests_for_server = requests.clone();
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
+                let (stream, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => continue,
                 };
                 let routes = routes.clone();
                 let default = default.clone();
@@ -224,19 +226,32 @@ fn build_response(resp: &StubResponse) -> Response<Full<Bytes>> {
     for (k, v) in &resp.headers {
         builder = builder.header(k, v);
     }
-    builder.body(Full::new(resp.body.clone())).unwrap()
+    builder
+        .body(Full::new(resp.body.clone()))
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(500)
+                .body(Full::new(Bytes::from(format!("stub build error: {e}"))))
+                .unwrap()
+        })
 }
 
 #[cfg(test)]
 mod tests {
+    /// A parsed raw HTTP/1.1 response.
+    struct RawResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
 
     #[tokio::test]
     async fn serves_a_single_scripted_response() {
         let server =
             super::StubServer::start_single(super::StubResponse::json(200, r#"{"ok":true}"#)).await;
 
-        let body = reqwest_get(server.url()).await;
-        assert_eq!(body, r#"{"ok":true}"#);
+        let resp = raw_request(server.url(), "GET", "/", "").await;
+        assert_eq!(resp.body, r#"{"ok":true}"#);
     }
 
     #[tokio::test]
@@ -252,14 +267,31 @@ mod tests {
             .start()
             .await;
 
-        assert_eq!(raw_request(server.url(), "GET", "/health", "").await, "ok");
-        assert_eq!(
-            raw_request(server.url(), "POST", "/token", "").await,
-            r#"{"id":1}"#
-        );
-        assert_eq!(
-            raw_request(server.url(), "GET", "/nope", "").await,
-            "missing"
+        let health = raw_request(server.url(), "GET", "/health", "").await;
+        assert_eq!(health.status, 200);
+        assert_eq!(health.body, "ok");
+
+        let token = raw_request(server.url(), "POST", "/token", "").await;
+        assert_eq!(token.status, 201);
+        assert_eq!(token.body, r#"{"id":1}"#);
+
+        let nope = raw_request(server.url(), "GET", "/nope", "").await;
+        assert_eq!(nope.status, 404);
+        assert_eq!(nope.body, "missing");
+    }
+
+    #[tokio::test]
+    async fn json_response_sets_content_type() {
+        let server =
+            super::StubServer::start_single(super::StubResponse::json(200, r#"{"ok":true}"#)).await;
+
+        let resp = raw_request(server.url(), "GET", "/", "").await;
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json"),
+            "expected content-type: application/json header, got: {:?}",
+            resp.headers
         );
     }
 
@@ -279,33 +311,41 @@ mod tests {
         let rec = server.assert_received("POST", "/introspect");
         assert_eq!(rec.body_string(), "token=abc");
         assert_eq!(rec.header("content-length"), Some("9"));
+        assert_eq!(rec.header("Content-Length"), Some("9"));
+        assert_eq!(rec.header("CONTENT-LENGTH"), Some("9"));
         assert_eq!(rec.path, "/introspect");
-        assert_eq!(rec.query(), Some("trace=1"));
+        assert_eq!(rec.query.as_deref(), Some("trace=1"));
         assert_eq!(server.requests().len(), 1);
     }
 
-    // Minimal dependency-free HTTP/1.1 GET client for tests.
-    async fn reqwest_get(url: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let addr = url.trim_start_matches("http://");
-        let (host, port) = addr.split_once(':').unwrap();
-        let mut s = tokio::net::TcpStream::connect((host, port.parse::<u16>().unwrap()))
-            .await
-            .unwrap();
-        s.write_all(
-            format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
-        let mut raw = Vec::new();
-        s.read_to_end(&mut raw).await.unwrap();
-        let text = String::from_utf8_lossy(&raw);
-        text.split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_string())
-            .unwrap_or_default()
+    #[tokio::test]
+    async fn default_404_when_no_default_response_configured() {
+        let server = super::StubServer::builder()
+            .route("GET", "/x", super::StubResponse::new(200, "x"))
+            .start()
+            .await;
+
+        let resp = raw_request(server.url(), "GET", "/unmatched", "").await;
+        assert_eq!(resp.status, 404);
+        assert_eq!(resp.body, "");
     }
 
-    async fn raw_request(url: &str, method: &str, path: &str, body: &str) -> String {
+    #[tokio::test]
+    #[should_panic(expected = "received no")]
+    async fn assert_received_panics_when_not_found() {
+        let server = super::StubServer::builder()
+            .route("POST", "/missing", super::StubResponse::new(200, "ok"))
+            .start()
+            .await;
+
+        let _ = raw_request(server.url(), "GET", "/other", "").await;
+
+        server.assert_received("POST", "/missing");
+    }
+
+    // Minimal dependency-free HTTP/1.1 client for tests: parses the status
+    // line, headers, and body.
+    async fn raw_request(url: &str, method: &str, path: &str, body: &str) -> RawResponse {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let addr = url.trim_start_matches("http://");
         let (host, port) = addr.split_once(':').unwrap();
@@ -320,9 +360,23 @@ mod tests {
         let mut raw = Vec::new();
         s.read_to_end(&mut raw).await.unwrap();
         let text = String::from_utf8_lossy(&raw);
-        text.split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_string())
-            .unwrap_or_default()
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_ref(), ""));
+        let mut lines = head.split("\r\n");
+        let status_line = lines.next().unwrap_or_default();
+        let status = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect();
+        RawResponse {
+            status,
+            headers,
+            body: body.to_string(),
+        }
     }
 
     #[tokio::test]
@@ -332,12 +386,15 @@ mod tests {
             server.url().trim_start_matches("http://").to_string()
         }; // server dropped here
 
-        // Give the aborted accept loop a moment to release the socket.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // We can now bind the same port (proves the listener was released).
-        let bound =
-            tokio::net::TcpListener::bind(addr.parse::<std::net::SocketAddr>().unwrap()).await;
+        // The abort() call schedules cancellation but the OS may need a
+        // moment to release the socket; retry rebinding for up to ~2s.
+        let socket_addr = addr.parse::<std::net::SocketAddr>().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut bound = tokio::net::TcpListener::bind(socket_addr).await;
+        while bound.is_err() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            bound = tokio::net::TcpListener::bind(socket_addr).await;
+        }
         assert!(bound.is_ok(), "port was not released after StubServer drop");
     }
 }
