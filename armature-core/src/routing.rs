@@ -329,17 +329,13 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, Stri
     let mut seen = 0usize;
     let mut param_count = 0usize;
     for (i, pattern_part) in split_segments(pattern).enumerate() {
-        match path_parts.get(i) {
-            Some(path_part) => {
-                if pattern_part.starts_with(':') {
-                    param_count += 1;
-                } else if pattern_part != *path_part {
-                    // Static segment doesn't match
-                    return None;
-                }
-            }
-            // Pattern has more segments than the request path
-            None => return None,
+        // Pattern has more segments than the request path
+        let path_part = path_parts.get(i)?;
+        if pattern_part.starts_with(':') {
+            param_count += 1;
+        } else if pattern_part != *path_part {
+            // Static segment doesn't match
+            return None;
         }
         seen = i + 1;
     }
