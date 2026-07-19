@@ -117,6 +117,44 @@ impl McpToolRegistry {
             .collect()
     }
 
+    /// Get a page of registered tool definitions, ordered deterministically
+    /// by name.
+    ///
+    /// `cursor` is an opaque token: the name of the last item returned by
+    /// the previous page (or `None` to start from the beginning). Returns
+    /// the page of tools together with the `next_cursor` to pass in to
+    /// fetch the following page, or `None` if this was the last page.
+    pub fn list_tools_page(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> (Vec<ToolDefinition>, Option<String>) {
+        let mut names: Vec<&String> = self.tools.keys().collect();
+        names.sort();
+
+        let start = match cursor {
+            Some(c) => names.partition_point(|name| name.as_str() <= c),
+            None => 0,
+        };
+
+        let remaining = &names[start..];
+        let take = remaining.len().min(limit.max(1));
+        let page = &remaining[..take];
+
+        let next_cursor = if take < remaining.len() {
+            Some(page[take - 1].clone())
+        } else {
+            None
+        };
+
+        let defs = page
+            .iter()
+            .map(|name| self.tools[name.as_str()].to_definition())
+            .collect();
+
+        (defs, next_cursor)
+    }
+
     /// Get a tool by name
     pub fn get_tool(&self, name: &str) -> Option<&'static McpToolEntry> {
         self.tools.get(name).copied()
@@ -251,5 +289,100 @@ mod tests {
         let def = entry.to_definition();
         assert_eq!(def.name, "test_tool");
         assert_eq!(def.description, Some("A test tool".to_string()));
+    }
+
+    struct PageTestOwner;
+
+    fn page_test_handler(
+        _args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolCallResult>> + Send>> {
+        Box::pin(async { Ok(ToolCallResult::text("test")) })
+    }
+
+    /// Build a registry with `count` tools named `tool_00`, `tool_01`, ...
+    /// so pagination has a large, deterministically ordered set to page
+    /// through.
+    fn registry_with_tools(count: usize) -> McpToolRegistry {
+        let mut tools = HashMap::new();
+        for i in 0..count {
+            let name: &'static str = Box::leak(format!("tool_{i:02}").into_boxed_str());
+            let entry: &'static McpToolEntry =
+                Box::leak(Box::new(McpToolEntry::new::<PageTestOwner>(
+                    name,
+                    None,
+                    r#"{"type": "object"}"#,
+                    page_test_handler as ToolHandlerFnPtr,
+                )));
+            tools.insert(name.to_string(), entry);
+        }
+        McpToolRegistry { tools }
+    }
+
+    #[test]
+    fn test_list_tools_page_first_page_has_cursor() {
+        let registry = registry_with_tools(10);
+
+        let (page, next_cursor) = registry.list_tools_page(None, 4);
+
+        assert_eq!(page.len(), 4);
+        assert_eq!(page[0].name, "tool_00");
+        assert_eq!(page[3].name, "tool_03");
+        assert_eq!(next_cursor, Some("tool_03".to_string()));
+    }
+
+    #[test]
+    fn test_list_tools_page_cursor_returns_next_page() {
+        let registry = registry_with_tools(10);
+
+        let (first, cursor) = registry.list_tools_page(None, 4);
+        let cursor = cursor.expect("first page should have a cursor");
+        let (second, _) = registry.list_tools_page(Some(&cursor), 4);
+
+        assert_eq!(second.len(), 4);
+        assert_eq!(second[0].name, "tool_04");
+        assert_eq!(second[3].name, "tool_07");
+
+        // no overlap between pages
+        let first_names: std::collections::HashSet<_> =
+            first.iter().map(|t| t.name.clone()).collect();
+        let second_names: std::collections::HashSet<_> =
+            second.iter().map(|t| t.name.clone()).collect();
+        assert!(first_names.is_disjoint(&second_names));
+    }
+
+    #[test]
+    fn test_list_tools_page_final_page_has_no_cursor() {
+        let registry = registry_with_tools(10);
+
+        let (page, cursor) = registry.list_tools_page(Some("tool_07"), 4);
+
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].name, "tool_08");
+        assert_eq!(page[1].name, "tool_09");
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn test_list_tools_page_union_equals_full_list_no_dupes() {
+        let registry = registry_with_tools(10);
+
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let (page, next_cursor) = registry.list_tools_page(cursor.as_deref(), 3);
+            collected.extend(page.into_iter().map(|t| t.name));
+            match next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+
+        let mut expected: Vec<String> = (0..10).map(|i| format!("tool_{i:02}")).collect();
+        expected.sort();
+
+        assert_eq!(collected, expected);
+
+        let unique: std::collections::HashSet<_> = collected.iter().collect();
+        assert_eq!(unique.len(), collected.len());
     }
 }

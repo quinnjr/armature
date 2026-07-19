@@ -13,6 +13,10 @@ use std::collections::HashMap;
 /// MCP protocol version
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Maximum number of items returned per page by the `tools/list` and
+/// `resources/list` handlers.
+const LIST_PAGE_SIZE: usize = 100;
+
 /// Configuration for the MCP service
 #[derive(Clone)]
 pub struct McpConfig {
@@ -217,13 +221,14 @@ impl McpService {
     }
 
     /// Handle tools/list request
-    fn handle_tools_list(&self, _params: Option<Value>) -> Result<Value> {
-        let tools = self.tool_registry.list_tools();
+    fn handle_tools_list(&self, params: Option<Value>) -> Result<Value> {
+        let cursor = parse_list_cursor(params)?;
 
-        let result = ToolsListResult {
-            tools,
-            next_cursor: None,
-        };
+        let (tools, next_cursor) = self
+            .tool_registry
+            .list_tools_page(cursor.as_deref(), LIST_PAGE_SIZE);
+
+        let result = ToolsListResult { tools, next_cursor };
 
         serde_json::to_value(result).map_err(McpError::from)
     }
@@ -245,12 +250,16 @@ impl McpService {
     }
 
     /// Handle resources/list request
-    fn handle_resources_list(&self, _params: Option<Value>) -> Result<Value> {
-        let resources = self.resource_registry.list_resources();
+    fn handle_resources_list(&self, params: Option<Value>) -> Result<Value> {
+        let cursor = parse_list_cursor(params)?;
+
+        let (resources, next_cursor) = self
+            .resource_registry
+            .list_resources_page(cursor.as_deref(), LIST_PAGE_SIZE);
 
         let result = ResourcesListResult {
             resources,
-            next_cursor: None,
+            next_cursor,
         };
 
         serde_json::to_value(result).map_err(McpError::from)
@@ -295,6 +304,20 @@ impl Default for McpService {
     }
 }
 
+/// Parse the optional `cursor` field out of a `tools/list`/`resources/list`
+/// request's params. Missing params (or a missing/null `cursor`) means
+/// "start from the beginning".
+fn parse_list_cursor(params: Option<Value>) -> Result<Option<String>> {
+    match params {
+        None => Ok(None),
+        Some(value) => {
+            let params: ListParams = serde_json::from_value(value)
+                .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            Ok(params.cursor)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +359,57 @@ mod tests {
 
         assert!(response.error.is_none());
         assert!(response.result.is_some());
+
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        // No inventory-registered tools in the unit test binary, so the
+        // single (empty) page has no continuation.
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_list_with_cursor_param() {
+        let service = McpService::new();
+        let request = JsonRpcRequest::new("tools/list")
+            .with_params(serde_json::json!({ "cursor": "some_tool_name" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ToolsListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_handle_resources_list_with_cursor_param() {
+        let service = McpService::new();
+        let request = JsonRpcRequest::new("resources/list")
+            .with_params(serde_json::json!({ "cursor": "some_resource_uri" }));
+
+        let response = service.handle_request(request, &empty_headers()).await;
+
+        assert!(response.error.is_none());
+        let result: ResourcesListResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.next_cursor, None);
+    }
+
+    #[test]
+    fn test_parse_list_cursor_none_when_no_params() {
+        assert_eq!(parse_list_cursor(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_list_cursor_extracts_cursor() {
+        let params = serde_json::json!({ "cursor": "abc" });
+        assert_eq!(
+            parse_list_cursor(Some(params)).unwrap(),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_list_cursor_invalid_params_errors() {
+        let params = serde_json::json!({ "cursor": 123 });
+        assert!(parse_list_cursor(Some(params)).is_err());
     }
 
     #[tokio::test]
