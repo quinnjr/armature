@@ -369,7 +369,7 @@ impl EmailQueueBackend for RedisBackend {
         redis::cmd("SET")
             .arg(self.job_key(&job.id))
             .arg(&job_json)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -378,7 +378,7 @@ impl EmailQueueBackend for RedisBackend {
             .arg(self.pending_key())
             .arg(score)
             .arg(&job.id)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -398,7 +398,7 @@ impl EmailQueueBackend for RedisBackend {
         let job_ids: Vec<String> = redis::cmd("ZPOPMIN")
             .arg(self.pending_key())
             .arg(count)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -410,7 +410,7 @@ impl EmailQueueBackend for RedisBackend {
             .arg("LIMIT")
             .arg(0)
             .arg(count)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -419,7 +419,7 @@ impl EmailQueueBackend for RedisBackend {
             redis::cmd("ZREM")
                 .arg(self.retry_key())
                 .arg(&retry_ids)
-                .query_async::<()>(&mut *conn)
+                .query_async::<()>(&mut conn)
                 .await
                 .map_err(|e| MailError::Queue(e.to_string()))?;
         }
@@ -429,7 +429,7 @@ impl EmailQueueBackend for RedisBackend {
         for id in job_ids.into_iter().chain(retry_ids.into_iter()) {
             let job_json: Option<String> = redis::cmd("GET")
                 .arg(self.job_key(&id))
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
                 .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -454,7 +454,7 @@ impl EmailQueueBackend for RedisBackend {
         // Remove job data
         redis::cmd("DEL")
             .arg(self.job_key(job_id))
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -463,7 +463,7 @@ impl EmailQueueBackend for RedisBackend {
             .arg(self.stats_key())
             .arg("processed")
             .arg(1)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -485,7 +485,7 @@ impl EmailQueueBackend for RedisBackend {
         redis::cmd("SET")
             .arg(self.job_key(&job.id))
             .arg(&job_json)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -495,7 +495,7 @@ impl EmailQueueBackend for RedisBackend {
             .arg(self.retry_key())
             .arg(score)
             .arg(&job.id)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -515,14 +515,14 @@ impl EmailQueueBackend for RedisBackend {
         redis::cmd("LPUSH")
             .arg(self.dead_letter_key())
             .arg(&job_json)
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         // Remove job data
         redis::cmd("DEL")
             .arg(self.job_key(&job.id))
-            .query_async::<()>(&mut *conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
@@ -539,26 +539,26 @@ impl EmailQueueBackend for RedisBackend {
 
         let pending: u64 = redis::cmd("ZCARD")
             .arg(self.pending_key())
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .unwrap_or(0);
 
         let retrying: u64 = redis::cmd("ZCARD")
             .arg(self.retry_key())
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .unwrap_or(0);
 
         let dead_letter: u64 = redis::cmd("LLEN")
             .arg(self.dead_letter_key())
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .unwrap_or(0);
 
         let processed: u64 = redis::cmd("HGET")
             .arg(self.stats_key())
             .arg("processed")
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .unwrap_or(0);
 
