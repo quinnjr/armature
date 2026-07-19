@@ -17,7 +17,7 @@ default = ["postgres", "deadpool"]
 postgres = ["diesel/postgres", "diesel-async/postgres"]
 mysql = ["diesel/mysql", "diesel-async/mysql"]
 # Connection pools
-deadpool = ["diesel-async/deadpool"]
+deadpool = ["diesel-async/deadpool", "dep:deadpool"]
 bb8 = ["diesel-async/bb8", "dep:bb8"]
 mobc = ["diesel-async/mobc"]
 # Extras
@@ -31,6 +31,12 @@ diesel = { version = "2.3", default-features = false }
 diesel-async = { version = "0.9", default-features = false }
 diesel_migrations = { version = "2.3", optional = true }
 bb8 = { version = "0.9", optional = true }
+# Only needed to select a `Runtime` for deadpool's create/recycle timeouts;
+# `diesel-async`'s own `deadpool` feature does not enable `rt_tokio_1`.
+deadpool = { version = "0.13", optional = true, default-features = false, features = [
+    "managed",
+    "rt_tokio_1",
+] }
 
 # Async
 tokio = { version = "1", features = ["sync"] }

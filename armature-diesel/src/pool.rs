@@ -20,6 +20,63 @@ use diesel_async::pooled_connection::deadpool::Object as DeadpoolObject;
 use diesel_async::pooled_connection::bb8::Pool as Bb8Pool;
 
 // ============================================================================
+// Configuration helpers
+// ============================================================================
+
+/// Percent-encode a value for use in a libpq-style connection URL query
+/// parameter (e.g. `application_name`, `sslmode`).
+///
+/// `tokio-postgres` percent-decodes query parameter values when parsing a
+/// connection URL, so this keeps names containing spaces or other reserved
+/// characters intact.
+#[cfg(feature = "postgres")]
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Build the PostgreSQL connection URL used to establish new connections,
+/// appending `application_name` / `sslmode` as libpq connection options when
+/// configured.
+///
+/// Note: `tokio-postgres` only recognizes `sslmode` values of `disable`,
+/// `prefer`, or `require` when parsed from a URL (unlike libpq's full set,
+/// e.g. `verify-ca` / `verify-full`); other values will fail to parse when
+/// the connection is established.
+#[cfg(feature = "postgres")]
+fn pg_connection_url(config: &DieselConfig) -> String {
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(name) = &config.application_name {
+        params.push(format!("application_name={}", percent_encode(name)));
+    }
+
+    if let Some(mode) = &config.ssl_mode {
+        params.push(format!("sslmode={}", percent_encode(mode)));
+    }
+
+    if params.is_empty() {
+        return config.database_url.clone();
+    }
+
+    let separator = if config.database_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+
+    format!("{}{separator}{}", config.database_url, params.join("&"))
+}
+
+// ============================================================================
 // PostgreSQL Pool
 // ============================================================================
 
@@ -46,10 +103,16 @@ impl PgPool {
                 .unwrap_or(config.database_url.len())]
         );
 
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database_url);
+        let connection_url = pg_connection_url(&config);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&connection_url);
 
+        // deadpool has no direct `min_idle` / `max_lifetime` / `idle_timeout`
+        // knobs (it lazily creates connections and has no background reaper);
+        // those fields are only honored on the bb8 backend (`PgPoolBb8`).
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
+            .create_timeout(Some(config.connect_timeout))
+            .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;
 
@@ -102,11 +165,15 @@ impl PgPoolBb8 {
 
         info!("Creating PostgreSQL bb8 connection pool");
 
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database_url);
+        let connection_url = pg_connection_url(&config);
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&connection_url);
 
         let pool = Bb8Pool::builder()
             .max_size(config.pool_size as u32)
             .connection_timeout(config.connect_timeout)
+            .min_idle(config.min_idle.map(|n| n as u32))
+            .max_lifetime(Some(config.max_lifetime))
+            .idle_timeout(Some(config.idle_timeout))
             .build(manager)
             .await
             .map_err(|e| DieselError::Pool(e.to_string()))?;
@@ -170,8 +237,16 @@ impl MysqlPool {
         let manager =
             AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(&config.database_url);
 
+        // `application_name` / `ssl_mode` are not wired here: they are
+        // libpq/PostgreSQL connection-URL options (see `pg_connection_url`)
+        // with no equivalent reachable through `mysql_async`'s URL parsing
+        // without adding `mysql_async` as a direct dependency of this crate.
+        // deadpool also has no `min_idle` / `max_lifetime` / `idle_timeout`
+        // knobs (see the PostgreSQL deadpool path above for details).
         let pool = DeadpoolPool::builder(manager)
             .max_size(config.pool_size)
+            .create_timeout(Some(config.connect_timeout))
+            .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|e| DieselError::Pool(e.to_string()))?;
 
@@ -248,3 +323,110 @@ pub type DieselPool = PgPool;
 /// Default MySQL pool type.
 #[cfg(all(feature = "mysql", feature = "deadpool", not(feature = "postgres")))]
 pub type DieselPool = MysqlPool;
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod pg_connection_url_tests {
+    use super::pg_connection_url;
+    use crate::DieselConfig;
+
+    #[test]
+    fn appends_application_name_and_sslmode_as_query_params() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db")
+            .application_name("armature test app")
+            .ssl_mode("require");
+
+        let url = pg_connection_url(&config);
+
+        assert_eq!(
+            url,
+            "postgres://user:pass@localhost/db?application_name=armature%20test%20app&sslmode=require"
+        );
+    }
+
+    #[test]
+    fn leaves_url_untouched_when_neither_is_set() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db");
+        assert_eq!(pg_connection_url(&config), config.database_url);
+    }
+
+    #[test]
+    fn appends_with_ampersand_when_url_already_has_a_query_string() {
+        let config = DieselConfig::new("postgres://user:pass@localhost/db?connect_timeout=5")
+            .ssl_mode("disable");
+
+        let url = pg_connection_url(&config);
+
+        assert_eq!(
+            url,
+            "postgres://user:pass@localhost/db?connect_timeout=5&sslmode=disable"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "mysql", feature = "deadpool"))]
+mod mysql_pool_config_tests {
+    use crate::{DieselConfig, MysqlPool};
+    use std::time::Duration;
+
+    // No MySQL container is available in `armature-testkit`, so this only
+    // proves the builder accepts and does not silently drop `connect_timeout`
+    // (a real connection would be needed to prove it reaches the server).
+    #[tokio::test]
+    async fn pool_construction_honors_connect_timeout_without_a_live_server() {
+        let config = DieselConfig::new("mysql://user:pass@127.0.0.1:1/nonexistent_db")
+            .pool_size(1)
+            .connect_timeout(Duration::from_millis(50));
+
+        // deadpool creates connections lazily, so building the pool itself
+        // must succeed even though nothing is listening on that port.
+        let pool = MysqlPool::new(config).await;
+        assert!(pool.is_ok(), "pool construction should not eagerly connect");
+    }
+}
+
+/// Requires Docker; skips itself when unavailable (see `armature_testkit::docker_available`).
+#[cfg(all(test, feature = "postgres", feature = "deadpool"))]
+mod pg_pool_config_integration_tests {
+    use crate::{DieselConfig, PgPool};
+    use diesel::QueryableByName;
+    use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl;
+    use std::time::Duration;
+
+    #[derive(QueryableByName)]
+    struct ApplicationNameRow {
+        #[diesel(sql_type = Text)]
+        application_name: String,
+    }
+
+    #[tokio::test]
+    async fn application_name_reaches_the_server() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: docker not available");
+            return;
+        }
+
+        let container = armature_testkit::containers::PostgresContainer::start().await;
+        let config = DieselConfig::new(container.url())
+            .application_name("armature_test")
+            .connect_timeout(Duration::from_secs(5));
+
+        let pool = PgPool::new(config).await.expect("failed to build pg pool");
+        let mut conn = pool.get().await.expect("failed to get connection");
+
+        let rows: Vec<ApplicationNameRow> = diesel::sql_query("SHOW application_name")
+            .load(&mut conn)
+            .await
+            .expect("SHOW application_name failed");
+
+        assert_eq!(
+            rows.into_iter().next().unwrap().application_name,
+            "armature_test"
+        );
+    }
+}
