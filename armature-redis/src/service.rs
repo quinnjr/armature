@@ -58,8 +58,7 @@ impl RedisService {
 
     /// Get a connection from the pool.
     pub async fn get(&self) -> Result<RedisConnection<'_>> {
-        let conn = self.pool.get().await?;
-        Ok(RedisConnection::new(conn))
+        self.pool.get().await
     }
 
     /// Get or lazily build the reusable dedicated `redis::Client`.
@@ -100,7 +99,7 @@ impl RedisService {
     pub async fn health_check(&self) -> Result<()> {
         let mut conn = self.get().await?;
         let _: String = redis::cmd("PING")
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .map_err(|e| RedisError::Connection(e.to_string()))?;
         Ok(())
@@ -135,7 +134,7 @@ impl RedisService {
         let _: () = redis::cmd("SET")
             .arg(key)
             .arg(value)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         Ok(())
     }
@@ -154,7 +153,7 @@ impl RedisService {
             .arg(value)
             .arg("EX")
             .arg(ttl.as_secs())
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         Ok(())
     }
@@ -222,7 +221,7 @@ impl RedisService {
             .arg(key)
             .arg(field)
             .arg(value)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         Ok(())
     }
@@ -292,7 +291,7 @@ impl RedisService {
         let is_member: bool = redis::cmd("SISMEMBER")
             .arg(key)
             .arg(member)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         Ok(is_member)
     }
@@ -306,7 +305,7 @@ impl RedisService {
     ) -> Result<T> {
         let mut conn = self.get().await?;
         let script = redis::Script::new(script);
-        let result: T = script.key(keys).arg(args).invoke_async(&mut *conn).await?;
+        let result: T = script.key(keys).arg(args).invoke_async(&mut conn).await?;
         Ok(result)
     }
 
@@ -321,7 +320,7 @@ impl RedisService {
             return Ok(Vec::new());
         }
         let mut conn = self.get().await?;
-        let values: Vec<Option<T>> = redis::cmd("MGET").arg(keys).query_async(&mut *conn).await?;
+        let values: Vec<Option<T>> = redis::cmd("MGET").arg(keys).query_async(&mut conn).await?;
         Ok(values)
     }
 
@@ -341,7 +340,7 @@ impl RedisService {
         for (key, value) in items {
             cmd.arg(*key).arg(value);
         }
-        let _: () = cmd.query_async(&mut *conn).await?;
+        let _: () = cmd.query_async(&mut conn).await?;
         Ok(())
     }
 
@@ -353,7 +352,7 @@ impl RedisService {
             return Ok(0);
         }
         let mut conn = self.get().await?;
-        let deleted: u64 = redis::cmd("DEL").arg(keys).query_async(&mut *conn).await?;
+        let deleted: u64 = redis::cmd("DEL").arg(keys).query_async(&mut conn).await?;
         Ok(deleted)
     }
 
@@ -386,7 +385,7 @@ impl RedisService {
         let mut conn = self.get().await?;
         let mut pipe = redis::pipe();
         build(&mut pipe);
-        let result: T = pipe.query_async(&mut *conn).await?;
+        let result: T = pipe.query_async(&mut conn).await?;
         Ok(result)
     }
 }
