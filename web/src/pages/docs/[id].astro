@@ -1,0 +1,57 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import DocsShell from '../../components/docs/DocsShell.astro';
+import DocsOverview from '../../components/docs/DocsOverview.astro';
+import ProfilingGuide from '../../components/docs/ProfilingGuide.astro';
+import { docs, docFile, getDoc } from '../../lib/docs';
+import { renderDocMarkdown } from '../../lib/markdown';
+import { url } from '../../lib/url';
+
+export function getStaticPaths() {
+  return docs.map((doc) => ({ params: { id: doc.id } }));
+}
+
+const { id } = Astro.params;
+const doc = getDoc(id!)!;
+const file = docFile(doc);
+const html = doc.hasComponent ? null : file ? renderDocMarkdown(file) : null;
+---
+
+<BaseLayout title={`${doc.title} - Documentation - Armature`}>
+  <DocsShell activeId={doc.id}>
+    {doc.id === 'readme' && <DocsOverview />}
+    {doc.id === 'profiling-guide' && <ProfilingGuide />}
+    {html !== null && <article class="markdown-content" set:html={html} />}
+    {
+      !doc.hasComponent && html === null && (
+        <div class="markdown-content">
+          <h1>{doc.title}</h1>
+          <p>This documentation page is being enhanced with beautiful visuals.</p>
+          <p>In the meantime, you can:</p>
+          <ul>
+            <li>
+              Check out the <a href={url('/docs/readme')}>Overview</a> for a quick start
+            </li>
+            <li>
+              Visit our{' '}
+              <a href="https://github.com/pegasusheavy/armature" target="_blank">
+                GitHub repository
+              </a>{' '}
+              for source code
+            </li>
+            <li>
+              See the{' '}
+              <a href="https://docs.rs/armature" target="_blank">
+                API documentation
+              </a>{' '}
+              on docs.rs
+            </li>
+          </ul>
+          <p>
+            <a href={url('/docs/readme')}>← Back to Overview</a>
+          </p>
+        </div>
+      )
+    }
+  </DocsShell>
+</BaseLayout>

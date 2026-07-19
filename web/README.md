@@ -1,6 +1,6 @@
 # Armature Framework - Web Documentation
 
-This is the official documentation website for the Armature Framework, built with Angular 21+ and Tailwind CSS 4+.
+This is the official documentation website for the Armature Framework, built with Astro 5 and Tailwind CSS 4+.
 
 ## About Armature
 
@@ -34,32 +34,36 @@ This is the official documentation website for the Armature Framework, built wit
 
 ## Technology Stack
 
-- **Angular**: 21.0.1 (latest)
-- **Tailwind CSS**: 4.1.17 (CSS-first configuration)
+- **Astro**: 5.x (static site generation)
+- **Tailwind CSS**: 4.1+ (CSS-first configuration) via `@tailwindcss/vite`
+- **Theme**: [`@pegasusheavy/tailswatch`](https://github.com/pegasusheavy/tailswatch) Oxide theme
 - **SCSS**: For enhanced styling capabilities
-- **TypeScript**: 5.7+
+- **TypeScript**: 5.9+
 - **Package Manager**: pnpm
+- **Tests**: Vitest
 
 ## Tailwind CSS 4+ Configuration
 
-This project uses Tailwind CSS 4's new CSS-first configuration approach. No more `tailwind.config.js`!
+This project uses Tailwind CSS 4's CSS-first configuration approach. No `tailwind.config.js`.
 
 ### How it works:
 
-1. **Direct CSS Import**: Tailwind is imported directly in `src/styles.scss`:
+1. **Direct CSS Import**: Tailwind and the Tailswatch Oxide theme are imported in `src/styles/global.scss`:
    ```scss
-   @import "tailwindcss";
+   @use "tailwindcss";
+   @use "@pegasusheavy/tailswatch/themes/oxide";
    ```
 
-2. **Theme Configuration**: Custom themes are defined using `@theme` directive with CSS variables:
-   ```scss
-   @theme {
-     --color-primary-500: #0ea5e9;
-     --font-family-sans: Inter, system-ui, sans-serif;
-   }
-   ```
+2. **Theme Configuration**: Custom theme extensions are defined using the `@theme` directive with CSS variables (see the rust/stone color aliases in `global.scss`).
 
-3. **Utility Classes**: Use Tailwind utilities directly in templates with `@apply` in SCSS.
+3. **Utility Classes**: Use Tailwind utilities directly in `.astro` templates.
+
+## Documentation Content
+
+The guide pages under `/docs/<id>` are statically generated at build time from the
+markdown files in the repository's top-level `docs/` directory. The registry mapping
+doc ids to markdown files, titles, and sidebar categories lives in `src/lib/docs.ts`.
+Adding a new guide means adding the markdown file to `docs/` and one entry to that registry.
 
 ## Development
 
@@ -85,35 +89,41 @@ pnpm lint
 ```
 web/
 ├── src/
-│   ├── app/
-│   │   ├── app.ts          # Main component
-│   │   ├── app.html        # Component template
-│   │   ├── app.scss        # Component styles
-│   │   └── app.config.ts   # App configuration
-│   ├── styles.scss         # Global styles + Tailwind
-│   ├── index.html          # HTML entry point
-│   └── main.ts             # TypeScript entry point
-├── public/
-│   └── favicon.ico
-└── angular.json            # Angular configuration
+│   ├── layouts/
+│   │   └── BaseLayout.astro    # HTML shell, SEO meta, nav + footer
+│   ├── components/
+│   │   ├── Nav.astro
+│   │   ├── Footer.astro
+│   │   ├── Icon.astro          # FontAwesome SVG renderer
+│   │   └── docs/               # Docs shell + hand-built doc pages
+│   ├── pages/                  # File-based routes
+│   │   ├── index.astro
+│   │   ├── getting-started.astro
+│   │   ├── comparisons.astro
+│   │   ├── roadmap.astro
+│   │   ├── faq.astro
+│   │   ├── 404.astro
+│   │   └── docs/
+│   │       ├── index.astro
+│   │       └── [id].astro      # Statically generated from ../docs/*.md
+│   ├── lib/
+│   │   ├── docs.ts             # Doc registry (ids, titles, categories, files)
+│   │   ├── markdown.ts         # Build-time markdown rendering
+│   │   └── url.ts              # Base-path-aware link helper
+│   └── styles/
+│       ├── global.scss         # Tailwind + Tailswatch Oxide theme + overrides
+│       ├── docs.scss           # Docs shell + markdown typography
+│       └── doc-content.scss    # Shared doc component styles
+├── tests/                      # Vitest tests
+├── public/                     # Static assets (favicon, logos, manifest, ...)
+└── astro.config.mjs            # Astro configuration
 ```
-
-## Features
-
-- ✅ Standalone Components (Angular 21+)
-- ✅ Tailwind CSS 4+ with CSS-first configuration
-- ✅ SCSS for enhanced styling
-- ✅ Responsive design with mobile-first approach
-- ✅ TypeScript with strict mode
-- ✅ Production-ready build optimization
-- ✅ Modern CSS features (CSS Grid, Flexbox)
-- ✅ Google Fonts integration (Inter)
 
 ## Customizing Styles
 
 ### Adding Custom Colors
 
-Edit `src/styles.scss`:
+Edit `src/styles/global.scss`:
 
 ```scss
 @theme {
@@ -128,16 +138,6 @@ Then use in templates:
 <div class="bg-accent-500 text-white">Custom color</div>
 ```
 
-### Component-Specific Styles
-
-Add styles to `src/app/app.scss` using Tailwind's `@apply`:
-
-```scss
-.my-custom-class {
-  @apply px-4 py-2 bg-primary-500 text-white rounded-lg;
-}
-```
-
 ## Deployment
 
 ### Build for Production
@@ -146,22 +146,12 @@ Add styles to `src/app/app.scss` using Tailwind's `@apply`:
 pnpm run build
 ```
 
-Output will be in `dist/web/`.
+Output will be in `dist/`.
 
 ### Deploy to GitHub Pages
 
-The site is configured for automatic deployment via GitHub Actions:
-
-```bash
-# Commit changes to main branch
-git add .
-git commit -m "Update web documentation"
-
-# Push to main
-git push origin main
-```
-
-GitHub Pages will automatically build and deploy the site when changes are pushed to the `main` branch.
+The site is configured for automatic deployment via GitHub Actions (`.github/workflows/docs.yml`).
+The `build:gh-pages` script sets the `/armature` base path.
 
 Live site: https://pegasusheavy.github.io/armature/
 
@@ -174,7 +164,7 @@ Live site: https://pegasusheavy.github.io/armature/
 
 ## License
 
-MIT License - See root LICENSE file for details.
+Apache 2.0 License - See root LICENSE file for details.
 
 ## Contributing
 

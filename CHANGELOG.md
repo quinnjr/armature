@@ -539,6 +539,12 @@ A conformance `/audit` (name/doc/signature vs implementation, project-scoped rat
 - Query strings were dropped by the module/controller server — `?a=b` params never reached handlers. They are now parsed and percent-decoded on every `listen*` path.
 - Six source modules (`conditional`, `content_negotiation`, `response_cache`, `error_correlation`, `error_transform`, `exception_filter`) were never declared and so never compiled — which also broke the `#[catch]` macro. They are now wired into the crate.
 - Numerous correctness/soundness/security fixes in `armature-core`: use-after-free in `cow_state`, dangling reference in `cache_local`, unsound `SoaStorage`, bulkhead/circuit-breaker/streaming cancellation and race bugs, HTTP/3 responses dropping headers/cookies/body, cross-user response-cache leakage, SQL injection in pagination sort, per-request `Box::leak` in wildcard routing, multipart binary corruption, and UTF-8 mishandling in percent-decoding and content negotiation.
+### Changed
+
+#### Documentation Website (`web/`)
+- Converted the docs site from Angular 21 to Astro 5 static site generation, keeping the `@pegasusheavy/tailswatch` Oxide theme and all custom Tailwind CSS
+- Guide pages under `/docs/<id>` are now statically rendered at build time from the repository's `docs/*.md` files (previously most showed a "coming soon" placeholder)
+- GitHub Pages workflow simplified: no more copying markdown into `public/`, SPA `404.html` hack removed (Astro emits a real 404 page)
 
 ---
 

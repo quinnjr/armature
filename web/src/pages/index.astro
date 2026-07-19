@@ -1,0 +1,215 @@
+---
+import { faShieldAlt, faSyringe, faCubes, faBolt, faUserShield, faTerminal } from '@fortawesome/free-solid-svg-icons';
+import { faGithub } from '@fortawesome/free-brands-svg-icons';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import { url } from '../lib/url';
+---
+
+<BaseLayout title="Armature - Modern Rust Web Framework">
+  <!-- Hero -->
+  <section class="hero-rust-gradient text-white">
+    <div class="max-w-5xl mx-auto px-6 py-24 text-center relative z-10">
+      <img src={url('/assets/armature-logo.svg')} alt="Armature Logo" class="h-24 w-24 mx-auto mb-6" />
+      <p class="text-rust-400 font-semibold mb-4 tracking-wide uppercase text-sm">The Rust Web Framework</p>
+      <h1 class="text-5xl md:text-6xl font-bold mb-6 tracking-tight">Armature</h1>
+      <p class="text-xl text-stone-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+        Build production-ready, Enterprise grade APIs with type-safe routing, dependency injection, and modular
+        architecture inspired by Angular &amp; NestJS.
+      </p>
+      <div class="flex gap-4 justify-center">
+        <a href={url('/getting-started')} class="btn-rust"> Get Started </a>
+        <a
+          href="https://github.com/pegasusheavy/armature"
+          target="_blank"
+          class="bg-stone-800 hover:bg-stone-700 text-white font-medium px-6 py-3 rounded-lg transition-colors flex items-center gap-2 border border-stone-700"
+        >
+          <Icon icon={faGithub} />
+          GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Code Preview -->
+  <section class="bg-stone-900 border-y border-stone-800">
+    <div class="max-w-5xl mx-auto">
+      <pre
+        class="p-6 text-sm overflow-x-auto leading-relaxed"><code class="text-stone-300"><span class="text-rust-500">use</span> armature::prelude::*;
+<span class="text-rust-500">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="text-amber-500">&#35;[derive(Serialize, Deserialize)]</span>
+<span class="text-rust-500">struct</span> <span class="text-teal-400">User</span> &#123; id: <span class="text-teal-400">u32</span>, name: <span class="text-teal-400">String</span> &#125;
+
+<span class="text-stone-500">// Injectable service with business logic</span>
+<span class="text-amber-500">&#35;[injectable]</span>
+<span class="text-amber-500">&#35;[derive(Default, Clone)]</span>
+<span class="text-rust-500">struct</span> <span class="text-teal-400">UserService</span>;
+
+<span class="text-rust-500">impl</span> UserService &#123;
+    <span class="text-rust-500">fn</span> <span class="text-yellow-300">find_by_id</span>(&amp;self, id: <span class="text-teal-400">u32</span>) -&gt; Option&lt;User&gt; &#123;
+        Some(User &#123; id, name: <span class="text-orange-300">"Alice"</span>.into() &#125;)
+    &#125;
+&#125;
+
+<span class="text-stone-500">// Controller with routes</span>
+<span class="text-amber-500">&#35;[controller("/api/users")]</span>
+<span class="text-amber-500">&#35;[derive(Default, Clone)]</span>
+<span class="text-rust-500">struct</span> <span class="text-teal-400">UserController</span>;
+
+<span class="text-rust-500">impl</span> UserController &#123;
+    <span class="text-amber-500">&#35;[get("")]</span>
+    <span class="text-rust-500">async fn</span> <span class="text-yellow-300">list</span>() -&gt; Result&lt;Json&lt;Vec&lt;User&gt;&gt;, Error&gt; &#123;
+        Ok(Json(<span class="text-rust-500">vec!</span>[User &#123; id: <span class="text-green-400">1</span>, name: <span class="text-orange-300">"Alice"</span>.into() &#125;]))
+    &#125;
+
+    <span class="text-amber-500">&#35;[get("/:id")]</span>
+    <span class="text-rust-500">async fn</span> <span class="text-yellow-300">get_user</span>(req: HttpRequest) -&gt; Result&lt;Json&lt;User&gt;, Error&gt; &#123;
+        <span class="text-rust-500">let</span> id: <span class="text-teal-400">u32</span> = req.param(<span class="text-orange-300">"id"</span>).unwrap().parse().unwrap();
+        Ok(Json(User &#123; id, name: <span class="text-orange-300">"Alice"</span>.into() &#125;))
+    &#125;
+
+    <span class="text-amber-500">&#35;[post("")]</span>
+    <span class="text-rust-500">async fn</span> <span class="text-yellow-300">create</span>(req: HttpRequest) -&gt; Result&lt;Json&lt;User&gt;, Error&gt; &#123;
+        <span class="text-rust-500">let</span> user: User = req.json()?;
+        Ok(Json(user))
+    &#125;
+&#125;
+
+<span class="text-stone-500">// Module wires everything together</span>
+<span class="text-amber-500">&#35;[module(</span>
+    <span class="text-amber-500">providers: [UserService],</span>
+    <span class="text-amber-500">controllers: [UserController]</span>
+<span class="text-amber-500">)]</span>
+<span class="text-amber-500">&#35;[derive(Default)]</span>
+<span class="text-rust-500">struct</span> <span class="text-teal-400">AppModule</span>;
+
+<span class="text-amber-500">&#35;[tokio::main]</span>
+<span class="text-rust-500">async fn</span> <span class="text-yellow-300">main</span>() &#123;
+    <span class="text-rust-500">let</span> app = Application::create::&lt;AppModule&gt;().<span class="text-rust-500">await</span>;
+    app.listen(<span class="text-green-400">3000</span>).<span class="text-rust-500">await</span>.unwrap();
+&#125;</code></pre>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="bg-stone-950 py-20">
+    <div class="max-w-5xl mx-auto px-6">
+      <h2 class="text-3xl font-bold text-center text-white mb-4">Why Armature?</h2>
+      <p class="text-stone-400 text-center max-w-2xl mx-auto mb-16">
+        Everything you need to build fast, reliable web APIs in Rust.
+      </p>
+
+      <div class="grid md:grid-cols-3 gap-8">
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-rust-600 transition-colors">
+          <div class="w-10 h-10 bg-rust-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faShieldAlt} class="text-rust-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">Type-Safe</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            Catch errors at compile time. Path parameters, query strings, and request bodies are fully typed.
+          </p>
+        </div>
+
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-emerald-600 transition-colors">
+          <div class="w-10 h-10 bg-emerald-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faSyringe} class="text-emerald-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">Dependency Injection</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            Services are automatically injected into controllers. No manual wiring required.
+          </p>
+        </div>
+
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-amber-600 transition-colors">
+          <div class="w-10 h-10 bg-amber-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faCubes} class="text-amber-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">Modular Architecture</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            Organize your app into modules with clear boundaries and dependencies.
+          </p>
+        </div>
+
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-orange-600 transition-colors">
+          <div class="w-10 h-10 bg-orange-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faBolt} class="text-orange-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">High Performance</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            Built on Tokio for async I/O. Zero-cost abstractions mean no runtime overhead.
+          </p>
+        </div>
+
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-rose-600 transition-colors">
+          <div class="w-10 h-10 bg-rose-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faUserShield} class="text-rose-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">Built-in Security</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            JWT, OAuth2, and SAML authentication. Security headers and middleware included.
+          </p>
+        </div>
+
+        <div class="bg-stone-900 border border-stone-800 rounded-xl p-6 hover:border-teal-600 transition-colors">
+          <div class="w-10 h-10 bg-teal-900/50 rounded-lg flex items-center justify-center mb-4">
+            <Icon icon={faTerminal} class="text-teal-400" />
+          </div>
+          <h3 class="font-semibold text-white mb-2">Powerful CLI</h3>
+          <p class="text-stone-400 text-sm leading-relaxed">
+            Generate controllers, services, and modules. Dev server with hot reloading.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section class="bg-stone-900 py-20 border-t border-stone-800">
+    <div class="max-w-3xl mx-auto px-6">
+      <h2 class="text-3xl font-bold text-center text-white mb-4">Quick Start</h2>
+      <p class="text-stone-400 text-center mb-10">Get up and running in seconds.</p>
+
+      <div class="w-full bg-stone-950 rounded-xl overflow-hidden border border-stone-800">
+        <div class="bg-stone-800 px-4 py-3 flex items-center gap-2">
+          <div class="w-3 h-3 rounded-full bg-red-500"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+          <div class="w-3 h-3 rounded-full bg-green-500"></div>
+          <span class="ml-3 text-stone-400 text-sm font-medium">Terminal</span>
+        </div>
+        <div class="p-6 font-mono text-sm leading-relaxed">
+          <div class="mb-2 text-stone-500"># Install the CLI</div>
+          <div class="mb-4">
+            <span class="text-green-400">$</span>
+            <span class="text-stone-300">cargo install armature-cli</span>
+          </div>
+
+          <div class="mb-2 text-stone-500"># Create a new project</div>
+          <div><span class="text-green-400">$</span> <span class="text-stone-300">armature new my-api</span></div>
+          <div class="mb-4"><span class="text-green-400">$</span> <span class="text-stone-300">cd my-api</span></div>
+
+          <div class="mb-2 text-stone-500"># Start the dev server</div>
+          <div><span class="text-green-400">$</span> <span class="text-stone-300">armature dev</span></div>
+          <div class="mt-2 text-rust-400">→ Server running at http://localhost:3000</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="hero-rust-gradient py-16">
+    <div class="max-w-3xl mx-auto px-6 text-center relative z-10">
+      <h2 class="text-2xl font-bold text-white mb-4">Ready to build?</h2>
+      <p class="text-stone-400 mb-8">Check out the documentation to learn more.</p>
+      <div class="flex gap-4 justify-center">
+        <a href={url('/getting-started')} class="btn-rust"> Get Started </a>
+        <a
+          href={url('/docs')}
+          class="bg-stone-800 hover:bg-stone-700 text-white font-medium px-6 py-3 rounded-lg transition-colors border border-stone-700"
+        >
+          Read the Docs
+        </a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

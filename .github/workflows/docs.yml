@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   # ============================================================================
-  # BUILD ANGULAR WEBSITE
+  # BUILD ASTRO WEBSITE
   # ============================================================================
 
   build-website:
@@ -50,25 +50,15 @@ jobs:
         working-directory: web
         run: pnpm install
 
-      - name: Copy docs to web/public/docs for build
-        run: |
-          rm -rf web/public/docs
-          mkdir -p web/public/docs
-          cp docs/*.md web/public/docs/
-
-      - name: Build Angular app for GitHub Pages
+      - name: Build Astro site for GitHub Pages
         working-directory: web
         run: pnpm run build:gh-pages
-
-      - name: Create 404.html for SPA routing
-        working-directory: web/dist/web/browser
-        run: cp index.html 404.html
 
       - name: Upload website artifact
         uses: actions/upload-artifact@v7
         with:
           name: website
-          path: web/dist/web/browser/
+          path: web/dist/
 
   # ============================================================================
   # DEPLOY TO GH-PAGES BRANCH

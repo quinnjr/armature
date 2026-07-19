@@ -1,0 +1,45 @@
+---
+import { docsByCategory } from '../../lib/docs';
+import { url } from '../../lib/url';
+import '../../styles/docs.scss';
+
+interface Props {
+  activeId: string;
+}
+
+const { activeId } = Astro.props;
+const grouped = docsByCategory();
+---
+
+<div class="docs-container">
+  <!-- Sidebar Navigation -->
+  <aside class="docs-sidebar">
+    <div class="sidebar-content">
+      <h2>📚 Documentation</h2>
+
+      <nav>
+        {
+          [...grouped.entries()].map(([category, categoryDocs]) => (
+            <div class="doc-category">
+              <h3>{category}</h3>
+              <ul>
+                {categoryDocs.map((doc) => (
+                  <li>
+                    <a href={url(`/docs/${doc.id}`)} class:list={[{ active: doc.id === activeId }]}>
+                      {doc.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </nav>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="docs-content">
+    <slot />
+  </main>
+</div>

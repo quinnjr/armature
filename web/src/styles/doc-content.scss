@@ -1,0 +1,776 @@
+// =============================================================================
+// Shared Documentation Content Styles
+// =============================================================================
+// This file contains common styles used across all documentation pages.
+// Import this in individual doc components or in the main docs.component.scss
+
+// -----------------------------------------------------------------------------
+// Base Document Content
+// -----------------------------------------------------------------------------
+.doc-content {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  color: var(--color-stone-200);
+}
+
+// -----------------------------------------------------------------------------
+// Hero Section
+// -----------------------------------------------------------------------------
+.doc-hero {
+  text-align: center;
+  padding: 3rem 0;
+  border-bottom: 1px solid var(--color-stone-800);
+  margin-bottom: 3rem;
+
+  h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--color-stone-100);
+    margin: 1rem 0;
+  }
+
+  .hero-description {
+    font-size: 1.25rem;
+    color: var(--color-stone-400);
+    max-width: 600px;
+    margin: 0 auto 1.5rem;
+    line-height: 1.6;
+  }
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-rust-900);
+  border: 1px solid var(--color-rust-700);
+  padding: 0.5rem 1rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  color: var(--color-rust-300);
+
+  .badge-icon {
+    font-size: 1.25rem;
+  }
+}
+
+.hero-links {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+// -----------------------------------------------------------------------------
+// Buttons
+// -----------------------------------------------------------------------------
+.doc-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-rust-600);
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.2s;
+
+  &:hover {
+    background: var(--color-rust-500);
+  }
+}
+
+.doc-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-stone-800);
+  color: var(--color-stone-200);
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--color-stone-700);
+  transition: all 0.2s;
+
+  &:hover {
+    background: var(--color-stone-700);
+    border-color: var(--color-stone-600);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Features Section
+// -----------------------------------------------------------------------------
+.features-section {
+  margin-bottom: 3rem;
+
+  h2 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--color-stone-100);
+    margin-bottom: 1.5rem;
+  }
+}
+
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.feature-card {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  transition: border-color 0.2s;
+
+  &:hover {
+    border-color: var(--color-stone-700);
+  }
+
+  .feature-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+    display: block;
+  }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-stone-100);
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    font-size: 0.875rem;
+    color: var(--color-stone-400);
+    line-height: 1.5;
+    margin: 0;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Content Sections
+// -----------------------------------------------------------------------------
+.section {
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--color-stone-800);
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--color-stone-100);
+    margin-bottom: 1rem;
+  }
+
+  h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-stone-200);
+    margin: 1.5rem 0 1rem;
+  }
+
+  h4 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--color-stone-200);
+    margin: 1.25rem 0 0.75rem;
+  }
+
+  p {
+    color: var(--color-stone-300);
+    line-height: 1.7;
+    margin-bottom: 1rem;
+  }
+
+  code {
+    background: var(--color-stone-800);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.875em;
+    color: #f9a825; // Bright amber for better visibility
+    border: 1px solid var(--color-stone-700);
+  }
+
+  ul,
+  ol {
+    color: var(--color-stone-300);
+    line-height: 1.7;
+    margin-bottom: 1rem;
+    padding-left: 1.5rem;
+
+    li {
+      margin-bottom: 0.5rem;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Code Blocks
+// -----------------------------------------------------------------------------
+.code-block {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  margin: 1rem 0;
+
+  .code-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: var(--color-stone-800);
+    border-bottom: 1px solid var(--color-stone-700);
+
+    .code-lang {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      color: var(--color-rust-400);
+      font-weight: 600;
+    }
+
+    .code-file {
+      font-size: 0.75rem;
+      color: var(--color-stone-500);
+    }
+  }
+
+  pre {
+    margin: 0;
+    padding: 1rem;
+    overflow-x: auto;
+
+    code {
+      background: none;
+      padding: 0;
+      font-size: 0.875rem;
+      line-height: 1.6;
+      color: var(--color-stone-300);
+    }
+  }
+}
+
+.output-block {
+  background: var(--color-stone-950);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  margin: 1rem 0;
+
+  .output-header {
+    padding: 0.5rem 1rem;
+    background: var(--color-stone-900);
+    border-bottom: 1px solid var(--color-stone-800);
+    font-size: 0.75rem;
+    color: var(--color-stone-500);
+    text-transform: uppercase;
+  }
+
+  pre {
+    margin: 0;
+    padding: 1rem;
+    overflow-x: auto;
+
+    code {
+      background: none;
+      padding: 0;
+      font-size: 0.875rem;
+      line-height: 1.6;
+      color: var(--color-rust-400);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Notes & Callouts
+// -----------------------------------------------------------------------------
+.note {
+  background: var(--color-stone-900);
+  border-left: 3px solid var(--color-rust-500);
+  padding: 1rem 1.5rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  margin: 1rem 0;
+
+  strong {
+    color: var(--color-rust-400);
+  }
+
+  a {
+    color: var(--color-rust-400);
+    text-decoration: underline;
+
+    &:hover {
+      color: var(--color-rust-300);
+    }
+  }
+}
+
+.warning {
+  background: var(--color-stone-900);
+  border-left: 3px solid #f59e0b;
+  padding: 1rem 1.5rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  margin: 1rem 0;
+
+  strong {
+    color: #f59e0b;
+  }
+}
+
+.tip {
+  background: var(--color-stone-900);
+  border-left: 3px solid #10b981;
+  padding: 1rem 1.5rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  margin: 1rem 0;
+
+  strong {
+    color: #10b981;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Tables
+// -----------------------------------------------------------------------------
+.table-container {
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+
+  th,
+  td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--color-stone-800);
+  }
+
+  th {
+    background: var(--color-stone-900);
+    color: var(--color-stone-200);
+    font-weight: 600;
+  }
+
+  td {
+    color: var(--color-stone-300);
+
+    code {
+      background: var(--color-stone-800);
+      padding: 0.2rem 0.5rem;
+      border-radius: 0.25rem;
+      color: #f9a825; // Bright amber for better visibility
+      border: 1px solid var(--color-stone-700);
+    }
+  }
+
+  tr:hover td {
+    background: var(--color-stone-900);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Info Box
+// -----------------------------------------------------------------------------
+.info-box {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+
+  h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-stone-100);
+    margin-bottom: 1rem;
+  }
+
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+
+    li {
+      padding: 0.5rem 0;
+      color: var(--color-stone-300);
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+
+      &::before {
+        content: '→';
+        color: var(--color-rust-500);
+      }
+
+      strong {
+        color: var(--color-stone-200);
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Config Grid
+// -----------------------------------------------------------------------------
+.config-grid {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.config-item {
+  display: flex;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-stone-900);
+  border-radius: 0.5rem;
+
+  .config-name {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--color-rust-400);
+    font-size: 0.875rem;
+    min-width: 180px;
+  }
+
+  .config-desc {
+    color: var(--color-stone-400);
+    font-size: 0.875rem;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Action Cards (for Process Management, etc.)
+// -----------------------------------------------------------------------------
+.action-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.action-card {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  text-align: center;
+
+  .action-icon {
+    font-size: 1.5rem;
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  .action-name {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--color-rust-400);
+    font-size: 0.875rem;
+    display: block;
+    margin-bottom: 0.25rem;
+  }
+
+  .action-desc {
+    font-size: 0.75rem;
+    color: var(--color-stone-500);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// API Reference Section
+// -----------------------------------------------------------------------------
+.api-section {
+  .api-category {
+    margin-bottom: 1.5rem;
+
+    h3 {
+      font-size: 1rem;
+      color: var(--color-stone-300);
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--color-stone-800);
+    }
+  }
+
+  .api-types {
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .api-type {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: var(--color-stone-900);
+    border-radius: 0.25rem;
+
+    code {
+      color: var(--color-rust-400);
+    }
+
+    span {
+      color: var(--color-stone-500);
+      font-size: 0.875rem;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Best Practices
+// -----------------------------------------------------------------------------
+.best-practices {
+  display: grid;
+  gap: 1rem;
+}
+
+.practice-card {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+
+  h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-stone-100);
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    font-size: 0.875rem;
+    color: var(--color-stone-400);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  code {
+    background: var(--color-stone-800);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    color: #f9a825; // Bright amber for better visibility
+    border: 1px solid var(--color-stone-700);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Related Documentation Section
+// -----------------------------------------------------------------------------
+.related-section {
+  .related-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+
+  .related-card {
+    display: block;
+    background: var(--color-stone-900);
+    border: 1px solid var(--color-stone-800);
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    text-decoration: none;
+    transition: all 0.2s;
+
+    &:hover {
+      border-color: var(--color-rust-700);
+      transform: translateY(-2px);
+    }
+
+    .related-icon {
+      font-size: 1.5rem;
+      display: block;
+      margin-bottom: 0.75rem;
+    }
+
+    h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--color-stone-100);
+      margin-bottom: 0.5rem;
+    }
+
+    p {
+      font-size: 0.875rem;
+      color: var(--color-stone-500);
+      margin: 0;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Stats Grid
+// -----------------------------------------------------------------------------
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.stat-card {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  text-align: center;
+
+  .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--color-rust-400);
+    display: block;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    color: var(--color-stone-500);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Terminal/Quick Start Block
+// -----------------------------------------------------------------------------
+.terminal-block {
+  background: var(--color-stone-950);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  margin: 1rem 0;
+
+  .terminal-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--color-stone-900);
+    border-bottom: 1px solid var(--color-stone-800);
+
+    .terminal-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+
+      &.red {
+        background: #ff5f56;
+      }
+      &.yellow {
+        background: #ffbd2e;
+      }
+      &.green {
+        background: #27ca3f;
+      }
+    }
+
+    .terminal-title {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: var(--color-stone-500);
+    }
+  }
+
+  .terminal-content {
+    padding: 1rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    color: var(--color-stone-300);
+
+    .prompt {
+      color: var(--color-rust-400);
+      user-select: none;
+    }
+
+    .comment {
+      color: var(--color-stone-600);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Concept Cards Grid
+// -----------------------------------------------------------------------------
+.concepts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.concept-card {
+  background: var(--color-stone-900);
+  border: 1px solid var(--color-stone-800);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+
+  h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-stone-100);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  p {
+    font-size: 0.875rem;
+    color: var(--color-stone-400);
+    margin: 0;
+    line-height: 1.5;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Responsive Adjustments
+// -----------------------------------------------------------------------------
+@media (max-width: 768px) {
+  .doc-content {
+    padding: 1rem;
+  }
+
+  .doc-hero h1 {
+    font-size: 2rem;
+  }
+
+  .hero-links {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .features-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-item {
+    flex-direction: column;
+    gap: 0.25rem;
+
+    .config-name {
+      min-width: unset;
+    }
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .concepts-grid {
+    grid-template-columns: 1fr;
+  }
+}
