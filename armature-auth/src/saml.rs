@@ -200,36 +200,20 @@ impl SamlProvider for SamlServiceProvider {
     }
 
     fn create_auth_request(&self) -> Result<SamlAuthRequest> {
-        // For now, return a simplified implementation
-        // In production, you'd generate a proper SAML AuthnRequest
-        let request_id = format!("_{}", uuid::Uuid::new_v4());
+        #[cfg(feature = "saml")]
+        {
+            self.create_auth_request_from_metadata()
+        }
 
-        let authn_request_xml = format!(
-            r#"<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
-                xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
-                ID="{}"
-                Version="2.0"
-                IssueInstant="{}"
-                AssertionConsumerServiceURL="{}">
-                <saml:Issuer>{}</saml:Issuer>
-            </samlp:AuthnRequest>"#,
-            request_id,
-            Utc::now().to_rfc3339(),
-            self.config.acs_url,
-            self.config.entity_id
-        );
-
-        // Base64 encode
-        let encoded = general_purpose::STANDARD.encode(authn_request_xml.as_bytes());
-
-        // Get IdP SSO URL - use a placeholder for now
-        let redirect_url = "https://idp.example.com/sso".to_string();
-
-        Ok(SamlAuthRequest {
-            saml_request: encoded,
-            relay_state: Some(self.generate_relay_state()),
-            redirect_url,
-        })
+        // Without the `saml` feature there is no way to parse the IdP metadata or (when
+        // configured) sign the AuthnRequest, so refuse rather than fabricate a request
+        // pointing at a placeholder endpoint.
+        #[cfg(not(feature = "saml"))]
+        {
+            Err(AuthError::SamlValidation(
+                "SAML AuthnRequest generation requires the `saml` feature".to_string(),
+            ))
+        }
     }
 
     async fn validate_response(&self, saml_response: &str) -> Result<SamlAssertion> {
@@ -269,6 +253,118 @@ impl SamlProvider for SamlServiceProvider {
 
         Ok(metadata_xml)
     }
+}
+
+/// Build the outbound SAML AuthnRequest, resolving the IdP's SingleSignOnService endpoint
+/// from the configured IdP metadata (never a hardcoded placeholder), and signing the
+/// request when SP credentials (`sp_certificate` + `sp_private_key`) are configured.
+#[cfg(feature = "saml")]
+impl SamlServiceProvider {
+    fn create_auth_request_from_metadata(&self) -> Result<SamlAuthRequest> {
+        use samael::crypto::{Crypto, CryptoProvider};
+        use samael::metadata::{EntityDescriptor, HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
+        use samael::service_provider::ServiceProviderBuilder;
+        use samael::traits::ToXml;
+
+        // 1. Parse the IdP metadata XML into an EntityDescriptor. The SingleSignOnService
+        //    endpoint(s) used below live in this metadata.
+        let idp_xml = match &self.config.idp_metadata {
+            IdpMetadata::Xml(xml) => xml.clone(),
+            IdpMetadata::Url(_) => {
+                return Err(AuthError::SamlValidation(
+                    "IdP metadata must be provided as XML to generate an AuthnRequest; \
+                     URL-based metadata fetching is not implemented here"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let idp_metadata: EntityDescriptor = idp_xml.parse().map_err(|e| {
+            AuthError::SamlValidation(format!("Failed to parse IdP metadata XML: {e}"))
+        })?;
+
+        let sp = ServiceProviderBuilder::default()
+            .entity_id(Some(self.config.entity_id.clone()))
+            .acs_url(Some(self.config.acs_url.clone()))
+            .idp_metadata(idp_metadata)
+            .allow_idp_initiated(true)
+            .build()
+            .map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to build SAML service provider: {e}"))
+            })?;
+
+        // 2. Resolve the real IdP SSO endpoint from metadata (prefer HTTP-Redirect, the
+        //    conventional binding for sending an AuthnRequest, falling back to HTTP-POST).
+        let idp_sso_url = sp
+            .sso_binding_location(HTTP_REDIRECT_BINDING)
+            .or_else(|| sp.sso_binding_location(HTTP_POST_BINDING))
+            .ok_or_else(|| {
+                AuthError::SamlValidation(
+                    "IdP metadata does not contain a SingleSignOnService endpoint".to_string(),
+                )
+            })?;
+
+        // 3. Build the AuthnRequest (issuer = entity_id, ACS = acs_url) addressed to the
+        //    resolved IdP endpoint.
+        let mut authn_request = sp.make_authentication_request(&idp_sso_url).map_err(|e| {
+            AuthError::SamlValidation(format!("Failed to build SAML AuthnRequest: {e}"))
+        })?;
+
+        // 4. Sign the AuthnRequest when SP credentials are configured. `sp_private_key` and
+        //    `sp_certificate` are otherwise-unused config knobs without this. Signing
+        //    requires an enveloped `<ds:Signature>` template (referencing the request's own
+        //    ID and carrying the SP certificate) to be present before serialization; xmlsec
+        //    fills in the digest/signature values over that template.
+        let request_xml = if let (Some(cert_pem), Some(private_key_pem)) =
+            (&self.config.sp_certificate, &self.config.sp_private_key)
+        {
+            use samael::crypto::CertificateDer;
+            use samael::signature::Signature;
+
+            let cert_der: CertificateDer = pem_to_der(cert_pem)?.into();
+            let private_key_der = pem_to_der(private_key_pem)?;
+
+            authn_request.signature = Some(Signature::template(&authn_request.id, &cert_der));
+
+            let unsigned_xml = authn_request.to_string().map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to serialize SAML AuthnRequest: {e:?}"))
+            })?;
+
+            Crypto::sign_xml(&unsigned_xml, &private_key_der).map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to sign SAML AuthnRequest: {e}"))
+            })?
+        } else {
+            authn_request.to_string().map_err(|e| {
+                AuthError::SamlValidation(format!("Failed to serialize SAML AuthnRequest: {e:?}"))
+            })?
+        };
+
+        let encoded = general_purpose::STANDARD.encode(request_xml.as_bytes());
+
+        Ok(SamlAuthRequest {
+            saml_request: encoded,
+            relay_state: Some(self.generate_relay_state()),
+            redirect_url: idp_sso_url,
+        })
+    }
+}
+
+/// Decode a PEM-encoded key/certificate body into raw DER bytes, ignoring the
+/// `-----BEGIN ...-----` / `-----END ...-----` header and footer lines. Used for SP
+/// AuthnRequest signing, where samael's `Crypto::sign_xml` expects DER key bytes.
+#[cfg(feature = "saml")]
+fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+    let mut body = String::new();
+    for line in pem.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("-----") {
+            continue;
+        }
+        body.push_str(line);
+    }
+    general_purpose::STANDARD
+        .decode(body)
+        .map_err(|e| AuthError::SamlValidation(format!("Failed to decode PEM data: {e}")))
 }
 
 /// Real SAML response verification (enveloped XML signature + SAML conditions).
@@ -761,5 +857,196 @@ mod saml_verification_tests {
             .await
             .expect_err("missing required attribute must be rejected");
         assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+}
+
+/// Tests for `create_auth_request`: the redirect must point at the IdP's real
+/// SingleSignOnService endpoint (resolved from the configured IdP metadata), never a
+/// hardcoded placeholder, and the AuthnRequest must be signed when SP credentials are set.
+#[cfg(all(test, feature = "saml"))]
+mod saml_auth_request_tests {
+    use super::*;
+    use base64::engine::general_purpose;
+    use samael::idp::{CertificateParams, IdentityProvider, KeyType, Rsa};
+
+    const SP_ENTITY_ID: &str = "https://sp.example.test/metadata";
+    const ACS_URL: &str = "https://sp.example.test/saml/acs";
+    const IDP_ENTITY_ID: &str = "https://idp.example.test/metadata";
+    const IDP_SSO_REDIRECT_URL: &str = "https://idp.example.test/sso/redirect";
+    const IDP_SSO_POST_URL: &str = "https://idp.example.test/sso/post";
+
+    fn idp_metadata_xml() -> String {
+        format!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY_ID}">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{IDP_SSO_REDIRECT_URL}"/>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{IDP_SSO_POST_URL}"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>"#
+        )
+    }
+
+    fn der_to_pem(der: &[u8], label: &str) -> String {
+        let b64 = general_purpose::STANDARD.encode(der);
+        let mut pem = format!("-----BEGIN {label}-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str(&format!("-----END {label}-----\n"));
+        pem
+    }
+
+    // (a) The generated redirect points at the IdP's metadata SSO endpoint (HTTP-Redirect
+    //     preferred), not a hardcoded `idp.example.com` placeholder.
+    #[test]
+    fn redirect_url_resolves_from_idp_metadata() {
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(idp_metadata_xml()),
+        );
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        let auth_request = provider
+            .create_auth_request()
+            .expect("auth request generation should succeed");
+
+        assert_eq!(auth_request.redirect_url, IDP_SSO_REDIRECT_URL);
+        assert_ne!(auth_request.redirect_url, "https://idp.example.com/sso");
+
+        let decoded = String::from_utf8(
+            general_purpose::STANDARD
+                .decode(&auth_request.saml_request)
+                .expect("saml_request should be valid base64"),
+        )
+        .expect("decoded AuthnRequest should be valid UTF-8");
+
+        assert!(decoded.contains("AuthnRequest"));
+        assert!(decoded.contains(SP_ENTITY_ID), "issuer should be entity_id");
+        assert!(
+            decoded.contains(ACS_URL),
+            "AssertionConsumerServiceURL should be acs_url"
+        );
+    }
+
+    // (b) Falls back to the HTTP-POST SSO binding when no HTTP-Redirect binding is present.
+    #[test]
+    fn redirect_url_falls_back_to_post_binding() {
+        let metadata = format!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY_ID}">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{IDP_SSO_POST_URL}"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>"#
+        );
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(metadata),
+        );
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        let auth_request = provider
+            .create_auth_request()
+            .expect("auth request generation should succeed");
+
+        assert_eq!(auth_request.redirect_url, IDP_SSO_POST_URL);
+    }
+
+    // (c) Missing SSO endpoint in metadata is a clear error, not a silent placeholder.
+    #[test]
+    fn missing_sso_endpoint_is_rejected() {
+        let metadata = format!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY_ID}">
+  <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"/>
+</md:EntityDescriptor>"#
+        );
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(metadata),
+        );
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        let err = provider
+            .create_auth_request()
+            .expect_err("missing SSO endpoint must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // (d) When SP certificate + private key are configured, the AuthnRequest is signed
+    //     (an enveloped <Signature> is present in the decoded request XML).
+    #[test]
+    fn auth_request_is_signed_when_sp_keys_configured() {
+        let sp_idp = IdentityProvider::generate_new(KeyType::Rsa(Rsa::Rsa2048))
+            .expect("failed to generate SP key");
+        let cert = sp_idp
+            .create_certificate(&CertificateParams {
+                common_name: SP_ENTITY_ID,
+                issuer_name: SP_ENTITY_ID,
+                days_until_expiration: 3650,
+            })
+            .expect("failed to mint SP certificate");
+        let private_key_der = sp_idp
+            .export_private_key_der()
+            .expect("failed to export SP private key");
+
+        let private_key_pem = der_to_pem(&private_key_der, "RSA PRIVATE KEY");
+        let cert_pem = der_to_pem(cert.der_data(), "CERTIFICATE");
+
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(idp_metadata_xml()),
+        )
+        .with_keys(cert_pem, private_key_pem);
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        let auth_request = provider
+            .create_auth_request()
+            .expect("signed auth request generation should succeed");
+
+        let decoded = String::from_utf8(
+            general_purpose::STANDARD
+                .decode(&auth_request.saml_request)
+                .expect("saml_request should be valid base64"),
+        )
+        .expect("decoded AuthnRequest should be valid UTF-8");
+
+        assert!(
+            decoded.contains("Signature"),
+            "signed AuthnRequest should contain an enveloped Signature element: {decoded}"
+        );
+    }
+
+    // (e) Without SP credentials configured, the request is produced unsigned (no dead
+    //     config path silently required).
+    #[test]
+    fn auth_request_is_unsigned_without_sp_keys() {
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(idp_metadata_xml()),
+        );
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        let auth_request = provider
+            .create_auth_request()
+            .expect("auth request generation should succeed");
+
+        let decoded = String::from_utf8(
+            general_purpose::STANDARD
+                .decode(&auth_request.saml_request)
+                .expect("saml_request should be valid base64"),
+        )
+        .expect("decoded AuthnRequest should be valid UTF-8");
+
+        assert!(!decoded.contains("Signature"));
     }
 }
