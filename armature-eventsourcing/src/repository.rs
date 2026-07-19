@@ -66,9 +66,16 @@ where
             return Ok(());
         }
 
+        // The store's optimistic-concurrency check compares `expected_version`
+        // against the number of events already persisted. `aggregate.version()`
+        // reflects the version *after* applying the staged (uncommitted) events,
+        // so the expected version must be the base version prior to those
+        // events, not the post-apply version.
+        let base_version = aggregate.version().saturating_sub(events.len() as u64);
+
         // Save events with optimistic concurrency
         self.store
-            .save_events(aggregate.aggregate_id(), events, Some(aggregate.version()))
+            .save_events(aggregate.aggregate_id(), events, Some(base_version))
             .await?;
 
         // Mark events as committed
@@ -174,8 +181,13 @@ where
             return Ok(());
         }
 
+        // See `save` above: the store compares `expected_version` against the
+        // number of already-persisted events, so we must pass the base version
+        // (before the staged events were applied), not `aggregate.version()`.
+        let base_version = aggregate.version().saturating_sub(events.len() as u64);
+
         self.store
-            .save_events(aggregate.aggregate_id(), events, Some(aggregate.version()))
+            .save_events(aggregate.aggregate_id(), events, Some(base_version))
             .await?;
 
         aggregate.mark_events_committed();
@@ -256,6 +268,75 @@ mod tests {
                 root: AggregateRoot::new(id, TestState { count: 0 }),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn save_after_applying_events_succeeds() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let repo = AggregateRepository::<CounterAggregate, _>::new(store.clone());
+
+        // Load a fresh (non-existent) aggregate: version 0, no stored events.
+        let mut aggregate = repo.load("agg-apply").await.unwrap();
+        assert_eq!(aggregate.version(), 0);
+
+        // Apply one event (bumps version to 1) and stage it as uncommitted.
+        let event = increment_event("agg-apply", 5);
+        aggregate.apply_event(&event).unwrap();
+        aggregate.root.add_event(event);
+        assert_eq!(aggregate.version(), 1);
+
+        // Saving must succeed: the store has 0 stored events, matching the base
+        // version (version() - uncommitted count = 1 - 1 = 0), not version() itself.
+        repo.save(&mut aggregate)
+            .await
+            .expect("save should not raise a false VersionConflict");
+    }
+
+    #[tokio::test]
+    async fn save_with_snapshot_after_applying_events_succeeds() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let repo = AggregateRepository::<CounterAggregate, _>::new(store.clone());
+
+        let mut aggregate = repo.load("agg-apply-snap").await.unwrap();
+        assert_eq!(aggregate.version(), 0);
+
+        let event = increment_event("agg-apply-snap", 5);
+        aggregate.apply_event(&event).unwrap();
+        aggregate.root.add_event(event);
+        assert_eq!(aggregate.version(), 1);
+
+        repo.save_with_snapshot(&mut aggregate)
+            .await
+            .expect("save_with_snapshot should not raise a false VersionConflict");
+    }
+
+    #[tokio::test]
+    async fn save_detects_genuine_stale_write() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let repo = AggregateRepository::<CounterAggregate, _>::new(store.clone());
+
+        // Two independent loads of the same (empty) aggregate at base version 0.
+        let mut first = repo.load("agg-stale").await.unwrap();
+        let mut second = repo.load("agg-stale").await.unwrap();
+
+        let event_a = increment_event("agg-stale", 1);
+        first.apply_event(&event_a).unwrap();
+        first.root.add_event(event_a);
+
+        let event_b = increment_event("agg-stale", 2);
+        second.apply_event(&event_b).unwrap();
+        second.root.add_event(event_b);
+
+        // First save succeeds and advances the store.
+        repo.save(&mut first).await.unwrap();
+
+        // Second save is stale: it was loaded before the first save landed, so its
+        // base version (0) no longer matches the store's current length (1).
+        let result = repo.save(&mut second).await;
+        assert!(
+            matches!(result, Err(AggregateError::VersionConflict { .. })),
+            "expected a genuine VersionConflict, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -401,22 +482,22 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let repo = AggregateRepository::<CounterAggregate, _>::with_snapshots(store.clone(), 2);
 
-        // Two events already persisted (store length 2 == expected version).
+        // One event already persisted (store length 1 == the aggregate's base
+        // version before the newly staged/applied event below).
         store
-            .save_events(
-                "c1",
-                &[increment_event("c1", 10), increment_event("c1", 10)],
-                None,
-            )
+            .save_events("c1", &[increment_event("c1", 10)], None)
             .await
             .unwrap();
 
-        // Aggregate reflecting the persisted state (version 2, count 20) with a new
-        // staged event to commit.
+        // Aggregate reflecting the persisted state (version 1, count 10), with a
+        // new event both applied (version -> 2, count -> 20) and staged to commit,
+        // matching the real apply-then-save flow.
         let mut agg = CounterAggregate::new_instance("c1".to_string());
-        agg.root.version = 2;
-        agg.root.state.count = 20;
-        agg.root.add_event(increment_event("c1", 10));
+        agg.root.version = 1;
+        agg.root.state.count = 10;
+        let event = increment_event("c1", 10);
+        agg.apply_event(&event).unwrap();
+        agg.root.add_event(event);
 
         repo.save_with_snapshot(&mut agg).await.unwrap();
 
