@@ -6,6 +6,7 @@ use crate::event::SiemEvent;
 use crate::format::{EventFormatter, get_formatter};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Trait for SIEM transports
@@ -44,9 +45,16 @@ pub trait SiemTransport: Send + Sync {
 /// ```
 pub struct SiemClient {
     config: SiemConfig,
-    formatter: Box<dyn EventFormatter>,
+    formatter: Arc<dyn EventFormatter>,
     transport: Arc<dyn SiemTransport>,
     batch: Arc<Mutex<Vec<SiemEvent>>>,
+    /// Background time-based flush task, if batching + a non-zero
+    /// `batch_flush_interval` are configured. Aborted on `Drop` so the task
+    /// never outlives the client. This handle holds no `Arc` back to the
+    /// client itself (only clones of `batch`/`formatter`/`transport` and an
+    /// owned `SiemConfig`), so it cannot create a reference cycle that would
+    /// prevent `Drop` from running.
+    flush_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SiemClient {
@@ -54,7 +62,7 @@ impl SiemClient {
     pub fn new(config: SiemConfig) -> SiemResult<Self> {
         config.validate()?;
 
-        let formatter = get_formatter(config.format);
+        let formatter: Arc<dyn EventFormatter> = Arc::from(get_formatter(config.format));
         let transport: Arc<dyn SiemTransport> = match config.transport {
             Transport::Https => {
                 #[cfg(feature = "http")]
@@ -72,11 +80,67 @@ impl SiemClient {
             Transport::Udp => Arc::new(UdpTransport::new(&config)?),
         };
 
+        let batch = Arc::new(Mutex::new(Vec::new()));
+
+        let flush_task = if config.batching_enabled && !config.batch_flush_interval.is_zero() {
+            Some(Self::spawn_flush_task(
+                config.clone(),
+                formatter.clone(),
+                transport.clone(),
+                batch.clone(),
+            ))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             formatter,
             transport,
-            batch: Arc::new(Mutex::new(Vec::new())),
+            batch,
+            flush_task,
+        })
+    }
+
+    /// Spawn the background task that periodically flushes the batch on
+    /// `config.batch_flush_interval`. Only owns `Arc` clones of the pieces it
+    /// needs (never the `SiemClient` itself), so it never blocks `Drop`.
+    fn spawn_flush_task(
+        config: SiemConfig,
+        formatter: Arc<dyn EventFormatter>,
+        transport: Arc<dyn SiemTransport>,
+        batch: Arc<Mutex<Vec<SiemEvent>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let interval_dur = config.batch_flush_interval;
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval_dur);
+            // The first tick fires immediately; consume it here so the first
+            // *flush* only happens once the interval has actually elapsed.
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                let events = {
+                    let mut b = batch.lock().await;
+                    std::mem::take(&mut *b)
+                };
+
+                if events.is_empty() {
+                    continue;
+                }
+
+                if let Ok(formatted) = formatter.format_batch(&events, &config) {
+                    let _ = Self::send_via_transport(
+                        &transport,
+                        &config,
+                        &formatted,
+                        formatter.content_type(),
+                    )
+                    .await;
+                }
+            }
         })
     }
 
@@ -122,11 +186,24 @@ impl SiemClient {
     /// permanent (bad configuration, auth failure, unsupported
     /// provider/format, malformed data) are not retried.
     async fn send_with_retry(&self, data: &str, content_type: &str) -> SiemResult<()> {
-        let max_retries = self.config.max_retries;
+        Self::send_via_transport(&self.transport, &self.config, data, content_type).await
+    }
+
+    /// Free-standing version of `send_with_retry` that only needs a
+    /// transport/config pair rather than a full `&self`. This is the seam
+    /// the background flush task uses so it doesn't need to hold (or share)
+    /// the `SiemClient` itself.
+    async fn send_via_transport(
+        transport: &Arc<dyn SiemTransport>,
+        config: &SiemConfig,
+        data: &str,
+        content_type: &str,
+    ) -> SiemResult<()> {
+        let max_retries = config.max_retries;
         let mut attempt: u32 = 0;
 
         loop {
-            match self.transport.send(data, content_type).await {
+            match transport.send(data, content_type).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     if attempt >= max_retries || !Self::is_retryable(&err) {
@@ -135,9 +212,9 @@ impl SiemClient {
 
                     let delay = match &err {
                         SiemError::RateLimited(retry_after_ms) => {
-                            std::time::Duration::from_millis(*retry_after_ms)
+                            Duration::from_millis(*retry_after_ms)
                         }
-                        _ => self.config.retry_delay * 2u32.saturating_pow(attempt),
+                        _ => config.retry_delay * 2u32.saturating_pow(attempt),
                     };
 
                     tokio::time::sleep(delay).await;
@@ -210,6 +287,17 @@ impl SiemClient {
     }
 }
 
+impl Drop for SiemClient {
+    /// Stop the background time-based flush task (if any) when the client is
+    /// dropped, so it never keeps running against a client that no longer
+    /// exists.
+    fn drop(&mut self) {
+        if let Some(handle) = self.flush_task.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Azure Log Analytics HTTP Data Collector API path used in the SharedKey
 /// signature's canonical string. This is fixed by the Azure API contract
 /// and is unrelated to the actual request path/endpoint configured.
@@ -234,6 +322,7 @@ pub struct HttpTransport {
     endpoint: String,
     auth_header: Option<String>,
     sentinel: Option<SentinelAuth>,
+    compression: bool,
 }
 
 #[cfg(feature = "http")]
@@ -248,8 +337,21 @@ impl HttpTransport {
             builder = builder.danger_accept_invalid_certs(true);
         }
 
-        // Note: Compression is handled via headers, not client builder
-        let _ = config.compression; // Used in request headers if needed
+        if let Some(ca_path) = &config.ca_cert_path {
+            let pem = std::fs::read(ca_path).map_err(|e| {
+                SiemError::Config(format!(
+                    "Failed to read CA certificate '{}': {}",
+                    ca_path, e
+                ))
+            })?;
+            let cert = reqwest::Certificate::from_pem(&pem).map_err(|e| {
+                SiemError::Config(format!(
+                    "Failed to parse CA certificate '{}': {}",
+                    ca_path, e
+                ))
+            })?;
+            builder = builder.add_root_certificate(cert);
+        }
 
         let client = builder.build()?;
 
@@ -306,7 +408,19 @@ impl HttpTransport {
             endpoint: config.endpoint.clone(),
             auth_header,
             sentinel,
+            compression: config.compression,
         })
+    }
+
+    /// Gzip-compress `data` for the `Content-Encoding: gzip` request body.
+    fn gzip_compress(data: &str) -> SiemResult<Vec<u8>> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data.as_bytes())?;
+        encoder.finish().map_err(SiemError::from)
     }
 
     /// Compute the Azure Sentinel `SharedKey` `Authorization` header value
@@ -317,7 +431,7 @@ impl HttpTransport {
     /// HMAC-SHA256'd with the base64-decoded shared key, then base64-encoded.
     fn sentinel_signature(
         sentinel: &SentinelAuth,
-        data: &str,
+        content_length: usize,
         date: chrono::DateTime<chrono::Utc>,
     ) -> SiemResult<(String, String)> {
         use base64::Engine as _;
@@ -325,7 +439,6 @@ impl HttpTransport {
         use sha2::Sha256;
 
         let rfc1123_date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        let content_length = data.len();
         let canonical = format!(
             "POST\n{}\napplication/json\nx-ms-date:{}\n{}",
             content_length, rfc1123_date, SENTINEL_SIGNED_RESOURCE
@@ -357,14 +470,25 @@ impl HttpTransport {
         content_type: &str,
         date: chrono::DateTime<chrono::Utc>,
     ) -> SiemResult<()> {
+        let body: Vec<u8> = if self.compression {
+            Self::gzip_compress(data)?
+        } else {
+            data.as_bytes().to_vec()
+        };
+        let content_length = body.len();
+
         let mut request = self
             .client
             .post(&self.endpoint)
             .header("Content-Type", content_type)
-            .body(data.to_string());
+            .body(body);
+
+        if self.compression {
+            request = request.header("Content-Encoding", "gzip");
+        }
 
         if let Some(ref sentinel) = self.sentinel {
-            let (auth, rfc1123_date) = Self::sentinel_signature(sentinel, data, date)?;
+            let (auth, rfc1123_date) = Self::sentinel_signature(sentinel, content_length, date)?;
             request = request
                 .header("Authorization", auth)
                 .header("x-ms-date", rfc1123_date)
@@ -884,6 +1008,155 @@ mod tests {
                 3,
                 "server should have been hit exactly 3 times (1 initial + 2 retries)"
             );
+        }
+    }
+
+    /// Time-based background batch flush.
+    #[cfg(feature = "http")]
+    mod time_based_flush {
+        use super::super::*;
+        use crate::SiemProvider;
+        use crate::config::SiemConfig;
+        use armature_testkit::{StubResponse, StubServer};
+        use std::time::Duration;
+
+        #[tokio::test]
+        async fn flushes_low_volume_batch_after_interval_elapses() {
+            let server = StubServer::start_single(StubResponse::new(200, "")).await;
+
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Custom)
+                .endpoint(server.url())
+                .token("test-token")
+                .batching(true)
+                .batch_size(100) // well above the single event we send
+                .batch_flush_interval(Duration::from_millis(30))
+                .build()
+                .expect("valid config");
+
+            let client = SiemClient::new(config).expect("build client");
+
+            client
+                .send(SiemEvent::new("auth.success"))
+                .await
+                .expect("send should enqueue into the batch");
+
+            // Below batch_size, so nothing should have been sent yet.
+            assert!(server.requests().is_empty(), "flush must not be immediate");
+
+            // Wait past the flush interval for the background task to fire.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "background task should have flushed the batch after the interval elapsed"
+            );
+        }
+
+        #[tokio::test]
+        async fn dropping_client_stops_background_flush_task() {
+            let server = StubServer::start_single(StubResponse::new(200, "")).await;
+
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Custom)
+                .endpoint(server.url())
+                .token("test-token")
+                .batching(true)
+                .batch_size(100)
+                .batch_flush_interval(Duration::from_millis(30))
+                .build()
+                .expect("valid config");
+
+            let client = SiemClient::new(config).expect("build client");
+
+            client
+                .send(SiemEvent::new("auth.success"))
+                .await
+                .expect("send should enqueue into the batch");
+
+            // Drop before the interval elapses: the background task must be
+            // aborted and never get a chance to flush.
+            drop(client);
+
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            assert!(
+                server.requests().is_empty(),
+                "dropped client's background flush task must not still be running"
+            );
+        }
+    }
+
+    /// Gzip compression of the HTTP request body.
+    #[cfg(feature = "http")]
+    mod compression {
+        use super::super::*;
+        use crate::SiemProvider;
+        use crate::config::SiemConfig;
+        use armature_testkit::{StubResponse, StubServer};
+        use std::io::Read;
+
+        #[tokio::test]
+        async fn gzips_body_and_sets_content_encoding_header() {
+            let server = StubServer::start_single(StubResponse::new(200, "")).await;
+
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Custom)
+                .endpoint(server.url())
+                .token("test-token")
+                .batching(false)
+                .compression(true)
+                .build()
+                .expect("valid config");
+
+            let transport = HttpTransport::new(&config).expect("build transport");
+            let body = r#"{"event":"test"}"#;
+
+            transport
+                .send(body, "application/json")
+                .await
+                .expect("send should succeed against stub server");
+
+            let recorded = server.assert_received("POST", "/");
+            assert_eq!(recorded.header("Content-Encoding"), Some("gzip"));
+
+            let mut decoder = flate2::read::GzDecoder::new(&recorded.body[..]);
+            let mut decompressed = String::new();
+            decoder
+                .read_to_string(&mut decompressed)
+                .expect("recorded body must be valid gzip");
+            assert_eq!(decompressed, body);
+        }
+    }
+
+    /// Custom CA certificate loading for the reqwest-based HTTP transport.
+    #[cfg(feature = "http")]
+    mod ca_cert_path {
+        use super::super::*;
+        use crate::SiemProvider;
+        use crate::config::SiemConfig;
+
+        #[test]
+        fn bogus_ca_cert_path_returns_clear_config_error() {
+            let config = SiemConfig::builder()
+                .provider(SiemProvider::Custom)
+                .endpoint("https://example.invalid")
+                .token("test-token")
+                .ca_cert("/nonexistent/path/does-not-exist.pem")
+                .build()
+                .expect("valid config");
+
+            match HttpTransport::new(&config) {
+                Err(SiemError::Config(msg)) => {
+                    assert!(
+                        msg.contains("CA certificate"),
+                        "error message should mention the CA certificate: {msg}"
+                    );
+                }
+                Err(other) => panic!("expected SiemError::Config, got: {other:?}"),
+                Ok(_) => panic!("a bogus ca_cert_path must produce an error, not succeed"),
+            }
         }
     }
 

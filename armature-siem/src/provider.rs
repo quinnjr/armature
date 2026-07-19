@@ -78,15 +78,56 @@ impl ElasticConfig {
     }
 
     /// Create an Elastic Cloud configuration
+    ///
+    /// Decodes an Elastic Cloud `cloud_id` of the form
+    /// `name:base64(host$es_uuid$kibana_uuid)` into the Elasticsearch
+    /// endpoint `https://{es_uuid}.{host}:443`.
     pub fn cloud(cloud_id: impl Into<String>, api_key: impl Into<String>) -> SiemConfigBuilder {
-        // In a real implementation, we'd decode the cloud_id to get the endpoint
-        // For now, just use it as the endpoint
+        let cloud_id = cloud_id.into();
+        let endpoint =
+            Self::decode_cloud_id(&cloud_id).unwrap_or_else(|| format!("https://{}", cloud_id));
+
         SiemConfig::builder()
             .provider(SiemProvider::Elastic)
-            .endpoint(cloud_id)
+            .endpoint(endpoint)
             .token(api_key)
             .format(EventFormat::Ecs)
             .transport(Transport::Https)
+    }
+
+    /// Decode an Elastic Cloud `cloud_id` into an Elasticsearch endpoint URL.
+    ///
+    /// An Elastic Cloud ID has the form `name:payload`, where `payload` is
+    /// base64 (standard, unpadded or padded) of `host$es_uuid$kibana_uuid`.
+    /// Returns `https://{es_uuid}.{host}:443`, or `None` if `cloud_id` isn't
+    /// in the expected format.
+    fn decode_cloud_id(cloud_id: &str) -> Option<String> {
+        use base64::Engine as _;
+
+        // The part before the first `:` is just a human-readable deployment
+        // name; the base64 payload is everything after it (or the whole
+        // string, if there's no `name:` prefix).
+        let payload = match cloud_id.split_once(':') {
+            Some((_name, payload)) => payload,
+            None => cloud_id,
+        };
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload))
+            .ok()?;
+        let decoded = String::from_utf8(decoded).ok()?;
+
+        let mut parts = decoded.splitn(3, '$');
+        let host = parts.next()?;
+        let es_uuid = parts.next()?;
+        let _kibana_uuid = parts.next();
+
+        if host.is_empty() || es_uuid.is_empty() {
+            return None;
+        }
+
+        Some(format!("https://{}.{}:443", es_uuid, host))
     }
 }
 
@@ -336,6 +377,25 @@ mod tests {
         assert_eq!(config.provider, SiemProvider::QRadar);
         assert_eq!(config.format, EventFormat::Leef);
         assert_eq!(config.transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn test_elastic_cloud_id_decodes_to_es_endpoint() {
+        use base64::Engine as _;
+
+        // A known vector: host$es_uuid$kibana_uuid, base64-encoded, prefixed
+        // with a human-readable deployment name (as real Elastic Cloud IDs
+        // are formatted).
+        let payload = base64::engine::general_purpose::STANDARD
+            .encode("us-east-1.aws.found.io$abc123$def456");
+        let cloud_id = format!("my-deployment:{}", payload);
+
+        let config = ElasticConfig::cloud(cloud_id, "test-api-key")
+            .build()
+            .expect("valid elastic cloud config");
+
+        assert_eq!(config.endpoint, "https://abc123.us-east-1.aws.found.io:443");
+        assert_eq!(config.token, Some("test-api-key".to_string()));
     }
 
     #[test]

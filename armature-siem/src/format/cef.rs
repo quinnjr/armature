@@ -124,16 +124,63 @@ impl CefFormatter {
 
         ext.push(format!("cat={}", event.category));
 
-        // Add custom metadata
+        // Add custom metadata into distinct CEF custom slots: string-valued
+        // entries go into `cs1..cs6` (with `cs{n}Label`), numeric-valued
+        // entries go into `cn1..cn3` (with `cn{n}Label`). CEF's `cn1` is
+        // already used above for `httpStatusCode`, so numeric metadata
+        // starts at `cn2`. Once all slots for a value's kind are exhausted,
+        // remaining metadata is serialized as a single JSON blob into
+        // `cs6`/`deviceCustomString6` (`additionalMetadata`) rather than
+        // being silently dropped or overwriting an already-used slot.
+        const MAX_CS: usize = 6;
+        // cn1 is reserved for httpStatusCode above.
+        const CN_START: usize = 2;
+        const MAX_CN: usize = 3;
+
+        let mut next_cs = 1usize;
+        let mut next_cn = CN_START;
+        let mut overflow = serde_json::Map::new();
+
         for (key, value) in &event.metadata {
-            let val_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                _ => value.to_string(),
-            };
+            let is_numeric = value.is_number();
+
+            if is_numeric && next_cn <= MAX_CN {
+                ext.push(format!("cn{}={}", next_cn, value));
+                ext.push(format!(
+                    "cn{}Label={}",
+                    next_cn,
+                    Self::escape_extension(key)
+                ));
+                next_cn += 1;
+                continue;
+            }
+
+            if !is_numeric && next_cs <= MAX_CS {
+                let val_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string(),
+                };
+                ext.push(format!(
+                    "cs{}={} cs{}Label={}",
+                    next_cs,
+                    Self::escape_extension(&val_str),
+                    next_cs,
+                    Self::escape_extension(key)
+                ));
+                next_cs += 1;
+                continue;
+            }
+
+            // Slots for this value's kind (or both) are exhausted: don't
+            // drop the data, carry it in the overflow blob instead.
+            overflow.insert(key.clone(), value.clone());
+        }
+
+        if !overflow.is_empty() {
+            let overflow_json = serde_json::Value::Object(overflow).to_string();
             ext.push(format!(
-                "cs1={} cs1Label={}",
-                Self::escape_extension(&val_str),
-                Self::escape_extension(key)
+                "additionalMetadata={}",
+                Self::escape_extension(&overflow_json)
             ));
         }
 
@@ -200,6 +247,37 @@ mod tests {
         assert!(result.contains("login"));
         assert!(result.contains("src=192.168.1.100"));
         assert!(result.contains("suser=alice"));
+    }
+
+    #[test]
+    fn test_cef_metadata_uses_distinct_custom_slots() {
+        let formatter = CefFormatter;
+        let event = sample_event()
+            .metadata("tenant", serde_json::json!("acme-corp"))
+            .metadata("risk_score", serde_json::json!("high"));
+        let config = sample_config();
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        // Both metadata values must appear, in distinct cs slots (not one
+        // overwriting the other).
+        assert!(
+            result.contains("cs1=acme-corp") || result.contains("cs2=acme-corp"),
+            "expected tenant value in a cs slot: {result}"
+        );
+        assert!(
+            result.contains("cs1=high") || result.contains("cs2=high"),
+            "expected risk_score value in a cs slot: {result}"
+        );
+        assert!(
+            result.contains("acme-corp") && result.contains("high"),
+            "both metadata values must survive formatting: {result}"
+        );
+        // The two values must not land in the same slot.
+        assert!(
+            !(result.contains("cs1=acme-corp") && result.contains("cs1=high")),
+            "metadata entries collided on the same cs slot: {result}"
+        );
     }
 
     #[test]
