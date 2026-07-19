@@ -68,3 +68,12 @@ pub enum OpenSearchError {
 
 /// Result type alias for OpenSearch operations.
 pub type Result<T> = std::result::Result<T, OpenSearchError>;
+
+/// Extract a human-readable reason from an OpenSearch error response body,
+/// e.g. `{"error": {"reason": "..."}}`.
+pub(crate) fn error_reason(body: &serde_json::Value) -> String {
+    body["error"]["reason"]
+        .as_str()
+        .unwrap_or("Unknown error")
+        .to_string()
+}

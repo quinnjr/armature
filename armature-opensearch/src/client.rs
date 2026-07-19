@@ -1,13 +1,14 @@
 //! OpenSearch client implementation.
 
 use crate::{
+    bulk::{BulkOperation, BulkResponse},
     config::OpenSearchConfig,
     document::Document,
-    error::{OpenSearchError, Result},
+    error::{OpenSearchError, Result, error_reason},
     index::IndexManager,
     search::SearchBuilder,
 };
-use armature_log::{debug, info};
+use armature_log::{debug, info, warn};
 use opensearch::{
     OpenSearch,
     http::transport::{SingleNodeConnectionPool, TransportBuilder},
@@ -15,6 +16,7 @@ use opensearch::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// OpenSearch client for document operations.
 #[derive(Clone)]
@@ -41,6 +43,36 @@ impl OpenSearchClient {
 
         // Configure timeouts
         builder = builder.timeout(config.request_timeout).disable_proxy();
+
+        // `TransportBuilder` only exposes a single overall request timeout, covering
+        // everything from connect until the response body finishes; it has no separate
+        // connect-phase timeout. `connect_timeout` therefore can't be applied independently.
+        if config.connect_timeout != Duration::from_secs(10) {
+            warn!(
+                "OpenSearchConfig::connect_timeout ({:?}) is not applied: the opensearch crate's \
+                 TransportBuilder has no separate connect-phase timeout, only the combined \
+                 `request_timeout` ({:?}) is honored",
+                config.connect_timeout, config.request_timeout
+            );
+        }
+
+        // `TransportBuilder` has no retry mechanism at all; requests are sent exactly once.
+        if config.max_retries != 3 {
+            warn!(
+                "OpenSearchConfig::max_retries ({}) is not applied: the opensearch crate's \
+                 TransportBuilder has no built-in retry support",
+                config.max_retries
+            );
+        }
+
+        // Response gzip decompression is always-on (the `opensearch` crate is built with
+        // reqwest's `gzip` feature) and `TransportBuilder` exposes no way to disable it.
+        if !config.compression {
+            warn!(
+                "OpenSearchConfig::compression = false is not applied: the opensearch crate's \
+                 TransportBuilder cannot disable gzip response decompression"
+            );
+        }
 
         // Configure basic auth
         if let (Some(user), Some(pass)) = (&config.username, &config.password) {
@@ -69,6 +101,85 @@ impl OpenSearchClient {
                 provider,
                 aws_types::region::Region::new(region.clone()),
             ));
+        }
+
+        // Configure TLS: CA trust and mutual-TLS client certificates.
+        #[cfg(any(feature = "rustls", feature = "native-tls"))]
+        if let Some(tls) = &config.tls {
+            use opensearch::{
+                auth::{ClientCertificate, Credentials as OsCredentials},
+                cert::{Certificate as OsCertificate, CertificateValidation},
+            };
+
+            if tls.danger_accept_invalid_certs {
+                if tls.ca_cert.is_some() {
+                    warn!(
+                        "TlsConfig::ca_cert is ignored because danger_accept_invalid_certs is \
+                         set; certificate validation is fully disabled"
+                    );
+                }
+                builder = builder.cert_validation(CertificateValidation::None);
+            } else if let Some(ca_cert_path) = &tls.ca_cert {
+                let pem = std::fs::read(ca_cert_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::ca_cert '{}': {}",
+                        ca_cert_path, e
+                    ))
+                })?;
+                let cert = OsCertificate::from_pem(&pem).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Invalid TlsConfig::ca_cert PEM at '{}': {}",
+                        ca_cert_path, e
+                    ))
+                })?;
+                builder = builder.cert_validation(CertificateValidation::Full(cert));
+            }
+
+            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                if config.username.is_some() && config.password.is_some() {
+                    return Err(OpenSearchError::Validation(
+                        "TlsConfig client_cert/client_key (mTLS) cannot be combined with basic \
+                         auth: the opensearch crate's TransportBuilder can only hold a single \
+                         Credentials value at a time; configure one or the other"
+                            .to_string(),
+                    ));
+                }
+
+                #[cfg(feature = "aws-auth")]
+                if config.aws_region.is_some() {
+                    return Err(OpenSearchError::Validation(
+                        "TlsConfig client_cert/client_key (mTLS) cannot be combined with AWS \
+                         SigV4 auth: the opensearch crate's TransportBuilder can only hold a \
+                         single Credentials value at a time; configure one or the other"
+                            .to_string(),
+                    ));
+                }
+
+                let mut pem = std::fs::read(cert_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::client_cert '{}': {}",
+                        cert_path, e
+                    ))
+                })?;
+                let mut key_pem = std::fs::read(key_path).map_err(|e| {
+                    OpenSearchError::Validation(format!(
+                        "Failed to read TlsConfig::client_key '{}': {}",
+                        key_path, e
+                    ))
+                })?;
+                pem.push(b'\n');
+                pem.append(&mut key_pem);
+
+                builder = builder.auth(OsCredentials::Certificate(ClientCertificate::Pem(pem)));
+            }
+        }
+
+        #[cfg(not(any(feature = "rustls", feature = "native-tls")))]
+        if config.tls.is_some() {
+            warn!(
+                "OpenSearchConfig::tls is set but neither the `rustls` nor `native-tls` feature \
+                 is enabled on armature-opensearch; TLS options are not applied"
+            );
         }
 
         let transport = builder
@@ -329,7 +440,13 @@ impl OpenSearchClient {
             .send()
             .await?;
 
+        let status = response.status_code();
         let body: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&body)));
+        }
+
         let deleted = body["deleted"].as_u64().unwrap_or(0);
 
         Ok(deleted)
@@ -450,6 +567,52 @@ impl OpenSearchClient {
         Ok(ids.len())
     }
 
+    /// Execute a batch of mixed bulk operations (index/create/update/delete) in a
+    /// single request, in the order given, using [`BulkOperation::to_bulk_lines`]
+    /// to render each operation's NDJSON action/data lines.
+    ///
+    /// Unlike [`Self::bulk_index`] and [`Self::bulk_delete`], this returns the raw
+    /// [`BulkResponse`] (including per-item results) rather than failing the whole
+    /// call when some items error; inspect `BulkResponse::errors` and
+    /// `BulkResponse::items` to see individual outcomes.
+    pub async fn bulk_execute<T: Document>(
+        &self,
+        operations: Vec<BulkOperation<T>>,
+    ) -> Result<BulkResponse> {
+        if operations.is_empty() {
+            return Ok(BulkResponse {
+                took: 0,
+                errors: false,
+                items: Vec::new(),
+            });
+        }
+
+        debug!("Executing {} bulk operations", operations.len());
+
+        let mut body: Vec<opensearch::http::request::JsonBody<Value>> = Vec::new();
+        for op in &operations {
+            for line in op.to_bulk_lines()? {
+                body.push(line.into());
+            }
+        }
+
+        let response = self
+            .client
+            .bulk(opensearch::BulkParts::None)
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status_code();
+        let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
+
+        Ok(serde_json::from_value(result)?)
+    }
+
     // =========================================================================
     // Utility Methods
     // =========================================================================
@@ -458,11 +621,17 @@ impl OpenSearchClient {
     pub async fn refresh(&self, index: &str) -> Result<()> {
         debug!("Refreshing index {}", index);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .refresh(opensearch::indices::IndicesRefreshParts::Index(&[index]))
             .send()
             .await?;
+
+        if !response.status_code().is_success() {
+            let body: Value = response.json().await?;
+            return Err(OpenSearchError::Internal(error_reason(&body)));
+        }
 
         Ok(())
     }
@@ -476,7 +645,14 @@ impl OpenSearchClient {
             .send()
             .await?;
 
-        Ok(response.json().await?)
+        let status = response.status_code();
+        let body: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&body)));
+        }
+
+        Ok(body)
     }
 
     /// Ping the cluster.

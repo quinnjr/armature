@@ -2,7 +2,7 @@
 
 use crate::{
     document::{Document, DocumentMeta, DocumentWithMeta},
-    error::{OpenSearchError, Result},
+    error::{OpenSearchError, Result, error_reason},
     query::Query,
 };
 use armature_log::debug;
@@ -384,7 +384,13 @@ impl SearchBuilder {
             .send()
             .await?;
 
+        let status = response.status_code();
         let result: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(OpenSearchError::Internal(error_reason(&result)));
+        }
+
         Ok(result["count"].as_u64().unwrap_or(0))
     }
 }

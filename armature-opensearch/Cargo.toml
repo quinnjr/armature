@@ -18,8 +18,6 @@ rustls = ["opensearch/rustls-tls"]
 native-tls = ["opensearch/native-tls"]
 # AWS authentication
 aws-auth = ["dep:aws-config", "dep:aws-credential-types", "dep:aws-types", "opensearch/aws-auth"]
-# Bulk operations with streaming
-bulk-stream = ["dep:futures"]
 
 [dependencies]
 armature-core = { path = "../armature-core", version = "0.2.1" }
@@ -43,9 +41,6 @@ thiserror = "2.0"
 aws-config = { version = "1", optional = true }
 aws-credential-types = { version = "1", optional = true }
 aws-types = { version = "1", optional = true }
-
-# Optional streaming
-futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

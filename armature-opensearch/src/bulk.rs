@@ -1,4 +1,9 @@
-//! Bulk operations with streaming support.
+//! Bulk operation types.
+//!
+//! [`BulkOperation`] describes a single mixed index/create/update/delete
+//! operation and [`BulkOperation::to_bulk_lines`] renders it into the NDJSON
+//! action/data line pairs OpenSearch's `_bulk` API expects. Use
+//! [`crate::OpenSearchClient::bulk_execute`] to send a batch of them.
 
 use crate::{document::Document, error::Result};
 use serde::{Deserialize, Serialize};
