@@ -42,12 +42,8 @@ armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 
 [features]
 default = []
-# Cluster support
-cluster = []
 # TLS support
 tls = ["redis/tokio-rustls-comp"]
-# Sentinel support
-sentinel = []
 # All features
-full = ["cluster", "tls", "sentinel"]
+full = ["tls"]
 

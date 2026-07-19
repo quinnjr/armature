@@ -2,15 +2,14 @@
 //!
 //! Async Diesel database integration for the Armature framework.
 //!
-//! This crate provides connection pooling, transaction management, and
-//! seamless integration with Armature's dependency injection system.
+//! This crate provides connection pooling and transaction management for
+//! Diesel's async API.
 //!
 //! ## Features
 //!
-//! - **Async Connection Pools**: Built on `diesel-async` with `deadpool`, `bb8`, or `mobc`
+//! - **Async Connection Pools**: Built on `diesel-async` with `deadpool` or `bb8`
 //! - **Multiple Backends**: PostgreSQL and MySQL support
 //! - **Transaction Management**: Easy-to-use transaction helpers
-//! - **DI Integration**: Works with Armature's dependency injection
 //! - **Connection Health**: Automatic connection validation
 //!
 //! ## Quick Start

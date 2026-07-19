@@ -71,6 +71,9 @@ impl OpenSearchConfig {
     }
 
     /// Set connection timeout.
+    ///
+    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
+    /// express it); see `OpenSearchClient::new`.
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
@@ -117,12 +120,18 @@ impl OpenSearchConfig {
     }
 
     /// Enable or disable compression.
+    ///
+    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
+    /// express it); see `OpenSearchClient::new`.
     pub fn with_compression(mut self, enabled: bool) -> Self {
         self.compression = enabled;
         self
     }
 
     /// Set maximum retries.
+    ///
+    /// Note: not applied by the current transport (opensearch 2.4 TransportBuilder cannot
+    /// express it); see `OpenSearchClient::new`.
     pub fn with_max_retries(mut self, retries: u32) -> Self {
         self.max_retries = retries;
         self

@@ -220,7 +220,8 @@ impl Default for DatabaseConfig {
     }
 }
 
-/// Humantime serde module for duration serialization.
+/// Serde helper: (de)serializes a `Duration` as an integer number of
+/// seconds (not humantime strings), despite the module name.
 mod humantime_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;

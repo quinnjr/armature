@@ -121,7 +121,11 @@ let pool = PgPool::new(config).await?;
 let config = DieselConfig::from_env()?;
 ```
 
-The `bb8` feature enables an alternate pool type, `PgPoolBb8`, built the
+Note: `min_idle`, `max_lifetime`, and `idle_timeout` are inert on the
+default `PgPool` (backed by `deadpool`), which does not support them.
+They only take effect on the `bb8`-backed pool, `PgPoolBb8`.
+
+The `bb8` feature enables this alternate pool type, `PgPoolBb8`, built the
 same way from a `DieselConfig`.
 
 ## License

@@ -88,9 +88,11 @@
 //! ```rust,ignore
 //! use armature_events::Event;
 //! use async_trait::async_trait;
+//! use std::sync::Mutex;
 //!
 //! struct UserListProjection {
 //!     // Read model storage
+//!     users: Mutex<Vec<String>>,
 //! }
 //!
 //! #[async_trait]
@@ -105,6 +107,14 @@
 //!             }
 //!             _ => {}
 //!         }
+//!         Ok(())
+//!     }
+//!
+//!     // Any projection that holds state MUST override `reset`, clearing
+//!     // that state, so that `rebuild`/`rebuild_all` (which call `reset`
+//!     // before replaying events) don't double-apply events on top of it.
+//!     async fn reset(&self) -> Result<(), ProjectionError> {
+//!         self.users.lock().unwrap().clear();
 //!         Ok(())
 //!     }
 //! }

@@ -30,7 +30,7 @@ pub enum BulkOperation<T> {
     Update {
         /// Document ID.
         id: String,
-        /// Partial document.
+        /// Full replacement document (sent under the `doc` key).
         doc: T,
     },
     /// Delete a document.

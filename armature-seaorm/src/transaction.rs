@@ -198,7 +198,7 @@ fn deferrable_statement(
 /// ```rust,ignore
 /// use armature_seaorm::run_transaction;
 ///
-/// let result = run_transaction(&db.connection(), |txn| {
+/// let result = run_transaction(db.connection(), |txn| {
 ///     Box::pin(async move {
 ///         // Do work with txn
 ///         Ok::<_, sea_orm::DbErr>(42)
