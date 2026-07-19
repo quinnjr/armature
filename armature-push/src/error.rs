@@ -124,7 +124,7 @@ impl From<web_push::WebPushError> for PushError {
         } else if err_string.contains("payload") || err_string.contains("too large") {
             Self::PayloadTooLarge {
                 size: 0,
-                limit: 4096,
+                limit: crate::web_push::WEB_PUSH_MAX_PAYLOAD,
             }
         } else {
             Self::Provider(err_string)

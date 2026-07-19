@@ -19,11 +19,26 @@ use crate::{
     ProcessingResult, PublishOptions, SubscribeOptions, Subscription, config::KafkaConfig,
 };
 
+/// A live consumer subscription tracked by [`KafkaBroker`], keyed by
+/// subscription id. Holds the consumer alive and the `active` flag used to
+/// stop its polling task on `close`/`unsubscribe`.
+struct ConsumerEntry {
+    /// Kept alive so the spawned consume task's `Arc<StreamConsumer>` is not
+    /// the only owner; dropped when the subscription is removed.
+    _consumer: Arc<StreamConsumer>,
+    /// Shared stop-flag polled by the consume loop.
+    active: Arc<AtomicBool>,
+}
+
 /// Apache Kafka message broker
 pub struct KafkaBroker {
     producer: FutureProducer,
     config: KafkaConfig,
-    consumers: Arc<RwLock<Vec<Arc<StreamConsumer>>>>,
+    /// Active consumer subscriptions keyed by subscription id. Entries are
+    /// inserted on `subscribe` and removed on `unsubscribe` (so the map does
+    /// not grow unbounded), and every entry's `active` flag is flipped to
+    /// `false` on `close` so the spawned consume tasks stop polling.
+    consumers: Arc<RwLock<HashMap<String, ConsumerEntry>>>,
     connected: Arc<AtomicBool>,
 }
 
@@ -92,7 +107,7 @@ impl KafkaBroker {
         Ok(Self {
             producer,
             config,
-            consumers: Arc::new(RwLock::new(Vec::new())),
+            consumers: Arc::new(RwLock::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -188,6 +203,18 @@ impl MessageBroker for KafkaBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // `concurrency` is not yet implemented for any backend: messages are
+        // dispatched to the handler sequentially. Warn so a caller who set it
+        // is not silently misled into thinking they got parallel dispatch.
+        if let Some(concurrency) = options.concurrency
+            && concurrency > 1
+        {
+            warn!(
+                concurrency,
+                "SubscribeOptions::concurrency is not implemented for Kafka; messages are dispatched sequentially"
+            );
+        }
+
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &self.config.base.url);
 
@@ -275,15 +302,25 @@ impl MessageBroker for KafkaBroker {
 
         let consumer = Arc::new(consumer);
         let active = Arc::new(AtomicBool::new(true));
+        let subscription_id = uuid::Uuid::new_v4().to_string();
 
         let subscription = KafkaSubscription {
             topic: topic.to_string(),
             group_id: group_id.clone(),
             active: active.clone(),
+            id: subscription_id.clone(),
+            consumers: self.consumers.clone(),
         };
 
-        // Store consumer for cleanup
-        self.consumers.write().await.push(consumer.clone());
+        // Store consumer + stop-flag keyed by subscription id so `close` can
+        // stop every consumer and `unsubscribe` can prune this one.
+        self.consumers.write().await.insert(
+            subscription_id,
+            ConsumerEntry {
+                _consumer: consumer.clone(),
+                active: active.clone(),
+            },
+        );
 
         // Spawn consumer task
         let topic_owned = topic.to_string();
@@ -303,7 +340,12 @@ impl MessageBroker for KafkaBroker {
     async fn close(&self) -> Result<(), MessagingError> {
         info!("Closing Kafka connections");
         self.connected.store(false, Ordering::SeqCst);
-        // Consumers will stop when active flag is set to false
+        // Stop every consume task by flipping its stop-flag. Without this the
+        // spawned tasks keep polling and invoking handlers after `close`.
+        let consumers = self.consumers.read().await;
+        for entry in consumers.values() {
+            entry.active.store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -333,37 +375,67 @@ async fn consume_messages(
 
     let mut stream = consumer.stream();
 
+    // Manual-ack at-least-once safety.
+    //
+    // In `AckMode::Manual` we commit offsets explicitly, only after the handler
+    // reports `Success`. The hazard is that Kafka commits a *watermark*: a
+    // single committed offset marks everything up to it as consumed. If message
+    // N fails (non-`Success` result or handler error) but message N+1 then
+    // succeeds, committing N+1 would advance the watermark past N, permanently
+    // skipping the failed message on restart (silent data loss).
+    //
+    // To preserve at-least-once, once any message in this consumer's stream
+    // fails to be acknowledged we stop committing entirely (`commit_halted`).
+    // The failed message and everything after it are then redelivered when the
+    // consumer group next starts from its last committed offset. This is a
+    // deliberately coarse, safe choice: it may redeliver already-processed
+    // messages (handlers must be idempotent), but it never skips one.
+    let mut commit_halted = false;
+
     while active.load(Ordering::SeqCst) {
         match stream.next().await {
             Some(Ok(borrowed_message)) => {
                 let message = kafka_message_to_message(&borrowed_message, topic);
 
                 match handler.handle(message).await {
-                    Ok(result) => {
-                        match result {
-                            ProcessingResult::Success => {
-                                // Commit the offset explicitly in manual ack mode, since
-                                // `enable.auto.commit` is disabled for that mode and
-                                // rdkafka will never advance the consumer group's offset
-                                // on its own, causing redelivery on restart.
-                                if ack_mode == AckMode::Manual
-                                    && let Err(e) = consumer
-                                        .commit_message(&borrowed_message, CommitMode::Async)
-                                {
-                                    error!(error = %e, "Failed to commit Kafka offset");
-                                }
-                            }
-                            ProcessingResult::Retry => {
-                                warn!(
-                                    "Kafka does not support message retry - message will be lost"
-                                );
-                            }
-                            ProcessingResult::DeadLetter | ProcessingResult::Reject => {
-                                debug!("Message rejected");
-                            }
+                    Ok(ProcessingResult::Success) => {
+                        // Commit the offset explicitly in manual ack mode, since
+                        // `enable.auto.commit` is disabled for that mode and
+                        // rdkafka will never advance the consumer group's offset
+                        // on its own, causing redelivery on restart. Skip once a
+                        // prior message has failed (see `commit_halted` above).
+                        if ack_mode == AckMode::Manual
+                            && !commit_halted
+                            && let Err(e) =
+                                consumer.commit_message(&borrowed_message, CommitMode::Async)
+                        {
+                            error!(error = %e, "Failed to commit Kafka offset");
+                        }
+                    }
+                    Ok(ProcessingResult::Retry) => {
+                        if ack_mode == AckMode::Manual {
+                            commit_halted = true;
+                            warn!(
+                                "Kafka message not acknowledged (retry requested); halting further offset commits so it and later messages are redelivered on restart"
+                            );
+                        } else {
+                            warn!("Kafka does not support message retry - message will be lost");
+                        }
+                    }
+                    Ok(ProcessingResult::DeadLetter | ProcessingResult::Reject) => {
+                        if ack_mode == AckMode::Manual {
+                            commit_halted = true;
+                            debug!(
+                                "Message rejected; halting further Kafka offset commits to avoid skipping it"
+                            );
+                        } else {
+                            debug!("Message rejected");
                         }
                     }
                     Err(e) => {
+                        if ack_mode == AckMode::Manual {
+                            commit_halted = true;
+                        }
                         error!(error = %e, "Message handler error");
                     }
                 }
@@ -435,12 +507,20 @@ pub struct KafkaSubscription {
     topic: String,
     group_id: String,
     active: Arc<AtomicBool>,
+    /// Id under which this subscription is tracked in `KafkaBroker::consumers`.
+    id: String,
+    /// Handle to the broker's consumer registry so `unsubscribe` can prune this
+    /// subscription's entry (preventing unbounded growth of the map).
+    consumers: Arc<RwLock<HashMap<String, ConsumerEntry>>>,
 }
 
 #[async_trait]
 impl Subscription for KafkaSubscription {
     async fn unsubscribe(&self) -> Result<(), MessagingError> {
         self.active.store(false, Ordering::SeqCst);
+        // Drop the tracked consumer so the map does not grow unbounded across
+        // subscribe/unsubscribe cycles.
+        self.consumers.write().await.remove(&self.id);
         info!(topic = %self.topic, group_id = %self.group_id, "Unsubscribed from Kafka topic");
         Ok(())
     }

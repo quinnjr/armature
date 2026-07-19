@@ -2,8 +2,8 @@
 
 use crate::error::{CronError, CronResult};
 use crate::expression::CronExpression;
-use crate::job::{Job, JobContext, JobStatus};
-use armature_log::{debug, info, warn};
+use crate::job::{Job, JobContext, JobFn, JobStatus};
+use armature_log::{debug, error, info, warn};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::future::Future;
@@ -198,53 +198,81 @@ impl CronScheduler {
             }
 
             while *running.read().await {
-                let job_names: Vec<String> = {
-                    let jobs = jobs.read().await;
-                    jobs.keys().cloned().collect()
+                // Take the jobs map write lock ONCE per tick and decide which
+                // jobs are due while holding it, instead of spawning a task
+                // (and acquiring a concurrency permit) per registered job on
+                // every tick. Jobs that are due are flipped to `Running`
+                // under this single lock, which preserves the overlap-skip
+                // guarantee, and only those due jobs are handed off for
+                // execution.
+                let due: Vec<(String, JobFn, JobContext)> = {
+                    let mut jobs = jobs.write().await;
+                    let mut due = Vec::new();
+                    for job in jobs.values_mut() {
+                        if !job.should_run() {
+                            continue;
+                        }
+                        job.status = JobStatus::Running;
+                        let context = JobContext::new(
+                            job.name.clone(),
+                            job.next_run.unwrap_or_else(Utc::now),
+                            job.execution_count,
+                        );
+                        due.push((job.name.clone(), job.function.clone(), context));
+                    }
+                    due
                 };
 
-                for name in job_names {
+                for (name, job_fn, context) in due {
                     let jobs_clone = jobs.clone();
                     let log = log_execution;
                     let semaphore = semaphore.clone();
 
                     tokio::spawn(async move {
-                        // Bound concurrency. Held for the whole execution.
+                        // Bound concurrency. Held for the whole execution. The
+                        // permit is acquired here, inside the spawned task for
+                        // an already-due job, rather than before `should_run()`
+                        // was checked.
                         let _permit = match semaphore.acquire_owned().await {
                             Ok(permit) => permit,
                             Err(_) => return, // semaphore closed
                         };
 
-                        // Short-lived lock: decide whether to run, mark the job
-                        // Running (so overlapping ticks skip it), and clone out
-                        // the function + context needed to execute. The map lock
-                        // is released before we await the job body.
-                        let job_fn;
-                        let context;
-                        {
-                            let mut jobs = jobs_clone.write().await;
-                            let job = match jobs.get_mut(&name) {
-                                Some(job) if job.should_run() => job,
-                                _ => return,
-                            };
-                            job.status = JobStatus::Running;
-                            context = JobContext::new(
-                                job.name.clone(),
-                                job.next_run.unwrap_or_else(Utc::now),
-                                job.execution_count,
-                            );
-                            job_fn = job.function.clone();
-                        }
-
                         if log {
                             println!("[CRON] Executing job: {}", name);
                         }
 
-                        // Execute WITHOUT holding the jobs map lock, so other
-                        // jobs, status queries, and mutations proceed in parallel.
-                        let result = job_fn(context).await;
+                        // Run the job body on its own task so that if it
+                        // panics, the panic unwinds *that* task and is
+                        // reported as a `JoinError` here rather than
+                        // unwinding this task and skipping the
+                        // outcome-recording block below. Without this, a
+                        // panicking job would be left stuck in `Running`
+                        // forever, and (with `prevent_overlap`, the default)
+                        // would never be scheduled again.
+                        let outcome = tokio::spawn(job_fn(context)).await;
 
-                        // Re-acquire briefly to record the outcome.
+                        let result: CronResult<()> = match outcome {
+                            Ok(inner) => inner,
+                            Err(join_err) if join_err.is_panic() => {
+                                error!("Job '{}' panicked during execution", name);
+                                Err(CronError::ExecutionFailed(format!(
+                                    "job '{}' panicked during execution",
+                                    name
+                                )))
+                            }
+                            Err(join_err) => {
+                                error!("Job '{}' task failed: {}", name, join_err);
+                                Err(CronError::ExecutionFailed(format!(
+                                    "job '{}' task failed: {}",
+                                    name, join_err
+                                )))
+                            }
+                        };
+
+                        // Re-acquire briefly to record the outcome. This runs
+                        // even when the job body panicked, since the panic
+                        // was contained to the nested task above.
                         {
                             let mut jobs = jobs_clone.write().await;
                             if let Some(job) = jobs.get_mut(&name) {
@@ -571,23 +599,74 @@ mod tests {
         // Let next_run elapse while stopped.
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        // Align just past a whole-second boundary so the advanced next_run is
-        // ~1s out, leaving a safe window to confirm nothing fired.
+        // Align close to a whole-second boundary so the freshly-advanced
+        // next_run (computed inside `start()`) lands comfortably in the
+        // future, leaving a wide safety margin to confirm nothing fired
+        // before it does. A looser alignment window combined with ordinary
+        // scheduling/CI jitter could previously shrink this margin enough to
+        // flake the `== 0` assertion below; aligning earlier in the second
+        // and checking sooner after `start()` keeps a wide buffer in both
+        // directions without weakening what the assertion proves.
         loop {
-            if Utc::now().timestamp_subsec_millis() < 60 {
+            if Utc::now().timestamp_subsec_millis() < 20 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
 
         scheduler.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Checked well before the ~1s-out next_run, so ordinary scheduling
+        // latency cannot cause a false failure; a genuine regression that
+        // fires the job immediately on start would still be caught.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let observed = count.load(Ordering::SeqCst);
         scheduler.stop().await.unwrap();
 
         assert_eq!(
             observed, 0,
             "past-due fire must be skipped when run_missed_jobs is false"
+        );
+    }
+
+    // A panicking job must not wedge the schedule: the outcome-recording
+    // step must still run even though the job body unwound, leaving the job
+    // in a terminal status (not stuck `Running`, which combined with the
+    // default `prevent_overlap` would otherwise mean it can never run
+    // again) and advanced to a future `next_run`.
+    #[tokio::test]
+    async fn test_panicking_job_does_not_wedge_schedule() {
+        let mut scheduler = CronScheduler::with_config(SchedulerConfig {
+            tick_interval: Duration::from_millis(50),
+            log_execution: false,
+            ..Default::default()
+        });
+        scheduler
+            .add_job("boom", "* * * * * *", |_ctx| async {
+                panic!("job intentionally panics");
+            })
+            .await
+            .unwrap();
+
+        scheduler.start().await.unwrap();
+        // Allow at least one full second (the job's schedule granularity)
+        // plus margin for the panic to be caught and the outcome recorded.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        scheduler.stop().await.unwrap();
+
+        let stats = scheduler.get_stats("boom").await.unwrap();
+        assert_ne!(
+            stats.status,
+            JobStatus::Running,
+            "a panicking job must not be left stuck in Running; got {:?}",
+            stats.status
+        );
+        assert!(
+            stats.next_run.is_some(),
+            "a panicking job must still be advanced to its next scheduled run"
+        );
+        assert!(
+            stats.execution_count >= 1,
+            "the panicking execution must still be recorded"
         );
     }
 }

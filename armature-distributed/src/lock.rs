@@ -1,24 +1,23 @@
 //! Distributed locks using Redis
 
 use async_trait::async_trait;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Lua script that only mutates the key if the caller's token still matches
-/// the stored value. Shared by the renewal watchdog and by release paths so
-/// a lock is never refreshed or deleted out from under another holder.
-const RELEASE_SCRIPT: &str = r#"
-    if redis.call("get", KEYS[1]) == ARGV[1] then
-        return redis.call("del", KEYS[1])
-    else
-        return 0
-    end
-"#;
+use crate::RELEASE_SCRIPT;
+
+/// Number of consecutive renewal errors the watchdog tolerates before it
+/// treats the lease as lost. Transient Redis blips should not fence the
+/// holder, but sustained failure means we can no longer prove we hold the
+/// lock, so the critical section must be told to stand down.
+const MAX_RENEW_ERRORS: u32 = 3;
 
 const RENEW_SCRIPT: &str = r#"
     if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -67,6 +66,17 @@ pub trait DistributedLock: Send + Sync {
 /// TTL in Redis (guarded by the lock's token, via [`RENEW_SCRIPT`]) so the
 /// lock does not silently expire while the critical section is still
 /// running. The watchdog is cancelled when the guard is released or dropped.
+///
+/// # Fencing
+///
+/// The watchdog cannot _prevent_ another node from stealing the lease (for
+/// example if this node stalls past the TTL and the key expires), but it
+/// _detects_ it: when a renewal finds the token no longer matches, or renewal
+/// fails repeatedly ([`MAX_RENEW_ERRORS`] consecutive errors), the guard is
+/// marked lost. Callers running a mutually-exclusive critical section MUST
+/// re-check [`LockGuard::is_held`] (or `select!` on [`LockGuard::lost`])
+/// immediately before committing any externally-visible side effect; holding
+/// the guard value is not by itself proof the lease is still ours.
 pub struct LockGuard {
     key: String,
     token: String,
@@ -75,6 +85,13 @@ pub struct LockGuard {
     watchdog_stop: Option<oneshot::Sender<()>>,
     /// Handle to the watchdog task, kept so `drop` can detach it cleanly.
     watchdog: Option<JoinHandle<()>>,
+    /// `true` while we can still prove we hold the lease; flipped to `false`
+    /// by the watchdog when the lease is lost (token mismatch or sustained
+    /// renewal failure). Shared with the watchdog task.
+    held: Arc<AtomicBool>,
+    /// Notified once when `held` transitions to `false`, so callers can
+    /// `select!` on [`LockGuard::lost`] instead of polling.
+    lost_notify: Arc<Notify>,
 }
 
 impl LockGuard {
@@ -84,6 +101,8 @@ impl LockGuard {
     /// `LeaderElection`'s refresh cadence.
     fn new(key: String, token: String, conn: redis::aio::ConnectionManager, ttl: Duration) -> Self {
         let (watchdog_stop, mut stop_rx) = oneshot::channel();
+        let held = Arc::new(AtomicBool::new(true));
+        let lost_notify = Arc::new(Notify::new());
 
         let watchdog = {
             let key = key.clone();
@@ -91,8 +110,20 @@ impl LockGuard {
             let mut conn = conn.clone();
             let ttl_ms = ttl.as_millis().max(1) as usize;
             let interval = Duration::from_millis((ttl.as_millis() / 3).max(1) as u64);
+            let held = held.clone();
+            let lost_notify = lost_notify.clone();
 
             tokio::spawn(async move {
+                // Fence the holder: on token mismatch (lease stolen/expired) or
+                // sustained renewal failure, flip `held` to false and wake any
+                // `lost()` waiter so the critical section can stand down.
+                let mark_lost = |held: &AtomicBool, lost_notify: &Notify| {
+                    held.store(false, Ordering::Release);
+                    lost_notify.notify_waiters();
+                };
+
+                let mut consecutive_errors: u32 = 0;
+
                 loop {
                     tokio::select! {
                         _ = &mut stop_rx => break,
@@ -107,13 +138,32 @@ impl LockGuard {
                         .await;
 
                     match result {
-                        Ok(1) => debug!("Renewed lock: {}", key),
+                        Ok(1) => {
+                            consecutive_errors = 0;
+                            debug!("Renewed lock: {}", key);
+                        }
                         Ok(_) => {
-                            warn!("Lock renewal found lock no longer held: {}", key);
+                            warn!(
+                                "Lock renewal found lock no longer held (lease lost to another holder): {}",
+                                key
+                            );
+                            mark_lost(&held, &lost_notify);
                             break;
                         }
                         Err(e) => {
-                            warn!("Lock renewal failed for {}: {}", key, e);
+                            consecutive_errors += 1;
+                            warn!(
+                                "Lock renewal failed for {} ({}/{}): {}",
+                                key, consecutive_errors, MAX_RENEW_ERRORS, e
+                            );
+                            if consecutive_errors >= MAX_RENEW_ERRORS {
+                                warn!(
+                                    "Lock renewal failed {} times in a row; treating lease as lost: {}",
+                                    consecutive_errors, key
+                                );
+                                mark_lost(&held, &lost_notify);
+                                break;
+                            }
                         }
                     }
                 }
@@ -126,6 +176,8 @@ impl LockGuard {
             conn,
             watchdog_stop: Some(watchdog_stop),
             watchdog: Some(watchdog),
+            held,
+            lost_notify,
         }
     }
 
@@ -137,6 +189,40 @@ impl LockGuard {
         // Detach rather than await: `release`/`drop` must not block on the
         // watchdog's next wake-up.
         self.watchdog.take();
+    }
+
+    /// Returns `true` while the lease can still be proven held, and `false`
+    /// once the renewal watchdog has observed the lease being lost (token
+    /// mismatch, i.e. stolen/expired, or [`MAX_RENEW_ERRORS`] consecutive
+    /// renewal failures).
+    ///
+    /// Critical sections that must be mutually exclusive across nodes should
+    /// call this immediately before committing any externally-visible side
+    /// effect. A `true` result is not a guarantee for all future time — it
+    /// means no loss has been detected as of this call.
+    pub fn is_held(&self) -> bool {
+        self.held.load(Ordering::Acquire)
+    }
+
+    /// Resolves once the lease is lost (see [`LockGuard::is_held`]). If the
+    /// lease has already been lost, resolves immediately. Intended for use in
+    /// a `tokio::select!` alongside the critical-section work so the holder
+    /// can abort the moment fencing is detected:
+    ///
+    /// ```rust,ignore
+    /// tokio::select! {
+    ///     _ = guard.lost() => { /* stand down, do not commit */ }
+    ///     result = do_work() => { if guard.is_held() { commit(result); } }
+    /// }
+    /// ```
+    pub async fn lost(&self) {
+        // Register interest *before* re-checking the flag so a loss that
+        // happens between the check and the await is not missed.
+        let notified = self.lost_notify.notified();
+        if !self.held.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 
     /// Manually release the lock
@@ -421,6 +507,80 @@ mod tests {
         );
 
         drop(guard2);
+    }
+
+    #[test]
+    fn dropping_guard_off_a_tokio_runtime_does_not_panic() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        // Construct a real guard inside a runtime (acquiring the lock and
+        // spawning its watchdog both need one), then move it out and drop it
+        // from a plain OS thread that has no Tokio runtime, exercising the
+        // `Handle::try_current()` fallback in `Drop` (which must skip the
+        // best-effort release rather than panic).
+        let rt = tokio::runtime::Runtime::new().expect("build runtime");
+        let guard = rt.block_on(async {
+            let container = armature_testkit::containers::RedisContainer::start().await;
+            let conn = connection_manager(&container.url()).await;
+            let lock = RedisLock::new("wf3-drop-off-runtime", Duration::from_secs(30), conn);
+            lock.try_acquire()
+                .await
+                .expect("try_acquire should not error")
+                .expect("acquire should succeed")
+            // `container` is dropped here; the off-runtime drop below performs
+            // no Redis I/O, so the stopped container does not matter.
+        });
+        assert!(guard.is_held(), "freshly acquired guard should report held");
+
+        let handle = std::thread::spawn(move || {
+            drop(guard);
+        });
+        handle
+            .join()
+            .expect("dropping a LockGuard off any Tokio runtime must not panic");
+    }
+
+    #[tokio::test]
+    async fn is_held_flips_false_when_the_lease_is_stolen() {
+        if !armature_testkit::docker_available() {
+            eprintln!("skipping: Docker not available");
+            return;
+        }
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let conn = connection_manager(&container.url()).await;
+        let mut stealer = connection_manager(&container.url()).await;
+
+        let ttl = Duration::from_millis(300);
+        let lock = RedisLock::new("wf3-fencing", ttl, conn);
+
+        let guard = lock
+            .try_acquire()
+            .await
+            .expect("try_acquire should not error")
+            .expect("first acquire should succeed");
+        assert!(guard.is_held(), "guard should start held");
+
+        // Steal the lease: overwrite the key with a foreign token so the
+        // holder's next renewal sees a token mismatch (Lua returns 0).
+        let _: () = redis::cmd("SET")
+            .arg("wf3-fencing")
+            .arg("foreign-token")
+            .query_async(&mut stealer)
+            .await
+            .expect("steal the lock key");
+
+        // The watchdog should observe the mismatch on its next renewal and
+        // wake `lost()`.
+        tokio::time::timeout(Duration::from_secs(2), guard.lost())
+            .await
+            .expect("watchdog should mark the lease lost within the timeout");
+
+        assert!(
+            !guard.is_held(),
+            "is_held must flip to false once the lease has been stolen"
+        );
     }
 
     #[tokio::test]

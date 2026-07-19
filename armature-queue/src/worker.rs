@@ -238,7 +238,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Stop the worker.
     /// Process multiple jobs of the same type in parallel
     ///
     /// This method dequeues and processes multiple jobs of the same type
@@ -421,6 +420,7 @@ impl Worker {
         self.handlers.write().await.insert(job_type.into(), wrapped);
     }
 
+    /// Stop the worker.
     pub async fn stop(&mut self) -> QueueResult<()> {
         let mut running = self.running.write().await;
         if !*running {

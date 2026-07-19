@@ -1,6 +1,6 @@
 [package]
 name = "armature-discovery"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,13 +22,6 @@ tracing = "0.1"
 url = "2.5"
 base64 = "0.22"
 rand = "0.10"
-
-# Optional Consul support
-consul = { version = "0.4", optional = true }
-
-[features]
-default = []
-consul-client = ["consul"]
 
 [dev-dependencies]
 tokio-test = "0.4"

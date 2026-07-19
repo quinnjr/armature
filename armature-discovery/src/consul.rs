@@ -4,7 +4,13 @@ use crate::service::{DiscoveryError, ServiceDiscovery, ServiceInstance};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, info};
+use url::Url;
+
+/// Timeout applied to every Consul HTTP request so a stalled/unreachable
+/// Consul agent fails fast instead of hanging the caller indefinitely.
+const CONSUL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Consul service discovery client
 pub struct ConsulDiscovery {
@@ -23,17 +29,41 @@ impl ConsulDiscovery {
     /// let consul = ConsulDiscovery::new("http://localhost:8500")?;
     /// ```
     pub fn new(base_url: impl Into<String>) -> Result<Self, DiscoveryError> {
+        let client = reqwest::Client::builder()
+            .timeout(CONSUL_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| DiscoveryError::InvalidConfiguration(e.to_string()))?;
+
         Ok(Self {
             base_url: base_url.into(),
-            client: reqwest::Client::new(),
+            client,
         })
+    }
+
+    /// Build `{base_url}/{segments...}`, percent-encoding each segment so
+    /// caller-controlled values (service names/ids) can't inject extra
+    /// path segments, query strings, or fragments into the request.
+    fn build_url(&self, segments: &[&str]) -> Result<Url, DiscoveryError> {
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|e| DiscoveryError::InvalidConfiguration(e.to_string()))?;
+        {
+            let mut path_segments = url.path_segments_mut().map_err(|_| {
+                DiscoveryError::InvalidConfiguration(
+                    "Consul base_url cannot be a base URL".to_string(),
+                )
+            })?;
+            for segment in segments {
+                path_segments.push(segment);
+            }
+        }
+        Ok(url)
     }
 }
 
 #[async_trait]
 impl ServiceDiscovery for ConsulDiscovery {
     async fn register(&self, service: &ServiceInstance) -> Result<(), DiscoveryError> {
-        let url = format!("{}/v1/agent/service/register", self.base_url);
+        let url = self.build_url(&["v1", "agent", "service", "register"])?;
 
         // Build Consul registration payload
         let mut payload = serde_json::json!({
@@ -54,7 +84,7 @@ impl ServiceDiscovery for ConsulDiscovery {
             });
         }
 
-        let response = self.client.put(&url).json(&payload).send().await?;
+        let response = self.client.put(url).json(&payload).send().await?;
 
         if response.status().is_success() {
             info!("Registered service {} with Consul", service.id);
@@ -69,12 +99,9 @@ impl ServiceDiscovery for ConsulDiscovery {
     }
 
     async fn deregister(&self, service_id: &str) -> Result<(), DiscoveryError> {
-        let url = format!(
-            "{}/v1/agent/service/deregister/{}",
-            self.base_url, service_id
-        );
+        let url = self.build_url(&["v1", "agent", "service", "deregister", service_id])?;
 
-        let response = self.client.put(&url).send().await?;
+        let response = self.client.put(url).send().await?;
 
         if response.status().is_success() {
             info!("Deregistered service {} from Consul", service_id);
@@ -91,13 +118,13 @@ impl ServiceDiscovery for ConsulDiscovery {
     async fn discover(&self, service_name: &str) -> Result<Vec<ServiceInstance>, DiscoveryError> {
         // `passing=true` asks Consul to filter out instances whose health
         // checks are not all passing, so callers never get routed to an
-        // unhealthy/critical instance.
-        let url = format!(
-            "{}/v1/health/service/{}?passing=true",
-            self.base_url, service_name
-        );
+        // unhealthy/critical instance. `service_name` is percent-encoded
+        // as a path segment so a name containing `?`, `#`, or `/` can't
+        // rewrite the request's path or query string.
+        let mut url = self.build_url(&["v1", "health", "service", service_name])?;
+        url.query_pairs_mut().append_pair("passing", "true");
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client.get(url).send().await?;
 
         if !response.status().is_success() {
             return Err(DiscoveryError::ServiceNotFound(service_name.to_string()));
@@ -151,9 +178,9 @@ impl ServiceDiscovery for ConsulDiscovery {
     }
 
     async fn get_service(&self, service_id: &str) -> Result<ServiceInstance, DiscoveryError> {
-        let url = format!("{}/v1/agent/service/{}", self.base_url, service_id);
+        let url = self.build_url(&["v1", "agent", "service", service_id])?;
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client.get(url).send().await?;
 
         if !response.status().is_success() {
             return Err(DiscoveryError::ServiceNotFound(service_id.to_string()));
@@ -186,9 +213,9 @@ impl ServiceDiscovery for ConsulDiscovery {
     }
 
     async fn list_services(&self) -> Result<Vec<String>, DiscoveryError> {
-        let url = format!("{}/v1/catalog/services", self.base_url);
+        let url = self.build_url(&["v1", "catalog", "services"])?;
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client.get(url).send().await?;
 
         if !response.status().is_success() {
             return Err(DiscoveryError::RegistrationFailed(
@@ -245,6 +272,49 @@ mod tests {
             req.query.as_deref(),
             Some("passing=true"),
             "discover() must ask Consul to filter to passing (healthy) instances only"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_returns_ok_empty_for_unregistered_service_name() {
+        let server = StubServer::builder()
+            .route(
+                "GET",
+                "/v1/health/service/nonexistent",
+                StubResponse::json(200, "[]"),
+            )
+            .start()
+            .await;
+
+        let consul = ConsulDiscovery::new(server.url()).unwrap();
+        let instances = consul.discover("nonexistent").await.unwrap();
+        assert!(
+            instances.is_empty(),
+            "discover() of an unregistered name must return Ok(vec![]), matching the other backends"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_percent_encodes_service_name_path_segment() {
+        let server = StubServer::builder()
+            .default_response(StubResponse::json(200, "[]"))
+            .start()
+            .await;
+
+        let consul = ConsulDiscovery::new(server.url()).unwrap();
+        // A crafted name that would otherwise inject a path segment / query
+        // string must be percent-encoded, not interpreted as URL syntax.
+        consul.discover("api/../secret?x=1").await.unwrap();
+
+        let requests = server.requests();
+        let req = requests
+            .iter()
+            .find(|r| r.method == "GET")
+            .expect("expected a GET request");
+        assert!(
+            req.path.contains("%2F") || !req.path.contains("../secret"),
+            "service_name must be percent-encoded, not left as raw path syntax: {}",
+            req.path
         );
     }
 }

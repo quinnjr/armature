@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Configuration for mq-bridge endpoints
 #[derive(Debug, Clone)]
@@ -276,6 +277,50 @@ pub fn to_canonical(msg: &Message) -> CanonicalMessage {
         canonical
             .metadata
             .insert("reply_to".to_string(), rt.clone());
+    }
+    if let Some(pri) = msg.priority {
+        canonical
+            .metadata
+            .insert("priority".to_string(), pri.to_string());
+    }
+    if let Some(ttl) = msg.ttl {
+        canonical
+            .metadata
+            .insert("ttl".to_string(), ttl.to_string());
+    }
+
+    canonical
+}
+
+/// Convert an owned armature [`Message`] into an mq-bridge [`CanonicalMessage`],
+/// moving the payload, id, topic and headers instead of cloning them.
+///
+/// This is the by-value counterpart to [`to_canonical`]: `publish` owns its
+/// `Message`, so it can hand ownership straight through and avoid cloning the
+/// (potentially large) payload on every publish. Use [`to_canonical`] when you
+/// only have a `&Message`.
+pub fn into_canonical(msg: Message) -> CanonicalMessage {
+    let mut canonical = CanonicalMessage::new(msg.payload, None);
+
+    // Store message ID and topic in metadata
+    canonical.metadata.insert("armature_id".to_string(), msg.id);
+    canonical
+        .metadata
+        .insert("armature_topic".to_string(), msg.topic);
+
+    // Move headers to metadata
+    for (key, value) in msg.headers {
+        canonical.metadata.insert(key, value);
+    }
+
+    if let Some(ct) = msg.content_type {
+        canonical.metadata.insert("content_type".to_string(), ct);
+    }
+    if let Some(cid) = msg.correlation_id {
+        canonical.metadata.insert("correlation_id".to_string(), cid);
+    }
+    if let Some(rt) = msg.reply_to {
+        canonical.metadata.insert("reply_to".to_string(), rt);
     }
     if let Some(pri) = msg.priority {
         canonical
@@ -546,7 +591,9 @@ impl MessageBroker for MqBridgeBroker {
         // `config.topic` - this is what lets multi-topic use of a single
         // `MqBridgeBroker` actually reach the right destination.
         let publisher = self.get_or_create_publisher(&message.topic).await?;
-        let canonical = to_canonical(&message);
+        // `publish` owns `message`, so move it into the canonical form rather
+        // than cloning the payload.
+        let canonical = into_canonical(message);
 
         publisher
             .send(canonical)
@@ -584,8 +631,17 @@ impl MessageBroker for MqBridgeBroker {
         &self,
         topic: &str,
         handler: Arc<dyn MessageHandler>,
-        _options: SubscribeOptions,
+        options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        if let Some(concurrency) = options.concurrency
+            && concurrency > 1
+        {
+            warn!(
+                concurrency,
+                "SubscribeOptions::concurrency is not implemented for the mq-bridge backend; messages are dispatched sequentially"
+            );
+        }
+
         let (subscription, mut cancel_rx) = MqBridgeSubscription::new(topic.to_string());
 
         // Route by the topic argument, not the broker's default

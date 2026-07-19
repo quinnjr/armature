@@ -3,7 +3,13 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 use thiserror::Error;
+
+/// Timeout applied to the default `health_check` HTTP probe so a
+/// stalled/unreachable health endpoint fails fast instead of hanging the
+/// caller indefinitely.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Service discovery errors
 #[derive(Debug, Error)]
@@ -118,13 +124,18 @@ pub trait ServiceDiscovery: Send + Sync {
         let service = self.get_service(service_id).await?;
 
         if let Some(health_url) = service.health_check_url {
-            match reqwest::get(&health_url).await {
-                Ok(response) => Ok(response.status().is_success()),
+            match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, reqwest::get(&health_url)).await {
+                Ok(Ok(response)) => Ok(response.status().is_success()),
                 // A transport error (connection refused, DNS failure, TLS
-                // error, timeout, ...) is not the same thing as the service
+                // error, ...) is not the same thing as the service
                 // reporting itself unhealthy — surface it distinctly so
                 // callers can tell "unreachable" apart from "unhealthy".
-                Err(e) => Err(DiscoveryError::HealthCheckFailed(e.to_string())),
+                Ok(Err(e)) => Err(DiscoveryError::HealthCheckFailed(e.to_string())),
+                // The probe didn't complete within the timeout budget —
+                // treat that the same as any other transport failure.
+                Err(_) => Err(DiscoveryError::HealthCheckFailed(format!(
+                    "health check for {health_url} timed out after {HEALTH_CHECK_TIMEOUT:?}"
+                ))),
             }
         } else {
             Ok(true) // No health check configured, assume healthy

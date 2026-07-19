@@ -209,6 +209,15 @@ impl MessageBroker for NatsBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        if let Some(concurrency) = options.concurrency
+            && concurrency > 1
+        {
+            warn!(
+                concurrency,
+                "SubscribeOptions::concurrency is not implemented for NATS; messages are dispatched sequentially"
+            );
+        }
+
         let subscriber = if let Some(ref group) = options.consumer_group {
             // Queue group subscription for load balancing
             self.client
@@ -229,8 +238,13 @@ impl MessageBroker for NatsBroker {
             active: active.clone(),
         };
 
-        // Store active flag for cleanup
-        self.active_flags.write().await.push(active.clone());
+        // Store active flag for cleanup, pruning flags whose consumer task has
+        // already stopped so the vec does not grow unbounded.
+        {
+            let mut flags = self.active_flags.write().await;
+            flags.retain(|flag| flag.load(Ordering::SeqCst));
+            flags.push(active.clone());
+        }
 
         // Spawn consumer task
         let topic_owned = topic.to_string();

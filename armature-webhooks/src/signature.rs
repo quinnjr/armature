@@ -40,13 +40,28 @@ impl WebhookSignature {
 
     /// Generate a signature with a specific timestamp
     pub fn sign_with_timestamp(&self, payload: &[u8], timestamp: &str) -> String {
-        let signed_payload = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
-        let signature = self.compute_hmac(signed_payload.as_bytes());
+        let signature = self.compute_hmac_over_timestamped_payload(timestamp.as_bytes(), payload);
         format!("t={},v1={}", timestamp, signature)
     }
 
     /// Verify a signature against the payload
+    ///
+    /// Supports two signature schemes:
+    /// - Stripe-style `t=<timestamp>,v1=<hex>`: verified with timestamp-tolerance
+    ///   replay protection.
+    /// - GitHub-style `sha256=<hex>` (no timestamp): verified as a timestampless
+    ///   HMAC-SHA256 over the raw body. Since there is no timestamp, replay
+    ///   protection does not apply to this scheme.
     pub fn verify(&self, payload: &[u8], signature: &str, tolerance_secs: u64) -> Result<bool> {
+        if let Some(hex_sig) = signature.strip_prefix("sha256=") {
+            // GitHub-style signature: timestampless HMAC-SHA256 over the raw body.
+            let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
+                .expect("HMAC can take any size key");
+            mac.update(payload);
+            let expected = hex::encode(mac.finalize().into_bytes());
+            return Ok(constant_time_compare(hex_sig, &expected));
+        }
+
         let parts = Self::parse_signature(signature)?;
 
         // Verify timestamp is within tolerance
@@ -66,35 +81,53 @@ impl WebhookSignature {
         }
 
         // Compute expected signature
-        let signed_payload = format!("{}.{}", parts.timestamp, String::from_utf8_lossy(payload));
-        let expected = self.compute_hmac(signed_payload.as_bytes());
+        let expected =
+            self.compute_hmac_over_timestamped_payload(parts.timestamp.as_bytes(), payload);
 
         // Constant-time comparison to prevent timing attacks
         Ok(constant_time_compare(&parts.signature, &expected))
     }
 
-    /// Compute the HMAC using the configured signing algorithm
-    fn compute_hmac(&self, data: &[u8]) -> String {
+    /// Compute the HMAC over `timestamp || "." || payload`, using the configured
+    /// signing algorithm, feeding raw bytes directly into the MAC (no lossy
+    /// UTF-8 conversion or intermediate `String` allocation).
+    fn compute_hmac_over_timestamped_payload(&self, timestamp: &[u8], payload: &[u8]) -> String {
         match self.algorithm {
-            SigningAlgorithm::HmacSha256 => self.compute_hmac_sha256(data),
-            SigningAlgorithm::HmacSha512 => self.compute_hmac_sha512(data),
+            SigningAlgorithm::HmacSha256 => {
+                self.compute_hmac_sha256_over_timestamped_payload(timestamp, payload)
+            }
+            SigningAlgorithm::HmacSha512 => {
+                self.compute_hmac_sha512_over_timestamped_payload(timestamp, payload)
+            }
         }
     }
 
-    /// Compute HMAC-SHA256 signature
-    fn compute_hmac_sha256(&self, data: &[u8]) -> String {
+    /// Compute HMAC-SHA256 over `timestamp || "." || payload`
+    fn compute_hmac_sha256_over_timestamped_payload(
+        &self,
+        timestamp: &[u8],
+        payload: &[u8],
+    ) -> String {
         let mut mac =
             HmacSha256::new_from_slice(self.secret.as_bytes()).expect("HMAC can take any size key");
-        mac.update(data);
+        mac.update(timestamp);
+        mac.update(b".");
+        mac.update(payload);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
 
-    /// Compute HMAC-SHA512 signature
-    fn compute_hmac_sha512(&self, data: &[u8]) -> String {
+    /// Compute HMAC-SHA512 over `timestamp || "." || payload`
+    fn compute_hmac_sha512_over_timestamped_payload(
+        &self,
+        timestamp: &[u8],
+        payload: &[u8],
+    ) -> String {
         let mut mac =
             HmacSha512::new_from_slice(self.secret.as_bytes()).expect("HMAC can take any size key");
-        mac.update(data);
+        mac.update(timestamp);
+        mac.update(b".");
+        mac.update(payload);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
@@ -253,9 +286,8 @@ mod tests {
         assert_ne!(sha256_sig, sha512_sig);
 
         // Compute the expected raw HMAC-SHA512 value directly and confirm it's embedded
-        let expected_sha512 = sha512_signer.compute_hmac_sha512(
-            format!("{}.{}", timestamp, String::from_utf8_lossy(payload)).as_bytes(),
-        );
+        let expected_sha512 = sha512_signer
+            .compute_hmac_sha512_over_timestamped_payload(timestamp.as_bytes(), payload);
         assert!(sha512_sig.contains(&expected_sha512));
 
         // SHA-512 hex digest is 128 chars, SHA-256 is 64 chars
@@ -275,6 +307,36 @@ mod tests {
         let cross_result = sha256_signer.verify(payload, &live_sha512_sig, 300);
         assert!(cross_result.is_ok());
         assert!(!cross_result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_github_style_sha256_signature() {
+        // GitHub sends `X-Hub-Signature-256: sha256=<hex>` with no timestamp:
+        // a raw HMAC-SHA256 over the exact request body.
+        let secret = "test-secret";
+        let signer = WebhookSignature::new(secret);
+        let payload = b"{\"action\":\"opened\"}";
+
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take any size key");
+        mac.update(payload);
+        let expected_hex = hex::encode(mac.finalize().into_bytes());
+        let github_signature = format!("sha256={}", expected_hex);
+
+        let result = signer.verify(payload, &github_signature, 300);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // Wrong secret must not verify
+        let wrong_signer = WebhookSignature::new("wrong-secret");
+        let wrong_result = wrong_signer.verify(payload, &github_signature, 300);
+        assert!(wrong_result.is_ok());
+        assert!(!wrong_result.unwrap());
+
+        // Tampered payload must not verify
+        let tampered_result = signer.verify(b"{\"action\":\"closed\"}", &github_signature, 300);
+        assert!(tampered_result.is_ok());
+        assert!(!tampered_result.unwrap());
     }
 
     #[test]

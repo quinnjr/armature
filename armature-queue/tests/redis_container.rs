@@ -368,6 +368,92 @@ async fn max_size_counts_processing_jobs() {
     );
 }
 
+/// `complete`/`fail` must drain the `processing` set even when the job body
+/// itself is gone (simulating a TTL expiry mid-flight between dequeue and
+/// complete/fail): previously both were guarded by `if let Some(job) =
+/// get_job(...)`, so a missing job body left the id orphaned in `processing`
+/// forever while the call still returned `Ok(())`.
+#[tokio::test]
+async fn complete_and_fail_drain_orphaned_processing_entry() {
+    require_docker!();
+    let redis = RedisContainer::start().await;
+    let queue = Queue::new(redis.url(), "orphan").await.unwrap();
+    queue.clear().await.unwrap();
+
+    let client = redis::Client::open(redis.url()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let processing_key = "armature:queue:orphan:processing";
+    let fake_id = JobId::new_v4();
+
+    // Put an id in `processing` with no corresponding `job:<id>` key at all
+    // (stand-in for "the job key TTL-expired mid-flight").
+    let _: () = redis::cmd("ZADD")
+        .arg(processing_key)
+        .arg(0)
+        .arg(fake_id.to_string())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(queue.processing_len().await.unwrap(), 1);
+
+    queue.complete(fake_id).await.unwrap();
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        0,
+        "complete() must drain processing even when the job body is gone"
+    );
+
+    // Same check for fail().
+    let _: () = redis::cmd("ZADD")
+        .arg(processing_key)
+        .arg(0)
+        .arg(fake_id.to_string())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(queue.processing_len().await.unwrap(), 1);
+
+    queue.fail(fake_id, "boom".to_string()).await.unwrap();
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        0,
+        "fail() must drain processing even when the job body is gone"
+    );
+}
+
+/// `process_batch` happy path: two same-type jobs are dequeued together,
+/// processed in parallel, and both complete without leaving anything behind
+/// in `processing`.
+#[tokio::test]
+async fn process_batch_happy_path() {
+    require_docker!();
+    let redis = RedisContainer::start().await;
+    let queue = Queue::new(redis.url(), "batch_happy").await.unwrap();
+    queue.clear().await.unwrap();
+
+    queue.enqueue("work", json!({"n": 1})).await.unwrap();
+    queue.enqueue("work", json!({"n": 2})).await.unwrap();
+
+    let mut worker = Worker::with_config(
+        queue.clone(),
+        WorkerConfig {
+            log_execution: false,
+            ..Default::default()
+        },
+    );
+    worker
+        .register_handler("work", |_job| async move { Ok(()) })
+        .await;
+
+    let processed = worker.process_batch("work", 10).await.unwrap();
+    assert_eq!(processed.len(), 2, "both same-type jobs must be processed");
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        0,
+        "batch completion must not leave orphans in processing"
+    );
+}
+
 /// `enqueue_at` (past) is immediately due and promotes; `enqueue_in` (future)
 /// stays delayed and is not yet dequeuable.
 #[tokio::test]

@@ -56,11 +56,19 @@ impl WebhookReceiver {
 
     /// Verify signature from HTTP headers
     ///
-    /// Looks for the signature in common header names, matched
-    /// case-insensitively (HTTP header names are case-insensitive per RFC
-    /// 7230 section 3.2):
-    /// - X-Webhook-Signature
-    /// - X-Hub-Signature-256
+    /// Scans a fixed, priority-ordered list of candidate header names,
+    /// matched case-insensitively (HTTP header names are case-insensitive per
+    /// RFC 7230 section 3.2), and verifies the first one present:
+    /// 1. `X-Webhook-Signature` — Stripe-style `t=<timestamp>,v1=<hex>` scheme,
+    ///    verified with timestamp-tolerance replay protection.
+    /// 2. `X-Hub-Signature-256` — accepted in either the Stripe-style scheme,
+    ///    or GitHub's native `sha256=<hex>` scheme (verified as a timestampless
+    ///    HMAC-SHA256 over the raw body; no replay protection applies to this
+    ///    scheme since it carries no timestamp).
+    ///
+    /// If both headers happen to be present, `X-Webhook-Signature` always
+    /// wins — the candidate list is scanned in a fixed order rather than
+    /// depending on `HashMap` iteration order.
     pub fn verify_from_headers(
         &self,
         payload: &[u8],
@@ -68,10 +76,12 @@ impl WebhookReceiver {
     ) -> Result<bool> {
         const CANDIDATES: &[&str] = &["x-webhook-signature", "x-hub-signature-256"];
 
-        let signature = headers
+        let lower_headers: std::collections::HashMap<String, &String> =
+            headers.iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+
+        let signature = CANDIDATES
             .iter()
-            .find(|(key, _)| CANDIDATES.contains(&key.to_lowercase().as_str()))
-            .map(|(_, value)| value)
+            .find_map(|candidate| lower_headers.get(*candidate).copied())
             .ok_or(WebhookError::SignatureMissing)?;
 
         self.verify(payload, signature)
@@ -254,6 +264,53 @@ mod tests {
         let result2 = receiver.verify_from_headers(payload, &headers2);
         assert!(result2.is_ok());
         assert!(result2.unwrap());
+    }
+
+    #[test]
+    fn test_verify_from_headers_deterministic_precedence() {
+        // When both X-Webhook-Signature and X-Hub-Signature-256 are present,
+        // X-Webhook-Signature must always win, regardless of HashMap
+        // iteration order.
+        let secret = "test-secret";
+        let receiver = WebhookReceiver::new(secret);
+        let signer = WebhookSignature::new(secret);
+
+        let payload = b"test payload";
+        let correct_signature = signer.sign(payload);
+        let bogus_signature = "t=1,v1=deadbeef".to_string();
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Webhook-Signature".to_string(), correct_signature);
+        headers.insert("X-Hub-Signature-256".to_string(), bogus_signature);
+
+        // Must succeed: X-Webhook-Signature (the valid one) takes priority.
+        let result = receiver.verify_from_headers(payload, &headers);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_from_headers_github_style_signature() {
+        let secret = "test-secret";
+        let receiver = WebhookReceiver::new(secret);
+
+        use hmac::{KeyInit, Mac};
+
+        let payload = b"{\"action\":\"opened\"}";
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+            .expect("HMAC can take any size key");
+        mac.update(payload);
+        let expected_hex = hex::encode(mac.finalize().into_bytes());
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "X-Hub-Signature-256".to_string(),
+            format!("sha256={}", expected_hex),
+        );
+
+        let result = receiver.verify_from_headers(payload, &headers);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
     }
 
     #[test]

@@ -129,12 +129,13 @@ impl EventBus {
                 match task.await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
+                        // continue_on_error is true here, so this failure never affects
+                        // the final outcome; the handler already logged via `error!`
+                        // above, so there is nothing to accumulate.
                         error!("Handler failed: {}", e);
-                        errors.push(e);
                     }
                     Err(e) => {
                         error!("Handler task panicked: {}", e);
-                        errors.push(EventHandlerError::HandlerFailed(e.to_string()));
                     }
                 }
             }

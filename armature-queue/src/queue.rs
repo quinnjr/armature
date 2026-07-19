@@ -54,18 +54,33 @@ end
 return promoted
 "#;
 
-/// Pop the highest-priority available job id across the priority queues.
+/// Pop the highest-priority available job id (and its job JSON) across the
+/// priority queues.
 ///
 /// `KEYS` are the priority queue keys in descending priority order
-/// (critical, high, normal, low). Returns the popped job id, or `nil` when
-/// every queue is empty. Running server-side makes the "check queues high to
-/// low, pop the first non-empty" sequence a single atomic round-trip and
-/// removes the concurrent double-pop window.
+/// (critical, high, normal, low); `ARGV[1]` is the queue key prefix used to
+/// build the `prefix:job:<id>` lookup key. Returns `{id, job_json}`, or `nil`
+/// when every queue is empty. Running server-side makes the "check queues
+/// high to low, pop the first non-empty, fetch its job body, and if that body
+/// has expired keep popping" sequence a single atomic round-trip: it removes
+/// the concurrent double-pop window AND folds the client-side `GET` (plus the
+/// expired-job retry loop, which previously re-invoked the whole script) into
+/// one call.
 const DEQUEUE_POP_SCRIPT: &str = r#"
+local prefix = ARGV[1]
 for i = 1, #KEYS do
-    local popped = redis.call('ZPOPMIN', KEYS[i], 1)
-    if popped and popped[1] then
-        return popped[1]
+    while true do
+        local popped = redis.call('ZPOPMIN', KEYS[i], 1)
+        if not popped or not popped[1] then
+            break
+        end
+        local job_id = popped[1]
+        local job_json = redis.call('GET', prefix .. ':job:' .. job_id)
+        if job_json then
+            return {job_id, job_json}
+        end
+        -- Job body expired between enqueue and dequeue: the id is discarded
+        -- (already popped) and we keep draining this same queue.
     end
 end
 return nil
@@ -251,50 +266,75 @@ impl Queue {
 
         let mut conn = self.connection.clone();
 
-        // A single Lua pop replaces the four sequential ZPOPMIN round-trips,
-        // scanning the priority queues high-to-low server-side and atomically
-        // popping the first available job id. As in the original loop, ids that
-        // fail to parse or whose job data has expired are discarded (already
-        // popped) and the next-best job is tried on the following iteration; in
-        // the common case this loop runs exactly once.
+        // A single Lua pop replaces the previous four sequential ZPOPMIN
+        // round-trips PLUS the separate client-side GET: it scans the
+        // priority queues high-to-low server-side, atomically pops the first
+        // available job id, and fetches its job JSON in the same round-trip,
+        // internally re-draining a queue if a popped id's job body has
+        // expired (mirroring the old client-side retry loop with zero extra
+        // round-trips).
         let script = redis::Script::new(DEQUEUE_POP_SCRIPT);
-        loop {
-            let job_id_str: Option<String> = script
-                .key(self.priority_queue_key(JobPriority::Critical))
-                .key(self.priority_queue_key(JobPriority::High))
-                .key(self.priority_queue_key(JobPriority::Normal))
-                .key(self.priority_queue_key(JobPriority::Low))
-                .invoke_async(&mut conn)
-                .await?;
+        let popped: Option<(String, String)> = script
+            .key(self.priority_queue_key(JobPriority::Critical))
+            .key(self.priority_queue_key(JobPriority::High))
+            .key(self.priority_queue_key(JobPriority::Normal))
+            .key(self.priority_queue_key(JobPriority::Low))
+            .arg(&self.config.key_prefix)
+            .invoke_async(&mut conn)
+            .await?;
 
-            let Some(job_id_str) = job_id_str else {
-                return Ok(None);
-            };
-            let Ok(job_id) = job_id_str.parse::<JobId>() else {
-                continue;
-            };
-            let Some(mut job) = self.get_job(job_id).await? else {
-                continue;
-            };
+        let Some((job_id_str, job_json)) = popped else {
+            return Ok(None);
+        };
+        // Ids are always UUIDs written by `enqueue_job`; a parse failure here
+        // would indicate corrupted queue data, not a normal empty-queue case.
+        let job_id = job_id_str
+            .parse::<JobId>()
+            .map_err(|e| QueueError::Deserialization(e.to_string()))?;
+        let mut job: Job = serde_json::from_str(&job_json)
+            .map_err(|e| QueueError::Deserialization(e.to_string()))?;
 
-            job.start_processing();
-            self.save_job(&job).await?;
+        job.start_processing();
+        let job_key = self.config.key(&format!("job:{}", job_id));
+        let processing_key = self.config.key("processing");
+        let updated_json =
+            serde_json::to_string(&job).map_err(|e| QueueError::Serialization(e.to_string()))?;
 
-            // Add to processing set
-            let processing_key = self.config.key("processing");
-            let _: () = conn
-                .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
-                .await?;
+        // Pipeline the terminal save + processing-set add into one round-trip
+        // instead of two sequential ones.
+        let _: () = redis::pipe()
+            .set_ex(&job_key, updated_json, self.config.retention_time.as_secs())
+            .ignore()
+            .zadd(&processing_key, job_id.to_string(), Utc::now().timestamp())
+            .ignore()
+            .query_async(&mut conn)
+            .await?;
 
-            return Ok(Some(job));
-        }
+        Ok(Some(job))
     }
 
     /// Complete a job.
     pub async fn complete(&self, job_id: JobId) -> QueueResult<()> {
+        // `remove_from_processing` runs unconditionally, even when the job
+        // body itself is gone (TTL-expired mid-flight between dequeue and
+        // complete): otherwise the id would be orphaned forever in
+        // `processing` while this fn still returned `Ok(())`.
         if let Some(mut job) = self.get_job(job_id).await? {
             job.complete();
-            self.save_job(&job).await?;
+            let job_key = self.config.key(&format!("job:{}", job_id));
+            let processing_key = self.config.key("processing");
+            let job_json = serde_json::to_string(&job)
+                .map_err(|e| QueueError::Serialization(e.to_string()))?;
+
+            let mut conn = self.connection.clone();
+            let _: () = redis::pipe()
+                .set_ex(&job_key, job_json, self.config.retention_time.as_secs())
+                .ignore()
+                .zrem(&processing_key, job_id.to_string())
+                .ignore()
+                .query_async(&mut conn)
+                .await?;
+        } else {
             self.remove_from_processing(job_id).await?;
         }
         Ok(())
@@ -302,31 +342,50 @@ impl Queue {
 
     /// Fail a job.
     pub async fn fail(&self, job_id: JobId, error: String) -> QueueResult<()> {
+        // As in `complete`, `remove_from_processing` must run even when the
+        // job body has TTL-expired mid-flight, so the id is never left
+        // orphaned in `processing`.
         if let Some(mut job) = self.get_job(job_id).await? {
             job.fail(error);
+
+            let job_key = self.config.key(&format!("job:{}", job_id));
+            let processing_key = self.config.key("processing");
+            let job_json = serde_json::to_string(&job)
+                .map_err(|e| QueueError::Serialization(e.to_string()))?;
+            let mut conn = self.connection.clone();
 
             if job.status.state == JobState::Failed && job.can_retry() {
                 // Retry with backoff
                 let retry_at = Utc::now() + job.backoff_delay();
                 job.scheduled_at = Some(retry_at);
-                self.save_job(&job).await?;
+                let job_json = serde_json::to_string(&job)
+                    .map_err(|e| QueueError::Serialization(e.to_string()))?;
 
                 // Add to delayed queue
-                let mut conn = self.connection.clone();
                 let delayed_key = self.config.key("delayed");
-                let _: () = conn
+                let _: () = redis::pipe()
+                    .set_ex(&job_key, job_json, self.config.retention_time.as_secs())
+                    .ignore()
                     .zadd(&delayed_key, job_id.to_string(), retry_at.timestamp())
+                    .ignore()
+                    .zrem(&processing_key, job_id.to_string())
+                    .ignore()
+                    .query_async(&mut conn)
                     .await?;
             } else {
                 // Move to dead letter queue
-                self.save_job(&job).await?;
-                let mut conn = self.connection.clone();
                 let dead_key = self.config.key("dead");
-                let _: () = conn
+                let _: () = redis::pipe()
+                    .set_ex(&job_key, job_json, self.config.retention_time.as_secs())
+                    .ignore()
                     .zadd(&dead_key, job_id.to_string(), Utc::now().timestamp())
+                    .ignore()
+                    .zrem(&processing_key, job_id.to_string())
+                    .ignore()
+                    .query_async(&mut conn)
                     .await?;
             }
-
+        } else {
             self.remove_from_processing(job_id).await?;
         }
         Ok(())
@@ -395,8 +454,7 @@ impl Queue {
         let mut conn = self.connection.clone();
 
         // Pipeline the four ZCARDs into one round-trip instead of issuing them
-        // sequentially. Called before every enqueue, so this removes three
-        // round-trips from the hot path.
+        // sequentially.
         let mut pipe = redis::pipe();
         for priority in [
             JobPriority::Critical,

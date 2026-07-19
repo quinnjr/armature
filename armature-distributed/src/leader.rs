@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -40,8 +39,9 @@ pub struct LeaderElection {
     /// Refresh interval (should be less than TTL)
     refresh_interval: Duration,
 
-    /// Redis connection
-    conn: Arc<RwLock<redis::aio::ConnectionManager>>,
+    /// Redis connection. `ConnectionManager` is `Clone` and internally
+    /// multiplexed, so each call site clones it instead of locking.
+    conn: redis::aio::ConnectionManager,
 
     /// Is this node the leader?
     is_leader: Arc<AtomicBool>,
@@ -82,7 +82,7 @@ impl LeaderElection {
             node_id: Uuid::new_v4().to_string(),
             ttl,
             refresh_interval,
-            conn: Arc::new(RwLock::new(conn)),
+            conn,
             is_leader: Arc::new(AtomicBool::new(false)),
             on_elected: None,
             on_revoked: None,
@@ -194,7 +194,7 @@ impl LeaderElection {
 
     /// Try to become or maintain leadership
     async fn try_become_leader(&self) -> Result<bool, LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
         let ttl_ms = self.ttl.as_millis() as usize;
 
         // Use Lua script for atomic operation
@@ -212,7 +212,7 @@ impl LeaderElection {
             .key(&self.key)
             .arg(&self.node_id)
             .arg(ttl_ms)
-            .invoke_async(&mut *conn)
+            .invoke_async(&mut conn)
             .await?;
 
         Ok(result == 1)
@@ -220,21 +220,14 @@ impl LeaderElection {
 
     /// Resign from leadership
     async fn resign(&self) -> Result<(), LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
 
-        // Only delete if we're still the leader
-        let script = r#"
-            if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("del", KEYS[1])
-            else
-                return 0
-            end
-        "#;
-
-        let _: i32 = redis::Script::new(script)
+        // Only delete if we're still the leader (token-guarded release,
+        // shared with the distributed-lock release path).
+        let _: i32 = redis::Script::new(crate::RELEASE_SCRIPT)
             .key(&self.key)
             .arg(&self.node_id)
-            .invoke_async(&mut *conn)
+            .invoke_async(&mut conn)
             .await?;
 
         self.is_leader.store(false, Ordering::Release);
@@ -245,7 +238,7 @@ impl LeaderElection {
 
     /// Get current leader node ID
     pub async fn get_leader(&self) -> Result<Option<String>, LeaderError> {
-        let mut conn = self.conn.write().await;
+        let mut conn = self.conn.clone();
         let leader: Option<String> = conn.get(&self.key).await?;
         Ok(leader)
     }
