@@ -838,7 +838,13 @@ async fn validate_oauth2_via_introspection(
 ) -> Result<McpAuthContext> {
     let mut request = oauth2_http_client()
         .post(url)
-        .form(&[("token", token), ("token_type_hint", "access_token")]);
+        .form(&[("token", token), ("token_type_hint", "access_token")])
+        .map_err(|e| {
+            McpError::InvalidRequest(format!(
+                "failed to build OAuth2 introspection request: {}",
+                e
+            ))
+        })?;
 
     // RFC 7662 requires the caller to authenticate; use HTTP Basic with the
     // configured client credentials when available.

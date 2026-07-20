@@ -3,6 +3,112 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::error::GrpcError;
+
+/// TLS configuration for the gRPC server (rustls-backed, via tonic's
+/// `tls-ring` feature — no OpenSSL/native-tls).
+#[derive(Clone)]
+pub struct GrpcServerTlsConfig {
+    /// PEM-encoded server certificate chain.
+    pub cert_pem: Vec<u8>,
+    /// PEM-encoded server private key.
+    pub key_pem: Vec<u8>,
+    /// PEM-encoded CA certificate used to verify client certificates (mTLS).
+    /// When `None`, client certificates are not requested.
+    pub client_ca_cert_pem: Option<Vec<u8>>,
+    /// Whether client certificate auth is optional when `client_ca_cert_pem`
+    /// is set. Defaults to `false` (client cert required for mTLS).
+    pub client_auth_optional: bool,
+}
+
+impl std::fmt::Debug for GrpcServerTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrpcServerTlsConfig")
+            .field("cert_pem", &format_args!("<{} bytes>", self.cert_pem.len()))
+            .field("key_pem", &format_args!("<{} bytes>", self.key_pem.len()))
+            .field("client_ca_cert_pem", &self.client_ca_cert_pem.is_some())
+            .field("client_auth_optional", &self.client_auth_optional)
+            .finish()
+    }
+}
+
+impl GrpcServerTlsConfig {
+    /// Create a new server TLS configuration from PEM-encoded certificate and key.
+    pub fn new(cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
+        Self {
+            cert_pem: cert_pem.into(),
+            key_pem: key_pem.into(),
+            client_ca_cert_pem: None,
+            client_auth_optional: false,
+        }
+    }
+
+    /// Require (or accept) client certificates signed by the given CA for mTLS.
+    pub fn client_ca(mut self, ca_pem: impl Into<Vec<u8>>) -> Self {
+        self.client_ca_cert_pem = Some(ca_pem.into());
+        self
+    }
+
+    /// Make client certificate auth optional (only meaningful with `client_ca`).
+    pub fn client_auth_optional(mut self, optional: bool) -> Self {
+        self.client_auth_optional = optional;
+        self
+    }
+}
+
+/// TLS configuration for the gRPC client (rustls-backed, via tonic's
+/// `tls-ring` feature — no OpenSSL/native-tls).
+#[derive(Clone, Default)]
+pub struct GrpcClientTlsConfig {
+    /// PEM-encoded CA certificate(s) used to verify the server's certificate.
+    /// When `None`, the platform/webpki default roots configured on the
+    /// `tonic` build are used (if any `tls-*-roots` feature is enabled).
+    pub ca_cert_pem: Option<Vec<u8>>,
+    /// Domain name to verify against the server's certificate.
+    pub domain_name: Option<String>,
+    /// PEM-encoded client certificate, for mutual TLS.
+    pub client_cert_pem: Option<Vec<u8>>,
+    /// PEM-encoded client private key, for mutual TLS.
+    pub client_key_pem: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for GrpcClientTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrpcClientTlsConfig")
+            .field("ca_cert_pem", &self.ca_cert_pem.is_some())
+            .field("domain_name", &self.domain_name)
+            .field("client_cert_pem", &self.client_cert_pem.is_some())
+            .field("client_key_pem", &self.client_key_pem.is_some())
+            .finish()
+    }
+}
+
+impl GrpcClientTlsConfig {
+    /// Create a new, empty client TLS configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Verify the server's certificate against this PEM-encoded CA.
+    pub fn ca_certificate(mut self, ca_pem: impl Into<Vec<u8>>) -> Self {
+        self.ca_cert_pem = Some(ca_pem.into());
+        self
+    }
+
+    /// Verify the server's certificate against this domain name.
+    pub fn domain_name(mut self, domain: impl Into<String>) -> Self {
+        self.domain_name = Some(domain.into());
+        self
+    }
+
+    /// Present this PEM-encoded client identity for mutual TLS.
+    pub fn identity(mut self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
+        self.client_cert_pem = Some(cert_pem.into());
+        self.client_key_pem = Some(key_pem.into());
+        self
+    }
+}
+
 /// gRPC server configuration.
 #[derive(Debug, Clone)]
 pub struct GrpcServerConfig {
@@ -30,6 +136,8 @@ pub struct GrpcServerConfig {
     pub initial_connection_window_size: Option<u32>,
     /// Initial stream window size.
     pub initial_stream_window_size: Option<u32>,
+    /// TLS configuration. When `None`, the server accepts plaintext connections.
+    pub tls: Option<GrpcServerTlsConfig>,
 }
 
 impl Default for GrpcServerConfig {
@@ -47,6 +155,7 @@ impl Default for GrpcServerConfig {
             concurrency_limit_per_connection: None,
             initial_connection_window_size: None,
             initial_stream_window_size: None,
+            tls: None,
         }
     }
 }
@@ -62,12 +171,19 @@ impl GrpcServerConfig {
 #[derive(Debug, Default)]
 pub struct GrpcServerConfigBuilder {
     config: GrpcServerConfig,
+    bind_address_error: Option<String>,
 }
 
 impl GrpcServerConfigBuilder {
     /// Set the bind address.
+    ///
+    /// A malformed address is not reported until [`GrpcServerConfigBuilder::build`]
+    /// is called (returning `Err(GrpcError::Config(..))`) rather than panicking.
     pub fn bind_address(mut self, addr: impl Into<String>) -> Self {
-        self.config.bind_address = addr.into().parse().unwrap();
+        match addr.into().parse() {
+            Ok(parsed) => self.config.bind_address = parsed,
+            Err(e) => self.bind_address_error = Some(e.to_string()),
+        }
         self
     }
 
@@ -126,9 +242,22 @@ impl GrpcServerConfigBuilder {
         self
     }
 
+    /// Configure TLS for the server. When set, the server serves over TLS
+    /// exclusively (plaintext connections are refused).
+    pub fn tls(mut self, tls: GrpcServerTlsConfig) -> Self {
+        self.config.tls = Some(tls);
+        self
+    }
+
     /// Build the configuration.
-    pub fn build(self) -> GrpcServerConfig {
-        self.config
+    ///
+    /// Returns `Err(GrpcError::Config(..))` if [`GrpcServerConfigBuilder::bind_address`]
+    /// was given a malformed address.
+    pub fn build(self) -> Result<GrpcServerConfig, GrpcError> {
+        if let Some(err) = self.bind_address_error {
+            return Err(GrpcError::Config(format!("invalid bind address: {err}")));
+        }
+        Ok(self.config)
     }
 }
 
@@ -161,6 +290,8 @@ pub struct GrpcClientConfig {
     pub retry_enabled: bool,
     /// Maximum retry attempts.
     pub max_retry_attempts: u32,
+    /// TLS configuration. When `None`, the client connects over plaintext.
+    pub tls: Option<GrpcClientTlsConfig>,
 }
 
 impl Default for GrpcClientConfig {
@@ -179,6 +310,7 @@ impl Default for GrpcClientConfig {
             initial_stream_window_size: None,
             retry_enabled: true,
             max_retry_attempts: 3,
+            tls: None,
         }
     }
 }
@@ -258,8 +390,36 @@ impl GrpcClientConfigBuilder {
         self
     }
 
+    /// Configure TLS for the client connection.
+    pub fn tls(mut self, tls: GrpcClientTlsConfig) -> Self {
+        self.config.tls = Some(tls);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> GrpcClientConfig {
         self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_bind_address_returns_config_error_instead_of_panicking() {
+        let result = GrpcServerConfig::builder()
+            .bind_address("not an address")
+            .build();
+        assert!(matches!(result, Err(GrpcError::Config(_))));
+    }
+
+    #[test]
+    fn valid_bind_address_builds_successfully() {
+        let config = GrpcServerConfig::builder()
+            .bind_address("127.0.0.1:12345")
+            .build()
+            .expect("valid address should build");
+        assert_eq!(config.bind_address, "127.0.0.1:12345".parse().unwrap());
     }
 }

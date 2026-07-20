@@ -184,7 +184,38 @@ impl RequestInterceptor for AuthInterceptor {
 }
 
 /// Retry-After header interceptor that respects rate limiting.
-pub struct RateLimitInterceptor;
+///
+/// When a response is a `429 Too Many Requests` carrying a numeric
+/// `Retry-After` header (seconds), this interceptor transparently sleeps for
+/// that duration before returning the response, so that a caller simply
+/// retrying immediately after `intercept` returns will not hammer the
+/// upstream service. The duration actually waited is capped by
+/// `max_wait`, to avoid a hostile/misconfigured server stalling the caller
+/// indefinitely.
+pub struct RateLimitInterceptor {
+    max_wait: std::time::Duration,
+}
+
+impl RateLimitInterceptor {
+    /// Create a new rate-limit interceptor with a default max wait of 60s.
+    pub fn new() -> Self {
+        Self {
+            max_wait: std::time::Duration::from_secs(60),
+        }
+    }
+
+    /// Create a rate-limit interceptor with a custom cap on how long it will
+    /// ever sleep for, regardless of what `Retry-After` requests.
+    pub fn with_max_wait(max_wait: std::time::Duration) -> Self {
+        Self { max_wait }
+    }
+}
+
+impl Default for RateLimitInterceptor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ResponseInterceptor for RateLimitInterceptor {
@@ -193,11 +224,13 @@ impl ResponseInterceptor for RateLimitInterceptor {
             && let Some(retry_after) = response.headers().get(http::header::RETRY_AFTER)
             && let Ok(seconds) = retry_after.to_str().unwrap_or("0").parse::<u64>()
         {
+            let wait = std::time::Duration::from_secs(seconds).min(self.max_wait);
             tracing::warn!(
                 retry_after_seconds = seconds,
-                "Rate limited, should retry after {} seconds",
-                seconds
+                waited_seconds = wait.as_secs(),
+                "Rate limited, waiting before returning response"
             );
+            tokio::time::sleep(wait).await;
         }
         Ok(response)
     }

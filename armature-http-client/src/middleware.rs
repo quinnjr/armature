@@ -50,7 +50,7 @@ impl MiddlewareChain {
         if index >= self.middlewares.len() {
             // End of chain, execute the actual request
             let response = self.client.execute(request).await?;
-            Ok(Response::from_reqwest(response).await)
+            Response::from_reqwest(response).await
         } else {
             let next = MiddlewareChain {
                 middlewares: self.middlewares.clone(),

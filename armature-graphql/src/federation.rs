@@ -28,6 +28,12 @@
 //!
 //! ## Example: Creating a Subgraph
 //!
+//! `SubgraphSchemaBuilder` only builds an `async-graphql` [`Schema`] with
+//! federation directives enabled — it does not run an HTTP server. Serve the
+//! resulting schema yourself (e.g. with `async-graphql-axum`, which this
+//! crate already depends on) the same way you would serve any other
+//! `async-graphql` schema.
+//!
 //! ```rust,ignore
 //! use armature_graphql::federation::*;
 //! use async_graphql::*;
@@ -54,19 +60,24 @@
 //! }
 //!
 //! // Create the subgraph schema
-//! let schema = SubgraphSchema::builder()
+//! let schema = SubgraphSchemaBuilder::new()
 //!     .query(Query)
 //!     .mutation(Mutation)
+//!     .subscription(EmptySubscription)
 //!     .enable_federation()
 //!     .build()?;
 //!
-//! // Start the subgraph server
-//! SubgraphServer::new(schema)
-//!     .listen(4001)
-//!     .await?;
+//! // `schema.schema()` returns the underlying `async_graphql::Schema`; wire
+//! // it into your own HTTP router (e.g. `async_graphql_axum::GraphQL`) to
+//! // actually serve it. This crate does not include a server/runtime.
 //! ```
 //!
-//! ## Example: Creating a Gateway
+//! ## Example: Querying subgraphs from a gateway
+//!
+//! `FederationGateway` (behind the `federation` feature) is a query-forwarding
+//! HTTP *client* for talking to already-running subgraphs — it does not host
+//! a gateway server and has no `listen()` method. Use it to fetch subgraph
+//! SDLs, forward queries to a specific subgraph, or resolve entities:
 //!
 //! ```rust,ignore
 //! use armature_graphql::federation::*;
@@ -75,11 +86,15 @@
 //!     .subgraph("users", "http://localhost:4001/graphql")
 //!     .subgraph("products", "http://localhost:4002/graphql")
 //!     .subgraph("orders", "http://localhost:4003/graphql")
-//!     .enable_introspection()
-//!     .build()
+//!     .build()?;
+//!
+//! // Forward a query to a specific subgraph
+//! let result = gateway
+//!     .execute_subgraph_query("users", "{ user(id: \"1\") { name } }", None)
 //!     .await?;
 //!
-//! gateway.listen(4000).await?;
+//! // Fetch every subgraph's SDL (e.g. for offline composition tooling)
+//! let sdls = gateway.fetch_subgraph_sdls().await?;
 //! ```
 
 use async_graphql::{ObjectType, SDLExportOptions, Schema, SubscriptionType};
@@ -184,6 +199,7 @@ pub struct SubgraphSchemaBuilder<Query, Mutation, Subscription> {
     subscription: Option<Subscription>,
     enable_federation: bool,
     enable_tracing: bool,
+    config: Option<crate::config::GraphQLConfig>,
 }
 
 impl<Query, Mutation, Subscription> SubgraphSchemaBuilder<Query, Mutation, Subscription>
@@ -199,6 +215,7 @@ where
             subscription: None,
             enable_federation: false,
             enable_tracing: false,
+            config: None,
         }
     }
 
@@ -229,6 +246,15 @@ where
         self
     }
 
+    /// Attach a [`crate::config::GraphQLConfig`] whose security/behavior knobs
+    /// (introspection, max depth, max complexity, validation) will be applied
+    /// to the built subgraph schema. Without this, the schema is built
+    /// unrestricted.
+    pub fn config(mut self, config: crate::config::GraphQLConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     /// Build the subgraph schema
     pub fn build(self) -> Result<SubgraphSchema<Query, Mutation, Subscription>, FederationError> {
         let query = self
@@ -250,6 +276,10 @@ where
         // Enable federation directives
         if self.enable_federation {
             builder = builder.enable_federation();
+        }
+
+        if let Some(config) = &self.config {
+            builder = config.configure(builder);
         }
 
         let schema = builder.finish();
@@ -448,32 +478,43 @@ mod gateway {
             execute_query(&self.client, config, query, variables).await
         }
 
-        /// Resolve entities from a subgraph
+        /// Resolve entities from a subgraph.
+        ///
+        /// `fields` is the GraphQL selection set (e.g. `"id name email"`, or
+        /// nested selections like `"id address { city }"`) to request for
+        /// each resolved entity. `__typename` is always included
+        /// automatically. All `representations` must share the same
+        /// `__typename` — the `_entities` field returns a `_Entity` union,
+        /// so selecting concrete fields (rather than just `__typename`)
+        /// requires an inline fragment (`... on <Type> { ... }`) on that one
+        /// concrete type; batch calls per-type if you need to resolve
+        /// entities of different types.
+        ///
+        /// Passing an empty `fields` string resolves only `__typename` for
+        /// each entity (the previous, more limited behavior).
         pub async fn resolve_entities(
             &self,
             subgraph: &str,
             representations: Vec<EntityReference>,
+            fields: &str,
         ) -> Result<Vec<serde_json::Value>, FederationError> {
             let config = self
                 .subgraphs
                 .get(subgraph)
                 .ok_or_else(|| FederationError::SubgraphNotFound(subgraph.to_string()))?;
 
-            let query = r#"
-                query($representations: [_Any!]!) {
-                    _entities(representations: $representations) {
-                        ... on _Entity {
-                            __typename
-                        }
-                    }
-                }
-            "#;
+            if representations.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let typename = &representations[0].typename;
+            let query = build_entities_query(typename, fields);
 
             let variables = serde_json::json!({
                 "representations": representations
             });
 
-            let result = execute_query(&self.client, config, query, Some(variables)).await?;
+            let result = execute_query(&self.client, config, &query, Some(variables)).await?;
 
             result["data"]["_entities"]
                 .as_array()
@@ -589,7 +630,14 @@ mod gateway {
         query: &str,
         variables: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, FederationError> {
-        let mut request = client.post(&config.url);
+        // Apply this subgraph's own `timeout_secs` to the individual
+        // request, overriding the gateway client's global default timeout
+        // for this call. `SubgraphConfig::with_timeout` previously set
+        // `timeout_secs` but nothing ever read it back — the client-wide
+        // timeout set once at gateway-build time was always used instead.
+        let mut request = client
+            .post(&config.url)
+            .timeout(Duration::from_secs(config.timeout_secs));
 
         // Add custom headers
         for (key, value) in &config.headers {
@@ -613,6 +661,36 @@ mod gateway {
             .await
             .map_err(|e| FederationError::NetworkError(e.to_string()))
     }
+}
+
+/// Build the `_entities` query for [`FederationGateway::resolve_entities`].
+///
+/// Uses an inline fragment on the concrete entity `typename` so the
+/// requested `fields` (a raw GraphQL selection set) can actually be
+/// selected — the `_entities` field returns a `_Entity` union, and only
+/// `__typename` is selectable without narrowing to a concrete type via
+/// `... on <Type> { ... }`.
+#[cfg_attr(not(feature = "federation"), allow(dead_code))]
+fn build_entities_query(typename: &str, fields: &str) -> String {
+    let selection = if fields.trim().is_empty() {
+        "__typename".to_string()
+    } else {
+        format!("__typename\n                        {}", fields.trim())
+    };
+
+    format!(
+        r#"
+                query($representations: [_Any!]!) {{
+                    _entities(representations: $representations) {{
+                        ... on {typename} {{
+                        {selection}
+                        }}
+                    }}
+                }}
+            "#,
+        typename = typename,
+        selection = selection
+    )
 }
 
 #[cfg(feature = "federation")]
@@ -662,22 +740,35 @@ impl EntityKey {
 }
 
 // =============================================================================
-// Supergraph Composition Helpers
+// Subgraph SDL Bundling Helpers
+//
+// NOTE: Despite the names below (kept for API compatibility), nothing in
+// this module performs real Apollo supergraph composition. There is no
+// type merging, no `@join`/`@link` directive generation, and no conflict
+// resolution — `compose_supergraph` only concatenates each subgraph's raw
+// SDL text behind comment separators and flags subgraphs missing `@key`.
+// For a real, spec-compliant supergraph, use Apollo's official composition
+// tooling (e.g. `rover supergraph compose`).
 // =============================================================================
 
-/// Result of composing multiple subgraph schemas
+/// Result of [`compose_supergraph`] — a **concatenated bundle** of subgraph
+/// SDLs, not a composed Apollo supergraph.
 #[derive(Debug, Clone)]
 pub struct ComposedSchema {
-    /// The composed supergraph SDL
+    /// The concatenated subgraph SDL bundle (raw SDL text from each
+    /// subgraph joined with comment separators). This is NOT a valid,
+    /// type-merged Apollo supergraph SDL — no `@join`/`@link` directives
+    /// are generated and no conflicts are resolved.
     pub sdl: String,
-    /// Hints/warnings from composition
+    /// Hints/warnings produced while scanning the input SDLs (e.g. a
+    /// subgraph with no `@key` directives)
     pub hints: Vec<String>,
-    /// Subgraphs included in composition
+    /// Subgraphs included in the bundle
     pub subgraphs: Vec<String>,
 }
 
 impl ComposedSchema {
-    /// Check if composition produced any hints
+    /// Check if bundling produced any hints
     pub fn has_hints(&self) -> bool {
         !self.hints.is_empty()
     }
@@ -688,10 +779,16 @@ impl ComposedSchema {
     }
 }
 
-/// Compose multiple subgraph SDLs into a supergraph
+/// Concatenate multiple subgraph SDLs into a single bundled SDL document.
 ///
-/// This is a simplified composition - for production use, consider
-/// using Apollo's official composition tools (rover, etc.)
+/// **This does not perform real Apollo Federation composition.** It does no
+/// type merging, generates no `@join`/`@link` directives, and resolves no
+/// conflicts between subgraphs — it simply joins each subgraph's raw SDL
+/// text behind a comment header, and emits a hint for any subgraph whose
+/// SDL has no `@key` directive. The result is useful for eyeballing/bundling
+/// SDL text, but it is **not** a valid supergraph SDL that a real Apollo
+/// Gateway/Router could load. For production composition, use Apollo's
+/// official tooling (e.g. `rover supergraph compose`).
 pub fn compose_supergraph(
     subgraphs: HashMap<String, String>,
 ) -> Result<ComposedSchema, FederationError> {
@@ -823,5 +920,213 @@ mod tests {
         assert!(result.sdl.contains("Product"));
         // Should have a hint about products missing @key
         assert!(result.has_hints());
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 5 regression: `_entities` query selection set
+    //
+    // Previously `resolve_entities` always sent a hardcoded
+    // `... on _Entity { __typename }` selection, so callers could never
+    // get back anything but the typename regardless of what fields they
+    // actually needed. `build_entities_query` now narrows to the
+    // representations' concrete `__typename` via an inline fragment and
+    // includes the caller-requested field selection.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_build_entities_query_selects_requested_fields() {
+        let query = build_entities_query("User", "id name email");
+
+        assert!(query.contains("... on User"));
+        assert!(query.contains("__typename"));
+        assert!(query.contains("id name email"));
+        // The old hardcoded query only ever fragmented on the union type
+        // itself, which cannot select concrete fields.
+        assert!(!query.contains("_Entity"));
+    }
+
+    #[test]
+    fn test_build_entities_query_defaults_to_typename_only() {
+        let query = build_entities_query("Product", "");
+
+        assert!(query.contains("... on Product"));
+        assert!(query.contains("__typename"));
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 7 regression: no test previously asserted that a
+    // federation-enabled subgraph SDL actually contains federation
+    // directives, or that `is_federated()` reflects the schema's real
+    // state.
+    // -------------------------------------------------------------------
+
+    #[derive(async_graphql::SimpleObject)]
+    struct FedUser {
+        id: async_graphql::ID,
+        name: String,
+    }
+
+    struct FedQuery;
+
+    #[async_graphql::Object]
+    impl FedQuery {
+        // The `@key` directive on `FedUser` is derived from this entity
+        // resolver's `id` argument — async-graphql has no field-level
+        // `#[graphql(key)]` attribute for `SimpleObject`.
+        #[graphql(entity)]
+        async fn find_user_by_id(&self, id: async_graphql::ID) -> FedUser {
+            FedUser {
+                id,
+                name: "test".to_string(),
+            }
+        }
+
+        async fn user(&self) -> FedUser {
+            FedUser {
+                id: "1".into(),
+                name: "test".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_federated_subgraph_sdl_contains_federation_directives() {
+        let schema = SubgraphSchemaBuilder::new()
+            .query(FedQuery)
+            .mutation(async_graphql::EmptyMutation)
+            .subscription(async_graphql::EmptySubscription)
+            .enable_federation()
+            .build()
+            .unwrap();
+
+        assert!(
+            schema.is_federated(),
+            "is_federated() should reflect enable_federation()"
+        );
+
+        let sdl = schema.sdl();
+        assert!(
+            sdl.contains("@key"),
+            "federation-enabled SDL should contain a @key directive: {sdl}"
+        );
+        assert!(
+            sdl.contains("@link") && sdl.contains("specs.apollo.dev/federation"),
+            "federation-enabled SDL should declare the Apollo Federation @link: {sdl}"
+        );
+    }
+
+    #[test]
+    fn test_non_federated_subgraph_is_federated_false() {
+        let schema = SubgraphSchemaBuilder::new()
+            .query(FedQuery)
+            .mutation(async_graphql::EmptyMutation)
+            .subscription(async_graphql::EmptySubscription)
+            .build()
+            .unwrap();
+
+        assert!(
+            !schema.is_federated(),
+            "is_federated() should be false when enable_federation() was not called"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 1 wiring: SubgraphSchemaBuilder::config() actually reaches
+    // the built schema (introspection is disabled when configured).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_subgraph_schema_builder_applies_graphql_config() {
+        use crate::config::GraphQLConfig;
+
+        struct PlainQuery;
+
+        #[async_graphql::Object]
+        impl PlainQuery {
+            async fn hello(&self) -> &str {
+                "hi"
+            }
+        }
+
+        let schema = SubgraphSchemaBuilder::new()
+            .query(PlainQuery)
+            .mutation(async_graphql::EmptyMutation)
+            .subscription(async_graphql::EmptySubscription)
+            .config(GraphQLConfig::production("/graphql"))
+            .build()
+            .unwrap();
+
+        let response =
+            tokio_test::block_on(schema.schema().execute("{ __schema { types { name } } }"));
+
+        let data = response.data.into_json().unwrap();
+        assert!(
+            data["__schema"].is_null(),
+            "GraphQLConfig::production() passed via .config() should disable introspection \
+             on the built subgraph schema, but got: {:?}",
+            data
+        );
+    }
+}
+
+#[cfg(all(test, feature = "federation"))]
+mod gateway_tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    // -------------------------------------------------------------------
+    // Finding 6 regression: `SubgraphConfig::with_timeout` was recorded on
+    // the config but `execute_query` never applied it — only the gateway
+    // builder's one-time, global client timeout was ever in effect. This
+    // spins up a subgraph that accepts a connection and then never
+    // responds, and asserts that a short per-subgraph `timeout_secs`
+    // fires well before the (much longer) global client timeout.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_execute_query_applies_per_subgraph_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                // Read whatever the client sent, then hold the connection
+                // open without responding so the client must rely on its
+                // own timeout to give up.
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        let gateway = FederationGateway::builder()
+            .subgraph_with_config(
+                SubgraphConfig::new("slow", format!("http://{}", addr)).with_timeout(1),
+            )
+            // Global client timeout is deliberately much longer than the
+            // per-subgraph override, so a passing test proves the
+            // per-subgraph timeout is what actually fired.
+            .timeout(60)
+            .build()
+            .expect("build gateway");
+
+        let start = Instant::now();
+        let result = gateway
+            .execute_subgraph_query("slow", "{ __typename }", None)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "request to a hung subgraph should fail once its timeout fires"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "per-subgraph timeout_secs=1 should fire well before the 60s global client \
+             timeout, but the request took {:?}",
+            elapsed
+        );
     }
 }

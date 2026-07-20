@@ -86,7 +86,10 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Set the request body as JSON.
-    pub fn json<T: Serialize>(mut self, json: &T) -> Self {
+    ///
+    /// Returns an error rather than silently producing a bodyless request if
+    /// serialization fails.
+    pub fn json<T: Serialize>(mut self, json: &T) -> Result<Self> {
         match serde_json::to_vec(json) {
             Ok(bytes) => {
                 self.headers.insert(
@@ -94,16 +97,20 @@ impl<'a> RequestBuilder<'a> {
                     HeaderValue::from_static("application/json"),
                 );
                 self.body = Some(bytes);
+                Ok(self)
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to serialize JSON body");
+                Err(HttpClientError::Json(e.to_string()))
             }
         }
-        self
     }
 
     /// Set the request body as form data.
-    pub fn form<T: Serialize>(mut self, form: &T) -> Self {
+    ///
+    /// Returns an error rather than silently producing a bodyless request if
+    /// encoding fails.
+    pub fn form<T: Serialize>(mut self, form: &T) -> Result<Self> {
         match serde_urlencoded::to_string(form) {
             Ok(encoded) => {
                 self.headers.insert(
@@ -111,12 +118,13 @@ impl<'a> RequestBuilder<'a> {
                     HeaderValue::from_static("application/x-www-form-urlencoded"),
                 );
                 self.body = Some(encoded.into_bytes());
+                Ok(self)
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to encode form data");
+                Err(HttpClientError::RequestBuild(e.to_string()))
             }
         }
-        self
     }
 
     /// Set a custom timeout for this request.
@@ -168,31 +176,37 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Send the request.
+    ///
+    /// The request is captured as a [`crate::client::RequestSpec`] (method,
+    /// URL, headers, body bytes, and per-request timeout) rather than a
+    /// single `reqwest::Request`, so that retries can rebuild a complete,
+    /// non-empty request for every attempt.
     pub async fn send(self) -> Result<Response> {
         let url = self.build_url()?;
 
-        let mut request = self.client.inner().request(self.method.clone(), url);
+        let mut headers = HeaderMap::new();
 
         // Add default headers from config
         for (name, value) in &self.client.config().default_headers {
-            request = request.header(name.as_str(), value.as_str());
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::try_from(name.as_str()),
+                HeaderValue::try_from(value.as_str()),
+            ) {
+                headers.insert(name, value);
+            }
         }
 
-        // Add request-specific headers
-        for (name, value) in &self.headers {
-            request = request.header(name, value);
-        }
+        // Add request-specific headers (these take precedence)
+        headers.extend(self.headers);
 
-        // Add body
-        if let Some(body) = self.body {
-            request = request.body(body);
-        }
+        let spec = crate::client::RequestSpec {
+            method: self.method,
+            url,
+            headers,
+            body: self.body,
+            timeout: self.timeout,
+        };
 
-        // Set timeout
-        if let Some(timeout) = self.timeout {
-            request = request.timeout(timeout);
-        }
-
-        self.client.execute(request.build()?).await
+        self.client.execute(spec).await
     }
 }

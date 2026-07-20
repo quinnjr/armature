@@ -29,11 +29,10 @@
 //!         .bind_address("0.0.0.0:50051")
 //!         .enable_health_check()
 //!         .enable_reflection()
-//!         .build();
+//!         .build()?;
 //!
-//!     let server = GrpcServer::new(config)
-//!         .add_service(MyServiceServer::new(MyServiceImpl))
-//!         .serve()
+//!     GrpcServer::builder(config)
+//!         .serve(MyServiceServer::new(MyServiceImpl))
 //!         .await?;
 //!
 //!     Ok(())
@@ -52,7 +51,8 @@
 //!         .timeout(std::time::Duration::from_secs(30))
 //!         .build();
 //!
-//!     let client = GrpcClient::connect(config).await?;
+//!     let channel = GrpcClient::connect(config).await?;
+//!     let mut client = GreeterClient::new(channel.inner().clone());
 //!
 //!     // Use the client...
 //!     Ok(())
@@ -61,19 +61,34 @@
 
 mod client;
 mod config;
+mod crypto_provider;
 mod error;
 mod interceptor;
 mod middleware;
 mod server;
 
+/// Type alias for the body type produced by tonic services. This is the same
+/// body type tonic-build's generated `<Service>Server<T>` types use, so our
+/// own service wrappers in `server` and `middleware` stay drop-in compatible
+/// with real generated services (and with tonic's own `Server::add_service`,
+/// which requires `S::Response: axum::response::IntoResponse` — satisfied by
+/// `http::Response<TonicBody>`).
+pub(crate) type TonicBody = tonic::body::Body;
+
 pub use client::{GrpcChannel, GrpcClient};
-pub use config::{GrpcClientConfig, GrpcServerConfig};
+pub use config::{
+    GrpcClientConfig, GrpcClientConfigBuilder, GrpcClientTlsConfig, GrpcServerConfig,
+    GrpcServerConfigBuilder, GrpcServerTlsConfig,
+};
 pub use error::{GrpcError, Result};
 pub use interceptor::{
     AuthInterceptor, Interceptor, LoggingInterceptor, MetricsInterceptor, RequestInterceptor,
     ResponseInterceptor,
 };
-pub use middleware::{GrpcMiddleware, MiddlewareLayer};
+pub use middleware::{
+    CompressionMiddleware, ConcurrencyLimitMiddleware, GrpcMiddleware, LoadSheddingMiddleware,
+    MiddlewareLayer, RateLimitMiddleware, RetryMiddleware, TimeoutMiddleware,
+};
 pub use server::{GrpcServer, GrpcServerBuilder};
 
 // Re-export tonic types
@@ -96,12 +111,17 @@ pub use tonic_reflection;
 /// ```
 pub mod prelude {
     pub use crate::client::{GrpcChannel, GrpcClient};
-    pub use crate::config::{GrpcClientConfig, GrpcServerConfig};
+    pub use crate::config::{
+        GrpcClientConfig, GrpcClientTlsConfig, GrpcServerConfig, GrpcServerTlsConfig,
+    };
     pub use crate::error::{GrpcError, Result};
     pub use crate::interceptor::{
         AuthInterceptor, Interceptor, LoggingInterceptor, MetricsInterceptor,
     };
-    pub use crate::middleware::{GrpcMiddleware, MiddlewareLayer};
+    pub use crate::middleware::{
+        ConcurrencyLimitMiddleware, GrpcMiddleware, LoadSheddingMiddleware, MiddlewareLayer,
+        RateLimitMiddleware, RetryMiddleware, TimeoutMiddleware,
+    };
     pub use crate::server::{GrpcServer, GrpcServerBuilder};
     pub use tonic::{
         Code, Request, Response, Status,

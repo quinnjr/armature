@@ -43,7 +43,12 @@ impl SwaggerConfig {
     }
 }
 
-/// Generate Swagger UI HTML response
+/// Generate a Swagger UI HTML response.
+///
+/// The returned page loads the `swagger-ui-dist` JS/CSS bundle from the
+/// jsdelivr CDN (`cdn.jsdelivr.net`) rather than bundling it — it is not
+/// self-contained. It will fail to render fully offline or under a strict
+/// Content-Security-Policy that blocks that origin.
 pub fn swagger_ui_response(config: &SwaggerConfig) -> Result<HttpResponse, Error> {
     let spec_json = config.spec_json()?;
     let spec_json_escaped = spec_json.replace('\\', "\\\\").replace('`', "\\`");

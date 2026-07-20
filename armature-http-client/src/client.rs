@@ -1,14 +1,47 @@
 //! HTTP client implementation.
 
-use http::Method;
+use http::{HeaderMap, Method};
 use reqwest::Request;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::{
-    CircuitBreaker, HttpClientConfig, HttpClientError, RequestBuilder, Response, Result,
-    RetryStrategy,
+    CircuitBreaker, HttpClientConfig, HttpClientError, Interceptor, RequestBuilder,
+    RequestInterceptor, Response, ResponseInterceptor, Result, RetryStrategy,
 };
+
+/// A fully captured representation of a request to be sent.
+///
+/// Unlike a single `reqwest::Request` (which is consumed on send and whose
+/// body may not be reusable), a `RequestSpec` retains everything needed to
+/// build a fresh, complete `reqwest::Request` - including the body bytes and
+/// per-request timeout - for every attempt of a retried request.
+pub(crate) struct RequestSpec {
+    pub method: Method,
+    pub url: url::Url,
+    pub headers: HeaderMap,
+    pub body: Option<Vec<u8>>,
+    pub timeout: Option<Duration>,
+}
+
+impl RequestSpec {
+    /// Build a brand new `reqwest::Request` from this spec.
+    ///
+    /// Called once per attempt so that retries always carry the original
+    /// body and timeout instead of a lossy, bodyless clone.
+    fn to_request(&self) -> Request {
+        let mut request = Request::new(self.method.clone(), self.url.clone());
+        *request.headers_mut() = self.headers.clone();
+        if let Some(body) = &self.body {
+            *request.body_mut() = Some(reqwest::Body::from(body.clone()));
+        }
+        if let Some(timeout) = self.timeout {
+            *request.timeout_mut() = Some(timeout);
+        }
+        request
+    }
+}
 
 /// HTTP client with retry, circuit breaker, and timeout support.
 #[derive(Clone)]
@@ -16,6 +49,9 @@ pub struct HttpClient {
     inner: reqwest::Client,
     config: Arc<HttpClientConfig>,
     circuit_breaker: Option<Arc<CircuitBreaker>>,
+    interceptors: Vec<Arc<dyn Interceptor>>,
+    request_interceptors: Vec<Arc<dyn RequestInterceptor>>,
+    response_interceptors: Vec<Arc<dyn ResponseInterceptor>>,
 }
 
 impl HttpClient {
@@ -51,12 +87,52 @@ impl HttpClient {
             inner,
             config: Arc::new(config),
             circuit_breaker,
+            interceptors: Vec::new(),
+            request_interceptors: Vec::new(),
+            response_interceptors: Vec::new(),
         }
     }
 
     /// Create a new HTTP client with default configuration.
     pub fn default_client() -> Self {
         Self::new(HttpClientConfig::default())
+    }
+
+    /// Register a combined request/response interceptor.
+    ///
+    /// Its request phase runs once, before the first send attempt (and
+    /// before any retries); its response phase runs once, on the final
+    /// response returned from the retry/circuit-breaker machinery.
+    pub fn with_interceptor<I: Interceptor + 'static>(mut self, interceptor: I) -> Self {
+        self.interceptors.push(Arc::new(interceptor));
+        self
+    }
+
+    /// Register a shared combined interceptor (e.g. one also held by the
+    /// caller for inspection in tests).
+    pub fn with_shared_interceptor(mut self, interceptor: Arc<dyn Interceptor>) -> Self {
+        self.interceptors.push(interceptor);
+        self
+    }
+
+    /// Register a request-only interceptor. Runs once, before the first
+    /// send attempt, after any combined interceptors' request phase.
+    pub fn with_request_interceptor<I: RequestInterceptor + 'static>(
+        mut self,
+        interceptor: I,
+    ) -> Self {
+        self.request_interceptors.push(Arc::new(interceptor));
+        self
+    }
+
+    /// Register a response-only interceptor. Runs once, on the final
+    /// response, after any combined interceptors' response phase.
+    pub fn with_response_interceptor<I: ResponseInterceptor + 'static>(
+        mut self,
+        interceptor: I,
+    ) -> Self {
+        self.response_interceptors.push(Arc::new(interceptor));
+        self
     }
 
     /// Get the underlying reqwest client.
@@ -105,7 +181,7 @@ impl HttpClient {
     }
 
     /// Execute a request with retry and circuit breaker logic.
-    pub(crate) async fn execute(&self, request: Request) -> Result<Response> {
+    pub(crate) async fn execute(&self, mut spec: RequestSpec) -> Result<Response> {
         // Check circuit breaker
         if let Some(cb) = &self.circuit_breaker
             && !cb.is_allowed()
@@ -113,18 +189,51 @@ impl HttpClient {
             return Err(HttpClientError::CircuitOpen);
         }
 
+        // Run request interceptors once, before the first attempt. Any
+        // header/method/url mutation they make is folded back into the spec
+        // so it is preserved across every retry attempt.
+        if !self.interceptors.is_empty() || !self.request_interceptors.is_empty() {
+            let mut request = spec.to_request();
+            for interceptor in &self.interceptors {
+                request = interceptor.intercept_request(request).await?;
+            }
+            for interceptor in &self.request_interceptors {
+                request = interceptor.intercept(request).await?;
+            }
+            spec.method = request.method().clone();
+            spec.url = request.url().clone();
+            spec.headers = request.headers().clone();
+        }
+
         // Execute with retry if configured
-        if let Some(retry_config) = &self.config.retry {
-            self.execute_with_retry(request, retry_config).await
+        let result = if let Some(retry_config) = &self.config.retry {
+            self.execute_with_retry(&spec, retry_config).await
         } else {
-            self.execute_once(request).await
+            self.execute_once(spec.to_request()).await
+        };
+
+        // Run response interceptors once, on the final outcome.
+        match result {
+            Ok(mut response) => {
+                for interceptor in &self.interceptors {
+                    response = interceptor.intercept_response(response).await?;
+                }
+                for interceptor in &self.response_interceptors {
+                    response = interceptor.intercept(response).await?;
+                }
+                Ok(response)
+            }
+            Err(e) => Err(e),
         }
     }
 
     /// Execute request with retry logic.
+    ///
+    /// A fresh `reqwest::Request` (with the original body and timeout) is
+    /// built from `spec` for every attempt, including the first.
     async fn execute_with_retry(
         &self,
-        request: Request,
+        spec: &RequestSpec,
         retry_config: &crate::RetryConfig,
     ) -> Result<Response> {
         let mut attempt = 0;
@@ -139,16 +248,10 @@ impl HttpClient {
                 break;
             }
 
-            // Clone request for retry (reqwest requests can't be reused)
-            let request_clone = clone_request(&request);
+            let request = spec.to_request();
 
-            match self.execute_once(request_clone).await {
+            match self.execute_once(request).await {
                 Ok(response) => {
-                    // Record success with circuit breaker
-                    if let Some(cb) = &self.circuit_breaker {
-                        cb.record_success();
-                    }
-
                     // Check if response status should trigger retry
                     if retry_config.should_retry_status(response.status().as_u16())
                         && attempt < retry_config.max_attempts - 1
@@ -171,11 +274,6 @@ impl HttpClient {
                     return Ok(response);
                 }
                 Err(e) => {
-                    // Record failure with circuit breaker
-                    if let Some(cb) = &self.circuit_breaker {
-                        cb.record_failure();
-                    }
-
                     // Check if error is retryable
                     if retry_config.should_retry(attempt, &e)
                         && attempt < retry_config.max_attempts - 1
@@ -206,17 +304,50 @@ impl HttpClient {
     }
 
     /// Execute request once without retry.
+    ///
+    /// Records the outcome (success/failure) with the circuit breaker, if
+    /// configured, based on the *actual* result: a transport-level error, or
+    /// an HTTP response whose status indicates a server failure (5xx / 429),
+    /// both count as failures. This runs for every attempt regardless of
+    /// whether a retry loop is driving it, so the breaker can open purely on
+    /// a run of failing status codes, not just transport errors.
     async fn execute_once(&self, request: Request) -> Result<Response> {
-        let response = self.inner.execute(request).await?;
-        Ok(Response::from_reqwest(response).await)
+        match self.inner.execute(request).await {
+            Ok(response) => match Response::from_reqwest(response).await {
+                Ok(response) => {
+                    if let Some(cb) = &self.circuit_breaker {
+                        if is_failure_status(response.status()) {
+                            cb.record_failure();
+                        } else {
+                            cb.record_success();
+                        }
+                    }
+                    Ok(response)
+                }
+                Err(e) => {
+                    if let Some(cb) = &self.circuit_breaker {
+                        cb.record_failure();
+                    }
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                if let Some(cb) = &self.circuit_breaker {
+                    cb.record_failure();
+                }
+                Err(e.into())
+            }
+        }
     }
 }
 
-/// Clone a request (best effort - body may be empty).
-fn clone_request(request: &Request) -> Request {
-    let mut builder = reqwest::Request::new(request.method().clone(), request.url().clone());
-    *builder.headers_mut() = request.headers().clone();
-    builder
+/// Whether a response status should count as a circuit-breaker failure.
+///
+/// Mirrors the set of statuses `RetryConfig` retries by default (server
+/// errors and rate limiting), but is independent of retry configuration so
+/// the breaker still works when no retry policy is configured.
+fn is_failure_status(status: http::StatusCode) -> bool {
+    status.is_server_error() || status.as_u16() == 429
 }
 
 impl Default for HttpClient {

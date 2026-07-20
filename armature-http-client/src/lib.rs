@@ -51,7 +51,7 @@
 //!     // Circuit breaker will open after consecutive failures
 //!     let response = client
 //!         .post("https://api.example.com/orders")
-//!         .json(&serde_json::json!({"item": "widget", "quantity": 5}))
+//!         .json(&serde_json::json!({"item": "widget", "quantity": 5}))?
 //!         .send()
 //!         .await?;
 //!
@@ -73,7 +73,10 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::HttpClient;
 pub use config::{HttpClientConfig, HttpClientConfigBuilder};
 pub use error::{HttpClientError, Result};
-pub use interceptor::{Interceptor, RequestInterceptor, ResponseInterceptor};
+pub use interceptor::{
+    AuthInterceptor, Interceptor, LoggingInterceptor, RateLimitInterceptor, RequestInterceptor,
+    ResponseInterceptor,
+};
 pub use middleware::{Middleware, MiddlewareChain};
 pub use request::RequestBuilder;
 pub use response::Response;

@@ -97,10 +97,21 @@ impl Interceptor for LoggingInterceptor {
 }
 
 /// Authentication interceptor.
+///
+/// This type is deliberately direction-agnostic: it can attach credentials to
+/// outgoing (client-side) requests via [`AuthInterceptor::add_auth`] /
+/// [`AuthInterceptor::client_interceptor`], or validate incoming (server-side)
+/// requests via [`AuthInterceptor::validate`] / [`AuthInterceptor::server_interceptor`].
+/// The blanket [`Interceptor`] impl below is the **client-side** behavior only —
+/// it attaches credentials and never rejects a request. Do not use it as a
+/// `tonic::service::Interceptor` on the server; use [`AuthInterceptor::server_interceptor`]
+/// for that, which actually validates and rejects unauthenticated requests.
+#[derive(Clone)]
 pub struct AuthInterceptor {
     auth_type: AuthType,
 }
 
+#[derive(Clone)]
 enum AuthType {
     Bearer(String),
     ApiKey { header: String, key: String },
@@ -187,16 +198,41 @@ impl AuthInterceptor {
         }
         request
     }
+
+    /// Build a `tonic::service::Interceptor` suitable for **server-side** use
+    /// (e.g. via `InterceptedService::new` or a generated server's
+    /// `with_interceptor` constructor). Unlike the client-side [`Interceptor`]
+    /// impl on this type, this closure actually validates the request's
+    /// metadata and rejects it with `Status::unauthenticated` on failure.
+    pub fn server_interceptor(
+        self,
+    ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
+        move |request: Request<()>| -> Result<Request<()>, Status> {
+            self.validate(request.metadata())?;
+            Ok(request)
+        }
+    }
+
+    /// Build a `tonic::service::Interceptor` suitable for **client-side** use
+    /// that attaches credentials to every outgoing request (equivalent to
+    /// [`AuthInterceptor::add_auth`], but usable as a tonic interceptor).
+    pub fn client_interceptor(
+        self,
+    ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
+        move |request: Request<()>| -> Result<Request<()>, Status> { Ok(self.add_auth(request)) }
+    }
 }
 
+/// **Client-side** behavior: attaches credentials to the outgoing request.
+/// This impl never rejects a request — it is not authentication, it is
+/// credential attachment. For server-side authentication/rejection, use
+/// [`AuthInterceptor::server_interceptor`] instead.
 #[async_trait]
 impl Interceptor for AuthInterceptor {
     async fn intercept<T>(&self, request: Request<T>) -> Result<Request<T>, Status>
     where
         T: Send,
     {
-        // For server-side: validate
-        // For client-side: add auth
         Ok(self.add_auth(request))
     }
 }

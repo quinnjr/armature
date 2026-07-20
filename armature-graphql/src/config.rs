@@ -177,6 +177,75 @@ impl GraphQLConfig {
         self.enable_tracing = enable;
         self
     }
+
+    /// Apply this configuration's security/behavior knobs onto an
+    /// `async-graphql` [`SchemaBuilder`](async_graphql::SchemaBuilder).
+    ///
+    /// This is the only place these knobs take effect — building a schema
+    /// via a bare `Schema::build(...).finish()` silently ignores every
+    /// field on [`GraphQLConfig`]. In particular, [`GraphQLConfig::production`]
+    /// documents introspection as "Disabled for security", but that only
+    /// becomes true once the config is threaded through this method.
+    ///
+    /// Applies, in order:
+    /// - `.limit_depth(max_depth)` when `max_depth != 0`
+    /// - `.limit_complexity(max_complexity)` when `max_complexity != 0`
+    /// - `.disable_introspection()` when `!enable_introspection`
+    /// - `.validation_mode(ValidationMode::Fast)` and `.disable_suggestions()`
+    ///   when `!enable_validation` (async-graphql has no way to fully turn
+    ///   validation off; this is the closest approximation it exposes —
+    ///   faster/looser validation and no field-name suggestions, which also
+    ///   avoids leaking schema shape hints in error messages)
+    /// - `.extension(ApolloTracing)` when `enable_tracing`
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use armature_graphql::GraphQLConfig;
+    /// use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema};
+    ///
+    /// struct Query;
+    ///
+    /// #[Object]
+    /// impl Query {
+    ///     async fn hello(&self) -> &str {
+    ///         "hi"
+    ///     }
+    /// }
+    ///
+    /// let config = GraphQLConfig::production("/graphql");
+    /// let schema = config
+    ///     .configure(Schema::build(Query, EmptyMutation, EmptySubscription))
+    ///     .finish();
+    /// ```
+    pub fn configure<Q, M, S>(
+        &self,
+        mut builder: async_graphql::SchemaBuilder<Q, M, S>,
+    ) -> async_graphql::SchemaBuilder<Q, M, S> {
+        if self.max_depth > 0 {
+            builder = builder.limit_depth(self.max_depth);
+        }
+
+        if self.max_complexity > 0 {
+            builder = builder.limit_complexity(self.max_complexity);
+        }
+
+        if !self.enable_introspection {
+            builder = builder.disable_introspection();
+        }
+
+        if !self.enable_validation {
+            builder = builder
+                .validation_mode(async_graphql::ValidationMode::Fast)
+                .disable_suggestions();
+        }
+
+        if self.enable_tracing {
+            builder = builder.extension(async_graphql::extensions::ApolloTracing);
+        }
+
+        builder
+    }
 }
 
 impl Default for GraphQLConfig {
@@ -245,5 +314,153 @@ mod tests {
         assert_eq!(config.playground_endpoint, "/api/play");
         assert_eq!(config.graphiql_endpoint, "/api/iql");
         assert_eq!(config.schema_docs_endpoint, "/api/docs");
+    }
+
+    // -------------------------------------------------------------------
+    // GraphQLConfig::configure — regression tests for Finding 1.
+    //
+    // Prior to this fix, `configure` did not exist and nothing in the
+    // crate ever called `.disable_introspection()`/`.limit_depth()` on
+    // the async-graphql `SchemaBuilder`. A schema built from
+    // `GraphQLConfig::production()` was therefore fully introspectable
+    // and depth-unlimited despite the config's own docs claiming
+    // otherwise. These tests fail against that prior behavior.
+    // -------------------------------------------------------------------
+
+    struct IntrospectionTestQuery;
+
+    #[async_graphql::Object]
+    impl IntrospectionTestQuery {
+        async fn hello(&self) -> &str {
+            "hi"
+        }
+    }
+
+    #[test]
+    fn test_configure_disables_introspection_for_production() {
+        use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+
+        let config = GraphQLConfig::production("/graphql");
+        let schema = config
+            .configure(Schema::build(
+                IntrospectionTestQuery,
+                EmptyMutation,
+                EmptySubscription,
+            ))
+            .finish();
+
+        let response = tokio_test::block_on(schema.execute("{ __schema { types { name } } }"));
+
+        // With introspection disabled, async-graphql resolves `__schema` to
+        // `null` rather than erroring — so the regression check is that the
+        // introspection data itself is absent, not that the query errors.
+        let data = response.data.into_json().unwrap();
+        assert!(
+            data["__schema"].is_null(),
+            "introspection query should return no schema data when GraphQLConfig::production() \
+             is applied via configure(), but it returned: {:?}",
+            data
+        );
+    }
+
+    #[test]
+    fn test_configure_allows_introspection_by_default() {
+        use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+
+        let config = GraphQLConfig::new("/graphql");
+        let schema = config
+            .configure(Schema::build(
+                IntrospectionTestQuery,
+                EmptyMutation,
+                EmptySubscription,
+            ))
+            .finish();
+
+        let response = tokio_test::block_on(schema.execute("{ __schema { types { name } } }"));
+
+        assert!(
+            response.errors.is_empty(),
+            "default config should still allow introspection: {:?}",
+            response.errors
+        );
+
+        let data = response.data.into_json().unwrap();
+        assert!(
+            !data["__schema"].is_null(),
+            "default config should return real introspection data"
+        );
+    }
+
+    struct Nested3;
+
+    #[async_graphql::Object]
+    impl Nested3 {
+        async fn value(&self) -> i32 {
+            3
+        }
+    }
+
+    struct Nested2;
+
+    #[async_graphql::Object]
+    impl Nested2 {
+        async fn nested3(&self) -> Nested3 {
+            Nested3
+        }
+    }
+
+    struct DepthTestQuery;
+
+    #[async_graphql::Object]
+    impl DepthTestQuery {
+        async fn nested2(&self) -> Nested2 {
+            Nested2
+        }
+    }
+
+    #[test]
+    fn test_configure_enforces_max_depth() {
+        use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+
+        let config = GraphQLConfig::new("/graphql").with_max_depth(1);
+        let schema = config
+            .configure(Schema::build(
+                DepthTestQuery,
+                EmptyMutation,
+                EmptySubscription,
+            ))
+            .finish();
+
+        // Query depth here is 3: nested2 -> nested3 -> value
+        let response = tokio_test::block_on(schema.execute("{ nested2 { nested3 { value } } }"));
+
+        assert!(
+            !response.errors.is_empty(),
+            "query exceeding max_depth should be rejected when configured via configure(), \
+             but it succeeded: {:?}",
+            response.data
+        );
+    }
+
+    #[test]
+    fn test_configure_is_noop_when_limits_unset() {
+        use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+
+        let config = GraphQLConfig::new("/graphql"); // max_depth: 0 (unlimited)
+        let schema = config
+            .configure(Schema::build(
+                DepthTestQuery,
+                EmptyMutation,
+                EmptySubscription,
+            ))
+            .finish();
+
+        let response = tokio_test::block_on(schema.execute("{ nested2 { nested3 { value } } }"));
+
+        assert!(
+            response.errors.is_empty(),
+            "unlimited depth config should not reject a depth-3 query: {:?}",
+            response.errors
+        );
     }
 }

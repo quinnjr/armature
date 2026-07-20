@@ -1,6 +1,6 @@
 [package]
 name = "armature-grpc"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -16,16 +16,24 @@ categories = ["network-programming", "asynchronous"]
 armature-log = { path = "../armature-log", version = "0.1.0" }
 
 # gRPC
-tonic = { version = "0.14", features = ["gzip", "zstd"] }
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring"] }
 prost = "0.14"
 prost-types = "0.14"
+
+# rustls: explicit direct dependency so this crate can install the `ring`
+# CryptoProvider itself at TLS-setup time (see `crypto_provider::ensure_installed`).
+# Without this, rustls's automatic provider detection panics whenever this
+# crate is built alongside anything else that also compiles in the
+# `aws-lc-rs` provider (e.g. most AWS SDK crates) — Cargo unifies both
+# providers into one binary and rustls refuses to guess between them.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Async runtime
 tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # Tower (middleware)
-tower = { version = "0.5", features = ["timeout", "limit", "load-shed"] }
+tower = { version = "0.5", features = ["timeout", "limit", "load-shed", "retry", "util"] }
 tower-service = "0.3"
 
 # HTTP
@@ -68,4 +76,7 @@ reflection = ["tonic-reflection"]
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
+tonic-health = { version = "0.14" }
+tonic-reflection = { version = "0.14" }
+rcgen = { version = "0.14", features = ["pem"] }
 

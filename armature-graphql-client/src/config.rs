@@ -13,12 +13,6 @@ pub struct GraphQLClientConfig {
     pub timeout: Duration,
     /// Default headers for all requests.
     pub default_headers: Vec<(String, String)>,
-    /// Enable request batching.
-    pub batching: bool,
-    /// Maximum batch size.
-    pub max_batch_size: usize,
-    /// Batch delay (wait time to collect queries).
-    pub batch_delay: Duration,
     /// Enable response caching.
     pub caching: bool,
     /// Cache TTL.
@@ -38,9 +32,6 @@ impl Default for GraphQLClientConfig {
             ws_endpoint: None,
             timeout: Duration::from_secs(30),
             default_headers: Vec::new(),
-            batching: false,
-            max_batch_size: 10,
-            batch_delay: Duration::from_millis(10),
             caching: false,
             cache_ttl: Duration::from_secs(300),
             user_agent: format!("armature-graphql-client/{}", env!("CARGO_PKG_VERSION")),
@@ -104,24 +95,6 @@ impl GraphQLClientConfigBuilder {
             "Authorization".to_string(),
             format!("Bearer {}", token.into()),
         ));
-        self
-    }
-
-    /// Enable request batching.
-    pub fn batching(mut self, enabled: bool) -> Self {
-        self.config.batching = enabled;
-        self
-    }
-
-    /// Set maximum batch size.
-    pub fn max_batch_size(mut self, size: usize) -> Self {
-        self.config.max_batch_size = size;
-        self
-    }
-
-    /// Set batch delay.
-    pub fn batch_delay(mut self, delay: Duration) -> Self {
-        self.config.batch_delay = delay;
         self
     }
 
