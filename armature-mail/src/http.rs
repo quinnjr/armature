@@ -20,6 +20,17 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `ApnsConfig::connect_timeout` in `armature-push`.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Whether `host` names the local machine.
+///
+/// The same set is defined independently as `is_loopback_host` in
+/// `armature-payments::provider` and `armature-push::host_guard`. There is no
+/// dependency edge between the three crates, so this is a deliberate
+/// duplication under a shared name: grepping for `is_loopback_host` finds all
+/// three call sites when the set has to change.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
 /// Reject an endpoint that is neither `https` nor a loopback `http` URL.
 ///
 /// Both transports send a long-lived credential — SendGrid's
@@ -28,8 +39,12 @@ pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// therefore ships the key in cleartext to whoever is listening. Loopback is
 /// allowed so a test can stand a plain HTTP server up locally.
 ///
-/// Mirrors `armature-payments::provider::validate_base_url`.
-pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
+/// This checks the *scheme* only. It is **not** an SSRF guard: it does not
+/// resolve the host, and an `https` URL pointing at a private or link-local
+/// address passes. `armature-push::web_push::validate_endpoint` is the function
+/// that does the full address check; this one is named for what it actually
+/// guarantees so the two are not confused.
+pub(crate) fn require_encrypted_endpoint(endpoint: &str) -> Result<()> {
     let parsed = url::Url::parse(endpoint)
         .map_err(|e| MailError::Config(format!("invalid endpoint {endpoint:?}: {e}")))?;
 
@@ -37,7 +52,7 @@ pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
         "https" => Ok(()),
         "http" => {
             let host = parsed.host_str().unwrap_or_default();
-            if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+            if is_loopback_host(host) {
                 Ok(())
             } else {
                 Err(MailError::Config(format!(
@@ -81,7 +96,6 @@ pub(crate) fn build_client(
 /// (`EmailQueueWorker::calculate_backoff` returns it verbatim), so a provider
 /// that told us to wait 300s and got retried after the local 5s default just
 /// gets re-throttled. Mailgun hardcoded 60 and ignored the header outright.
-#[allow(dead_code)] // Only the `sendgrid`/`mailgun` transports call this.
 pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap, default_secs: u64) -> u64 {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -100,7 +114,7 @@ mod tests {
             "https://api.sendgrid.com/v3/mail/send",
             "https://api.eu.mailgun.net/v3/example.com/messages",
         ] {
-            assert!(validate_endpoint(ok).is_ok(), "should allow {ok}");
+            assert!(require_encrypted_endpoint(ok).is_ok(), "should allow {ok}");
         }
     }
 
@@ -111,13 +125,14 @@ mod tests {
             "http://127.0.0.1:3000/v3/mail/send",
             "http://[::1]:9000/v3/mail/send",
         ] {
-            assert!(validate_endpoint(ok).is_ok(), "should allow {ok}");
+            assert!(require_encrypted_endpoint(ok).is_ok(), "should allow {ok}");
         }
     }
 
     #[test]
     fn plaintext_http_to_a_remote_host_is_rejected() {
-        let err = validate_endpoint("http://collector.example.com/v3/mail/send").unwrap_err();
+        let err =
+            require_encrypted_endpoint("http://collector.example.com/v3/mail/send").unwrap_err();
         assert!(matches!(err, MailError::Config(_)));
         assert!(err.to_string().contains("https"), "{err}");
     }
@@ -126,7 +141,7 @@ mod tests {
     fn non_http_schemes_and_garbage_are_rejected() {
         for bad in ["ftp://api.example.com", "file:///etc/passwd", "not a url"] {
             assert!(
-                matches!(validate_endpoint(bad), Err(MailError::Config(_))),
+                matches!(require_encrypted_endpoint(bad), Err(MailError::Config(_))),
                 "should reject {bad}"
             );
         }

@@ -335,6 +335,64 @@ async fn provider_builds_and_sends_with_custom_timeouts() {
 }
 
 #[tokio::test]
+async fn a_connection_dropped_mid_request_is_a_retryable_network_error() {
+    // FCM's send path goes through `?`, i.e. `From<reqwest::Error>`. That impl
+    // classified only `is_timeout()` and `is_connect()`, sending
+    // `is_request()`/`is_body()` — a TCP reset after connect, a TLS
+    // renegotiation failure, a broken pipe mid-payload — to a `Provider` whose
+    // `status` is always `None` (`reqwest::Error::status()` is `Some` only for
+    // errors from `error_for_status()`, which no provider here calls). So those
+    // transient failures reported `is_retryable() == false` and callers'
+    // retry loops gave up on exactly what they were written for.
+    let token_server = StubServer::builder()
+        .route("POST", "/token", StubResponse::json(200, TOKEN_RESPONSE))
+        .start()
+        .await;
+
+    // A listener that accepts and immediately drops, so the failure happens
+    // after connect rather than during it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+
+    let config = FcmConfig::new(
+        "test-project",
+        "svc@test-project.iam.gserviceaccount.com",
+        RSA_PRIVATE_KEY,
+    )
+    .api_base(format!("http://{addr}"))
+    .token_uri(format!("{}/token", token_server.url()))
+    .allow_insecure_loopback(true)
+    .connect_timeout(Duration::from_millis(500))
+    .timeout(Duration::from_secs(2));
+
+    let provider = FcmProvider::new(config).await.expect("build provider");
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.send("device-token", &Notification::new("Hi", "there")),
+    )
+    .await
+    .expect("send should not hang")
+    .expect_err("a connection dropped mid-request must fail");
+
+    assert!(
+        matches!(err, PushError::Network(_)),
+        "expected Network, got {err:?}"
+    );
+    assert!(
+        err.is_retryable(),
+        "a mid-request transport failure must be retryable: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn non_https_api_base_is_rejected_without_opt_in() {
     let config = FcmConfig::new(
         "test-project",

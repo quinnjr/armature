@@ -97,7 +97,7 @@ impl SendGridTransport {
     /// be built is surfaced rather than swapped for `Client::new()`, which
     /// carries neither a request nor a connect timeout.
     pub fn new(config: SendGridConfig) -> Result<Self> {
-        crate::http::validate_endpoint(&config.endpoint)?;
+        crate::http::require_encrypted_endpoint(&config.endpoint)?;
         let client = build_client(config.timeout, config.connect_timeout)?;
 
         Ok(Self { client, config })
@@ -138,7 +138,14 @@ impl Transport for SendGridTransport {
                 60,
             )))
         } else {
-            let body = response.text().await.unwrap_or_default();
+            // Not `unwrap_or_default()`: that renders a connection dropped
+            // mid-body identically to a provider that genuinely sent none,
+            // which is the difference between "retry this" and "this payload is
+            // wrong". Surface the read failure in the message instead.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
             // The status is carried on the error so `is_retryable` can tell a
             // transient 5xx from a permanent 4xx.
             Err(MailError::provider(
@@ -341,7 +348,7 @@ impl SendGridPayload {
                 email: a.email.clone(),
                 name: a.name.clone(),
             }),
-            subject: email.subject.clone().unwrap_or_default(),
+            subject: email.wire_subject().unwrap_or_default().to_string(),
             content,
             attachments,
             headers: build_headers(email),

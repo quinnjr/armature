@@ -123,11 +123,18 @@ async fn extract_to_does_not_write_through_a_pre_existing_symlink() {
 
     let archive = raw_zip(&[("config.yml", b"pwned")]);
 
-    let result = ZipExtractor::new(archive).extract_to(&target).await;
+    let err = ZipExtractor::new(archive)
+        .extract_to(&target)
+        .await
+        .expect_err("extraction must refuse to write through a pre-existing symlink");
 
+    // Assert the *specific* refusal, not merely "some error": a bare
+    // `is_err()` is satisfied by a staging-creation failure, a permissions
+    // problem, or a corrupt fixture, none of which prove the leaf symlink was
+    // the thing that stopped the write.
     assert!(
-        result.is_err(),
-        "extraction must refuse to write through a pre-existing symlink"
+        err.to_string().contains("refusing to overwrite"),
+        "expected the O_EXCL destination-reservation refusal, got: {err}"
     );
     assert_eq!(
         std::fs::read(&outside).unwrap(),
@@ -366,6 +373,174 @@ fn entry_count_is_capped() {
     assert!(
         err.to_string().contains("exceeding the limit"),
         "unexpected error: {err}"
+    );
+}
+
+/// A 22-byte End Of Central Directory record declaring `count` members and no
+/// comment. Every byte is below 0x80, so the record doubles as a valid UTF-8
+/// string and can be planted verbatim in an archive comment.
+fn fake_eocd(count: u16) -> Vec<u8> {
+    let mut record = vec![b'P', b'K', 0x05, 0x06];
+    record.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    record.extend_from_slice(&0u16.to_le_bytes()); // disk with the CD start
+    record.extend_from_slice(&count.to_le_bytes()); // entries on this disk
+    record.extend_from_slice(&count.to_le_bytes()); // total entries
+    record.extend_from_slice(&0u32.to_le_bytes()); // CD size
+    record.extend_from_slice(&0u32.to_le_bytes()); // CD offset
+    record.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    assert_eq!(record.len(), 22);
+    record
+}
+
+/// Spoof #1: a second EOCD planted *inside* the real one's comment.
+///
+/// A backwards scan that takes the last `PK\x05\x06` in the tail reads the
+/// planted record — which declares one member — and waves a 20-member archive
+/// through the pre-parse guard. Both records are individually self-consistent
+/// (each one's comment length reaches the end of the file), so the guard has to
+/// take the *largest* declared count rather than trusting whichever it finds
+/// first.
+#[test]
+fn planted_eocd_in_the_comment_cannot_understate_the_entry_count() {
+    let planted = String::from_utf8(fake_eocd(1)).expect("the fixture record is ASCII-safe");
+
+    let mut builder = ZipBuilder::new().comment(planted);
+    for i in 0..20 {
+        builder = builder.add_file(format!("f{i}.txt"), "x");
+    }
+    let archive = builder.build().unwrap();
+
+    let err = ZipExtractor::new(archive.data)
+        .max_entries(5)
+        .list_files()
+        .expect_err("a planted EOCD must not launder 20 entries past a limit of 5");
+
+    assert!(
+        err.to_string().contains("declares 20 entries"),
+        "the real EOCD should have won the scan, got: {err}"
+    );
+}
+
+/// Spoof #2: a small classic count paired with a huge Zip64 count.
+///
+/// `zip` 8.x sizes its central-directory index from the Zip64 record whenever a
+/// locator is present, so consulting Zip64 only when the 16-bit field is
+/// saturated at `0xFFFF` lets an archive declare `5` classically and a million
+/// in Zip64 — ~46 MB on the wire, under the container cap, and a million
+/// allocated records once opened.
+#[test]
+fn zip64_entry_count_is_consulted_even_when_the_classic_count_is_small() {
+    let mut data = Vec::new();
+
+    let zip64_offset = data.len() as u64;
+    let mut zip64 = Vec::from(b"PK\x06\x06".as_slice());
+    zip64.extend_from_slice(&44u64.to_le_bytes()); // size of this record
+    zip64.extend_from_slice(&45u16.to_le_bytes()); // version made by
+    zip64.extend_from_slice(&45u16.to_le_bytes()); // version needed
+    zip64.extend_from_slice(&0u32.to_le_bytes()); // this disk
+    zip64.extend_from_slice(&0u32.to_le_bytes()); // disk with the CD start
+    zip64.extend_from_slice(&1_000_000u64.to_le_bytes()); // entries on this disk
+    zip64.extend_from_slice(&1_000_000u64.to_le_bytes()); // total entries
+    zip64.extend_from_slice(&0u64.to_le_bytes()); // CD size
+    zip64.extend_from_slice(&0u64.to_le_bytes()); // CD offset
+    assert_eq!(zip64.len(), 56);
+    data.extend_from_slice(&zip64);
+
+    data.extend_from_slice(b"PK\x06\x07"); // Zip64 EOCD locator
+    data.extend_from_slice(&0u32.to_le_bytes()); // disk with the Zip64 EOCD
+    data.extend_from_slice(&zip64_offset.to_le_bytes());
+    data.extend_from_slice(&1u32.to_le_bytes()); // total disks
+
+    // The classic record declares a harmless five.
+    data.extend_from_slice(&fake_eocd(5));
+
+    let err = ZipExtractor::new(Bytes::from(data))
+        .max_entries(10)
+        .list_files()
+        .expect_err("the Zip64 count must be enforced even though the classic one fits");
+
+    assert!(
+        err.to_string().contains("declares 1000000 entries"),
+        "the Zip64 record should have been consulted unconditionally, got: {err}"
+    );
+}
+
+/// The entry limit is re-applied on every call, not frozen at the parse that
+/// populated the index cache.
+///
+/// `max_entries` takes `self` by value, so the `Arc`'d cache travels with the
+/// builder: warming the cache and *then* tightening the limit used to hand back
+/// an extractor whose new limit was never consulted again.
+#[test]
+fn a_tightened_entry_limit_applies_to_an_already_cached_index() {
+    let mut builder = ZipBuilder::new();
+    for i in 0..20 {
+        builder = builder.add_file(format!("f{i}.txt"), "x");
+    }
+    let archive = builder.build().unwrap();
+
+    let extractor = ZipExtractor::new(archive.data);
+    assert_eq!(
+        extractor.list_files().unwrap().len(),
+        20,
+        "the default limit admits 20 entries and warms the index cache"
+    );
+
+    let err = extractor
+        .max_entries(5)
+        .list_files()
+        .expect_err("the tightened limit must apply to the cached index too");
+
+    assert!(
+        err.to_string().contains("exceeding the limit of 5"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Promotion is all-or-nothing: a failure partway through moving the staged
+/// entries into place must not leave the earlier ones behind.
+///
+/// `sub` is pre-created as a regular *file*, so the second entry's parent
+/// directory cannot be created. With `create_dir_all` + `rename` interleaved
+/// per entry, `x.txt` was already renamed into the target by the time
+/// `sub/y.txt` hit `ENOTDIR` — an `Err` return with attacker-controlled data on
+/// the caller's disk, repeatable to fill it.
+#[tokio::test]
+async fn a_failure_while_promoting_rolls_back_the_entries_already_moved() {
+    let archive = ZipBuilder::new()
+        .add_file("x.txt", "first")
+        .add_file("sub/y.txt", "second")
+        .build()
+        .unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("out");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("sub"), b"i am a file, not a directory").unwrap();
+
+    ZipExtractor::new(archive.data)
+        .extract_to(&target)
+        .await
+        .expect_err("a non-directory in the way of an entry's parent must fail the extraction");
+
+    assert!(
+        !target.join("x.txt").exists(),
+        "the first entry was promoted and left behind after the extraction failed"
+    );
+    assert_eq!(
+        std::fs::read(target.join("sub")).unwrap(),
+        b"i am a file, not a directory",
+        "the pre-existing path must be untouched"
+    );
+
+    let leftovers: Vec<_> = std::fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        leftovers.len(),
+        1,
+        "only the pre-existing `sub` should remain, found {leftovers:?}"
     );
 }
 

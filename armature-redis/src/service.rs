@@ -485,10 +485,7 @@ mod tests {
     /// rather than hanging or succeeding after the configured window.
     #[tokio::test]
     async fn command_timeout_bounds_live_command_execution() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let config = RedisConfig::builder()
             .url(container.url())

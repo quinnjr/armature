@@ -310,7 +310,7 @@ fn stripe_error(status: reqwest::StatusCode, body: &str, retry_after: Option<u32
             Some("card_error") => PaymentError::CardDeclined(message),
             Some("authentication_error") => PaymentError::Authentication(message),
             Some("invalid_request_error") if status == reqwest::StatusCode::NOT_FOUND => {
-                PaymentError::Provider(message)
+                PaymentError::provider(status.as_u16(), message)
             }
             Some("rate_limit_error") => PaymentError::RateLimited(backoff),
             _ if status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
@@ -326,7 +326,9 @@ fn stripe_error(status: reqwest::StatusCode, body: &str, retry_after: Option<u32
             {
                 PaymentError::Authentication(message)
             }
-            _ => PaymentError::Provider(message),
+            // The status rides along so `is_retryable` can tell a transient
+            // gateway 5xx from a permanent 4xx.
+            _ => PaymentError::provider(status.as_u16(), message),
         };
     }
 
@@ -334,7 +336,16 @@ fn stripe_error(status: reqwest::StatusCode, body: &str, retry_after: Option<u32
     // may still be an unexpected resource dump or a proxy error page, so it goes
     // through the shared classifier, which redacts it. Hand-rolling the same
     // match here let the message format drift away from every other provider's.
-    armature_log::debug!("Stripe returned {}: {}", status, body);
+    // Sanitized here too. Logging the raw body one line above a call that
+    // carefully redacts it defeats the redaction entirely: `armature_log`
+    // targets are routinely enabled in staging, and this body is the one that
+    // failed to parse as a Stripe envelope — a proxy error page echoing the
+    // request headers, or a resource dump.
+    armature_log::debug!(
+        "Stripe returned {}: {}",
+        status,
+        crate::provider::sanitize_body(body)
+    );
     crate::provider::classify_status("Stripe", status, body, retry_after)
 }
 

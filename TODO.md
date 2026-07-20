@@ -1368,14 +1368,22 @@ _Clean (no findings): `armature-framework`_
 ## Deferred from the WF6 audit battery (2026-07-20)
 
 Everything the battery found in the five delivery-provider crates was fixed on
-`feature/wf6-delivery-providers`. These four items are the residue — each is
-either out of the branch's scope or blocked on an upstream constraint, and each
-is recorded here rather than left as a comment nobody will find.
+`feature/wf6-delivery-providers`. The items below are the residue known at merge
+— each is either out of the branch's scope or blocked on an upstream constraint,
+and each is recorded here rather than left as a comment nobody will find. This
+list is not a completeness claim: a third review round found a deferral admitted
+only in a CI comment and, worse, found that one entry in an earlier version of
+this very section was **false**. Verify before acting on any of them.
 
-- [ ] **CI covers 7 of 63 workspace members** — the root `full` feature does not depend on most member crates, so `cargo test --features full` never compiles them, and the `coverage` job builds each member with only its *default* features. Feature-gated tests in the other 56 crates therefore still never run. `.github/workflows/ci.yml`'s `test-members` matrix now covers payments/mail/files/storage/push/queue/distributed with both `--all-features` and a minimal feature set; extend it crate-by-crate as each is verified to build under both shapes (the workflow carries the `cargo metadata | jq` command to regenerate the member list). A generated matrix was deliberately not used — it would immediately red-CI on ~56 crates never built under those shapes. Notably uncovered: `armature-acme`, `armature-opensearch`, `armature-redis`, `armature-aws`/`-azure`/`-gcp`, `armature-seaorm`, `armature-diesel`, `armature-graphql(-client)`, `armature-grpc`, `armature-siem`.
+References here name symbols, not line numbers. An earlier version cited line
+numbers that were already stale when written, because the same commit that added
+them moved the targets by several hundred lines.
+
+- [ ] **CI covers 12 of 63 workspace members; 51 remain** — the root `full` feature does not depend on most member crates, so `cargo test --features full` never compiles them, and the `coverage` job builds each member with only its *default* features. Feature-gated tests in the uncovered crates therefore still never run. `.github/workflows/ci.yml`'s `test-members` matrix covers payments, mail, files, storage, push, queue, distributed, testkit, redis, seaorm, diesel and acme — each with `--all-features` and, where the crate has features, a verified minimal shape. Extend it crate-by-crate, verifying both shapes build before adding a row (regenerate the member list with `cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'`). A generated matrix was deliberately not used — it would immediately red-CI on crates never built under those shapes. Notably still uncovered: `armature-opensearch`, `armature-aws`/`-azure`/`-gcp`, `armature-graphql(-client)`, `armature-grpc`, `armature-siem`.
+  - **Watch for `#[ignore]`d container tests when adding a crate.** `armature-testkit`'s own Docker suites are all `#[ignore = "requires Docker"]`, so its matrix row needs `-- --include-ignored` or the job reports green having started no container — the crate that owns the enforcement was the one place it could not fire. Any crate added here should be checked for the same shape.
 - [ ] **`armature-mail` still copies attachment bytes once per `to_lettre()`** — `Attachment::data` is now `bytes::Bytes`, so cloning an `Email`/`EmailJob` and the Mailgun multipart path are refcount bumps. But lettre's `IntoBody` is implemented over `Into<MaybeString>`, which `Bytes` does not satisfy, so `build_part` still materializes one `Vec<u8>` per MIME assembly — paid on every retry attempt. Eliminating it means building the `lettre::Message` once before the retry loop, which requires changing the `Transport` trait. `armature-mail/src/email.rs` (documented at the call site).
-- [ ] **`mod async_channel` in the mail queue is dead** — an entire `#[allow(dead_code)]` hand-rolled `Sender`/`Receiver` with the aspirational comment `// Need async-channel for worker communication`. Nothing uses it. Predates WF6 (introduced in `027dccd`). `armature-mail/src/queue.rs:1198`
-- [ ] **`StripePaymentMethod::method_type` is deserialized and discarded** — `#[allow(dead_code)]` rather than read or removed. Predates WF6 (introduced in `75e7a62`). `armature-payments/src/providers/stripe.rs:871`
+- [x] ~~**`mod async_channel` in the mail queue is dead**~~ — **this entry was false and has been retracted.** The module is the live worker channel: `EmailQueueWorker::run` calls `async_channel::bounded` and holds an `Arc<async_channel::Receiver<EmailJob>>`, and `armature-mail` has **no `async-channel` dependency**, so the hand-rolled module *is* the implementation. Acting on the original entry ("nothing uses it") would have deleted the mail queue's worker channel. It looked dead because of a blanket `#[allow(dead_code)]`, which has since been removed so the compiler can answer this question instead of a reader guessing. The entry was written by relaying a prior review's finding without verifying it — the same defect class this section exists to track.
+- [ ] **`StripePaymentMethod::method_type` is deserialized and discarded** — annotated `#[allow(dead_code)]` rather than read or removed. Predates WF6 (introduced in `75e7a62`). Symbol: `StripePaymentMethod::method_type` in `armature-payments/src/providers/stripe.rs`.
 
 ---
 

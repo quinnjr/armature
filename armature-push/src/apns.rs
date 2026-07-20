@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::error::map_status;
+use crate::time::unix_now_secs;
 use crate::{Notification, Platform, Priority, PushError, PushProvider, Result};
 
 /// Maximum APNS payload size in bytes for a regular notification.
@@ -179,24 +180,6 @@ impl ApnsConfig {
     }
 }
 
-/// Seconds since the UNIX epoch, or a `Config` error if the system clock is
-/// set before it.
-///
-/// `SystemTime::duration_since(UNIX_EPOCH).unwrap()` is a real panic on a VM
-/// resumed from a snapshot or a container with an unsynced RTC. That panic
-/// used to fire while the APNS `refresh_lock` was held, poisoning the mutex
-/// and making every later send panic forever.
-fn unix_now_secs() -> Result<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| {
-            PushError::Config(
-                "system clock is before the UNIX epoch; cannot sign a JWT".to_string(),
-            )
-        })
-}
-
 /// Reject a JWT-bearing endpoint that is neither https nor an opted-in
 /// loopback http URL.
 fn validate_endpoint(raw: &str, allow_insecure_loopback: bool) -> Result<()> {
@@ -230,6 +213,15 @@ pub struct ApnsProvider {
     /// Serializes JWT re-signing so a concurrent batch that crosses the expiry
     /// boundary performs one ES256 signature instead of one per in-flight send.
     refresh_lock: std::sync::Mutex<()>,
+    /// Number of times [`Self::prepare`] has run.
+    ///
+    /// The "one payload, one JWT per batch" property is not observable at the
+    /// HTTP layer — a single-key payload serializes byte-identically every
+    /// time and the JWT is cached — so a test asserting it against request
+    /// bodies passes equally well against a send-per-token implementation.
+    /// This counter makes the property directly observable; see
+    /// [`Self::prepare_count`].
+    prepare_count: std::sync::atomic::AtomicUsize,
 }
 
 struct AccessToken {
@@ -265,7 +257,20 @@ impl ApnsProvider {
             client,
             access_token: RwLock::new(None),
             refresh_lock: std::sync::Mutex::new(()),
+            prepare_count: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// How many times this provider has built a request payload.
+    ///
+    /// Exposed so tests can assert that [`PushProvider::send_batch`] prepares
+    /// **once** for the whole batch rather than once per device token. Not part
+    /// of the supported API surface: it is an implementation counter and may
+    /// change or disappear.
+    #[doc(hidden)]
+    pub fn prepare_count(&self) -> usize {
+        self.prepare_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Read the cached JWT if it is still valid.
@@ -428,6 +433,9 @@ impl ApnsProvider {
     fn prepare(&self, notification: &Notification) -> Result<PreparedApns> {
         use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 
+        self.prepare_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let jwt = self.get_token()?;
         let payload = self.build_payload(notification)?;
 
@@ -525,7 +533,33 @@ impl ApnsProvider {
         // cases need it before falling through to the shared mapper.
         if status.as_u16() == 400 || status.as_u16() == 404 || status.as_u16() == 410 {
             let headers = response.headers().clone();
-            let body = response.text().await.unwrap_or_default();
+
+            // The body is load-bearing here, not cosmetic: the `contains`
+            // checks below turn it into a device-removal verdict. A truncated
+            // or aborted read used to fall back to an empty string via
+            // `unwrap_or_default()`, which silently downgraded
+            // `ExpiredToken`/`BadDeviceToken` to a generic `Provider(400)` —
+            // the dead device stayed in the caller's table forever.
+            //
+            // 410 is the one status whose verdict does not depend on the body:
+            // Apple's bare 410 already means the device is gone, and both
+            // reasons it can carry (`ExpiredToken` or none) remove it. So it
+            // keeps its fallback rather than being downgraded here, which would
+            // be the mirror image of the bug above. Every other status in this
+            // arm needs the body to decide, so an unreadable one is reported as
+            // exactly that instead of being guessed at.
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(_) if status.as_u16() == 410 => {
+                    return Err(PushError::Unregistered(token.to_string()));
+                }
+                Err(_) => {
+                    return Err(PushError::provider(
+                        status.as_u16(),
+                        "APNS response body unreadable",
+                    ));
+                }
+            };
 
             // Apple's documented reason for 410 is `ExpiredToken`; treat the
             // explicit reason as the more specific error and let a bare 410
@@ -692,6 +726,7 @@ mod tests {
             client: Client::new(),
             access_token: RwLock::new(None),
             refresh_lock: std::sync::Mutex::new(()),
+            prepare_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -902,13 +937,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unix_now_secs_reports_a_plausible_clock() {
-        // Guards the replacement of `duration_since(UNIX_EPOCH).unwrap()`:
-        // the happy path must still yield real epoch seconds, and the error
-        // path is a `Config` error rather than a panic inside a held lock.
-        let now = unix_now_secs().expect("a sane clock is after the epoch");
-        assert!(now > 1_600_000_000, "got {now}");
+    #[tokio::test]
+    async fn prepare_counts_every_payload_build() {
+        // The counter that `tests/apns.rs` uses to observe "one preparation per
+        // batch" must actually track calls.
+        let provider = provider();
+        assert_eq!(provider.prepare_count(), 0);
+        // The fixture key is not a valid EC PEM, so `prepare` fails — but it
+        // must have counted the attempt before failing.
+        let _ = provider.prepare(&Notification::new("Hi", "there"));
+        assert_eq!(provider.prepare_count(), 1);
+        let _ = provider.prepare(&Notification::new("Hi", "there"));
+        assert_eq!(provider.prepare_count(), 2);
     }
 
     #[tokio::test]

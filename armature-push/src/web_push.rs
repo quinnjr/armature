@@ -1,7 +1,9 @@
 //! Web Push (VAPID) provider.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -51,10 +53,77 @@ fn urgency_header_value(urgency: Urgency) -> &'static str {
     }
 }
 
+/// What still has to happen before a validated endpoint may be connected to.
+#[derive(Debug, PartialEq, Eq)]
+enum EndpointTarget {
+    /// A loopback host or an IP literal. There is no name to resolve, and the
+    /// address in the URL is the address that will be dialed, so the shared
+    /// client can be used directly.
+    Literal,
+    /// A DNS name. The literal checks say nothing about where it points, so it
+    /// must be resolved, every returned address vetted, and the connection
+    /// pinned to those addresses — see [`WebPushProvider::vetted_client`].
+    Domain {
+        /// The host as it appears in the URL.
+        host: String,
+        /// The port that will be connected to (the scheme default if implicit).
+        port: u16,
+    },
+}
+
+/// True for a resolved address a subscription endpoint must never reach.
+///
+/// Loopback is folded in unconditionally here: this function only ever sees
+/// addresses that came back from DNS for a *non*-loopback name, and a name that
+/// resolves to 127.0.0.1 is the classic way to launder the loopback check.
+/// (`is_internal_v6` already covers IPv6 loopback; `is_internal_v4`
+/// deliberately does not, so it is added explicitly.)
+fn is_internal_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_internal_v4(&v4) || v4.is_loopback(),
+        IpAddr::V6(v6) => is_internal_v6(&v6),
+    }
+}
+
+/// Resolve `host` and refuse the whole endpoint if *any* answer is internal.
+///
+/// Rejecting on `any` rather than `all` is deliberate: a resolver that returns
+/// one public and one internal address would otherwise leave the choice of
+/// which to dial up to the connector.
+async fn resolve_and_vet(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    // The host is attacker-influenced, so — as everywhere else in this module —
+    // it is never echoed into the error text.
+    let unresolvable =
+        || PushError::Network("web push endpoint host could not be resolved".to_string());
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| unresolvable())?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(unresolvable());
+    }
+
+    if addrs.iter().any(|addr| is_internal_addr(addr.ip())) {
+        return Err(PushError::Config(
+            "web push endpoint resolves to an internal address".to_string(),
+        ));
+    }
+
+    Ok(addrs)
+}
+
 /// SSRF guard for the client-supplied subscription endpoint: enforce https and
 /// refuse IP-literal internal targets and `.internal`/`.local` hosts before we
-/// open a connection. This is a cheap literal/suffix check, not DNS resolution —
-/// enough to block the obvious pivots a malicious push subscription could aim at.
+/// open a connection.
+///
+/// This half is a pure literal/suffix check. It is deliberately *not* the whole
+/// guard: a `Host::Domain` passes here and is then resolved and vetted by
+/// [`resolve_and_vet`], because otherwise `https://metadata.attacker.example/`
+/// with an A record of `169.254.169.254` would skip every check above — an
+/// easier bypass than any of the IPv6 embeddings [`is_internal_v6`] handles.
+/// The returned [`EndpointTarget`] tells the caller which case it got.
 ///
 /// Loopback is exempt **only** when `allow_insecure_loopback` is set. That flag
 /// defaults to `false`, which matters: the exemption's stated justification is
@@ -62,7 +131,7 @@ fn urgency_header_value(urgency: Urgency) -> &'static str {
 /// production binary an untrusted subscription endpoint of
 /// `http://127.0.0.1:6379/...` passed validation and let a push subscription
 /// drive requests at any loopback-bound service on the app host.
-fn validate_endpoint(endpoint: &str, allow_insecure_loopback: bool) -> Result<()> {
+fn validate_endpoint(endpoint: &str, allow_insecure_loopback: bool) -> Result<EndpointTarget> {
     let url = url::Url::parse(endpoint)
         .map_err(|e| PushError::Config(format!("invalid web push endpoint URL: {e}")))?;
     let host_str = url.host_str().unwrap_or("");
@@ -83,7 +152,7 @@ fn validate_endpoint(endpoint: &str, allow_insecure_loopback: bool) -> Result<()
         // an untrusted endpoint could aim requests at services bound to
         // localhost on the app host.
         return if allow_insecure_loopback {
-            Ok(())
+            Ok(EndpointTarget::Literal)
         } else {
             Err(PushError::Config(
                 "web push endpoint targets a loopback address (set \
@@ -101,20 +170,6 @@ fn validate_endpoint(endpoint: &str, allow_insecure_loopback: bool) -> Result<()
         ));
     }
 
-    match url.host() {
-        Some(Host::Ipv4(ip)) if is_internal_v4(&ip) => {
-            return Err(PushError::Config(
-                "web push endpoint targets an internal IPv4 address".to_string(),
-            ));
-        }
-        Some(Host::Ipv6(ip)) if is_internal_v6(&ip) => {
-            return Err(PushError::Config(
-                "web push endpoint targets an internal IPv6 address".to_string(),
-            ));
-        }
-        _ => {}
-    }
-
     let host_lower = host_str.to_ascii_lowercase();
     if host_lower.ends_with(".internal") || host_lower.ends_with(".local") {
         return Err(PushError::Config(
@@ -122,7 +177,35 @@ fn validate_endpoint(endpoint: &str, allow_insecure_loopback: bool) -> Result<()
         ));
     }
 
-    Ok(())
+    match url.host() {
+        Some(Host::Ipv4(ip)) => {
+            if is_internal_v4(&ip) {
+                return Err(PushError::Config(
+                    "web push endpoint targets an internal IPv4 address".to_string(),
+                ));
+            }
+            Ok(EndpointTarget::Literal)
+        }
+        Some(Host::Ipv6(ip)) => {
+            if is_internal_v6(&ip) {
+                return Err(PushError::Config(
+                    "web push endpoint targets an internal IPv6 address".to_string(),
+                ));
+            }
+            Ok(EndpointTarget::Literal)
+        }
+        // The case the literal checks above cannot decide. Handing it back as
+        // `Domain` is what forces the caller through `resolve_and_vet`.
+        Some(Host::Domain(_)) => Ok(EndpointTarget::Domain {
+            host: host_str.to_string(),
+            port: url.port_or_known_default().ok_or_else(|| {
+                PushError::Config("web push endpoint has no usable port".to_string())
+            })?,
+        }),
+        None => Err(PushError::Config(
+            "web push endpoint has no host".to_string(),
+        )),
+    }
 }
 
 /// Web Push configuration.
@@ -250,6 +333,23 @@ impl From<&Subscription> for WebPushSubscription {
     }
 }
 
+/// How long a vetted DNS answer (and the client pinned to it) is reused.
+///
+/// Short enough that a legitimate push service can move, long enough that a
+/// batch to one host does not re-resolve per notification.
+const PINNED_CLIENT_TTL: Duration = Duration::from_secs(30);
+
+/// Hard cap on the pinned-client cache. Subscription endpoints are
+/// attacker-influenced, so an unbounded map keyed by their host is a memory
+/// amplification primitive.
+const PINNED_CLIENT_MAX: usize = 64;
+
+/// A client whose DNS resolution is pinned to already-vetted addresses.
+struct PinnedClient {
+    client: reqwest::Client,
+    expires_at: Instant,
+}
+
 /// Web Push provider using VAPID.
 pub struct WebPushProvider {
     config: WebPushConfig,
@@ -258,6 +358,14 @@ pub struct WebPushProvider {
     /// and attach the subscription info rather than re-decoding the base64 key
     /// and re-deriving the EC key on every notification.
     vapid: PartialVapidSignatureBuilder,
+    /// Per-host clients pinned to vetted addresses, keyed by `host:port`.
+    ///
+    /// Pinning is the point: without it the guard resolves the name, approves
+    /// the answer, and then lets the connector resolve it *again* — a DNS
+    /// rebinding window in which the second answer can be 169.254.169.254.
+    /// Caching them keeps a batch to one push service from paying a fresh
+    /// resolution and a fresh connection pool per notification.
+    pinned_clients: std::sync::Mutex<HashMap<String, PinnedClient>>,
 }
 
 impl WebPushProvider {
@@ -281,7 +389,64 @@ impl WebPushProvider {
             config,
             client,
             vapid,
+            pinned_clients: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A client that will only ever connect `host` to addresses this guard has
+    /// already vetted.
+    ///
+    /// Poison is recovered rather than propagated throughout: the guarded value
+    /// is a plain cache with no cross-field invariant, so one panic elsewhere
+    /// must not brick the provider.
+    async fn vetted_client(&self, host: &str, port: u16) -> Result<reqwest::Client> {
+        let key = format!("{host}:{port}");
+
+        {
+            let cache = self
+                .pinned_clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(pinned) = cache.get(&key)
+                && pinned.expires_at > Instant::now()
+            {
+                return Ok(pinned.client.clone());
+            }
+        }
+
+        let addrs = resolve_and_vet(host, port).await?;
+
+        // Same settings as `self.client` — redirects refused, both timeouts
+        // present — plus the resolution override that closes the rebinding
+        // window between the check above and the connect below.
+        let client = reqwest::Client::builder()
+            .timeout(self.config.timeout)
+            .connect_timeout(self.config.connect_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host, &addrs)
+            .build()
+            .map_err(|e| PushError::Config(e.to_string()))?;
+
+        let mut cache = self
+            .pinned_clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        cache.retain(|_, pinned| pinned.expires_at > now);
+        if cache.len() >= PINNED_CLIENT_MAX {
+            // Bounded, and cheap to rebuild: dropping everything is preferable
+            // to letting attacker-chosen hosts grow this without limit.
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            PinnedClient {
+                client: client.clone(),
+                expires_at: now + PINNED_CLIENT_TTL,
+            },
+        );
+
+        Ok(client)
     }
 
     /// Send to a subscription.
@@ -318,8 +483,14 @@ impl WebPushProvider {
         payload: &str,
     ) -> Result<()> {
         // SSRF hardening: reject non-https / internal-target endpoints before we
-        // sign anything or open a connection.
-        validate_endpoint(&subscription.endpoint, self.config.allow_insecure_loopback)?;
+        // sign anything or open a connection. A DNS name additionally gets
+        // resolved, every answer vetted, and the connection pinned to those
+        // answers so rebinding cannot swap the target between check and connect.
+        let client =
+            match validate_endpoint(&subscription.endpoint, self.config.allow_insecure_loopback)? {
+                EndpointTarget::Literal => self.client.clone(),
+                EndpointTarget::Domain { host, port } => self.vetted_client(&host, port).await?,
+            };
 
         let subscription_info = SubscriptionInfo::new(
             &subscription.endpoint,
@@ -382,8 +553,7 @@ impl WebPushProvider {
         // Content-Encoding / Content-Type / crypto headers, encrypted body) so we
         // don't depend on its isahc/libcurl client. If you bump web-push, re-diff
         // this against that function to keep the headers in sync.
-        let mut request = self
-            .client
+        let mut request = client
             .post(message.endpoint.to_string())
             .header("TTL", message.ttl.to_string())
             .header("Urgency", urgency_header_value(notification.urgency));
@@ -430,6 +600,17 @@ impl WebPushProvider {
                 PushError::Timeout
             } else if e.is_connect() {
                 PushError::Network("web push endpoint unreachable".to_string())
+            } else if e.is_request() || e.is_body() {
+                // A TCP reset after connect, a TLS renegotiation failure, or a
+                // broken pipe mid-payload are the same transient class as a
+                // connect failure. Routing them to the non-retryable
+                // `Provider(None, ..)` meant a push service that resets under
+                // load dropped notifications permanently, while the identical
+                // failure occurring during *connect* was retried. The message
+                // is a constant for the same reason as every other arm here:
+                // `e.to_string()` appends ` for url (…)` and would re-introduce
+                // the attacker-supplied endpoint.
+                PushError::Network("web push request failed in transit".to_string())
             } else {
                 PushError::provider(None, "web push request failed")
             }
@@ -672,6 +853,101 @@ mod tests {
                 "{endpoint} should be permitted with the opt-in"
             );
         }
+    }
+
+    #[test]
+    fn a_domain_endpoint_is_deferred_to_dns_resolution() {
+        // The gap this closes: `Some(Host::Domain(_))` had no arm at all, so
+        // `https://metadata.attacker.example/push` with an A record of
+        // 169.254.169.254 skipped every check. A domain must now come back as
+        // `Domain`, which is what forces the caller through `resolve_and_vet`.
+        assert_eq!(
+            validate_endpoint("https://metadata.attacker.example/push", false).unwrap(),
+            EndpointTarget::Domain {
+                host: "metadata.attacker.example".to_string(),
+                port: 443,
+            }
+        );
+        // An explicit port is carried through rather than defaulted.
+        assert_eq!(
+            validate_endpoint("https://push.example.com:8443/x", false).unwrap(),
+            EndpointTarget::Domain {
+                host: "push.example.com".to_string(),
+                port: 8443,
+            }
+        );
+    }
+
+    #[test]
+    fn ip_literal_endpoints_need_no_resolution() {
+        // Nothing to resolve and nothing to pin: the address in the URL is the
+        // address that gets dialed.
+        assert_eq!(
+            validate_endpoint("https://93.184.216.34/push", false).unwrap(),
+            EndpointTarget::Literal
+        );
+        assert_eq!(
+            validate_endpoint("https://[2606:2800:220:1:248:1893:25c8:1946]/push", false).unwrap(),
+            EndpointTarget::Literal
+        );
+        assert_eq!(
+            validate_endpoint("http://127.0.0.1:8080/push", true).unwrap(),
+            EndpointTarget::Literal
+        );
+    }
+
+    #[test]
+    fn resolved_internal_addresses_are_refused() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // The vetting applied to every DNS answer. Loopback has to be blocked
+        // here even though `is_internal_v4` excludes it: a name resolving to
+        // 127.0.0.1 is the standard way to launder the literal loopback check.
+        for ip in [
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6("fd12:3456::1".parse().unwrap()),
+        ] {
+            assert!(is_internal_addr(ip), "{ip} must be refused");
+        }
+
+        assert!(!is_internal_addr(IpAddr::V4(Ipv4Addr::new(
+            93, 184, 216, 34
+        ))));
+    }
+
+    #[tokio::test]
+    async fn resolve_and_vet_refuses_a_host_that_resolves_to_loopback() {
+        // `lookup_host` parses an IP literal without touching DNS, so this runs
+        // offline while still exercising the real resolve-then-vet path.
+        let err = resolve_and_vet("127.0.0.1", 443)
+            .await
+            .expect_err("a loopback answer must be refused");
+        assert!(matches!(err, PushError::Config(_)), "got {err:?}");
+
+        let err = resolve_and_vet("169.254.169.254", 443)
+            .await
+            .expect_err("a link-local answer must be refused");
+        assert!(matches!(err, PushError::Config(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_and_vet_accepts_a_public_answer_and_never_echoes_the_host() {
+        let addrs = resolve_and_vet("93.184.216.34", 443)
+            .await
+            .expect("a public answer must be accepted");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].port(), 443);
+
+        let err = resolve_and_vet("169.254.169.254", 443).await.unwrap_err();
+        assert!(
+            !err.to_string().contains("169.254"),
+            "the attacker-influenced host must not be echoed: {err}"
+        );
     }
 
     #[test]

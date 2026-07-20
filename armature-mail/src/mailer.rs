@@ -194,7 +194,7 @@ impl Mailer {
     /// Send to multiple recipients.
     ///
     /// Up to [`MailerConfig::bulk_concurrency`] sends are in flight at once, so
-    /// one slow recipient no longer stalls the whole batch. Results are returned
+    /// one slow recipient does not stall the whole batch. Results are returned
     /// in the same order as `emails` regardless of completion order.
     pub async fn send_bulk(&self, emails: Vec<Email>) -> Vec<Result<()>> {
         use futures_util::stream::StreamExt;
@@ -258,10 +258,16 @@ impl Mailer {
         // Unreachable: the loop runs `0..=retry_count`, and on its final
         // iteration `attempt >= retry_count` holds, so every path through the
         // last iteration returns — `Ok(())` or `Err(e)`. Kept as an `Err` rather
-        // than `unreachable!()`: trading a guaranteed-unused error return for a
-        // panic in a library is a strictly worse failure mode if the invariant
-        // above is ever broken by an edit to the loop.
-        Err(last_error.expect("send_with_retry always returns on its final attempt"))
+        // than a panic (`unreachable!()`, `.expect(..)`): trading a
+        // guaranteed-unused error return for a panic in a library is a strictly
+        // worse failure mode if the invariant above is ever broken by an edit to
+        // the loop.
+        Err(last_error.unwrap_or_else(|| {
+            MailError::provider(
+                None,
+                "send_with_retry exhausted its attempts without recording an error",
+            )
+        }))
     }
 }
 

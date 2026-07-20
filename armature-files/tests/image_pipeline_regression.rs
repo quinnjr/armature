@@ -834,6 +834,36 @@ async fn convert_format_re_encodes_original_while_the_pipeline_passes_through() 
     );
 }
 
+/// Finding #19 (b): with `embedded-font` off and no font supplied, a text
+/// watermark must fail *cleanly* rather than panic or silently no-op.
+///
+/// This is the documented reason the `--no-default-features --features images`
+/// CI matrix entry exists. Every other watermark test in this file is
+/// `#[cfg(feature = "embedded-font")]`, so without this one that job compiled
+/// the fallback-less path and asserted nothing about it.
+#[cfg(not(feature = "embedded-font"))]
+#[tokio::test]
+async fn text_watermark_without_a_font_errors_cleanly() {
+    let err = Pipeline::new()
+        .load_bytes(solid_png(64, 32, [255, 255, 255, 255]), "photo.png")
+        .image(ImageOp::TextWatermark {
+            text: "Hi".to_string(),
+            position: Position::Center,
+            font_size: 24.0,
+            color: [0, 0, 0, 255],
+            font: None,
+        })
+        .execute()
+        .await
+        .expect_err("no embedded font and no supplied font must be an error, not a render");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("font"),
+        "the error must name the missing font so the caller knows what to supply, got: {message}"
+    );
+}
+
 /// Finding #19: the vendored font must be substitutable.
 ///
 /// `embedded-font` is default-on, but a downstream binary that does not want

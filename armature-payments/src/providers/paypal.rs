@@ -179,7 +179,15 @@ impl PayPalProvider {
         if !response.status().is_success() {
             let status = response.status();
             let retry_after = retry_after_secs(&response);
-            let body = response.text().await.unwrap_or_default();
+            // A body that could not be read is not the same thing as an empty
+            // body: `unwrap_or_default()` made a truncated response
+            // indistinguishable from a gateway that legitimately sent nothing,
+            // which is exactly the distinction someone debugging a failed
+            // charge needs. Matches `stripe_unit`.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
             return Err(crate::provider::classify_status(
                 "paypal",
                 status,
@@ -278,7 +286,15 @@ fn order_charge_status(status: &str) -> ChargeStatus {
 async fn paypal_error(response: reqwest::Response) -> PaymentError {
     let status = response.status();
     let retry_after = retry_after_secs(&response);
-    let body = response.text().await.unwrap_or_default();
+    // A body that could not be read is not the same thing as an empty
+    // body: `unwrap_or_default()` made a truncated response
+    // indistinguishable from a gateway that legitimately sent nothing,
+    // which is exactly the distinction someone debugging a failed charge
+    // needs. Matches `stripe_unit`.
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
     crate::provider::classify_status("paypal", status, &body, retry_after)
 }
 

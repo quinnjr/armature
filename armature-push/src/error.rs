@@ -43,9 +43,8 @@ pub enum PushError {
     /// was one. It is load-bearing: every provider funnels its otherwise
     /// unclassified failures through this variant, so without the status a
     /// transient 503 is indistinguishable from a permanent 400 and
-    /// [`PushError::is_retryable`] has to guess — which it previously did,
-    /// answering `false` and permanently dropping a whole notification batch
-    /// across a five-minute FCM outage.
+    /// [`PushError::is_retryable`] cannot tell them apart. Populate it whenever
+    /// a real HTTP response is in hand.
     #[error("Provider error{}: {message}", .status.map(|s| format!(" ({s})")).unwrap_or_default())]
     Provider {
         /// HTTP status returned by the provider, if any.
@@ -196,9 +195,24 @@ impl From<reqwest::Error> for PushError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
             Self::Timeout
-        } else if err.is_connect() {
+        } else if err.is_connect() || err.is_request() || err.is_body() {
+            // `is_request()`/`is_body()` cover a TCP reset after connect, a TLS
+            // renegotiation failure, and a broken pipe mid-payload. Those are
+            // the same transient class as a connect failure, so they must land
+            // on the retryable `Network` — sending them to the fallthrough
+            // below produced a `Provider` with no status, which
+            // `is_retryable()` correctly refuses to retry, so a push service
+            // resetting under load dropped notifications permanently while an
+            // identical failure during *connect* retried.
             Self::Network(err.to_string())
         } else {
+            // NOTE: `reqwest::Error::status()` is `Some` only for errors
+            // produced by `Response::error_for_status()`, which no provider in
+            // this crate calls — every provider inspects `response.status()`
+            // itself and goes through `map_status`. So in practice this is
+            // always `None`, making the resulting `Provider` non-retryable.
+            // It is kept rather than hardcoded to `None` so the variant stays
+            // truthful if a future caller does use `error_for_status()`.
             Self::Provider {
                 status: err.status().map(|s| s.as_u16()),
                 message: err.to_string(),

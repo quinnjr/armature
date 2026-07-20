@@ -133,7 +133,7 @@ async fn enqueue_batch_pipelines_and_enqueues_everything() {
     let redis = service(&url).await;
 
     let config = EmailQueueConfig::default().queue_name("armature:test:batch");
-    let queue = EmailQueue::redis(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis.clone(), config.clone()).unwrap();
 
     let emails: Vec<Email> = (0..20).map(test_email).collect();
     let ids = queue.enqueue_batch(emails).await.unwrap();
@@ -216,17 +216,20 @@ async fn pop_never_returns_more_than_count() {
     let config = EmailQueueConfig::default().queue_name("armature:test:pop-count");
     let backend = RedisBackend::new(redis, config);
 
+    // 3 retry jobs, all already due. `fail` acts only for the caller that still
+    // holds the claim, so each is pushed and popped before it is failed — which
+    // is also the only sequence a real worker ever performs.
+    for i in 3..6 {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+    for mut job in backend.pop(3).await.unwrap() {
+        job.next_retry_at = Some(0);
+        backend.fail(job, "boom").await.unwrap();
+    }
+
     // 3 pending jobs.
     for i in 0..3 {
         backend.push(EmailJob::new(test_email(i))).await.unwrap();
-    }
-
-    // 3 retry jobs, all already due. `fail` both stores the body and adds the id
-    // to the retry set, so these must not also be `push`ed into pending.
-    for i in 3..6 {
-        let mut job = EmailJob::new(test_email(i));
-        job.next_retry_at = Some(0);
-        backend.fail(job, "boom").await.unwrap();
     }
 
     let jobs = backend.pop(2).await.unwrap();
@@ -247,7 +250,7 @@ async fn processing_is_tracked_between_pop_and_complete() {
 
     let config = EmailQueueConfig::default().queue_name("armature:test:processing");
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config);
+    let queue = EmailQueue::redis(redis, config).unwrap();
 
     for i in 0..3 {
         backend.push(EmailJob::new(test_email(i))).await.unwrap();
@@ -284,7 +287,7 @@ async fn a_job_with_a_missing_body_is_dead_lettered_not_dropped() {
 
     let config = EmailQueueConfig::default().queue_name("armature:test:lost-body");
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config.clone());
+    let queue = EmailQueue::redis(redis, config.clone()).unwrap();
 
     let job = EmailJob::new(test_email(0));
     let job_id = job.id.clone();
@@ -320,7 +323,7 @@ async fn a_job_with_a_corrupt_body_is_dead_lettered() {
 
     let config = EmailQueueConfig::default().queue_name("armature:test:corrupt-body");
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config.clone());
+    let queue = EmailQueue::redis(redis, config.clone()).unwrap();
 
     let job = EmailJob::new(test_email(0));
     let job_id = job.id.clone();
@@ -339,64 +342,76 @@ async fn a_job_with_a_corrupt_body_is_dead_lettered() {
     assert_eq!(queue.stats().await.unwrap().dead_letter, 1);
 }
 
-/// WF6 audit: the retry claim was `ZRANGEBYSCORE` followed by a *separate*
-/// `ZREM`, which is not a claim at all. Two concurrent `pop`s both saw the same
-/// ids before either `ZREM` landed, both added them to `:processing`, both
-/// `MGET`ed the bodies, and both sent the email. The claim must now decide
-/// ownership: across N concurrent pops, every job is returned exactly once.
-#[tokio::test]
+/// The retry claim was `ZRANGEBYSCORE` followed by a *separate* `ZREM`, which is
+/// not a claim at all. Two concurrent `pop`s both saw the same ids before either
+/// `ZREM` landed, both added them to `:processing`, both `MGET`ed the bodies,
+/// and both sent the email. The claim must now decide ownership: across N
+/// concurrent pops, every job is returned exactly once.
+///
+/// Runs on a multi-thread runtime, and repeats against a fresh queue name each
+/// round. On a current-thread runtime a serialising schedule passes against
+/// broken code — the "80 claims for 40 jobs" figure that motivated this only
+/// appears when the poppers genuinely interleave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_pops_claim_each_retry_job_exactly_once() {
     require_docker!();
     let container = RedisContainer::start().await;
     let redis = service(&container.url()).await;
 
-    let config = EmailQueueConfig::default().queue_name("armature:test:claim-race");
-    let backend = Arc::new(RedisBackend::new(redis, config));
-
-    // 40 jobs, all in the *retry* set and all already due — the path that had
-    // no atomic claim. `fail` both stores the body and adds the id to the retry
-    // set, so they must not also be pushed to pending.
     const JOBS: usize = 40;
-    for i in 0..JOBS {
-        let mut job = EmailJob::new(test_email(i));
-        job.next_retry_at = Some(0);
-        backend.fail(job, "boom").await.unwrap();
-    }
+    const ROUNDS: usize = 10;
 
-    // 8 concurrent poppers, each asking for the whole set: without an atomic
-    // claim every one of them gets every id.
-    let mut handles = Vec::new();
-    for _ in 0..8 {
-        let backend = backend.clone();
-        handles.push(tokio::spawn(
-            async move { backend.pop(JOBS).await.unwrap() },
-        ));
-    }
+    for round in 0..ROUNDS {
+        let config =
+            EmailQueueConfig::default().queue_name(format!("armature:test:claim-race:{round}"));
+        let backend = Arc::new(RedisBackend::new(redis.clone(), config));
 
-    let mut all_ids = Vec::new();
-    for handle in handles {
-        all_ids.extend(handle.await.unwrap().into_iter().map(|j| j.id));
-    }
+        // 40 jobs, all in the *retry* set and all already due — the path that
+        // had no atomic claim. `fail` acts only for the claim's owner, so each
+        // job is pushed and popped before it is failed.
+        for i in 0..JOBS {
+            backend.push(EmailJob::new(test_email(i))).await.unwrap();
+        }
+        for mut job in backend.pop(JOBS).await.unwrap() {
+            job.next_retry_at = Some(0);
+            backend.fail(job, "boom").await.unwrap();
+        }
 
-    let unique: std::collections::HashSet<_> = all_ids.iter().collect();
-    assert_eq!(
-        all_ids.len(),
-        unique.len(),
-        "a job was claimed by more than one popper — it would have been sent twice \
-         ({} claims, {} distinct jobs)",
-        all_ids.len(),
-        unique.len()
-    );
-    assert_eq!(
-        all_ids.len(),
-        JOBS,
-        "every job must be claimed exactly once across the concurrent pops"
-    );
+        // 8 concurrent poppers, each asking for the whole set: without an atomic
+        // claim every one of them gets every id.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let backend = backend.clone();
+            handles.push(tokio::spawn(
+                async move { backend.pop(JOBS).await.unwrap() },
+            ));
+        }
+
+        let mut all_ids = Vec::new();
+        for handle in handles {
+            all_ids.extend(handle.await.unwrap().into_iter().map(|j| j.id));
+        }
+
+        let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+        assert_eq!(
+            all_ids.len(),
+            unique.len(),
+            "round {round}: a job was claimed by more than one popper — it would have \
+             been sent twice ({} claims, {} distinct jobs)",
+            all_ids.len(),
+            unique.len()
+        );
+        assert_eq!(
+            all_ids.len(),
+            JOBS,
+            "round {round}: every job must be claimed exactly once across the concurrent pops"
+        );
+    }
 }
 
 /// The same guarantee for the pending path, which `ZPOPMIN` already made atomic
 /// — asserted so a future refactor cannot quietly regress it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_pops_claim_each_pending_job_exactly_once() {
     require_docker!();
     let container = RedisContainer::start().await;
@@ -432,10 +447,10 @@ async fn concurrent_pops_claim_each_pending_job_exactly_once() {
     assert_eq!(all_ids.len(), JOBS);
 }
 
-/// WF6 audit: `:processing` documented a sweeper that recovers jobs whose worker
-/// died between `pop` and `complete`. `grep -rn "sweep\|reclaim"` found only the
-/// comment — the job stayed claimed and its body stayed at `:job:<id>` forever,
-/// after `enqueue` had returned `Ok(job_id)`.
+/// `:processing` documented a sweeper that recovers jobs whose worker died
+/// between `pop` and `complete`, and no such sweeper existed — the job stayed
+/// claimed and its body stayed at `:job:<id>` forever, after `enqueue` had
+/// returned `Ok(job_id)`.
 #[tokio::test]
 async fn a_job_whose_worker_never_reported_back_is_reclaimed_and_redelivered() {
     require_docker!();
@@ -444,7 +459,7 @@ async fn a_job_whose_worker_never_reported_back_is_reclaimed_and_redelivered() {
 
     let config = EmailQueueConfig::default().queue_name("armature:test:reclaim");
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config);
+    let queue = EmailQueue::redis(redis, config).unwrap();
 
     backend.push(EmailJob::new(test_email(0))).await.unwrap();
 
@@ -470,10 +485,239 @@ async fn a_job_whose_worker_never_reported_back_is_reclaimed_and_redelivered() {
     assert_eq!(stats.processing, 0, "claim must be released: {stats:?}");
     assert_eq!(stats.retrying, 1, "job must be re-queued: {stats:?}");
 
-    // And it is genuinely redelivered, as the same job.
+    // And it is genuinely redelivered, as the same job, with the reclaim
+    // counted as an attempt.
     let again = backend.pop(1).await.unwrap();
     assert_eq!(again.len(), 1, "reclaimed job was not redelivered");
     assert_eq!(again[0].id, claimed[0].id);
+    assert_eq!(
+        again[0].attempts, 1,
+        "a reclaim must count as an attempt or a poison job redelivers forever"
+    );
+}
+
+/// `attempts` was bumped only by the worker's `fail` path, which a crashed
+/// worker never reaches. A job that kills its worker therefore came back with
+/// `attempts` frozen: `should_retry()` never went false, it never reached the
+/// dead-letter queue, and it was re-sent every `visibility_timeout` forever — an
+/// unbounded stream of duplicates if the send had actually succeeded first.
+#[tokio::test]
+async fn repeated_reclaims_dead_letter_the_job_instead_of_looping_forever() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:reclaim-poison");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config).unwrap();
+
+    let job = EmailJob::new(test_email(0)).max_retries(3);
+    let job_id = job.id.clone();
+    backend.push(job).await.unwrap();
+
+    // A worker that dies on this job every single time.
+    for attempt in 1..=3 {
+        let popped = backend.pop(1).await.unwrap();
+        assert_eq!(
+            popped.len(),
+            1,
+            "attempt {attempt}: job was not redelivered"
+        );
+        assert_eq!(popped[0].id, job_id);
+        assert_eq!(popped[0].attempts, attempt - 1);
+        assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+    }
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(
+        stats.dead_letter, 1,
+        "a job reclaimed max_attempts times must end in the DLQ: {stats:?}"
+    );
+    assert_eq!(stats.retrying, 0, "it must not still be queued: {stats:?}");
+    assert_eq!(stats.pending, 0);
+    assert_eq!(stats.processing, 0);
+    assert!(
+        backend.pop(1).await.unwrap().is_empty(),
+        "the dead-lettered job was redelivered anyway"
+    );
+}
+
+/// A reclaim that races a live `complete` must not manufacture a loss.
+///
+/// `reclaim_stale` moved the id to `:retry` but left the body; the still-live
+/// worker's `complete` then `DEL`ed the body, so the redelivery found
+/// `payload == None`, logged an `error!`, `LPUSH`ed to `:lost`, and dead-lettered
+/// a stub — for an email that was successfully delivered. Claims are now
+/// generational: whichever of the two `ZREM`s `:processing` first wins, and the
+/// loser is a no-op.
+#[tokio::test]
+async fn a_reclaim_racing_a_live_complete_does_not_fabricate_a_loss() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:reclaim-vs-complete");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config.clone()).unwrap();
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+    let claimed = backend.pop(1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    // The sweeper decides this claim is stale and takes it back...
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+
+    // ...and only then does the original worker report success. It no longer
+    // owns the claim, so it must leave the body alone.
+    backend.complete(&claimed[0].id).await.unwrap();
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(
+        stats.dead_letter, 0,
+        "a delivered email was dead-lettered as lost: {stats:?}"
+    );
+
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let lost: Vec<String> = redis::cmd("LRANGE")
+        .arg(format!("{}:lost", config.queue_name))
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(lost.is_empty(), "fabricated a lost-job record: {lost:?}");
+
+    // The redelivery is intact — a duplicate send (deduplicable on Message-ID)
+    // is the correct trade against a fabricated loss.
+    let again = backend.pop(1).await.unwrap();
+    assert_eq!(again.len(), 1, "the reclaimed copy lost its body");
+    assert_eq!(again[0].id, claimed[0].id);
+}
+
+/// A claimed job whose body Redis evicted is a *genuine* loss and must be
+/// recorded, not released silently.
+///
+/// The sweeper sees the same symptom — a stale claim with no body — in two
+/// opposite situations, and the naive reading ("the worker must have completed
+/// it") turns an evicted email into a `debug!` line. The discriminator is the
+/// `ZREM` reply: `complete` and `discard` are gated on `ZREM :processing == 1`,
+/// so an owner that finished has already taken the claim and the sweeper's
+/// `ZREM` returns 0. Here nobody completed it, the claim is still ours, and the
+/// caller was told this email was enqueued — so it belongs in `:lost`.
+#[tokio::test]
+async fn an_evicted_body_under_a_live_claim_is_recorded_as_lost() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:evicted-body");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+    let claimed = backend.pop(1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    // Simulate Redis evicting the body while the claim is still held. No worker
+    // ever calls `complete`, so the `:processing` entry remains ours.
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let deleted: i64 = redis::cmd("DEL")
+        .arg(format!("{}:job:{}", config.queue_name, claimed[0].id))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1, "the body should have been there to evict");
+
+    backend.reclaim_stale(Duration::ZERO).await.unwrap();
+
+    let lost: Vec<String> = redis::cmd("LRANGE")
+        .arg(format!("{}:lost", config.queue_name))
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        lost.len(),
+        1,
+        "an evicted body under a live claim must be recorded as lost, not released silently"
+    );
+    assert!(
+        lost[0].contains(&claimed[0].id),
+        "the lost record must name the job: {lost:?}"
+    );
+
+    // And the claim is released either way, so `:processing` does not leak.
+    let still_claimed: i64 = redis::cmd("ZCARD")
+        .arg(format!("{}:processing", config.queue_name))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(still_claimed, 0, "the stale claim was not released");
+}
+
+/// The reverse order: the owner completes first, so the sweeper's finalize is
+/// the no-op and nothing is resurrected.
+#[tokio::test]
+async fn a_completed_job_is_not_resurrected_by_a_later_sweep() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:complete-then-sweep");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config).unwrap();
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+    let claimed = backend.pop(1).await.unwrap();
+    backend.complete(&claimed[0].id).await.unwrap();
+
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 0);
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(stats.processed, 1);
+    assert_eq!(stats.retrying, 0, "a delivered job was requeued: {stats:?}");
+    assert_eq!(stats.dead_letter, 0);
+    assert!(backend.pop(1).await.unwrap().is_empty());
+}
+
+/// The `RECLAIM` script had no `LIMIT`, unlike `CLAIM_RETRY`. After a fleet
+/// restart `:processing` holds the whole backlog, all past the cutoff, and one
+/// `EVAL` does two writes per id while single-threaded Redis is blocked — and as
+/// a *write* script `SCRIPT KILL` refuses it, leaving `SHUTDOWN NOSAVE` (which
+/// discards unpersisted jobs) as the only recovery. The sweep is now batched,
+/// and the caller loops until a batch comes back short, so a backlog larger than
+/// one batch is still fully reclaimed.
+#[tokio::test]
+async fn a_backlog_larger_than_one_batch_is_swept_in_batches() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    // Comfortably more than the 100-id batch the sweeper uses.
+    const JOBS: usize = 250;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:reclaim-batching");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config).unwrap();
+
+    for i in 0..JOBS {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+    assert_eq!(backend.pop(JOBS).await.unwrap().len(), JOBS);
+    assert_eq!(queue.stats().await.unwrap().processing, JOBS as u64);
+
+    assert_eq!(
+        backend.reclaim_stale(Duration::ZERO).await.unwrap(),
+        JOBS as u64,
+        "the sweeper must keep going past the first batch"
+    );
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(stats.processing, 0, "claims not fully released: {stats:?}");
+    assert_eq!(stats.retrying, JOBS as u64, "{stats:?}");
 }
 
 /// A permanently failed email must not inflate the success counter: `complete`
@@ -487,7 +731,7 @@ async fn discard_releases_the_claim_without_counting_a_success() {
 
     let config = EmailQueueConfig::default().queue_name("armature:test:discard");
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config);
+    let queue = EmailQueue::redis(redis, config).unwrap();
 
     for i in 0..2 {
         backend.push(EmailJob::new(test_email(i))).await.unwrap();
@@ -517,7 +761,7 @@ async fn a_lost_job_is_recorded_even_with_the_dlq_disabled() {
         .queue_name("armature:test:lost-no-dlq")
         .dead_letter_queue(false);
     let backend = RedisBackend::new(redis.clone(), config.clone());
-    let queue = EmailQueue::redis(redis, config.clone());
+    let queue = EmailQueue::redis(redis, config.clone()).unwrap();
 
     let job = EmailJob::new(test_email(0));
     let job_id = job.id.clone();
@@ -579,7 +823,7 @@ async fn job_timeout_is_enforced_against_redis_backend() {
         .poll_interval(Duration::from_millis(20))
         .job_timeout(Duration::from_millis(200));
 
-    let queue = EmailQueue::redis(redis, config);
+    let queue = EmailQueue::redis(redis, config).unwrap();
     queue
         .enqueue_job(EmailJob::new(test_email(0)).max_retries(0))
         .await

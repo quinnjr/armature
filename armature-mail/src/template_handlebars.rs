@@ -27,10 +27,13 @@ impl HandlebarsEngine {
     /// Create a new Handlebars engine.
     ///
     /// The `html` part is HTML-escaped; the `text` and `subject` parts are not.
-    /// All three engines agree on this rule.
+    /// All three engines agree on this rule, and — since they escape via
+    /// [`crate::template_dir::escape_html`] rather than their own built-ins —
+    /// on the exact character set as well.
     pub fn new() -> Self {
         let mut handlebars = Handlebars::new();
         handlebars.set_strict_mode(true);
+        handlebars.register_escape_fn(crate::template_dir::escape_html);
 
         let mut plain = Handlebars::new();
         plain.set_strict_mode(true);

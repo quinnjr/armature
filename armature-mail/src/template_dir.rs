@@ -13,6 +13,43 @@ use crate::{MailError, Result};
 /// The parts of a template, in registration order.
 pub(crate) const PARTS: [&str; 3] = ["html", "text", "subject"];
 
+/// The escaping applied to the `html` part by *every* engine.
+///
+/// Each engine ships its own `escape_html`, and the three disagree: Handlebars
+/// escapes `` ` `` and `=`, MiniJinja escapes `/`, Tera escapes neither, and
+/// Tera and Handlebars even spell `'` differently (`&#39;` vs `&#x27;`). So the
+/// same template and the same context produced *different* HTML depending on
+/// which engine loaded it, while the crate documents them as interchangeable.
+///
+/// This is the union of all three sets, so no engine escapes less than it did
+/// before, installed on each of them as their escape function. The set matches
+/// the OWASP HTML-entity-encoding recommendation.
+///
+/// `tests/template_conformance.rs` pins the agreement with a fixture covering
+/// every character below.
+pub(crate) fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    push_escaped(value, &mut out);
+    out
+}
+
+/// [`escape_html`] into an existing buffer.
+pub(crate) fn push_escaped(value: &str, out: &mut String) {
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            '/' => out.push_str("&#x2f;"),
+            '=' => out.push_str("&#x3d;"),
+            '`' => out.push_str("&#x60;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 /// One template file found on disk.
 pub(crate) struct TemplatePart {
     /// Registration key: `"<template>/<part>"`.
@@ -87,6 +124,17 @@ mod tests {
         assert_eq!(keys, ["welcome/html", "welcome/subject"]);
         assert_eq!(found[0].template, "welcome");
         assert_eq!(found[0].content, "h");
+    }
+
+    /// The shared set is the union of what the three engines escaped
+    /// individually, so switching engines cannot weaken escaping.
+    #[test]
+    fn the_shared_escape_covers_every_engines_set() {
+        assert_eq!(
+            escape_html(r#"& < > " ' / = `"#),
+            "&amp; &lt; &gt; &quot; &#x27; &#x2f; &#x3d; &#x60;"
+        );
+        assert_eq!(escape_html("plain text"), "plain text");
     }
 
     #[test]

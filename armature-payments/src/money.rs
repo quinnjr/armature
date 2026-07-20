@@ -189,7 +189,12 @@ impl Money {
         use rust_decimal::prelude::ToPrimitive;
 
         let parsed = Decimal::from_str_exact(value.trim()).ok()?;
-        let scaled = parsed.checked_mul(Decimal::from(10i64.pow(currency.decimals())))?;
+        // `pow` panics on overflow. Unreachable while every `decimals()` is 0 or
+        // 2, but this is a parser fed by a gateway on the payment path, and a
+        // currency added with an implausible precision must surface as an
+        // unparseable amount, not as a panic in a request handler.
+        let multiplier = 10i64.checked_pow(currency.decimals())?;
+        let scaled = parsed.checked_mul(Decimal::from(multiplier))?;
         if !scaled.fract().is_zero() {
             return None;
         }
@@ -486,6 +491,19 @@ mod tests {
         assert_eq!(Currency::from_code("nonsense"), None);
         assert_eq!(Currency::from_code(""), None);
         assert_eq!(Currency::from_code("US"), None);
+    }
+
+    #[test]
+    fn every_currency_scales_without_overflowing() {
+        // The premise `from_gateway_string`'s `checked_pow` guards: a currency
+        // added with a precision beyond i64's reach would panic under `pow`.
+        for currency in Currency::ALL {
+            assert!(
+                10i64.checked_pow(currency.decimals()).is_some(),
+                "{} has an unrepresentable precision",
+                currency.code()
+            );
+        }
     }
 
     #[test]

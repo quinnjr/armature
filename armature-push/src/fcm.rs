@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::error::map_status;
+use crate::time::unix_now_secs;
 use crate::{Notification, Platform, Priority, PushError, PushProvider, Result};
 
 /// Maximum FCM HTTP v1 message size in bytes (4 MB).
@@ -297,8 +298,13 @@ impl FcmProvider {
     }
 
     /// Read the cached token if it is still comfortably valid.
+    ///
+    /// Poison is recovered rather than propagated: the guarded value is a
+    /// plain `Option<AccessToken>` with no cross-field invariant, so a panic
+    /// elsewhere cannot have left it half-updated. Unwrapping instead meant one
+    /// panic anywhere in the process bricked the provider forever.
     fn cached_token(&self) -> Option<String> {
-        let token = self.access_token.read().unwrap();
+        let token = self.access_token.read().unwrap_or_else(|e| e.into_inner());
         token.as_ref().and_then(|t| {
             (t.expires_at > Instant::now() + TOKEN_REFRESH_SKEW).then(|| t.token.clone())
         })
@@ -325,10 +331,12 @@ impl FcmProvider {
     async fn refresh_token(&self) -> Result<String> {
         use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        // A clock before the UNIX epoch is a configuration problem (a VM
+        // resumed from a snapshot, a container with an unsynced RTC), not a
+        // reason to panic. `duration_since(UNIX_EPOCH).unwrap()` here unwound
+        // straight out of `send()` and through the caller's task, while the
+        // byte-identical APNS code returned a `PushError::Config`.
+        let now = unix_now_secs()? as i64;
 
         #[derive(Serialize)]
         struct Claims {
@@ -388,7 +396,10 @@ impl FcmProvider {
             expires_at: Instant::now() + Duration::from_secs(response.expires_in),
         };
 
-        *self.access_token.write().unwrap() = Some(token);
+        // Same rationale as `cached_token`: the guarded value has no invariant
+        // a panicking holder could have broken, so poison is recovered rather
+        // than turned into a permanently unusable provider.
+        *self.access_token.write().unwrap_or_else(|e| e.into_inner()) = Some(token);
 
         Ok(response.access_token)
     }
@@ -825,6 +836,65 @@ mod tests {
         let err = validate_base_url("api_base", "http://169.254.169.254", true)
             .expect_err("opt-in must not permit http to a non-loopback host");
         assert!(matches!(err, PushError::Config(_)), "got {err:?}");
+    }
+
+    /// Mirrors `apns::tests::poisoned_locks_do_not_permanently_brick_the_provider`.
+    ///
+    /// FCM carried the byte-identical `access_token.read().unwrap()` /
+    /// `.write().unwrap()` that APNS was fixed for, so on the same host APNS
+    /// degraded gracefully while FCM panicked. Poison is benign here — the
+    /// RwLock guards a plain `Option<AccessToken>` with no cross-field
+    /// invariant — so it must be recovered, not propagated. (`refresh_lock` is
+    /// a `tokio::sync::Mutex`, which has no poisoning.)
+    #[test]
+    fn poisoned_token_lock_does_not_permanently_brick_the_provider() {
+        let provider = FcmProvider {
+            config: config(),
+            client: Client::new(),
+            access_token: RwLock::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
+        };
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = provider.access_token.write().unwrap();
+                    panic!("poison the token lock");
+                })
+                .join()
+                .expect_err("the spawned thread should have panicked");
+        });
+
+        assert!(provider.access_token.is_poisoned());
+
+        // Reading through the poisoned RwLock must not panic.
+        assert!(provider.cached_token().is_none());
+    }
+
+    /// The FCM half of the clock fix: `refresh_token` used to
+    /// `duration_since(UNIX_EPOCH).unwrap()`. It now goes through the shared
+    /// helper, whose failure is a `PushError::Config`. We cannot move the
+    /// system clock from a test, so pin that `refresh_token` reaches key
+    /// parsing (i.e. past the clock read) and reports a `Config` error rather
+    /// than panicking.
+    #[tokio::test]
+    async fn refresh_token_reports_a_config_error_instead_of_panicking() {
+        let provider = FcmProvider {
+            config: config(),
+            client: Client::new(),
+            access_token: RwLock::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
+        };
+
+        match provider.refresh_token().await {
+            Err(PushError::Config(msg)) => {
+                assert!(
+                    msg.contains("Invalid private key"),
+                    "expected to reach key parsing past the clock read, got {msg}"
+                );
+            }
+            other => panic!("expected a Config error from the fixture key, got {other:?}"),
+        }
     }
 
     #[test]

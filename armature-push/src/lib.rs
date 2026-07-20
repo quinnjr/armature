@@ -93,6 +93,9 @@ mod subscription;
 #[cfg(any(feature = "web-push", feature = "fcm", feature = "apns"))]
 mod host_guard;
 
+#[cfg(any(feature = "fcm", feature = "apns"))]
+mod time;
+
 #[cfg(feature = "web-push")]
 mod web_push;
 

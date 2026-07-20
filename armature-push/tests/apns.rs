@@ -277,12 +277,18 @@ async fn request_body_carries_aps_and_image() {
 }
 
 #[tokio::test]
-async fn send_batch_reuses_one_payload_and_one_jwt_across_tokens() {
+async fn send_batch_prepares_once_and_sends_one_request_per_token() {
     // `send_batch` used to call `send` per token, rebuilding the payload
     // (cloning the data HashMap) and re-running `serde_json::to_vec` for each
-    // one — 10k identical serializations for a 10k-device campaign. The token
-    // appears only in the URL, so every request body and every header must be
-    // byte-identical, and each token must still get exactly one request.
+    // one — 10k identical serializations for a 10k-device campaign.
+    //
+    // The "one payload, one JWT" property is *not* observable at the HTTP
+    // layer: a single-key payload serializes byte-identically every time, and
+    // the JWT is cached with a whole-second `iat`, so five sends in one second
+    // share it either way. Every body/header assertion below therefore holds
+    // against the old send-per-token code too, and only `prepare_count()`
+    // actually pins the rewrite. The wire assertions are kept for what they do
+    // verify: one request per token, at its own URL, with the right topic.
     let server = StubServer::builder()
         .default_response(StubResponse::new(200, ""))
         .start()
@@ -295,6 +301,13 @@ async fn send_batch_reuses_one_payload_and_one_jwt_across_tokens() {
 
     assert_eq!(results.len(), tokens.len(), "one result per input token");
     assert!(results.iter().all(|r| r.is_ok()), "got {results:?}");
+
+    assert_eq!(
+        provider.prepare_count(),
+        1,
+        "a 5-token batch must build the payload and fetch the JWT exactly once, \
+         not once per token"
+    );
 
     let requests = server.requests();
     assert_eq!(requests.len(), tokens.len());
@@ -352,6 +365,95 @@ async fn send_batch_reports_a_preparation_failure_for_every_token() {
         );
     }
     assert!(server.requests().is_empty(), "nothing should be sent");
+}
+
+/// A server that promises more body than it sends, then closes — so
+/// `response.text()` fails partway through the read.
+async fn truncated_body_server(status_line: &'static str, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // Drain enough of the request that the client finishes sending.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len() + 512
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.flush().await;
+                // Close early: the promised Content-Length never arrives.
+                drop(stream);
+            });
+        }
+    });
+
+    format!("http://{addr}")
+}
+
+async fn provider_at(url: String) -> ApnsProvider {
+    let config = ApnsConfig::new("team-id", "key-id", EC_PRIVATE_KEY, "com.example.app")
+        .environment(ApnsEnvironment::Custom(url))
+        .allow_insecure_loopback(true);
+    ApnsProvider::new(config).await.expect("build provider")
+}
+
+#[tokio::test]
+async fn an_unreadable_400_body_is_reported_rather_than_guessed_at() {
+    // `response.text().await.unwrap_or_default()` was load-bearing, not
+    // cosmetic: the body feeds `contains("ExpiredToken")` /
+    // `contains("BadDeviceToken")`, so a truncated read turned a
+    // device-removal verdict into a silent, generic `Provider(400)` and the
+    // dead device stayed in the caller's table forever.
+    let url = truncated_body_server("400 Bad Request", r#"{"reason":"BadDeviceToken"}"#).await;
+    let provider = provider_at(url).await;
+
+    let err = provider
+        .send("device-token", &Notification::new("Hi", "there"))
+        .await
+        .expect_err("a truncated response body must not be silently ignored");
+
+    assert!(
+        matches!(
+            err,
+            PushError::Provider {
+                status: Some(400),
+                ..
+            }
+        ),
+        "expected Provider(400), got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("APNS response body unreadable"),
+        "the error must say the body could not be read, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_410_body_still_removes_the_device() {
+    // 410 is the one status in that arm whose verdict does not need the body:
+    // Apple's bare 410 already means the device is gone. Downgrading it to a
+    // generic `Provider` on an unreadable body would be the mirror image of the
+    // bug above.
+    let url = truncated_body_server("410 Gone", r#"{"reason":"ExpiredToken"}"#).await;
+    let provider = provider_at(url).await;
+
+    let err = provider
+        .send("device-token", &Notification::new("Hi", "there"))
+        .await
+        .expect_err("expected error for 410");
+
+    assert!(
+        matches!(err, PushError::Unregistered(_)),
+        "expected Unregistered, got {err:?}"
+    );
+    assert!(err.should_remove_device());
 }
 
 #[tokio::test]

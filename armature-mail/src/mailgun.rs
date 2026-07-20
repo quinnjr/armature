@@ -144,7 +144,7 @@ fn build_form(email: &Email) -> Result<Vec<(String, String)>> {
         ("from".to_string(), from),
         (
             "subject".to_string(),
-            email.subject.clone().unwrap_or_default(),
+            email.wire_subject().unwrap_or_default().to_string(),
         ),
     ];
 
@@ -212,7 +212,7 @@ impl MailgunTransport {
     /// surfaced rather than swapped for `Client::new()`, which carries neither a
     /// request nor a connect timeout.
     pub fn new(config: MailgunConfig) -> Result<Self> {
-        crate::http::validate_endpoint(&config.endpoint())?;
+        crate::http::require_encrypted_endpoint(&config.endpoint())?;
         let client = build_client(config.timeout, config.connect_timeout)?;
 
         Ok(Self { client, config })
@@ -278,7 +278,12 @@ impl Transport for MailgunTransport {
                 60,
             )))
         } else {
-            let body = response.text().await.unwrap_or_default();
+            // Not `unwrap_or_default()`: a truncated read would be
+            // indistinguishable from a provider that sent an empty body.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
             Err(MailError::provider(
                 status.as_u16(),
                 format!("Mailgun error {}: {}", status, body),

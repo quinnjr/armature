@@ -56,7 +56,7 @@ async fn hung_send_is_abandoned_after_job_timeout() {
         .poll_interval(Duration::from_millis(20))
         .job_timeout(Duration::from_millis(200));
 
-    let queue = EmailQueue::in_memory(config.clone());
+    let queue = EmailQueue::in_memory(config.clone()).unwrap();
     queue
         .enqueue_job(EmailJob::new(test_email()).max_retries(0))
         .await
@@ -116,7 +116,7 @@ async fn timed_out_send_is_retried_when_retries_remain() {
         .retry_delay(Duration::from_secs(30))
         .job_timeout(Duration::from_millis(200));
 
-    let queue = EmailQueue::in_memory(config);
+    let queue = EmailQueue::in_memory(config).unwrap();
     queue
         .enqueue_job(EmailJob::new(test_email()).max_retries(3))
         .await
@@ -147,7 +147,7 @@ async fn timed_out_send_is_retried_when_retries_remain() {
 /// must still be enqueued exactly once and get a distinct id.
 #[tokio::test]
 async fn enqueue_batch_enqueues_every_email() {
-    let queue = EmailQueue::in_memory(EmailQueueConfig::default());
+    let queue = EmailQueue::in_memory(EmailQueueConfig::default()).unwrap();
 
     let emails: Vec<Email> = (0..10)
         .map(|i| test_email().subject(format!("Subject {i}")))
@@ -165,7 +165,7 @@ async fn enqueue_batch_enqueues_every_email() {
 
 #[tokio::test]
 async fn enqueue_batch_of_nothing_is_a_no_op() {
-    let queue = EmailQueue::in_memory(EmailQueueConfig::default());
+    let queue = EmailQueue::in_memory(EmailQueueConfig::default()).unwrap();
     assert!(queue.enqueue_batch(Vec::new()).await.unwrap().is_empty());
     assert_eq!(queue.stats().await.unwrap().pending, 0);
 }
@@ -213,7 +213,7 @@ async fn every_retry_reuses_the_same_message_id() {
         .retry_delay(Duration::from_millis(10))
         .job_timeout(Duration::from_secs(5));
 
-    let queue = EmailQueue::in_memory(config);
+    let queue = EmailQueue::in_memory(config).unwrap();
     queue
         .enqueue_job(EmailJob::new(test_email()).max_retries(3))
         .await
@@ -275,7 +275,7 @@ async fn permanent_failure_with_the_dlq_disabled_is_not_silently_lost() {
         .poll_interval(Duration::from_millis(10))
         .dead_letter_queue(false);
 
-    let queue = EmailQueue::in_memory(config);
+    let queue = EmailQueue::in_memory(config).unwrap();
     queue
         // No retries left, so the first failure is permanent.
         .enqueue_job(EmailJob::new(test_email()).max_retries(0))
@@ -373,4 +373,121 @@ async fn in_memory_pop_honors_count_exactly() {
 
     assert_eq!(backend.pop(2).await.unwrap().len(), 2);
     assert_eq!(backend.pop(10).await.unwrap().len(), 4);
+}
+
+/// Delegating wrapper so a test can hold the backend *and* hand it to a queue.
+///
+/// `EmailQueue::with_backend` takes ownership, but the sweep test needs to claim
+/// a job out of band, behind the worker's back.
+struct Shared(Arc<armature_mail::InMemoryBackend>);
+
+#[async_trait::async_trait]
+impl armature_mail::EmailQueueBackend for Shared {
+    async fn push(&self, job: EmailJob) -> Result<()> {
+        self.0.push(job).await
+    }
+    async fn pop(&self, count: usize) -> Result<Vec<EmailJob>> {
+        self.0.pop(count).await
+    }
+    async fn complete(&self, job_id: &str) -> Result<()> {
+        self.0.complete(job_id).await
+    }
+    async fn discard(&self, job_id: &str) -> Result<()> {
+        self.0.discard(job_id).await
+    }
+    async fn fail(&self, job: EmailJob, error: &str) -> Result<()> {
+        self.0.fail(job, error).await
+    }
+    async fn dead_letter(&self, job: EmailJob) -> Result<()> {
+        self.0.dead_letter(job).await
+    }
+    async fn reclaim_stale(&self, visibility_timeout: Duration) -> Result<u64> {
+        self.0.reclaim_stale(visibility_timeout).await
+    }
+    async fn stats(&self) -> Result<armature_mail::QueueStats> {
+        self.0.stats().await
+    }
+}
+
+/// The worker's sweep loop — the actual production wiring of `reclaim_stale` —
+/// had no test at all. An off-by-one in `sweep_interval`, or the `Err(e) =>
+/// error!` arm becoming a `break`, was invisible.
+///
+/// A job is claimed out of band and never reported on, standing in for a worker
+/// that died between `pop` and `complete`. The running worker must sweep it up
+/// and deliver it without any further help.
+#[tokio::test]
+async fn the_worker_sweep_loop_reclaims_and_redelivers_an_abandoned_job() {
+    use armature_mail::{EmailQueue, EmailQueueBackend, InMemoryBackend};
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mailer = Arc::new(
+        Mailer::new(RecordingTransport {
+            seen: seen.clone(),
+            fail: false,
+        })
+        .with_config(MailerConfig::default().retries(0)),
+    );
+
+    let backend = Arc::new(InMemoryBackend::new());
+    backend.push(EmailJob::new(test_email())).await.unwrap();
+
+    // Claim it and "die": no complete, no fail, no dead_letter. The worker below
+    // has no other way to learn about this job.
+    let claimed = backend.pop(1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let config = EmailQueueConfig::default()
+        .queue_name("armature:test:worker-sweep")
+        .concurrency(1)
+        .batch_size(1)
+        .poll_interval(Duration::from_millis(10))
+        .job_timeout(Duration::from_millis(20))
+        .visibility_timeout(Duration::from_millis(100));
+
+    let queue = EmailQueue::with_backend(Shared(backend.clone()), config).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let handle = tokio::spawn(queue.worker(mailer).with_shutdown(shutdown_rx).run());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !seen.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker never swept the abandoned job (stats: {:?})",
+            backend.stats().await.unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        claimed[0].email.message_id,
+        "a different email was delivered"
+    );
+
+    let _ = shutdown_tx.send(());
+    handle.abort();
+}
+
+/// `visibility_timeout` "must be comfortably above `job_timeout`" was a field
+/// doc and nothing else. `job_timeout(600s)` against the 300s default is a
+/// one-line plausible misconfiguration that systematically redelivers every slow
+/// email; an unsupportable configuration must be an error, not a hope.
+#[tokio::test]
+async fn a_queue_rejects_a_visibility_timeout_that_does_not_clear_job_timeout() {
+    let bad = EmailQueueConfig::default()
+        .queue_name("armature:test:bad-config")
+        .job_timeout(Duration::from_secs(600));
+
+    match EmailQueue::in_memory(bad) {
+        Err(armature_mail::MailError::Config(_)) => {}
+        Err(other) => panic!("expected a Config error, got {other}"),
+        Ok(_) => panic!("an unsupportable configuration was accepted"),
+    }
+
+    // The default is fine, and stays fine.
+    assert!(EmailQueue::in_memory(EmailQueueConfig::default()).is_ok());
 }

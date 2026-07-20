@@ -504,7 +504,9 @@ mod bb8_pool_config_tests {
     }
 }
 
-/// Requires Docker; skips itself when unavailable (see `armature_testkit::docker_available`).
+/// Requires Docker; skips itself when unavailable (see
+/// `armature_testkit::skip_if_no_docker!`), or fails under
+/// `ARMATURE_REQUIRE_DOCKER=1`.
 #[cfg(all(test, feature = "postgres", feature = "deadpool"))]
 mod pg_pool_config_integration_tests {
     use crate::{DieselConfig, PgPool};
@@ -521,10 +523,7 @@ mod pg_pool_config_integration_tests {
 
     #[tokio::test]
     async fn application_name_reaches_the_server() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
 
         let container = armature_testkit::containers::PostgresContainer::start().await;
         let config = DieselConfig::new(container.url())

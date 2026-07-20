@@ -135,8 +135,8 @@ impl ValidationError {
 /// [`FileValidator::validate`] call and shared by every rule.
 ///
 /// [`sniff_content_type`] scans the payload and, for the SVG probe, allocates a
-/// lossy `String` of the first KiB. Rules used to call it individually, so an
-/// N-rule validator re-scanned the same bytes N times.
+/// lossy `String` of the first KiB. Computing it once here and sharing it means
+/// an N-rule validator scans the bytes once, not N times.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationContext {
     /// The MIME type sniffed from the file's magic bytes, if recognizable.
@@ -660,6 +660,9 @@ pub mod size {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Minimal but genuine magic-byte payloads, so type checks see real
     /// content rather than the string "data".
@@ -878,5 +881,212 @@ mod tests {
         let validator = FileValidator::new().allowed_extensions(&["jpg", "png"]);
         let file = UploadedFile::from_bytes(Bytes::from("data"), "photo.jpg");
         assert!(validator.validate(&file).is_ok());
+    }
+
+    // --- ValidationContext / validate_with ----------------------------------
+
+    /// A rule that records how many times it was handed a context, and what the
+    /// context said the content type was.
+    struct SniffCountingRule {
+        contexts_seen: Arc<AtomicUsize>,
+        detected: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    impl ValidationRule for SniffCountingRule {
+        fn validate(&self, _file: &UploadedFile) -> Result<(), ValidationError> {
+            Ok(())
+        }
+
+        fn validate_with(
+            &self,
+            _file: &UploadedFile,
+            context: &ValidationContext,
+        ) -> Result<(), ValidationError> {
+            self.contexts_seen.fetch_add(1, Ordering::SeqCst);
+            self.detected
+                .lock()
+                .unwrap()
+                .push(context.detected_content_type().map(str::to_string));
+            Ok(())
+        }
+
+        fn description(&self) -> &str {
+            "Sniff counter"
+        }
+    }
+
+    /// The point of `ValidationContext`: one sniff per `validate` call, shared
+    /// by every rule, rather than one sniff per rule.
+    #[test]
+    fn every_rule_in_a_validator_sees_the_same_single_sniff() {
+        let contexts_seen = Arc::new(AtomicUsize::new(0));
+        let detected = Arc::new(Mutex::new(Vec::new()));
+
+        let mut validator = FileValidator::new();
+        for _ in 0..4 {
+            validator = validator.rule(SniffCountingRule {
+                contexts_seen: contexts_seen.clone(),
+                detected: detected.clone(),
+            });
+        }
+
+        validator
+            .validate(&file(PNG, "a.png"))
+            .expect("the counting rules never fail");
+
+        assert_eq!(
+            contexts_seen.load(Ordering::SeqCst),
+            4,
+            "every rule must be driven through validate_with"
+        );
+        assert_eq!(
+            detected.lock().unwrap().as_slice(),
+            [
+                Some("image/png".to_string()),
+                Some("image/png".to_string()),
+                Some("image/png".to_string()),
+                Some("image/png".to_string()),
+            ],
+            "all four rules must see the same, already-computed content type"
+        );
+    }
+
+    /// `validate_with` is defaulted, so a rule written before it existed --
+    /// implementing only `validate` -- must still be run, and still be able to
+    /// fail the validation.
+    struct LegacyRule {
+        ran: Arc<AtomicUsize>,
+    }
+
+    impl ValidationRule for LegacyRule {
+        fn validate(&self, _file: &UploadedFile) -> Result<(), ValidationError> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Err(ValidationError::custom("legacy rule says no"))
+        }
+
+        fn description(&self) -> &str {
+            "Legacy rule"
+        }
+    }
+
+    #[test]
+    fn a_rule_implementing_only_validate_still_runs() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let validator = FileValidator::new().rule(LegacyRule { ran: ran.clone() });
+
+        let err = validator
+            .validate(&file(PNG, "a.png"))
+            .expect_err("the legacy rule fails, and its failure must surface");
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "the default validate_with must defer to validate"
+        );
+        assert_eq!(err.rule(), Some("Legacy rule"));
+        assert!(matches!(err.kind(), ValidationError::Custom(_)));
+    }
+
+    /// The context is exactly `sniff_content_type` over the file's bytes --
+    /// nothing more, nothing stale.
+    #[test]
+    fn context_detected_content_type_agrees_with_sniff_content_type() {
+        for (bytes, name) in [
+            (PNG, "a.png"),
+            (JPEG, "a.jpg"),
+            (GIF, "a.gif"),
+            (PDF, "a.pdf"),
+            (SVG, "a.svg"),
+        ] {
+            let uploaded = file(bytes, name);
+            assert_eq!(
+                ValidationContext::for_file(&uploaded)
+                    .detected_content_type()
+                    .map(str::to_string),
+                sniff_content_type(bytes),
+                "context and direct sniff must agree for {name}"
+            );
+        }
+
+        // Undetectable content is `None`, not an empty string.
+        let plain = UploadedFile::from_bytes(Bytes::from_static(b"just words"), "a.txt");
+        assert_eq!(
+            ValidationContext::for_file(&plain).detected_content_type(),
+            None
+        );
+    }
+
+    /// The default context sniffs nothing, so a rule constructed by hand gets
+    /// `None` rather than a stale type from some other file.
+    #[test]
+    fn a_default_context_has_no_detected_type() {
+        assert_eq!(ValidationContext::default().detected_content_type(), None);
+    }
+
+    // --- AllowedTypesRule exact/wildcard partition ---------------------------
+
+    /// The allowlist is split into exact and wildcard entries once, at
+    /// construction, instead of rebuilding a `format!("{top}/*")` probe string
+    /// on every `permits` call. The partition must accept and reject exactly
+    /// what the string probe did.
+    #[test]
+    fn allowed_types_wildcard_matches_a_whole_top_level_type() {
+        let rule = AllowedTypesRule::new(&["image/*"], false);
+
+        assert!(rule.permits("image/png"));
+        assert!(rule.permits("image/jpeg"));
+        assert!(rule.permits("image/anything-at-all"));
+        assert!(!rule.permits("text/plain"));
+        assert!(!rule.permits("application/pdf"));
+        // Not a MIME type at all: no slash, no top-level part, no match.
+        assert!(!rule.permits("image"));
+    }
+
+    #[test]
+    fn allowed_types_exact_entries_do_not_match_siblings() {
+        let rule = AllowedTypesRule::new(&["image/png", "text/plain"], false);
+
+        assert!(rule.permits("image/png"));
+        assert!(rule.permits("text/plain"));
+        assert!(
+            !rule.permits("image/jpeg"),
+            "an exact entry is not a wildcard"
+        );
+        assert!(!rule.permits("text/csv"));
+    }
+
+    /// `*/*` splits as `("*", "*")`, i.e. a wildcard whose top-level type is
+    /// `*` -- which matches nothing, exactly as it did before the partition.
+    #[test]
+    fn a_bare_star_slash_star_entry_behaves_as_before() {
+        let rule = AllowedTypesRule::new(&["*/*"], false);
+
+        assert!(!rule.permits("image/png"));
+        assert!(!rule.permits("text/plain"));
+        // ...but the literal string still matches itself, since the top-level
+        // part of `*/*` is `*`.
+        assert!(rule.permits("*/anything"));
+    }
+
+    /// The mixed case: exact and wildcard entries in one allowlist, driven
+    /// through the whole validator rather than the private helper.
+    #[test]
+    fn a_mixed_allowlist_accepts_both_kinds_of_entry() {
+        let validator = FileValidator::new().allowed_types(&["image/*", "application/pdf"]);
+
+        validator
+            .validate(&file(PNG, "a.png"))
+            .expect("image/png is covered by image/*");
+        validator
+            .validate(&file(PDF, "a.pdf"))
+            .expect("application/pdf is covered exactly");
+
+        let err = validator
+            .validate(&UploadedFile::from_bytes(
+                Bytes::from_static(b"plain words"),
+                "a.txt",
+            ))
+            .expect_err("text/plain is on neither list");
+        assert!(matches!(err.kind(), ValidationError::TypeNotAllowed { .. }));
     }
 }

@@ -185,14 +185,18 @@ pub trait Storage: Send + Sync {
             let (page, next) = self
                 .list_page(prefix, cursor.as_deref(), DEFAULT_LIST_PAGE_SIZE)
                 .await?;
-            results.extend(page);
-
-            if results.len() > LIST_MAX_ITEMS {
+            // Checked *before* extending: the cap is on what this method will
+            // allocate, so a page that would push it over must not be appended
+            // first. With the default 1000-entry page size, checking afterwards
+            // let the `Vec` reach 11_000 before erroring.
+            if results.len() + page.len() > LIST_MAX_ITEMS {
                 return Err(crate::StorageError::Storage(format!(
                     "list exceeded the {LIST_MAX_ITEMS}-object cap for prefix {prefix:?}; \
                      use Storage::list_page to page through the results instead"
                 )));
             }
+
+            results.extend(page);
 
             match next {
                 Some(next) => cursor = Some(next),
@@ -293,4 +297,147 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect::<String>()
         .trim_start_matches('.')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A `Storage` that only implements `list_page`, handing back pages of
+    /// synthetic metadata drawn from a fixed total. Everything else panics, so
+    /// a test that strays off the listing path says so loudly.
+    struct PagingStub {
+        total: usize,
+        page_size: usize,
+        /// Every `limit` this stub was asked for, in order.
+        limits: Mutex<Vec<usize>>,
+    }
+
+    impl PagingStub {
+        fn new(total: usize, page_size: usize) -> Self {
+            Self {
+                total,
+                page_size,
+                limits: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.limits.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl Storage for PagingStub {
+        async fn put(&self, _key: &str, _data: Bytes) -> Result<StorageMetadata> {
+            unimplemented!("the listing tests never write")
+        }
+        async fn put_with_content_type(
+            &self,
+            _key: &str,
+            _data: Bytes,
+            _content_type: &str,
+        ) -> Result<StorageMetadata> {
+            unimplemented!("the listing tests never write")
+        }
+        async fn put_file(&self, _file: &UploadedFile) -> Result<StorageMetadata> {
+            unimplemented!("the listing tests never write")
+        }
+        async fn get(&self, _key: &str) -> Result<Bytes> {
+            unimplemented!("the listing tests never read")
+        }
+        async fn head(&self, _key: &str) -> Result<StorageMetadata> {
+            unimplemented!("the listing tests never stat")
+        }
+        async fn delete(&self, _key: &str) -> Result<()> {
+            unimplemented!("the listing tests never delete")
+        }
+        async fn exists(&self, _key: &str) -> Result<bool> {
+            unimplemented!("the listing tests never probe")
+        }
+        async fn copy(&self, _from: &str, _to: &str) -> Result<StorageMetadata> {
+            unimplemented!("the listing tests never copy")
+        }
+
+        async fn list_page(
+            &self,
+            _prefix: Option<&str>,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
+            self.limits.lock().unwrap().push(limit);
+
+            let offset: usize = cursor.map(|c| c.parse().unwrap()).unwrap_or(0);
+            let end = (offset + self.page_size).min(self.total);
+            let page = (offset..end)
+                .map(|i| StorageMetadata::new(format!("k{i}"), 1))
+                .collect::<Vec<_>>();
+
+            let next = (end < self.total).then(|| end.to_string());
+            Ok((page, next))
+        }
+    }
+
+    #[tokio::test]
+    async fn list_drains_every_page() {
+        let stub = PagingStub::new(2500, 1000);
+
+        let all = stub.list(None).await.expect("a small listing must succeed");
+
+        assert_eq!(all.len(), 2500);
+        assert_eq!(all[0].key, "k0");
+        assert_eq!(all[2499].key, "k2499");
+        assert_eq!(stub.calls(), 3);
+        assert_eq!(
+            stub.limits.lock().unwrap().as_slice(),
+            [DEFAULT_LIST_PAGE_SIZE; 3],
+            "list must request its documented page size"
+        );
+    }
+
+    /// The documented contract: `list` accumulates *at most* `LIST_MAX_ITEMS`.
+    /// Exactly that many is the last accepted listing.
+    #[tokio::test]
+    async fn list_accepts_exactly_the_cap() {
+        let stub = PagingStub::new(LIST_MAX_ITEMS, 1000);
+
+        let all = stub
+            .list(None)
+            .await
+            .expect("a listing of exactly LIST_MAX_ITEMS must succeed");
+        assert_eq!(all.len(), LIST_MAX_ITEMS);
+    }
+
+    /// One more than the cap is refused rather than accumulated. The cap is
+    /// checked *before* the page is appended, so the `Vec` never grows past
+    /// `LIST_MAX_ITEMS`; appending first let it reach 11_000 at the default
+    /// 1000-entry page size before the check fired.
+    #[tokio::test]
+    async fn list_refuses_to_exceed_the_cap() {
+        let stub = PagingStub::new(LIST_MAX_ITEMS + 1, 1000);
+
+        match stub.list(None).await {
+            Err(crate::StorageError::Storage(msg)) => {
+                assert!(
+                    msg.contains(&LIST_MAX_ITEMS.to_string()) && msg.contains("list_page"),
+                    "the error must name the cap and the way out: {msg}"
+                );
+            }
+            other => panic!("expected the cap to be enforced, got {other:?}"),
+        }
+    }
+
+    /// A single oversized page is refused without being appended either.
+    #[tokio::test]
+    async fn list_refuses_an_oversized_first_page() {
+        let stub = PagingStub::new(LIST_MAX_ITEMS * 2, LIST_MAX_ITEMS * 2);
+
+        assert!(stub.list(None).await.is_err());
+        assert_eq!(
+            stub.calls(),
+            1,
+            "the cap must fire on the first page, not after another round trip"
+        );
+    }
 }

@@ -241,6 +241,69 @@ impl GcsStorage {
         Ok(Some(url))
     }
 
+    /// Turn one `ListObjects` response into the [`StorageTrait::list_page`]
+    /// return shape.
+    ///
+    /// Split out of `list_page` so it is reachable from a test: the
+    /// control-plane client is gRPC, so unlike the S3 and Azure backends there
+    /// is no way to drive listing end-to-end against an HTTP stub.
+    ///
+    /// Two things it must get right. The configured
+    /// [`StorageConfig::path_prefix`] is stripped back off every key, or the
+    /// keys do not round-trip through `get`. And GCS signals "no more pages"
+    /// with an *empty* `next_page_token`, not an absent one -- since
+    /// [`StorageTrait::list`] is a draining loop keyed on `Some`/`None`,
+    /// reporting `Some("")` would make it re-request the same final page
+    /// forever, never growing its result set and so never tripping the
+    /// `LIST_MAX_ITEMS` escape either.
+    fn map_list_page(
+        &self,
+        page: &google_cloud_storage::model::ListObjectsResponse,
+    ) -> (Vec<StorageMetadata>, Option<String>) {
+        // Hoisted out of the per-object loop: this was reallocated for every
+        // object in the bucket.
+        let strip = self
+            .config
+            .storage
+            .path_prefix
+            .as_ref()
+            .map(|p| format!("{p}/"));
+
+        let mut results = Vec::with_capacity(page.objects.len());
+
+        for object in &page.objects {
+            // Remove prefix to get the relative key
+            let relative_key = match &strip {
+                Some(strip) => object
+                    .name
+                    .strip_prefix(strip.as_str())
+                    .unwrap_or(&object.name)
+                    .to_string(),
+                None => object.name.clone(),
+            };
+
+            let size = object.size as u64;
+            let mut metadata =
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
+
+            if !object.content_type.is_empty() {
+                metadata = metadata.with_content_type(&object.content_type);
+            }
+
+            if let Some(checksums) = &object.checksums
+                && !checksums.md5_hash.is_empty()
+            {
+                metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
+            }
+
+            results.push(metadata);
+        }
+
+        let next = Some(page.next_page_token.clone()).filter(|t| !t.is_empty());
+
+        (results, next)
+    }
+
     /// Get the public URL for a key.
     pub fn public_url(&self, key: &str) -> String {
         let full_key = self.full_key(key);
@@ -392,10 +455,9 @@ impl StorageTrait for GcsStorage {
 
     /// Delete an object, idempotently.
     ///
-    /// This used to bypass [`map_object_error`] -- the mapper defined in this
-    /// very file and used by `get`/`head` -- and report a missing object as an
-    /// opaque [`StorageError::Storage`]. Per the [`StorageTrait::delete`]
-    /// contract a missing key is now `Ok(())`, as it is on S3.
+    /// Per the [`StorageTrait::delete`] contract a missing key is `Ok(())`;
+    /// every other failure is classified by [`map_object_error`] and
+    /// propagated.
     async fn delete(&self, key: &str) -> Result<()> {
         let full_key = self.full_key(key);
 
@@ -458,48 +520,7 @@ impl StorageTrait for GcsStorage {
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        // Hoisted out of the per-object loop: this was reallocated for every
-        // object in the bucket.
-        let strip = self
-            .config
-            .storage
-            .path_prefix
-            .as_ref()
-            .map(|p| format!("{p}/"));
-
-        let mut results = Vec::with_capacity(page.objects.len());
-
-        for object in &page.objects {
-            // Remove prefix to get the relative key
-            let relative_key = match &strip {
-                Some(strip) => object
-                    .name
-                    .strip_prefix(strip.as_str())
-                    .unwrap_or(&object.name)
-                    .to_string(),
-                None => object.name.clone(),
-            };
-
-            let size = object.size as u64;
-            let mut metadata =
-                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
-
-            if !object.content_type.is_empty() {
-                metadata = metadata.with_content_type(&object.content_type);
-            }
-
-            if let Some(checksums) = &object.checksums
-                && !checksums.md5_hash.is_empty()
-            {
-                metadata = metadata.with_checksum(hex::encode(&checksums.md5_hash));
-            }
-
-            results.push(metadata);
-        }
-
-        let next = Some(page.next_page_token).filter(|t| !t.is_empty());
-
-        Ok((results, next))
+        Ok(self.map_list_page(&page))
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata> {
@@ -824,6 +845,175 @@ mod tests {
             map_object_error("UNAVAILABLE: backend overloaded", "k"),
             StorageError::Storage(_)
         ));
+    }
+
+    fn object(name: &str, size: i64, content_type: &str) -> google_cloud_storage::model::Object {
+        google_cloud_storage::model::Object::new()
+            .set_name(name)
+            .set_size(size)
+            .set_content_type(content_type)
+    }
+
+    /// `list_page` is the bounded listing primitive on every backend; S3 and
+    /// Azure each had a stub-server test for it and GCS had none. The
+    /// control-plane client is gRPC, so it cannot be pointed at the HTTP stub
+    /// the rest of this module uses -- this drives the response-mapping half
+    /// (`map_list_page`) directly instead, which is where every behaviour the
+    /// S3 and Azure tests assert on actually lives.
+    #[tokio::test]
+    async fn list_page_maps_a_page_and_returns_the_next_page_token() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        let page = google_cloud_storage::model::ListObjectsResponse::new()
+            .set_objects([
+                object("a.txt", 3, "text/plain"),
+                object("dir/b.bin", 5, "application/octet-stream"),
+            ])
+            .set_next_page_token("TOKEN-2");
+
+        let (results, next) = storage.map_list_page(&page);
+
+        assert_eq!(
+            results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["a.txt", "dir/b.bin"]
+        );
+        assert_eq!(results[0].size, 3);
+        assert_eq!(results[0].content_type.as_deref(), Some("text/plain"));
+        assert_eq!(results[1].size, 5);
+        assert_eq!(
+            results[0].url.as_deref(),
+            Some("https://storage.googleapis.com/test-bucket/a.txt")
+        );
+        assert_eq!(next.as_deref(), Some("TOKEN-2"));
+    }
+
+    /// The configured `path_prefix` is stripped back off the returned keys, so
+    /// they round-trip through `get`.
+    #[tokio::test]
+    async fn list_page_strips_the_configured_path_prefix_from_returned_keys() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage =
+            stub_gcs_storage(&server, GcsConfig::new("test-bucket").prefix("tenant-a")).await;
+
+        let page = google_cloud_storage::model::ListObjectsResponse::new().set_objects([object(
+            "tenant-a/reports/x.txt",
+            1,
+            "",
+        )]);
+
+        let (results, next) = storage.map_list_page(&page);
+
+        assert_eq!(
+            results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["reports/x.txt"]
+        );
+        assert_eq!(next, None);
+    }
+
+    /// GCS signals "no more pages" with an *empty* `next_page_token`, not an
+    /// absent one. `StorageTrait::list` is a draining loop keyed on
+    /// `Some`/`None`, so an empty token reported as a continuation makes it
+    /// re-request the same final page forever -- never growing `results`, so
+    /// the `LIST_MAX_ITEMS` escape never fires either. The
+    /// `.filter(|t| !t.is_empty())` is the only thing between `list()` and a
+    /// hung task.
+    #[tokio::test]
+    async fn an_empty_page_token_terminates_the_listing() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        // Explicitly empty, which is what the service sends on the last page.
+        let page = google_cloud_storage::model::ListObjectsResponse::new()
+            .set_objects([object("only.txt", 3, "")])
+            .set_next_page_token("");
+
+        let (results, next) = storage.map_list_page(&page);
+
+        assert_eq!(
+            results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["only.txt"]
+        );
+        assert_eq!(
+            next, None,
+            "an empty nextPageToken means the listing is complete, not 'ask again'"
+        );
+
+        // ...and the worst case: an empty final page with an empty token. If
+        // this ever came back as `Some("")`, `list` would never terminate and
+        // never accumulate, so it would hang rather than fail.
+        let empty = google_cloud_storage::model::ListObjectsResponse::new().set_next_page_token("");
+        assert_eq!(storage.map_list_page(&empty).1, None);
+    }
+
+    /// The `list()` draining loop itself must terminate when `list_page`
+    /// reports no continuation, even when it also reports no objects. Driven
+    /// through a `Storage` whose `list_page` replays exactly that shape, under
+    /// a timeout so a regression fails fast instead of hanging CI.
+    #[tokio::test]
+    async fn list_terminates_on_an_empty_final_page() {
+        struct EmptyFinalPage {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl StorageTrait for EmptyFinalPage {
+            async fn put(&self, _: &str, _: Bytes) -> Result<StorageMetadata> {
+                unimplemented!()
+            }
+            async fn put_with_content_type(
+                &self,
+                _: &str,
+                _: Bytes,
+                _: &str,
+            ) -> Result<StorageMetadata> {
+                unimplemented!()
+            }
+            async fn put_file(&self, _: &UploadedFile) -> Result<StorageMetadata> {
+                unimplemented!()
+            }
+            async fn get(&self, _: &str) -> Result<Bytes> {
+                unimplemented!()
+            }
+            async fn head(&self, _: &str) -> Result<StorageMetadata> {
+                unimplemented!()
+            }
+            async fn delete(&self, _: &str) -> Result<()> {
+                unimplemented!()
+            }
+            async fn exists(&self, _: &str) -> Result<bool> {
+                unimplemented!()
+            }
+            async fn copy(&self, _: &str, _: &str) -> Result<StorageMetadata> {
+                unimplemented!()
+            }
+            async fn list_page(
+                &self,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: usize,
+            ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // What `map_list_page` produces for a final, empty page.
+                Ok((Vec::new(), None))
+            }
+        }
+
+        let backend = EmptyFinalPage {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let listed = tokio::time::timeout(Duration::from_secs(10), backend.list(None))
+            .await
+            .expect("list must terminate on an empty final page, not spin forever")
+            .expect("list should succeed");
+
+        assert!(listed.is_empty());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one page, one call -- a terminated listing must not be re-requested"
+        );
     }
 
     #[tokio::test]

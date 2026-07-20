@@ -37,6 +37,13 @@ use crate::{MailError, RenderedTemplate, Result, TemplateEngine};
 /// File extension used for MiniJinja email templates.
 const EXT: &str = "jinja";
 
+/// Name of the crate's shared escaping format, as seen by MiniJinja.
+///
+/// [`AutoEscape::Html`] would use MiniJinja's own escaper, which disagrees with
+/// Handlebars' and Tera's; a custom format routes through
+/// [`crate::template_dir::escape_html`] instead.
+const ESCAPE_FORMAT: &str = "armature-mail/html";
+
 /// MiniJinja template engine for email rendering.
 pub struct MiniJinjaEngine {
     env: Environment<'static>,
@@ -54,14 +61,31 @@ impl MiniJinjaEngine {
     /// All three engines agree on this rule: escaping the `text/plain` body or
     /// the `Subject:` header is a bug (`Bob & Alice` would go out as
     /// `Bob &amp; Alice`), not a safety measure.
+    /// The escaping applied to the `html` part is
+    /// [`crate::template_dir::escape_html`], not MiniJinja's built-in HTML
+    /// escaper: the built-ins of the three engines cover different character
+    /// sets, so the same template produced different HTML depending on which
+    /// engine loaded it. That is what [`ESCAPE_FORMAT`] and the custom formatter
+    /// below exist for.
     pub fn new() -> Self {
         let mut env = Environment::new();
         env.set_auto_escape_callback(|name| {
             if name.ends_with("/html") {
-                AutoEscape::Html
+                AutoEscape::Custom(ESCAPE_FORMAT)
             } else {
                 AutoEscape::None
             }
+        });
+        env.set_formatter(|out, state, value| {
+            match state.auto_escape() {
+                // `|safe` output is already trusted markup — escaping it here
+                // would double-escape every partial and `{{ x|safe }}`.
+                AutoEscape::Custom(ESCAPE_FORMAT) if !value.is_safe() => {
+                    out.write_str(&crate::template_dir::escape_html(&value.to_string()))?;
+                }
+                _ => write!(out, "{value}")?,
+            }
+            Ok(())
         });
         Self { env }
     }

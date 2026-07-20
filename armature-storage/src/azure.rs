@@ -333,10 +333,8 @@ impl Storage for AzureBlobStorage {
 
     /// Delete a blob, idempotently.
     ///
-    /// This used to bypass [`map_blob_error`] -- the mapper defined in this
-    /// very file and used by `get`/`head` -- and report a missing blob as an
-    /// opaque [`StorageError::Storage`]. Per the [`Storage::delete`] contract a
-    /// missing key is now `Ok(())`, as it is on S3.
+    /// Per the [`Storage::delete`] contract a missing key is `Ok(())`; every
+    /// other failure is classified by [`map_blob_error`] and propagated.
     async fn delete(&self, key: &str) -> Result<()> {
         let blob_client = self.blob_client(key);
 
@@ -677,12 +675,81 @@ mod tests {
             "the limit must reach the service: {query}"
         );
 
-        // The cursor is sent back as the marker.
-        let _ = storage.list_page(None, Some("MARKER-2"), 1).await;
-        let query = server.requests()[1].query.clone().unwrap_or_default();
+        // The cursor is sent back as the marker. Bind the result rather than
+        // discarding it with `let _ =`: if the second call fails, the request
+        // may never have been made and `requests()[1]` would panic on an index
+        // out of bounds instead of reporting the real failure.
+        let (second, _) = storage
+            .list_page(None, Some("MARKER-2"), 1)
+            .await
+            .expect("the second list_page must succeed too");
+        assert_eq!(
+            second.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["a.txt"],
+            "the stub replays the same page, so the same key comes back"
+        );
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "a second request must have gone out");
+        let query = requests[1].query.clone().unwrap_or_default();
         assert!(
             query.contains("marker=MARKER-2"),
             "the cursor must be sent as the marker: {query}"
+        );
+    }
+
+    /// Azure emits a self-closing `<NextMarker />` on the *final* page, which
+    /// deserializes to `Some("")`. `Storage::list` is a draining loop keyed on
+    /// `Some`/`None`, so an empty marker treated as a continuation means it
+    /// re-requests the same final page forever, never growing `results` and so
+    /// never tripping the `LIST_MAX_ITEMS` escape either. The
+    /// `.filter(|m| !m.is_empty())` is the only thing between `list()` and a
+    /// hung task.
+    #[tokio::test]
+    async fn an_empty_next_marker_terminates_the_listing() {
+        let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+            <EnumerationResults ContainerName=\"container\">\
+            <Blobs><Blob><Name>only.txt</Name><Properties><Content-Length>3</Content-Length>\
+            </Properties></Blob></Blobs><NextMarker /></EnumerationResults>";
+        let server = StubServer::start_single(StubResponse::new(200, body)).await;
+        let storage = stub_azure_storage(&server).await;
+
+        let (page, next) = storage
+            .list_page(None, None, 10)
+            .await
+            .expect("list_page should succeed");
+
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["only.txt"]
+        );
+        assert_eq!(
+            next, None,
+            "an empty NextMarker means the listing is complete, not 'ask again'"
+        );
+    }
+
+    /// The same at the `list()` level, and against the worst case: a final page
+    /// with an empty marker and *no* blobs. A regression here does not fail, it
+    /// hangs -- so the timeout is the assertion.
+    #[tokio::test]
+    async fn list_terminates_on_an_empty_marker_with_no_blobs() {
+        let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+            <EnumerationResults ContainerName=\"container\">\
+            <Blobs></Blobs><NextMarker /></EnumerationResults>";
+        let server = StubServer::start_single(StubResponse::new(200, body)).await;
+        let storage = stub_azure_storage(&server).await;
+
+        let listed = tokio::time::timeout(Duration::from_secs(10), storage.list(None))
+            .await
+            .expect("list must terminate on an empty NextMarker, not spin forever")
+            .expect("list should succeed");
+
+        assert!(listed.is_empty());
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "one page, one request -- an empty marker must not be re-sent"
         );
     }
 

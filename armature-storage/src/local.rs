@@ -124,17 +124,22 @@ impl LocalStorage {
         Ok(path)
     }
 
-    /// Resolve `key` to a filesystem path that is *physically* inside the
-    /// storage root, rejecting it otherwise.
+    /// Resolve `key` to a filesystem path that, *at the moment of the check*,
+    /// is physically inside the storage root -- rejecting it otherwise.
     ///
-    /// Runs [`Self::full_path`]'s lexical validation and then two physical
-    /// checks, because lexical validation alone cannot see symlinks:
+    /// Runs [`Self::full_path`]'s lexical validation and then three physical
+    /// checks, because lexical validation alone cannot see the filesystem:
     ///
     /// 1. Every component from the root down is `lstat`ed, and any component
     ///    that is itself a symlink is rejected. This catches links planted
     ///    inside the root (by an earlier upload, another tenant, or an
     ///    operator) that point anywhere at all.
-    /// 2. The deepest *existing* ancestor of the resolved path is
+    /// 2. On unix, a target that is a regular file with more than one link is
+    ///    rejected. A hardlink is indistinguishable from the original by path
+    ///    -- `lstat` reports a plain file and `canonicalize` returns the path
+    ///    unchanged -- so without this the same actor who could plant a symlink
+    ///    could plant a hardlink and defeat both other checks.
+    /// 3. The deepest *existing* ancestor of the resolved path is
     ///    canonicalized -- resolving links, `..`, and mount indirection the
     ///    kernel would follow -- and asserted to still start with the
     ///    canonicalized root.
@@ -142,6 +147,30 @@ impl LocalStorage {
     /// The path itself need not exist; for a write the deepest existing
     /// ancestor is the parent directory, which is exactly what must be checked
     /// before creating a file inside it.
+    ///
+    /// # This is a check, not a guarantee
+    ///
+    /// The result describes the filesystem as it was when the check ran. It is
+    /// **not** a capability: nothing binds the verified path to the file a
+    /// later `open` reaches, and every path-based syscall re-traverses the name
+    /// from the root. An attacker who can write inside the storage root can
+    /// therefore swap a component between the check and the open.
+    ///
+    /// The leaf race -- the practical one, since it needs no directory
+    /// scheduling luck -- is closed separately: every final open goes through
+    /// [`open_read`]/[`open_write`], which pass `O_NOFOLLOW` on unix, so a
+    /// symlink substituted at the last component fails the open outright
+    /// rather than being followed. `delete` uses `unlink`, which never follows
+    /// a final symlink either.
+    ///
+    /// What remains on unix is substitution of an *intermediate directory*
+    /// component between the check and the open (`root/a/` swapped for a
+    /// symlink while `root/a/b` is being written). Closing that needs
+    /// `openat2(RESOLVE_BENEATH)` against a long-lived root descriptor, which
+    /// this backend does not yet do. On non-unix targets `O_NOFOLLOW` is
+    /// unavailable and the leaf is racy too. `LocalStorage` is a
+    /// dev/test/single-tenant backend; a root that hostile code can write to
+    /// out of band is outside what it defends.
     async fn resolve(&self, key: &str) -> Result<PathBuf> {
         let path = self.full_path(key)?;
         self.assert_inside_root(key, &path).await?;
@@ -179,7 +208,26 @@ impl LocalStorage {
             }
         }
 
-        // (2) Canonicalize the deepest existing ancestor and re-check it
+        // (2) No hardlink. A second name for an inode outside the root is
+        // spelled with `Normal` components, `lstat`s as a plain regular file
+        // (so check 1 sees nothing), and canonicalizes to itself under the root
+        // (so check 3 sees nothing) -- yet reading or writing it reaches the
+        // same inode as the original. Planting one needs exactly the capability
+        // the symlink defense already assumes an attacker has, so it is
+        // rejected on the same grounds.
+        #[cfg(unix)]
+        if let Ok(metadata) = fs::symlink_metadata(path).await {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.is_file() && metadata.nlink() > 1 {
+                return Err(StorageError::InvalidFileName(format!(
+                    "key {key:?} names a hard link ({} links), which may alias a file \
+                     outside the storage root",
+                    metadata.nlink()
+                )));
+            }
+        }
+
+        // (3) Canonicalize the deepest existing ancestor and re-check it
         // against the root. This is the belt-and-braces assertion the comment
         // here used to claim without doing: unlike the lexical `starts_with`
         // it replaced, it operates on a path the kernel actually resolved.
@@ -270,6 +318,30 @@ impl LocalStorage {
         }
     }
 
+    /// The public URL for `key`, or `None` when no base URL is configured.
+    ///
+    /// `key` is validated (so it cannot climb out of the base path with `..`)
+    /// and each of its segments is percent-encoded (so it cannot inject a
+    /// query, a fragment, or a header break into the URL). Every URL this
+    /// backend produces -- [`Storage::url`], and the `url` on the metadata
+    /// returned by `put`/`head`/`list` -- goes through here, so they cannot
+    /// disagree.
+    fn object_url(&self, key: &str) -> Result<Option<String>> {
+        let Some(base_url) = &self.config.base_url else {
+            return Ok(None);
+        };
+
+        let relative = Self::validate_relative(key)?;
+
+        let mut url = base_url.trim_end_matches('/').to_string();
+        for component in relative.components() {
+            url.push('/');
+            encode_url_segment(&component.as_os_str().to_string_lossy(), &mut url);
+        }
+
+        Ok(Some(url))
+    }
+
     /// Build [`StorageMetadata`] from filesystem metadata already in hand.
     fn build_metadata(
         &self,
@@ -287,9 +359,8 @@ impl LocalStorage {
             storage_metadata = storage_metadata.with_content_type(mime.to_string());
         }
 
-        if let Some(base_url) = &self.config.base_url {
-            storage_metadata =
-                storage_metadata.with_url(format!("{}/{}", base_url.trim_end_matches('/'), key));
+        if let Ok(Some(url)) = self.object_url(key) {
+            storage_metadata = storage_metadata.with_url(url);
         }
 
         storage_metadata
@@ -303,6 +374,74 @@ fn map_not_found(err: std::io::Error, key: &str) -> StorageError {
         StorageError::NotFound(key.to_string())
     } else {
         StorageError::Io(err)
+    }
+}
+
+/// Map a failure from one of the `O_NOFOLLOW` opens below.
+///
+/// The kernel reports `ELOOP` when the final component turned out to be a
+/// symbolic link. That is a containment failure -- something replaced the leaf
+/// between [`LocalStorage::assert_inside_root`] and the open -- not an I/O
+/// error, so it is reported the same way a link caught by the check would be.
+fn map_open_error(err: std::io::Error, key: &str) -> StorageError {
+    #[cfg(unix)]
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        return StorageError::InvalidFileName(format!(
+            "key {key:?} names a symbolic link at its final component"
+        ));
+    }
+    map_not_found(err, key)
+}
+
+/// `OpenOptions` that refuse to follow a symlink at the final component.
+///
+/// `fs::read`/`fs::write`/`fs::copy` re-traverse the path by name and follow
+/// links at every component, so the containment check
+/// ([`LocalStorage::assert_inside_root`]) and the open see potentially
+/// different filesystems. `O_NOFOLLOW` binds the leaf: whatever else changed,
+/// the opened file is not something reached through a link planted where the
+/// object should be. Intermediate directory components remain racy; see
+/// [`LocalStorage::resolve`].
+fn nofollow_options() -> fs::OpenOptions {
+    #[allow(unused_mut)]
+    let mut options = fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        // `tokio::fs::OpenOptions::custom_flags` is inherent on unix.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+}
+
+/// Open `path` for reading without following a final symlink.
+async fn open_read(path: &Path) -> std::io::Result<fs::File> {
+    nofollow_options().read(true).open(path).await
+}
+
+/// Open (or create) `path` for writing without following a final symlink.
+async fn open_write(path: &Path) -> std::io::Result<fs::File> {
+    nofollow_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+}
+
+/// Percent-encode one path segment for inclusion in a URL.
+///
+/// Everything outside the RFC 3986 unreserved set is escaped, so a key
+/// containing `?`, `#`, `%`, or a CR/LF cannot terminate the path and inject a
+/// query, a fragment, or a header. The separator between segments is added by
+/// the caller, so `/` inside a segment is escaped like anything else.
+fn encode_url_segment(segment: &str, out: &mut String) {
+    for byte in segment.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
     }
 }
 
@@ -346,8 +485,17 @@ impl Storage for LocalStorage {
             None
         };
 
-        // Write file
-        fs::write(&path, &data).await?;
+        // Write through a handle opened with `O_NOFOLLOW` rather than
+        // `fs::write`, which re-traverses the path by name and would follow a
+        // symlink dropped at the leaf after the check above.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut file = open_write(&path)
+                .await
+                .map_err(|e| map_open_error(e, key))?;
+            file.write_all(&data).await?;
+            file.flush().await?;
+        }
 
         debug!(key = %key, path = ?path, size = data.len(), "Stored file");
 
@@ -359,8 +507,8 @@ impl Storage for LocalStorage {
             metadata = metadata.with_checksum(checksum);
         }
 
-        if let Some(base_url) = &self.config.base_url {
-            metadata = metadata.with_url(format!("{}/{}", base_url.trim_end_matches('/'), key));
+        if let Some(url) = self.object_url(key)? {
+            metadata = metadata.with_url(url);
         }
 
         Ok(metadata)
@@ -387,17 +535,36 @@ impl Storage for LocalStorage {
         let path = self.resolve(key).await?;
 
         // No `exists()` pre-check: it is a blocking `stat` on the reactor
-        // thread and leaves a TOCTOU gap. `read` already reports NotFound.
-        let data = fs::read(&path).await.map_err(|e| map_not_found(e, key))?;
+        // thread and leaves a TOCTOU gap. The open already reports NotFound.
+        //
+        // Read through a handle opened with `O_NOFOLLOW` rather than
+        // `fs::read`, which re-traverses the path by name and would follow a
+        // symlink dropped at the leaf after `resolve` ran.
+        use tokio::io::AsyncReadExt;
+        let mut file = open_read(&path).await.map_err(|e| map_open_error(e, key))?;
+
+        let capacity = file.metadata().await.map(|m| m.len() as usize).unwrap_or(0);
+        let mut data = Vec::with_capacity(capacity);
+        file.read_to_end(&mut data).await?;
+
         Ok(Bytes::from(data))
     }
 
     async fn head(&self, key: &str) -> Result<StorageMetadata> {
         let path = self.resolve(key).await?;
 
-        let metadata = fs::metadata(&path)
+        // `symlink_metadata`, not `metadata`: a link substituted at the leaf
+        // after `resolve` must not have its target's size and mtime reported as
+        // the object's.
+        let metadata = fs::symlink_metadata(&path)
             .await
             .map_err(|e| map_not_found(e, key))?;
+
+        if metadata.file_type().is_symlink() {
+            return Err(StorageError::InvalidFileName(format!(
+                "key {key:?} names a symbolic link at its final component"
+            )));
+        }
 
         Ok(self.build_metadata(key, &path, &metadata))
     }
@@ -405,11 +572,13 @@ impl Storage for LocalStorage {
     /// Delete a file, idempotently.
     ///
     /// Per the [`Storage::delete`] contract a missing key is `Ok(())`, matching
-    /// S3, GCS and Azure. This backend used to be the odd one out, returning
-    /// [`StorageError::NotFound`].
+    /// S3, GCS and Azure.
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.resolve(key).await?;
 
+        // `unlink` never follows a final symlink, so the leaf race that
+        // `O_NOFOLLOW` closes for `get`/`put` cannot turn this into a delete of
+        // something outside the root: at worst it removes the planted link.
         match fs::remove_file(&path).await {
             Ok(()) => {
                 debug!(key = %key, "Deleted file");
@@ -433,6 +602,26 @@ impl Storage for LocalStorage {
         }
     }
 
+    /// List one page of objects.
+    ///
+    /// # Prefix semantics
+    ///
+    /// `prefix` is a **byte prefix over the whole key**, exactly as it is on
+    /// S3, GCS and Azure -- not a subdirectory to descend into. `Some("rep")`
+    /// therefore matches `reports/a.txt`, and it does so on every backend, so
+    /// code exercised against `LocalStorage` in development behaves the same
+    /// way in production. A prefix that normalizes to nothing (`""`, `"."`)
+    /// means "everything".
+    ///
+    /// # Cursor
+    ///
+    /// There is no server-side cursor here, so the continuation token is the
+    /// **last key emitted**, and the next call resumes by skipping everything
+    /// at or before it in the walk's (deterministic) order. It used to be a
+    /// positional offset into a tree that is re-walked from scratch on every
+    /// call, so a `put` or `delete` of a lexically earlier key between two
+    /// pages shifted every later position and the pagination silently dropped
+    /// or repeated objects.
     async fn list_page(
         &self,
         prefix: Option<&str>,
@@ -451,101 +640,122 @@ impl Storage for LocalStorage {
         let key_root = self.key_root()?;
 
         // A prefix that normalizes to nothing (`""`, `"."`) means "everything",
-        // as it does on S3/GCS/Azure -- not `InvalidFileName`.
-        let normalized_prefix = match prefix {
-            Some(p) => Self::normalize_relative(p)?,
+        // as it does on S3/GCS/Azure -- not `InvalidFileName`. Anything else is
+        // matched against the key as a string, so the walk always starts at the
+        // key root; joining the prefix onto it and walking *that* directory was
+        // the divergence from the cloud backends.
+        let key_prefix = match prefix {
+            Some(p) => Self::normalize_relative(p)?.map(|_| p),
             None => None,
         };
-        let base = match &normalized_prefix {
-            Some(p) => {
-                let path = key_root.join(p);
-                self.assert_inside_root(prefix.unwrap_or_default(), &path)
-                    .await?;
-                path
-            }
-            None => key_root.clone(),
-        };
 
-        // The local backend has no server-side cursor, so the cursor is an
-        // offset into the walk, which is ordered deterministically by sorting
-        // each directory's entries.
-        let offset: usize = match cursor {
-            Some(c) => c.parse().map_err(|_| {
-                StorageError::Storage(format!("invalid list cursor {c:?} for local storage"))
-            })?,
-            None => 0,
-        };
+        // The cursor is the last key of the previous page. Compared as a
+        // `Path`, i.e. component-wise, which is the order the walk emits in --
+        // a plain string comparison would disagree (`a.txt` sorts before
+        // `a/b.txt` as bytes, but the walk emits `a/b.txt` first, since the
+        // directory `a` sorts before the file `a.txt`).
+        let resume_after = cursor.map(PathBuf::from);
 
-        let mut seen = 0usize;
-        let mut results = Vec::new();
-        // `put` happily creates nested directories from slash-bearing keys, so
-        // listing has to recurse or those objects are silently invisible.
-        let mut stack = vec![base];
+        let mut results: Vec<StorageMetadata> = Vec::new();
 
-        while let Some(dir) = stack.pop() {
-            let mut entries = match fs::read_dir(&dir).await {
-                Ok(entries) => entries,
-                // A missing listing root is an empty listing, not an error.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
+        // A pre-order DFS in ascending component order: children are pushed in
+        // descending order so popping yields ascending. `put` happily creates
+        // nested directories from slash-bearing keys, so listing has to recurse
+        // or those objects are silently invisible.
+        enum Pending {
+            Dir(PathBuf),
+            File(PathBuf),
+        }
+        let mut stack = vec![Pending::Dir(key_root.clone())];
+
+        while let Some(pending) = stack.pop() {
+            let path = match pending {
+                Pending::Dir(dir) => {
+                    let mut entries = match fs::read_dir(&dir).await {
+                        Ok(entries) => entries,
+                        // A missing listing root is an empty listing, not an
+                        // error.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e.into()),
+                    };
+
+                    let mut children = Vec::new();
+                    while let Some(entry) = entries.next_entry().await? {
+                        // `entry.file_type()` does NOT follow symlinks, unlike
+                        // `entry.metadata()`. With `metadata()` a symlink to a
+                        // directory reported `is_dir()`, so `root/a/loop ->
+                        // ../a` made this walk run forever; and a symlink to a
+                        // file outside the root was listed with its absolute
+                        // path as the key.
+                        let file_type = entry.file_type().await?;
+                        if file_type.is_symlink() {
+                            // Never traverse or report a link: it can point
+                            // anywhere, including outside the root and back
+                            // into this walk.
+                            debug!(path = ?entry.path(), "Skipping symbolic link during list");
+                            continue;
+                        }
+                        if file_type.is_dir() {
+                            children.push(Pending::Dir(entry.path()));
+                        } else if file_type.is_file() {
+                            children.push(Pending::File(entry.path()));
+                        }
+                    }
+
+                    children.sort_by(|a, b| {
+                        let (Pending::Dir(a) | Pending::File(a)) = a;
+                        let (Pending::Dir(b) | Pending::File(b)) = b;
+                        b.cmp(a)
+                    });
+                    stack.extend(children);
+                    continue;
+                }
+                Pending::File(path) => path,
             };
 
-            let mut children = Vec::new();
-            while let Some(entry) = entries.next_entry().await? {
-                // `entry.file_type()` does NOT follow symlinks, unlike
-                // `entry.metadata()`. With `metadata()` a symlink to a
-                // directory reported `is_dir()`, so `root/a/loop -> ../a` made
-                // this walk run forever; and a symlink to a file outside the
-                // root was listed with its absolute path as the key.
-                let file_type = entry.file_type().await?;
-                children.push((entry.path(), file_type));
+            // A key that will not strip back to a root-relative path is not
+            // ours to report; emitting the absolute path (the old
+            // `unwrap_or(&path)`) leaked the server's filesystem layout into
+            // `StorageMetadata::key` and, via `build_metadata`, into the public
+            // `url`.
+            let Ok(relative) = path.strip_prefix(&key_root) else {
+                debug!(path = ?path, "Skipping list entry outside the key root");
+                continue;
+            };
+
+            // Resume point: everything at or before the previous page's last
+            // key has already been reported.
+            if let Some(resume_after) = &resume_after
+                && relative <= resume_after.as_path()
+            {
+                continue;
             }
-            // Deterministic order, so the offset cursor is stable across calls.
-            children.sort_by(|(a, _), (b, _)| b.cmp(a));
 
-            for (path, file_type) in children {
-                if file_type.is_symlink() {
-                    // Never traverse or report a link: it can point anywhere,
-                    // including outside the root and back into this walk.
-                    debug!(path = ?path, "Skipping symbolic link during list");
-                    continue;
-                }
+            let key = relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
 
-                if file_type.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !file_type.is_file() {
-                    continue;
-                }
-
-                // A key that will not strip back to a root-relative path is not
-                // ours to report; emitting the absolute path (the old
-                // `unwrap_or(&path)`) leaked the server's filesystem layout
-                // into `StorageMetadata::key` and, via `build_metadata`, into
-                // the public `url`.
-                let Ok(relative) = path.strip_prefix(&key_root) else {
-                    debug!(path = ?path, "Skipping list entry outside the key root");
-                    continue;
-                };
-                let key = relative
-                    .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/");
-
-                seen += 1;
-                if seen <= offset {
-                    continue;
-                }
-
-                let metadata = fs::metadata(&path).await?;
-                results.push(self.build_metadata(&key, &path, &metadata));
-
-                if results.len() == limit {
-                    // Only report a continuation if something is actually left.
-                    let next = offset + results.len();
-                    return Ok((results, Some(next.to_string())));
-                }
+            if let Some(key_prefix) = key_prefix
+                && !key.starts_with(key_prefix)
+            {
+                continue;
             }
+
+            // The page is full *and* another entry exists, so a continuation is
+            // genuinely warranted. Checking here rather than on `push` is what
+            // stops a listing whose size is an exact multiple of `limit` from
+            // handing back a cursor that only ever yields an empty final page.
+            if results.len() == limit {
+                let next = results
+                    .last()
+                    .expect("limit is non-zero, so a full page has a last entry")
+                    .key
+                    .clone();
+                return Ok((results, Some(next)));
+            }
+
+            let metadata = fs::symlink_metadata(&path).await?;
+            results.push(self.build_metadata(&key, &path, &metadata));
         }
 
         Ok((results, None))
@@ -555,25 +765,38 @@ impl Storage for LocalStorage {
         let from_path = self.resolve(from).await?;
         let to_path = self.resolve(to).await?;
 
-        // Create parent directories if needed
+        // Create parent directories if needed, then re-run the physical check:
+        // `create_dir_all` is the one step that changes what the path resolves
+        // to.
         if let Some(parent) = to_path.parent() {
             fs::create_dir_all(parent).await?;
             self.assert_inside_root(to, &to_path).await?;
         }
 
-        fs::copy(&from_path, &to_path)
+        // Both ends go through `O_NOFOLLOW` handles rather than `fs::copy`,
+        // which re-traverses both paths by name and follows links at every
+        // component.
+        let mut source = open_read(&from_path)
             .await
-            .map_err(|e| map_not_found(e, from))?;
+            .map_err(|e| map_open_error(e, from))?;
+        let mut destination = open_write(&to_path)
+            .await
+            .map_err(|e| map_open_error(e, to))?;
+
+        tokio::io::copy(&mut source, &mut destination).await?;
+        {
+            use tokio::io::AsyncWriteExt;
+            destination.flush().await?;
+        }
 
         self.head(to).await
     }
 
     async fn url(&self, key: &str) -> Result<Option<String>> {
-        if let Some(base_url) = &self.config.base_url {
-            Ok(Some(format!("{}/{}", base_url.trim_end_matches('/'), key)))
-        } else {
-            Ok(None)
-        }
+        // The only `Storage` method that used to interpolate the key raw: a
+        // key of `../../admin` walked out of the base path, and one containing
+        // `?`, `#` or `%0d%0a` injected a query, a fragment or a header break.
+        self.object_url(key)
     }
 }
 
@@ -966,15 +1189,21 @@ mod tests {
         assert_eq!(keys, ["a/file.txt"]);
     }
 
-    /// A file reached through a symlink pointing *outside* the root failed
-    /// `strip_prefix`, and `unwrap_or(&path)` then published the absolute
-    /// filesystem path as the object key -- which `build_metadata` concatenates
-    /// into the public `url`, leaking the server's layout to every `list`
-    /// caller.
+    /// The walk must not descend into a symlink that leaves the root: a file
+    /// reached that way is not an object of this store, and reporting one used
+    /// to publish its absolute filesystem path as the key (`strip_prefix`
+    /// failed and `unwrap_or(&path)` fell back to the full path), which
+    /// `build_metadata` concatenates into the public `url`.
+    ///
+    /// The former name promised more than the body could check. Links are
+    /// skipped at `read_dir` time, so nothing outside the key root ever reaches
+    /// the `strip_prefix` -- the "absolute key" assertions this test used to
+    /// carry were unreachable by construction, and only the key-set equality
+    /// below was ever load-bearing.
     #[cfg(unix)]
     #[tokio::test]
-    async fn list_never_leaks_absolute_paths_from_outside_the_root() {
-        let (_temp, storage, secret) = symlinked_storage().await;
+    async fn list_does_not_descend_into_a_symlink_out_of_the_root() {
+        let (_temp, storage, _secret) = symlinked_storage().await;
         storage.put("inside.txt", Bytes::from("x")).await.unwrap();
 
         let listed = storage.list(None).await.unwrap();
@@ -985,20 +1214,215 @@ mod tests {
             ["inside.txt"],
             "the symlinked tree must not be listed"
         );
-        for meta in &listed {
+    }
+
+    // --- Hardlink containment ------------------------------------------------
+    //
+    // Both halves of the symlink guard are symlink-specific: `symlink_metadata`
+    // reports a hardlink as a plain regular file, and `canonicalize("root/x")`
+    // returns `root/x`, which starts with the root. So a second name for an
+    // inode outside the root passed every check while `fs::read`/`fs::write`
+    // reached the original file. Planting one needs exactly the capability the
+    // symlink defense already assumes an attacker has.
+
+    /// Storage root containing `alias.txt`, a hard link to a file outside it.
+    #[cfg(unix)]
+    async fn hardlinked_storage() -> (tempfile::TempDir, LocalStorage, PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, b"TOP SECRET").unwrap();
+
+        let root = temp_dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::hard_link(&secret, root.join("alias.txt"))
+            .expect("creating a test hard link should succeed");
+
+        let storage = LocalStorage::with_path(&root).await.unwrap();
+        (temp_dir, storage, secret)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_storage_method_rejects_a_hardlinked_key() {
+        let (_temp, storage, secret) = hardlinked_storage().await;
+        storage.put("real.txt", Bytes::from("ok")).await.unwrap();
+
+        for result in [
+            storage.get("alias.txt").await.err(),
+            storage.put("alias.txt", Bytes::from("PWNED")).await.err(),
+            storage.delete("alias.txt").await.err(),
+            storage.head("alias.txt").await.err(),
+            storage.exists("alias.txt").await.err(),
+            storage.copy("alias.txt", "dst.txt").await.err(),
+            storage.copy("real.txt", "alias.txt").await.err(),
+        ] {
+            let err = result.expect("a hard link out of the root must be rejected");
             assert!(
-                !meta.key.starts_with('/'),
-                "absolute path leaked as a key: {:?}",
-                meta.key
-            );
-            assert!(
-                !meta
-                    .key
-                    .contains(secret.parent().unwrap().to_str().unwrap()),
-                "server layout leaked as a key: {:?}",
-                meta.key
+                matches!(err, StorageError::InvalidFileName(_)),
+                "expected InvalidFileName, got {err:?}"
             );
         }
+
+        assert_eq!(
+            std::fs::read(&secret).unwrap(),
+            b"TOP SECRET",
+            "the aliased file outside the root must be untouched"
+        );
+    }
+
+    /// The check is on *link count*, not on where the link points, so it must
+    /// not fire for an ordinary single-linked object.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_singly_linked_file_is_still_readable() {
+        let (_temp, storage, _secret) = hardlinked_storage().await;
+
+        storage.put("plain.txt", Bytes::from("v")).await.unwrap();
+        assert_eq!(storage.get("plain.txt").await.unwrap(), "v");
+        assert!(storage.exists("plain.txt").await.unwrap());
+        storage.head("plain.txt").await.unwrap();
+    }
+
+    // --- Leaf-race hardening -------------------------------------------------
+    //
+    // The containment check and the open are two separate path traversals;
+    // nothing binds one to the other. `O_NOFOLLOW` on the final open closes the
+    // leaf case: a symlink substituted where the object should be fails the
+    // open outright instead of being followed. These drive the openers directly
+    // because the race itself cannot be scheduled deterministically in a test.
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_final_open_refuses_to_follow_a_symlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let secret = temp_dir.path().join("secret.txt");
+        std::fs::write(&secret, b"TOP SECRET").unwrap();
+        let link = temp_dir.path().join("link.txt");
+        symlink(&secret, &link);
+
+        let read_err = open_read(&link)
+            .await
+            .expect_err("open_read must not follow a symlink at the leaf");
+        assert_eq!(read_err.raw_os_error(), Some(libc::ELOOP));
+        assert!(matches!(
+            map_open_error(read_err, "link.txt"),
+            StorageError::InvalidFileName(_)
+        ));
+
+        let write_err = open_write(&link)
+            .await
+            .expect_err("open_write must not follow a symlink at the leaf");
+        assert_eq!(write_err.raw_os_error(), Some(libc::ELOOP));
+
+        assert_eq!(
+            std::fs::read(&secret).unwrap(),
+            b"TOP SECRET",
+            "the link target must not have been truncated or written"
+        );
+    }
+
+    /// ...while a real file still opens both ways.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_final_open_still_works_on_a_real_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("real.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        open_read(&path).await.expect("a real file must open");
+        open_write(&path)
+            .await
+            .expect("a real file must open for writing");
+    }
+
+    // --- URL generation ------------------------------------------------------
+
+    async fn url_storage() -> (tempfile::TempDir, LocalStorage) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(
+            LocalStorageConfig::new(temp_dir.path())
+                .with_base_url("https://cdn.example.com/files/"),
+        )
+        .await
+        .unwrap();
+        (temp_dir, storage)
+    }
+
+    /// `url` was the tenth `Storage` method and the only one that did not
+    /// validate its key: it interpolated the key raw, so `../../admin` walked
+    /// out of the configured base path.
+    #[tokio::test]
+    async fn url_rejects_traversal_keys() {
+        let (_temp, storage) = url_storage().await;
+
+        for key in TRAVERSAL_KEYS {
+            let err = storage
+                .url(key)
+                .await
+                .expect_err(&format!("url must reject traversal key {key:?}"));
+            assert!(
+                matches!(err, StorageError::InvalidFileName(_)),
+                "expected InvalidFileName for {key:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// ...and it percent-encodes, so a key cannot inject a query, a fragment,
+    /// or a header break into the URL it is spliced into.
+    #[tokio::test]
+    async fn url_percent_encodes_each_segment() {
+        let (_temp, storage) = url_storage().await;
+
+        assert_eq!(
+            storage.url("a/b.txt").await.unwrap().as_deref(),
+            Some("https://cdn.example.com/files/a/b.txt"),
+            "an ordinary key must keep its shape, separators included"
+        );
+
+        assert_eq!(
+            storage.url("report?admin=1").await.unwrap().as_deref(),
+            Some("https://cdn.example.com/files/report%3Fadmin%3D1")
+        );
+        assert_eq!(
+            storage.url("report#frag").await.unwrap().as_deref(),
+            Some("https://cdn.example.com/files/report%23frag")
+        );
+        assert_eq!(
+            storage.url("a\r\nX-Injected: 1").await.unwrap().as_deref(),
+            Some("https://cdn.example.com/files/a%0D%0AX-Injected%3A%201")
+        );
+        assert_eq!(
+            storage.url("100%.txt").await.unwrap().as_deref(),
+            Some("https://cdn.example.com/files/100%25.txt")
+        );
+    }
+
+    /// Every URL this backend hands out comes from the same encoder, so
+    /// `Storage::url` and the `url` carried on metadata cannot disagree.
+    #[tokio::test]
+    async fn metadata_urls_are_encoded_the_same_way_as_storage_url() {
+        let (_temp, storage) = url_storage().await;
+
+        let key = "odd name?.txt";
+        let put = storage.put(key, Bytes::from("x")).await.unwrap();
+        let head = storage.head(key).await.unwrap();
+        let direct = storage.url(key).await.unwrap();
+
+        assert_eq!(put.url, direct);
+        assert_eq!(head.url, direct);
+        assert_eq!(
+            direct.as_deref(),
+            Some("https://cdn.example.com/files/odd%20name%3F.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn url_is_none_without_a_configured_base_url() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        assert_eq!(storage.url("a.txt").await.unwrap(), None);
     }
 
     /// S3, GCS and Azure all treat an empty prefix as "everything"; local
@@ -1025,6 +1449,11 @@ mod tests {
 
     /// The behaviour the three cloud backends now match: a client-supplied
     /// multipart filename never becomes a path.
+    ///
+    /// Note this pins *unchanged* local behaviour -- `LocalStorage::generate_key`
+    /// has always delegated to `sanitize_filename`. It is the reference the
+    /// matching S3/GCS/Azure tests were written against, not a regression test
+    /// for a local fix.
     #[tokio::test]
     async fn generate_key_sanitizes_a_path_bearing_filename() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1069,5 +1498,157 @@ mod tests {
         keys.sort();
         assert_eq!(keys, ["f0.txt", "f1.txt", "f2.txt", "f3.txt", "f4.txt"]);
         assert!(pages >= 3, "5 items at 2 per page must take several pages");
+    }
+
+    /// The cursor used to be a positional offset into a tree that is re-walked
+    /// from scratch on every call. Storing an object with a lexically earlier
+    /// key between two pages shifted every later position by one, so the second
+    /// page re-reported an object the first page had already returned (and, for
+    /// a delete, skipped one entirely). The cursor is now the last key emitted,
+    /// which no concurrent mutation can shift.
+    #[tokio::test]
+    async fn a_write_between_pages_does_not_repeat_or_drop_objects() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        for key in ["f2.txt", "f4.txt", "f6.txt"] {
+            storage.put(key, Bytes::from("x")).await.unwrap();
+        }
+
+        let (first, cursor) = storage.list_page(None, None, 2).await.unwrap();
+        assert_eq!(
+            first.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["f2.txt", "f4.txt"]
+        );
+        let cursor = cursor.expect("a third object is left, so a cursor is due");
+
+        // A key that sorts before everything already returned.
+        storage.put("f0.txt", Bytes::from("x")).await.unwrap();
+
+        let (second, next) = storage.list_page(None, Some(&cursor), 2).await.unwrap();
+        assert_eq!(
+            second.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["f6.txt"],
+            "the insert must not push an already-reported key onto the next page"
+        );
+        assert_eq!(next, None);
+    }
+
+    /// The same shift in the other direction: deleting a lexically earlier key
+    /// between pages used to make the offset skip an object outright.
+    #[tokio::test]
+    async fn a_delete_between_pages_does_not_drop_objects() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        for key in ["f0.txt", "f2.txt", "f4.txt", "f6.txt"] {
+            storage.put(key, Bytes::from("x")).await.unwrap();
+        }
+
+        let (first, cursor) = storage.list_page(None, None, 2).await.unwrap();
+        assert_eq!(
+            first.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["f0.txt", "f2.txt"]
+        );
+        let cursor = cursor.unwrap();
+
+        storage.delete("f0.txt").await.unwrap();
+
+        let (second, _) = storage.list_page(None, Some(&cursor), 2).await.unwrap();
+        assert_eq!(
+            second.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["f4.txt", "f6.txt"],
+            "the delete must not cause an unreported key to be skipped"
+        );
+    }
+
+    /// A continuation was returned whenever the page merely filled, so a
+    /// listing whose size is an exact multiple of the limit always cost one
+    /// extra full-tree walk that returned nothing. The cursor is now only
+    /// handed back when another entry actually exists.
+    #[tokio::test]
+    async fn an_exactly_full_page_does_not_promise_a_nonexistent_next_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        for key in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            storage.put(key, Bytes::from("x")).await.unwrap();
+        }
+
+        let (first, cursor) = storage.list_page(None, None, 2).await.unwrap();
+        assert_eq!(first.len(), 2);
+        let (second, next) = storage.list_page(None, cursor.as_deref(), 2).await.unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            next, None,
+            "the listing is exhausted; promising another page costs a whole extra walk"
+        );
+    }
+
+    /// `prefix` is a byte prefix over the whole key on S3/GCS/Azure. Local
+    /// storage joined it onto the key root and walked *that directory*, so
+    /// `list_page(Some("rep"), ..)` returned `["reports/a.txt"]` in production
+    /// and `[]` against the documented dev/test backend.
+    #[tokio::test]
+    async fn a_partial_prefix_matches_keys_the_way_the_cloud_backends_do() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        storage
+            .put("reports/a.txt", Bytes::from("1"))
+            .await
+            .unwrap();
+        storage.put("readme.txt", Bytes::from("2")).await.unwrap();
+        storage.put("other.txt", Bytes::from("3")).await.unwrap();
+
+        let (page, _) = storage.list_page(Some("rep"), None, 100).await.unwrap();
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["reports/a.txt"],
+            "a partial prefix must match by key, not by directory"
+        );
+
+        // A prefix spanning a separator works too, which a directory walk
+        // cannot express at all.
+        let (page, _) = storage
+            .list_page(Some("reports/a"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["reports/a.txt"]
+        );
+
+        // And a directory-shaped prefix still behaves as before.
+        let (page, _) = storage.list_page(Some("reports"), None, 100).await.unwrap();
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["reports/a.txt"]
+        );
+    }
+
+    /// The walk emits in component order, and the cursor is compared the same
+    /// way. A plain string comparison would disagree: `a.txt` sorts before
+    /// `a/b.txt` as bytes (`.` < `/`) but is emitted *after* it, because the
+    /// directory `a` sorts before the file `a.txt`.
+    #[tokio::test]
+    async fn pagination_is_consistent_where_string_and_path_order_disagree() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+        storage.put("a/b.txt", Bytes::from("1")).await.unwrap();
+        storage.put("a.txt", Bytes::from("2")).await.unwrap();
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        for _ in 0..5 {
+            let (page, next) = storage.list_page(None, cursor.as_deref(), 1).await.unwrap();
+            seen.extend(page.into_iter().map(|m| m.key));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            seen,
+            ["a/b.txt", "a.txt"],
+            "every object must be reported exactly once"
+        );
     }
 }

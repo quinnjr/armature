@@ -198,7 +198,8 @@ carrying the upstream status code alongside the response body.
 use armature_mail::{Email, EmailQueue, EmailQueueConfig, Mailer, SmtpConfig};
 use std::sync::Arc;
 
-let queue = EmailQueue::in_memory(EmailQueueConfig::default().concurrency(4));
+// Validated here: `visibility_timeout` must clear `job_timeout` by more than 2x.
+let queue = EmailQueue::in_memory(EmailQueueConfig::default().concurrency(4))?;
 
 let _job_id = queue
     .enqueue(Email::new().to("user@example.com").subject("Hi").text("Async"))

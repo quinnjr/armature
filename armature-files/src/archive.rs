@@ -243,35 +243,87 @@ pub const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 /// the last 22 + 65535 bytes and states the member count directly, so it can be
 /// checked first, for the cost of a backwards scan.
 ///
-/// Returns `None` when the record cannot be located or understood; callers must
+/// Returns `None` when no record can be located or understood; callers must
 /// treat that as "unknown" and fall back to the post-parse check.
+///
+/// # Why every candidate is examined, and the maximum taken
+///
+/// A backwards scan that stops at the *last* `PK\x05\x06` in the tail is
+/// trivially spoofable: the EOCD comment is attacker-controlled, so a crafted
+/// archive can declare a comment covering 22 planted bytes that themselves look
+/// like an EOCD announcing one member. Nor is a self-consistency check on the
+/// candidate alone enough — the planted record can be made self-consistent too
+/// (its own comment length can be chosen to reach the end of the file).
+///
+/// So the scan is conservative in both directions instead:
+///
+/// * every candidate whose comment length exactly reaches the end of the file
+///   is considered, and the **largest** declared count wins. A planted record
+///   can only ever add a count, never mask the real one;
+/// * the Zip64 record is consulted **unconditionally**, not only when the
+///   16-bit field is saturated at `0xFFFF`. `zip` 8.x sizes its
+///   central-directory index from the Zip64 record whenever a locator is
+///   present, so an archive declaring `5` classically and a million in Zip64
+///   would otherwise sail past this guard and allocate the million.
 fn peek_entry_count(data: &[u8]) -> Option<u64> {
     const EOCD_SIG: [u8; 4] = [b'P', b'K', 0x05, 0x06];
     const EOCD64_SIG: [u8; 4] = [b'P', b'K', 0x06, 0x06];
+
+    /// Every offset in `haystack` at which the 4-byte `needle` occurs.
+    fn candidates(haystack: &[u8], needle: [u8; 4]) -> impl Iterator<Item = usize> + '_ {
+        haystack
+            .windows(4)
+            .enumerate()
+            .filter_map(move |(i, w)| (w == needle).then_some(i))
+    }
+
+    fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[offset..offset + 8]);
+        u64::from_le_bytes(buf)
+    }
 
     // EOCD: 22 fixed bytes plus a comment of at most u16::MAX bytes.
     let window = data.len().min(22 + u16::MAX as usize);
     let tail = &data[data.len() - window..];
 
-    let pos = tail.windows(4).rposition(|w| w == EOCD_SIG)?;
-    let eocd = &tail[pos..];
-    if eocd.len() < 22 {
-        return None;
+    let mut declared: Option<u64> = None;
+    let mut record = |count: u64| {
+        declared = Some(declared.map_or(count, |seen: u64| seen.max(count)));
+    };
+
+    for pos in candidates(tail, EOCD_SIG) {
+        let eocd = &tail[pos..];
+        if eocd.len() < 22 {
+            continue;
+        }
+        // Self-consistency: the declared comment length must account for
+        // exactly the bytes that follow the fixed 22-byte header, which for a
+        // genuine EOCD means "to the end of the file".
+        let comment_len = u16::from_le_bytes([eocd[20], eocd[21]]) as usize;
+        if eocd.len() != 22 + comment_len {
+            continue;
+        }
+        record(u64::from(u16::from_le_bytes([eocd[10], eocd[11]])));
     }
 
-    let count = u16::from_le_bytes([eocd[10], eocd[11]]);
-    if count != u16::MAX {
-        return Some(u64::from(count));
+    for pos in candidates(tail, EOCD64_SIG) {
+        let eocd64 = &tail[pos..];
+        // 56 fixed bytes; a genuine record is always followed by at least the
+        // 20-byte locator and the 22-byte EOCD, so the tail cannot be short.
+        if eocd64.len() < 56 {
+            continue;
+        }
+        // "Size of zip64 end of central directory record": the byte count
+        // following this field, whose fixed portion is 44 bytes.
+        if u64_at(eocd64, 4) < 44 {
+            continue;
+        }
+        // Total number of entries in the central directory.
+        record(u64_at(eocd64, 32));
     }
 
-    // The count is saturated, so the real value lives in the Zip64 EOCD record
-    // (which precedes the Zip64 locator, which precedes the EOCD).
-    let pos64 = tail[..pos].windows(4).rposition(|w| w == EOCD64_SIG)?;
-    let eocd64 = &tail[pos64..];
-    if eocd64.len() < 40 {
-        return None;
-    }
-    Some(u64::from_le_bytes(eocd64[32..40].try_into().ok()?))
+    declared
 }
 
 /// Resolve an archive member name to a path guaranteed to stay under the
@@ -418,17 +470,26 @@ impl ZipExtractor {
 
             let archive = ZipArchive::new(Cursor::new(data.clone()))
                 .map_err(|e| FileError::Archive(format!("Failed to open archive: {}", e)))?;
-            if archive.len() > max_entries {
-                return Err(FileError::Archive(format!(
-                    "archive contains {} entries, exceeding the limit of {}",
-                    archive.len(),
-                    max_entries
-                )));
-            }
             *guard = Some(archive);
         }
 
-        f(guard.as_mut().expect("archive was just initialized"))
+        let archive = guard.as_mut().expect("archive was just initialized");
+
+        // Deliberately *outside* the `is_none()` block. `max_entries` takes
+        // `self` by value and returns it, so the `Arc` cache travels with the
+        // builder: `ZipExtractor::new(..)` → `list_files()` → `max_entries(5)`
+        // hands the tightened extractor an already-populated index. Checking
+        // only on the parse that populated it would mean a *tightened* limit
+        // was silently never applied.
+        if archive.len() > max_entries {
+            return Err(FileError::Archive(format!(
+                "archive contains {} entries, exceeding the limit of {}",
+                archive.len(),
+                max_entries
+            )));
+        }
+
+        f(archive)
     }
 
     /// Run `f` against the cached (lazily parsed) archive index.
@@ -504,11 +565,19 @@ impl ZipExtractor {
     ///
     /// Extraction is *staged*: every entry is written into a temporary
     /// directory created inside `dir`, and the results are only moved into
-    /// place once the whole archive has been extracted successfully. Any
-    /// failure — traversal, bomb budget, IO, a corrupt member — therefore
-    /// leaves `dir` exactly as it was, instead of leaving behind however many
+    /// place once the whole archive has been extracted successfully. A failure
+    /// during extraction — traversal, bomb budget, IO, a corrupt member —
+    /// therefore leaves `dir` untouched, instead of leaving behind however many
     /// entries had already been written (which let a crafted archive fill the
     /// caller's disk with attacker-controlled data and still return `Err`).
+    ///
+    /// A failure during the *promotion* of the staged entries into `dir` is
+    /// rolled back: the entries already moved are removed again, along with the
+    /// directories created for them. See `promote_staged_entries` for what
+    /// that rollback does and does not guarantee — it is best-effort in the
+    /// presence of a filesystem that also fails the cleanup, and it does not
+    /// pretend to be atomic against a concurrent observer watching `dir` while
+    /// the promotion runs.
     ///
     /// Three separate guards keep writes inside the directory:
     ///
@@ -527,7 +596,13 @@ impl ZipExtractor {
     /// As a consequence extraction is **non-clobbering**: an entry whose
     /// destination name already exists in `dir` (as a file, directory or
     /// symlink) is an error rather than an overwrite, which is the right
-    /// default for untrusted input.
+    /// default for untrusted input. The destination name is claimed with
+    /// `O_EXCL` rather than checked with `symlink_metadata` and then renamed
+    /// over, so there is no window in which a concurrently created name is
+    /// silently replaced by `std::fs::rename`.
+    ///
+    /// Two entries that cannot coexist on a filesystem — `a` as a regular file
+    /// and `a/b` under it — are rejected before anything is promoted.
     pub async fn extract_to(&self, dir: impl AsRef<Path>) -> FileResult<Vec<String>> {
         let dir = dir.as_ref().to_path_buf();
         tokio::fs::create_dir_all(&dir)
@@ -638,35 +713,127 @@ fn extract_all_from(
     Ok(entries)
 }
 
+/// Everything a partially completed promotion has to undo.
+#[derive(Default)]
+struct PromotionJournal {
+    /// Destination paths this promotion created — first as an empty `O_EXCL`
+    /// reservation, then (once renamed onto) as the extracted file itself.
+    /// Either way the path did not exist before, so removing it restores the
+    /// previous state.
+    reserved: Vec<PathBuf>,
+    /// Directories this promotion created under the root, in creation order.
+    created_dirs: Vec<PathBuf>,
+}
+
+impl PromotionJournal {
+    /// Best-effort undo of everything recorded so far.
+    ///
+    /// Deliberately ignores errors: this runs on a path that is already
+    /// returning `Err`, and a failure to clean up (a concurrently re-populated
+    /// directory, a revoked permission) must not mask the original cause.
+    fn roll_back(&self) {
+        for path in self.reserved.iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+        for dir in self.created_dirs.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
 /// Move fully extracted entries from the staging directory into the real
-/// extraction root.
+/// extraction root, atomically with respect to the caller.
 ///
-/// Every destination is checked with `symlink_metadata` (which does *not*
-/// follow symlinks) first: a pre-existing name is an error, so extraction never
-/// clobbers, and never replaces something a symlink points at. All the checks
-/// run before the first rename, so the usual failure mode (a name already
-/// taken) still leaves the target directory untouched.
+/// # What is guaranteed
+///
+/// Either every entry ends up in `root`, or none does: on any failure the
+/// entries already moved are deleted again and the directories created for them
+/// are removed, so `root` is left as it was found. The rollback is best-effort
+/// in the sense that it ignores IO errors of its own (see
+/// [`PromotionJournal::roll_back`]) — a rollback that itself fails can leave
+/// residue, but it never masks the original error.
+///
+/// Everything that can fail is hoisted into the pre-flight pass — parent
+/// creation, canonicalization, name reservation — so the promotion pass proper
+/// contains nothing but `rename`, which for a same-filesystem move of an
+/// already-created name is about as close to infallible as the filesystem gets.
+/// The previous shape interleaved `create_dir_all` + `canonicalize` + `rename`
+/// per entry, so an `ENOSPC`, `EXDEV`, `ENOTDIR` or permission error partway
+/// through returned `Err` with entries `0..N` already written into `root` —
+/// exactly the attacker-controlled disk fill that staging exists to prevent. An
+/// archive holding member `a` (a regular file) followed by `a/b` triggered it
+/// deterministically, with no race and no unusual filesystem state required.
+///
+/// # Non-clobbering, without a TOCTOU window
+///
+/// `std::fs::rename` *replaces* an existing destination, so a `symlink_metadata`
+/// pre-check would leave a window in which another process could create the
+/// name between the check and the rename, and see it silently replaced. Instead
+/// each destination is reserved during pre-flight by creating it with
+/// `create_new` (`O_EXCL`), which atomically fails if anything — file,
+/// directory or symlink — already holds the name. The rename then lands on a
+/// name this function already owns. That is portable, unlike
+/// `renameat2(RENAME_NOREPLACE)`, and closes the same window.
 fn promote_staged_entries(
     staging_root: &Path,
     root: &Path,
     entries: &[(String, PathBuf)],
 ) -> FileResult<()> {
+    let mut journal = PromotionJournal::default();
+
+    let result = promote_preflight(root, entries, &mut journal).and_then(|()| {
+        for (name, relative) in entries {
+            std::fs::rename(staging_root.join(relative), root.join(relative)).map_err(|e| {
+                FileError::Archive(format!(
+                    "failed to move archive entry {name} into place: {e}"
+                ))
+            })?;
+        }
+        Ok(())
+    });
+
+    if result.is_err() {
+        journal.roll_back();
+    }
+
+    result
+}
+
+/// Do every fallible part of the promotion up front: reject conflicting entry
+/// names, create the destination directories, and reserve each destination.
+fn promote_preflight(
+    root: &Path,
+    entries: &[(String, PathBuf)],
+    journal: &mut PromotionJournal,
+) -> FileResult<()> {
+    // An entry whose path is a strict prefix of another's cannot coexist with
+    // it: `a` is a regular file and `a/b` needs `a` to be a directory. Caught
+    // here rather than as an `ENOTDIR` halfway through the promotion.
+    let names: std::collections::HashSet<&Path> =
+        entries.iter().map(|(_, r)| r.as_path()).collect();
+    if names.len() != entries.len() {
+        return Err(FileError::Archive(
+            "archive declares the same entry path more than once".into(),
+        ));
+    }
     for (name, relative) in entries {
-        let destination = root.join(relative);
-        if destination.symlink_metadata().is_ok() {
-            return Err(FileError::Archive(format!(
-                "refusing to overwrite the existing path {} with archive entry {name}",
-                destination.display()
-            )));
+        for ancestor in relative.ancestors().skip(1) {
+            if names.contains(ancestor) {
+                return Err(FileError::Archive(format!(
+                    "refusing to extract entry {name}: {} is also a file entry in the archive",
+                    ancestor.display()
+                )));
+            }
         }
     }
 
-    for (_, relative) in entries {
+    for (name, relative) in entries {
         let destination = root.join(relative);
 
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(FileError::Io)?;
-            let canonical_parent = parent.canonicalize().map_err(FileError::Io)?;
+        if let Some(parent) = relative.parent() {
+            create_dirs_tracked(root, parent, journal)?;
+            let absolute_parent = root.join(parent);
+            let canonical_parent = absolute_parent.canonicalize().map_err(FileError::Io)?;
             if !canonical_parent.starts_with(root) {
                 return Err(FileError::Archive(format!(
                     "refusing to write {} outside the extraction directory",
@@ -675,9 +842,45 @@ fn promote_staged_entries(
             }
         }
 
-        std::fs::rename(staging_root.join(relative), &destination).map_err(FileError::Io)?;
+        // `create_new` is `O_EXCL`: an atomic "claim this name or fail". It
+        // doubles as the non-clobbering check, without the stat-then-rename
+        // race, and refuses to follow a symlink already sitting at the path.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(_) => journal.reserved.push(destination),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(FileError::Archive(format!(
+                    "refusing to overwrite the existing path {} with archive entry {name}",
+                    destination.display()
+                )));
+            }
+            Err(e) => return Err(FileError::Io(e)),
+        }
     }
 
+    Ok(())
+}
+
+/// `create_dir_all` for `root/relative`, recording each directory it actually
+/// creates so a failed promotion can remove them again.
+fn create_dirs_tracked(
+    root: &Path,
+    relative: &Path,
+    journal: &mut PromotionJournal,
+) -> FileResult<()> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::create_dir(&current) {
+            Ok(()) => journal.created_dirs.push(current.clone()),
+            // Already there: not ours, so not ours to remove on rollback.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(FileError::Io(e)),
+        }
+    }
     Ok(())
 }
 
@@ -711,5 +914,71 @@ mod tests {
 
         let content = extractor.extract_file("test.txt").unwrap();
         assert_eq!(&*content, b"Hello, World!");
+    }
+
+    /// Two entries that cannot coexist on a filesystem — `a` as a regular file
+    /// and `a/b` beneath it — are rejected in pre-flight, before anything is
+    /// moved into the extraction root.
+    ///
+    /// Tested at this level because the staging pass rejects the same shape
+    /// earlier (its own `create_dir_all` hits `ENOTDIR`); this pins the
+    /// promotion's independent refusal, which is what stops the loop from
+    /// discovering the conflict halfway through.
+    #[test]
+    fn promotion_rejects_an_entry_that_is_a_prefix_of_another() {
+        let staging = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(staging.path().join("a"), b"file").unwrap();
+
+        let entries = vec![
+            ("a".to_string(), PathBuf::from("a")),
+            ("a/b".to_string(), PathBuf::from("a/b")),
+        ];
+
+        let err = promote_staged_entries(staging.path(), root.path(), &entries)
+            .expect_err("`a` and `a/b` cannot both be extracted");
+        assert!(
+            err.to_string().contains("is also a file entry"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().next().is_none(),
+            "nothing may be created in the root when pre-flight rejects the set"
+        );
+    }
+
+    /// A duplicated entry path would have the second rename silently replace
+    /// the first.
+    #[test]
+    fn promotion_rejects_duplicate_entry_paths() {
+        let staging = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(staging.path().join("a"), b"file").unwrap();
+
+        let entries = vec![
+            ("a".to_string(), PathBuf::from("a")),
+            ("a".to_string(), PathBuf::from("a")),
+        ];
+
+        let err = promote_staged_entries(staging.path(), root.path(), &entries)
+            .expect_err("a duplicated destination must not be promoted twice");
+        assert!(
+            err.to_string().contains("more than once"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The pre-parse guard reads a plain archive's count, and both spoof
+    /// shapes (a planted EOCD, a large Zip64 count behind a small classic one)
+    /// are covered end-to-end in `tests/archive_hardening.rs`.
+    #[test]
+    fn peek_entry_count_reads_a_plain_archive() {
+        let archive = ZipBuilder::new()
+            .add_file("a.txt", "x")
+            .add_file("b.txt", "y")
+            .build()
+            .unwrap();
+
+        assert_eq!(peek_entry_count(&archive.data), Some(2));
     }
 }

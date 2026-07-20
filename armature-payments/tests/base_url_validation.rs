@@ -9,6 +9,11 @@
 //!
 //! The loopback exemption is not incidental: every stub-server test in this
 //! crate depends on `http://127.0.0.1:PORT` remaining acceptable.
+//!
+//! Nothing here is meaningful without at least one provider: every helper
+//! below exists to be driven through a concrete gateway, so with no provider
+//! feature enabled the file would be a pile of dead code.
+#![cfg(any(feature = "stripe", feature = "paypal", feature = "braintree"))]
 
 use armature_payments::PaymentError;
 

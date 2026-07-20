@@ -63,6 +63,11 @@ azure_core = { version = "1.0", optional = true }
 azure_identity = { version = "1.0", optional = true }
 base64 = { version = "0.22", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` on the final open in the local backend, and `MetadataExt::nlink`
+# for the hardlink containment check. Unix-only; nothing else needs it.
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 armature-testkit = { path = "../armature-testkit" }

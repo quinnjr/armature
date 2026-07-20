@@ -54,9 +54,19 @@ impl TeraEngine {
     /// All three engines agree on this rule: escaping the `text/plain` body or
     /// the `Subject:` header is a bug (`Bob & Alice` would go out as
     /// `Bob &amp; Alice`), not a safety measure.
+    ///
+    /// The escape function is [`crate::template_dir::escape_html`] rather than
+    /// Tera's built-in, which escapes a different set from Handlebars' and
+    /// MiniJinja's — the same template rendered identical-looking output on one
+    /// engine and different HTML on another.
     pub fn new() -> Self {
         let mut tera = Tera::new();
         tera.autoescape_on(vec!["/html", ".html", ".htm", ".xml"]);
+        tera.set_escape_fn(|input, output| {
+            let mut escaped = String::with_capacity(input.len());
+            crate::template_dir::push_escaped(input, &mut escaped);
+            output.write_all(escaped.as_bytes())
+        });
         Self { tera }
     }
 

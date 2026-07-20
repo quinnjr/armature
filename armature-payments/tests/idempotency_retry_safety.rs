@@ -10,10 +10,18 @@
 //! each provider actually forward its gateway's dedup header. These tests pin
 //! both halves: a provider that cannot deduplicate must be attempted exactly
 //! once, and a provider that can must repeat the *same* key on every attempt.
+//!
+//! Nothing here is meaningful without at least one provider: every helper
+//! below exists to be driven through a concrete gateway, so with no provider
+//! feature enabled the file would be a pile of dead code.
+#![cfg(any(feature = "stripe", feature = "paypal", feature = "braintree"))]
 
+// `PaymentError` is deliberately *not* imported here: only the Braintree module
+// uses it, and an unused import under `--no-default-features --features stripe`
+// fails any consumer building this crate with `-D warnings`.
 use armature_payments::{
-    ChargeRequest, Money, PaymentError, PaymentProcessor, PaymentProvider, PaymentSource,
-    ProcessorConfig, RefundRequest,
+    ChargeRequest, Money, PaymentProcessor, PaymentProvider, PaymentSource, ProcessorConfig,
+    RefundRequest,
 };
 use armature_testkit::http_stub::{StubResponse, StubServer};
 
@@ -49,6 +57,7 @@ fn charge_request() -> ChargeRequest {
 #[cfg(feature = "braintree")]
 mod braintree {
     use super::*;
+    use armature_payments::PaymentError;
     use armature_payments::providers::braintree::BraintreeProvider;
 
     fn provider(server: &StubServer) -> BraintreeProvider {

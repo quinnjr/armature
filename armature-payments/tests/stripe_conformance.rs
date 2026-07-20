@@ -113,7 +113,7 @@ async fn delete_customer_checks_the_response_status() {
             // itself must survive into the message.
             500,
             "upstream exploded",
-            |e| matches!(e, PaymentError::Provider(m) if m.contains("500")),
+            |e| matches!(e, PaymentError::Provider { status: Some(500), message } if message.contains("500")),
             "Provider containing \"500\"",
         ),
     ];
@@ -200,7 +200,7 @@ async fn error_statuses_map_to_typed_errors() {
         (
             500,
             "not json at all",
-            |e| matches!(e, PaymentError::Provider(m) if m.contains("500")),
+            |e| matches!(e, PaymentError::Provider { status: Some(500), message } if message.contains("500")),
         ),
     ];
 

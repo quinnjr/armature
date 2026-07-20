@@ -143,9 +143,13 @@ async fn create_customer_returns_an_explicit_unsupported_error() {
     // Either explicit-refusal variant is acceptable here; what must not happen
     // is a locally minted ID or a bare `Ok`.
     match err {
-        PaymentError::Unsupported(msg) | PaymentError::Provider(msg) => assert!(
+        PaymentError::Unsupported(msg) => assert!(
             msg.contains("customer"),
             "the error must explain why: {msg}"
+        ),
+        PaymentError::Provider { message, .. } => assert!(
+            message.contains("customer"),
+            "the error must explain why: {message}"
         ),
         other => panic!("expected an explicit refusal, got {other:?}"),
     }
@@ -208,11 +212,15 @@ async fn update_subscription_surfaces_a_revise_failure() {
     // The shared classifier keeps the status in the message so an operator can
     // tell a rejected plan change from a missing subscription.
     match err {
-        PaymentError::Provider(msg) => {
-            assert!(msg.contains("422"), "the status must survive: {msg}");
+        PaymentError::Provider { status, message } => {
+            assert_eq!(status, Some(422), "the status must ride on the variant");
             assert!(
-                msg.contains("PLAN_CHANGE_NOT_ALLOWED"),
-                "PayPal's reason must survive: {msg}"
+                message.contains("422"),
+                "the status must survive: {message}"
+            );
+            assert!(
+                message.contains("PLAN_CHANGE_NOT_ALLOWED"),
+                "PayPal's reason must survive: {message}"
             );
         }
         other => panic!("expected Provider, got {other:?}"),

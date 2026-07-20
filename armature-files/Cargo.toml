@@ -70,7 +70,8 @@ lopdf = { version = "0.43", optional = true }
 # Additional formats
 zip = { version = "8.6", optional = true }
 # `ZipExtractor::extract_to` stages into a temporary directory inside the target
-# so a failed extraction leaves nothing behind.
+# so a failed extraction leaves nothing behind; a failure while promoting the
+# staged entries is rolled back (best-effort) rather than left half-applied.
 tempfile = { version = "3.27", optional = true }
 
 [features]

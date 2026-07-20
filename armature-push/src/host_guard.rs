@@ -25,8 +25,10 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// (169.254/16 — the cloud metadata range), the whole 0.0.0.0/8 "this network"
 /// block, 100.64/10 (RFC 6598 CGNAT, which is routable to infrastructure
 /// inside many cloud VPCs), 192.0.0.0/24 (RFC 6890 IETF protocol
-/// assignments), the limited broadcast address, and all of 224.0.0.0/4
-/// multicast.
+/// assignments), 198.18.0.0/15 (RFC 2544 benchmarking, which several clouds
+/// route to infrastructure), 240.0.0.0/4 (RFC 1112 reserved — also routed
+/// internally in some clouds, and it subsumes the limited broadcast address),
+/// the limited broadcast address, and all of 224.0.0.0/4 multicast.
 ///
 /// The 0.0.0.0/8 rule is broader than `is_unspecified()` on purpose:
 /// `is_unspecified()` matches only `0.0.0.0` exactly, so `https://0.1.2.3/`
@@ -46,6 +48,12 @@ pub(crate) fn is_internal_v4(ip: &Ipv4Addr) -> bool {
     let protocol_assignments = o[0] == 192 && o[1] == 0 && o[2] == 0;
     // RFC 1122 "this network" — 0.0.0.0/8, not just the unspecified address.
     let this_network = o[0] == 0;
+    // RFC 2544 benchmarking, 198.18.0.0/15 — routed to infrastructure in some
+    // clouds rather than being genuinely dark.
+    let benchmarking = o[0] == 198 && (o[1] == 18 || o[1] == 19);
+    // RFC 1112 reserved, 240.0.0.0/4. Nominally unusable, but some clouds route
+    // it internally, and nothing legitimate is a push endpoint there.
+    let reserved = o[0] >= 240;
 
     ip.is_private()
         || ip.is_link_local()
@@ -54,6 +62,8 @@ pub(crate) fn is_internal_v4(ip: &Ipv4Addr) -> bool {
         || ip.is_multicast()
         || cgnat
         || protocol_assignments
+        || benchmarking
+        || reserved
 }
 
 /// True for IPv6 addresses that belong to internal ranges.
@@ -76,6 +86,12 @@ pub(crate) fn is_internal_v4(ip: &Ipv4Addr) -> bool {
 /// - **6to4, `2002::/16`** — the embedded v4 sits in segments 1 and 2, so
 ///   `https://[2002:a9fe:a9fe::]/` reaches 169.254.169.254 on any host with a
 ///   6to4 tunnel.
+/// - **IPv4-translated, `::ffff:0:a.b.c.d`** — the deprecated RFC 2765 form
+///   (`s[4] == 0xffff && s[5] == 0`). `to_ipv4()` returns `None` for it, so it
+///   matched no rule at all and fell through to "public".
+/// - **Teredo, `2001::/32`** — the tunnel client's IPv4 address is stored as
+///   the *complement* of the low 32 bits, so `2001:0:...:5601:5601` carries
+///   169.254.169.254 and reads as an ordinary public v6 address without this.
 ///
 /// Unlike [`is_internal_v4`], loopback *is* included here. The asymmetry was a
 /// trap: plain `::1` returned `false`, and only `web_push.rs`'s separate
@@ -95,6 +111,14 @@ pub(crate) fn is_internal_v6(ip: &Ipv6Addr) -> bool {
 
     let s = ip.segments();
 
+    // IPv4-translated `::ffff:0:a.b.c.d` (RFC 2765). `to_ipv4()` above does not
+    // match this form — it requires either an all-zero prefix or `s[5] ==
+    // 0xffff` — so without this arm it matched no rule and passed as public.
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0xffff && s[5] == 0 {
+        let v4 = Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
+        return is_internal_v4(&v4) || v4.is_loopback();
+    }
+
     // NAT64 well-known prefix 64:ff9b::/96 — the embedded v4 is the low 32 bits.
     if s[0] == 0x0064 && s[1] == 0xff9b {
         let v4 = Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
@@ -104,6 +128,14 @@ pub(crate) fn is_internal_v6(ip: &Ipv6Addr) -> bool {
     // 6to4 2002::/16 — the embedded v4 is segments 1 and 2.
     if s[0] == 0x2002 {
         let v4 = Ipv4Addr::from(((s[1] as u32) << 16) | s[2] as u32);
+        return is_internal_v4(&v4) || v4.is_loopback();
+    }
+
+    // Teredo 2001::/32 — the tunnel client's IPv4 address is the *complement*
+    // of the low 32 bits (RFC 4380 §4). Without un-complementing it, a Teredo
+    // address wrapping 169.254.169.254 reads as an ordinary public v6 address.
+    if s[0] == 0x2001 && s[1] == 0x0000 {
+        let v4 = Ipv4Addr::from(!(((s[6] as u32) << 16) | s[7] as u32));
         return is_internal_v4(&v4) || v4.is_loopback();
     }
 
@@ -213,6 +245,56 @@ mod tests {
         assert!(is_internal_v4(&v4("0.1.2.3")));
         assert!(is_internal_v4(&v4("0.255.255.255")));
         assert!(!is_internal_v4(&v4("1.0.0.1")));
+    }
+
+    #[test]
+    fn ipv4_translated_form_is_internal() {
+        // Closes: `::ffff:0:a.b.c.d` (RFC 2765 IPv4-translated). `to_ipv4()`
+        // returns None for this spelling — it wants an all-zero prefix or
+        // `s[5] == 0xffff` — so `https://[::ffff:0:169.254.169.254]/` matched
+        // no rule and reached the cloud metadata service.
+        assert!(is_internal_v6(&v6("::ffff:0:169.254.169.254")));
+        assert!(is_internal_v6(&v6("::ffff:0:a9fe:a9fe")));
+        assert!(is_internal_v6(&v6("::ffff:0:10.0.0.1")));
+        assert!(is_internal_v6(&v6("::ffff:0:127.0.0.1")));
+        // The prefix really is what distinguishes it: a translated *public*
+        // address is still allowed through.
+        assert!(!is_internal_v6(&v6("::ffff:0:93.184.216.34")));
+    }
+
+    #[test]
+    fn teredo_embedded_client_v4_is_internal() {
+        // Closes: Teredo 2001::/32 (RFC 4380 §4) stores the client IPv4 as the
+        // complement of the low 32 bits, so an address wrapping
+        // 169.254.169.254 (!0xa9fea9fe == 0x56015601) previously read as an
+        // ordinary public IPv6 address.
+        assert!(is_internal_v6(&v6("2001:0:4136:e378:8000:63bf:5601:5601")));
+        // !10.0.0.1 == 0xf5fffffe
+        assert!(is_internal_v6(&v6("2001:0::f5ff:fffe")));
+        // !127.0.0.1 == 0x80fffffe
+        assert!(is_internal_v6(&v6("2001:0::80ff:fffe")));
+        // A Teredo address wrapping a public v4 stays allowed: !93.184.216.34
+        // == 0xa24727dd.
+        assert!(!is_internal_v6(&v6("2001:0:4136:e378:8000:63bf:a247:27dd")));
+        // 2001:db8::/32 documentation space is *not* Teredo (s[1] != 0) and
+        // must not be misread through the complement rule.
+        assert!(!is_internal_v6(&v6("2001:db8::1")));
+    }
+
+    #[test]
+    fn benchmarking_and_reserved_v4_ranges_are_internal() {
+        // Closes: 198.18.0.0/15 (RFC 2544 benchmarking) and 240.0.0.0/4
+        // (RFC 1112 reserved). Both are routed to infrastructure in some
+        // clouds, and both previously passed as ordinary public addresses.
+        assert!(is_internal_v4(&v4("198.18.0.1")));
+        assert!(is_internal_v4(&v4("198.19.255.255")));
+        assert!(is_internal_v4(&v4("240.0.0.1")));
+        assert!(is_internal_v4(&v4("255.0.0.1")));
+        // Boundaries: 198.17.x and 198.20.x are outside 198.18.0.0/15, and
+        // 239.x is the top of the multicast block rather than the reserved one.
+        assert!(!is_internal_v4(&v4("198.17.255.255")));
+        assert!(!is_internal_v4(&v4("198.20.0.0")));
+        assert!(!is_internal_v4(&v4("198.51.100.1")));
     }
 
     #[test]

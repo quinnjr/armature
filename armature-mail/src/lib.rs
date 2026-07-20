@@ -77,7 +77,11 @@ mod error;
 mod mailer;
 mod transport;
 
-#[cfg(feature = "reqwest")]
+// Gated on the transports that use it, not on `reqwest` itself: `reqwest` is
+// only ever enabled *by* `sendgrid`/`mailgun`, and both import every item in
+// here unconditionally, so gating on the feature that actually implies a caller
+// is what keeps the module from needing a blanket `#[allow(dead_code)]`.
+#[cfg(any(feature = "sendgrid", feature = "mailgun"))]
 mod http;
 
 #[cfg(any(feature = "handlebars", feature = "tera", feature = "minijinja"))]
@@ -106,7 +110,7 @@ mod queue;
 
 pub use address::{Address, IntoAddress, Mailbox};
 pub use attachment::{Attachment, ContentDisposition, DEFAULT_MAX_ATTACHMENT_BYTES};
-pub use email::{Email, EmailBuilder, validate_header, validate_header_value};
+pub use email::{Email, EmailBuilder, validate_header};
 pub use error::{MailError, Result};
 pub use mailer::{Mailer, MailerConfig};
 pub use transport::{SmtpConfig, SmtpSecurity, SmtpTransport, Transport};

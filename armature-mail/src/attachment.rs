@@ -20,6 +20,13 @@ pub const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 /// roughly 3.5–4 bytes of JSON per source byte. The email queue stores the whole
 /// job as JSON in Redis and rewrites it on every retry, so a 10 MB attachment
 /// cost ~37 MB per `SET`. Base64 costs 1.33x instead.
+///
+/// Deserialization accepts *both* forms. `EmailJob` is persisted as JSON in
+/// Redis and holds an `Arc<Email>`, so a queue populated by 0.1.x contains
+/// `"data":[1,2,3]` bodies. Rejecting those would make `EmailQueueWorker::pop`
+/// fail every attachment-bearing job, push it onto `lost`, and `discard_lost`
+/// would then `DEL` the body — destroying mail that `enqueue` already
+/// acknowledged. So a sequence is still read; only writing is base64.
 mod base64_bytes {
     use base64::Engine;
     use bytes::Bytes;
@@ -29,12 +36,22 @@ mod base64_bytes {
         s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(data))
     }
 
+    /// Either a base64 string (0.2+) or a byte sequence (0.1.x).
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Payload {
+        Base64(String),
+        Sequence(Vec<u8>),
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
-        let encoded = String::deserialize(d)?;
-        base64::engine::general_purpose::STANDARD
-            .decode(encoded.as_bytes())
-            .map(Bytes::from)
-            .map_err(serde::de::Error::custom)
+        match Payload::deserialize(d)? {
+            Payload::Base64(encoded) => base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .map(Bytes::from)
+                .map_err(serde::de::Error::custom),
+            Payload::Sequence(bytes) => Ok(Bytes::from(bytes)),
+        }
     }
 }
 
@@ -88,7 +105,8 @@ impl Attachment {
     ///
     /// Rejects a file larger than [`DEFAULT_MAX_ATTACHMENT_BYTES`] *before*
     /// reading it, so a wrong path cannot pull an arbitrarily large file into
-    /// memory. This blocks the calling thread; from async code use
+    /// memory. Use [`Attachment::from_file_with_limit`] for a different ceiling.
+    /// This blocks the calling thread; from async code use
     /// [`Attachment::from_file_async`], which does not.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         Self::from_file_with_limit(path, DEFAULT_MAX_ATTACHMENT_BYTES)
@@ -113,7 +131,8 @@ impl Attachment {
     /// task it stalls the whole executor thread for the duration of the read,
     /// which for a multi-megabyte attachment on a slow disk is exactly the kind
     /// of stall an async crate exists to avoid. The size is checked against
-    /// [`DEFAULT_MAX_ATTACHMENT_BYTES`] via `metadata` before any bytes are read.
+    /// [`DEFAULT_MAX_ATTACHMENT_BYTES`] via `metadata` before any bytes are read;
+    /// use [`Attachment::from_file_async_with_limit`] for a different ceiling.
     pub async fn from_file_async(path: impl AsRef<Path>) -> Result<Self> {
         Self::from_file_async_with_limit(path, DEFAULT_MAX_ATTACHMENT_BYTES).await
     }
@@ -396,6 +415,68 @@ mod tests {
 
         let round_tripped: Attachment = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.data, attachment.data);
+    }
+
+    /// 0.1.x wrote `"data":[1,2,3]`. `EmailJob` is persisted as JSON in Redis, so
+    /// an in-place upgrade finds those bodies in a live queue: if the new
+    /// deserializer rejected them, every attachment-bearing job would fail in
+    /// `pop`, land on `lost`, and be `DEL`d by `discard_lost` — mail destroyed
+    /// after `enqueue` already returned `Ok(job_id)`. The legacy form must still
+    /// load.
+    #[test]
+    fn a_legacy_number_array_payload_still_deserializes() {
+        let legacy = r#"{
+            "filename": "x.bin",
+            "content_type": "application/octet-stream",
+            "data": [1, 2, 3],
+            "disposition": "Attachment",
+            "content_id": null
+        }"#;
+
+        let attachment: Attachment = serde_json::from_str(legacy).expect("0.1.x payload must load");
+
+        assert_eq!(&attachment.data[..], &[1u8, 2, 3]);
+        assert_eq!(attachment.filename, "x.bin");
+
+        // And re-serializing upgrades it to base64 in place.
+        let json = serde_json::to_string(&attachment).unwrap();
+        assert!(json.contains(r#""data":"AQID""#), "{json}");
+    }
+
+    /// The current form: a base64 string.
+    #[test]
+    fn a_base64_payload_deserializes() {
+        let current = r#"{
+            "filename": "x.bin",
+            "content_type": "application/octet-stream",
+            "data": "AQID",
+            "disposition": "Attachment",
+            "content_id": null
+        }"#;
+
+        let attachment: Attachment = serde_json::from_str(current).unwrap();
+        assert_eq!(&attachment.data[..], &[1u8, 2, 3]);
+    }
+
+    /// An empty payload round-trips in both forms — `""` and `[]` both decode to
+    /// zero bytes rather than erroring.
+    #[test]
+    fn an_empty_payload_round_trips_in_both_forms() {
+        for data in [r#""""#, "[]"] {
+            let json = format!(
+                r#"{{"filename":"e","content_type":"text/plain","data":{data},"disposition":"Attachment","content_id":null}}"#
+            );
+            let attachment: Attachment = serde_json::from_str(&json).unwrap();
+            assert!(attachment.data.is_empty(), "{data}");
+        }
+    }
+
+    /// A genuinely malformed payload is still an error — the sequence fallback
+    /// must not turn invalid base64 into silent corruption.
+    #[test]
+    fn a_malformed_payload_is_still_rejected() {
+        let bad = r#"{"filename":"x","content_type":"text/plain","data":"not base64!!","disposition":"Attachment","content_id":null}"#;
+        assert!(serde_json::from_str::<Attachment>(bad).is_err());
     }
 
     /// The base64 encoding must stay compact for a realistic payload: 1.33x, not

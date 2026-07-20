@@ -285,6 +285,15 @@ impl Email {
         headers
     }
 
+    /// The subject as it should be written to the wire: [`Email::subject`] with
+    /// any trailing whitespace removed.
+    ///
+    /// [`Email::validate`] validates this value rather than the raw field, so
+    /// transports must emit this one to stay consistent with what was checked.
+    pub(crate) fn wire_subject(&self) -> Option<&str> {
+        self.subject.as_deref().map(str::trim_end)
+    }
+
     /// Validate the email.
     pub fn validate(&self) -> Result<()> {
         if !self.invalid_addresses.is_empty() {
@@ -317,7 +326,13 @@ impl Email {
         // SendGrid's `headers` JSON object. They bypassed `Email::header`, so a
         // control character in any of them reached those transports unchecked
         // and could inject a header exactly as a poisoned custom header would.
-        validate_header_value("Subject", subject)?;
+        // `trim_end`: a template that ends its `subject` file with a newline
+        // produces a subject ending in `\n`. That is not an injection attempt —
+        // it cannot introduce a second header because nothing follows it — and
+        // rejecting it would refuse to send mail that 0.1.x delivered. The
+        // trailing run is stripped here and by [`Email::wire_subject`], which is
+        // what every transport emits, so it never reaches the wire either.
+        validate_header_value("Subject", subject.trim_end())?;
         if let Some(id) = &self.message_id {
             validate_header_value("Message-ID", id)?;
         }
@@ -343,10 +358,7 @@ impl Email {
             .as_ref()
             .expect("validated: from is present")
             .to_mailbox()?;
-        let subject = self
-            .subject
-            .as_deref()
-            .expect("validated: subject is present");
+        let subject = self.wire_subject().expect("validated: subject is present");
 
         let mut builder = lettre::Message::builder().from(from).subject(subject);
 
@@ -468,7 +480,10 @@ pub fn validate_header(name: &str, value: &str) -> Result<()> {
 /// Validate a header *value* only, for the fields that become headers without
 /// going through [`Email::header`] — `Subject`, `Message-ID`, `In-Reply-To` and
 /// `References`.
-pub fn validate_header_value(name: &str, value: &str) -> Result<()> {
+///
+/// Crate-internal: every caller is in this module, and [`validate_header`] is
+/// the entry point a user actually has a name to check against.
+pub(crate) fn validate_header_value(name: &str, value: &str) -> Result<()> {
     if let Some(c) = value.chars().find(|c| c.is_ascii_control()) {
         return Err(MailError::Config(format!(
             "Invalid control character {:?} in value of header {:?}",
@@ -900,6 +915,34 @@ mod tests {
             );
             assert!(email.to_lettre().is_err());
         }
+    }
+
+    /// A `subject.hbs` template ending in a newline renders a subject ending in
+    /// `\n`. That is not header injection — nothing follows the trailing run —
+    /// and rejecting it would refuse mail 0.1.x delivered. It must validate, and
+    /// the newline must not reach the wire.
+    #[test]
+    fn a_trailing_newline_in_the_subject_is_trimmed_not_rejected() {
+        for raw in ["Welcome Bob\n", "Welcome Bob\r\n", "Welcome Bob  \n\n"] {
+            let email = base().subject(raw);
+            assert!(
+                email.validate().is_ok(),
+                "trailing whitespace rejected: {raw:?}"
+            );
+            assert_eq!(email.wire_subject(), Some("Welcome Bob"));
+
+            let wire = formatted(&email);
+            assert!(wire.contains("Subject: Welcome Bob"), "{wire}");
+        }
+    }
+
+    /// Trimming the tail must not weaken the injection check: a control
+    /// character with anything after it is still rejected.
+    #[test]
+    fn a_trailing_trim_does_not_excuse_an_embedded_injection() {
+        let email = base().subject("ok\r\nBcc: evil@example.com\n");
+        assert!(matches!(email.validate(), Err(MailError::Config(_))));
+        assert!(email.to_lettre().is_err());
     }
 
     #[test]

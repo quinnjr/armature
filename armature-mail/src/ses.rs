@@ -126,7 +126,11 @@ fn ses_content(email: &Email) -> Result<EmailContent> {
     let message = Message::builder()
         .subject(
             Content::builder()
-                .data(email.subject.as_deref().unwrap_or_default())
+                // `wire_subject` rather than the raw field: a template-derived
+                // subject commonly ends in a newline, and every other transport
+                // strips that trailing run before it reaches the wire. Reading
+                // `email.subject` here made SES the one backend that emitted it.
+                .data(email.wire_subject().unwrap_or_default())
                 .charset("UTF-8")
                 .build()
                 .map_err(|e| MailError::Smtp(e.to_string()))?,
@@ -248,6 +252,27 @@ mod tests {
     fn raw_bytes(content: &EmailContent) -> String {
         let raw = content.raw().expect("raw content");
         String::from_utf8_lossy(raw.data().as_ref()).into_owned()
+    }
+
+    /// A template-derived subject commonly ends in a newline. Every transport
+    /// strips that trailing run before it reaches the wire; SES read the raw
+    /// `email.subject` field directly and so was the one backend that emitted
+    /// it, which would have been a bare `\n` inside a `Subject:` header.
+    #[test]
+    fn subject_trailing_newline_is_stripped_on_the_simple_path() {
+        let email = Email::new()
+            .from("sender@example.com")
+            .to("recipient@example.com")
+            .subject("Welcome\n")
+            .text("Hello");
+
+        let content = ses_content(&email).expect("simple content builds");
+        let simple = content.simple().expect("no attachments or wire headers");
+        assert_eq!(
+            simple.subject().unwrap().data(),
+            "Welcome",
+            "SES must send the wire subject, not the raw field"
+        );
     }
 
     /// WF6 finding 3: `SesTransport::send` built `EmailContent::simple` from

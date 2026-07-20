@@ -1,66 +1,4 @@
-//! Payment Processing Module for Armature Framework
-//!
-//! Provides a unified interface for payment processing with support for
-//! multiple providers including Stripe, PayPal, and Braintree.
-//!
-//! ## Overview
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                    Payment Processing                            │
-//! │                                                                  │
-//! │  ┌──────────────────────────────────────────────────────────┐  │
-//! │  │                 Unified Payment API                       │  │
-//! │  │  charge() | refund() | subscribe() | cancel()            │  │
-//! │  └──────────────────────────────────────────────────────────┘  │
-//! │                            │                                    │
-//! │         ┌──────────────────┼──────────────────┐                │
-//! │         ▼                  ▼                  ▼                │
-//! │  ┌────────────┐    ┌────────────┐    ┌────────────┐          │
-//! │  │   Stripe   │    │   PayPal   │    │ Braintree  │          │
-//! │  └────────────┘    └────────────┘    └────────────┘          │
-//! │                                                                │
-//! │  ┌──────────────────────────────────────────────────────────┐  │
-//! │  │                  Webhook Handler                          │  │
-//! │  │  payment.succeeded | refund.created | subscription.*     │  │
-//! │  └──────────────────────────────────────────────────────────┘  │
-//! └─────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ## Quick Start
-//!
-//! ```rust,no_run
-//! use armature_payments::providers::StripeProvider;
-//! use armature_payments::{
-//!     ChargeRequest, Money, PaymentProcessor, PaymentSource, WebhookHeaders,
-//! };
-//!
-//! # async fn example(
-//! #     body: Vec<u8>,
-//! #     signature_header: &str,
-//! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! // Initialize with Stripe. `new` is fallible because the provider's HTTP
-//! // client always carries a request and connect timeout — it will not fall
-//! // back to an untimed client that could hang a charge.
-//! let processor = PaymentProcessor::new(
-//!     StripeProvider::new("sk_test_...")?.with_webhook_secret("whsec_..."),
-//! );
-//!
-//! // Create a charge
-//! let _charge = processor
-//!     .charge(
-//!         ChargeRequest::new(Money::usd(2999), PaymentSource::card("tok_visa"))
-//!             .description("Order #1234"),
-//!     )
-//!     .await?;
-//!
-//! // Handle webhooks. Verification runs before parsing and fails closed, so
-//! // pass the request's real headers — a forged webhook is rejected here.
-//! let headers = WebhookHeaders::single("Stripe-Signature", signature_header);
-//! let _event = processor.handle_webhook(&body, &headers).await?;
-//! # Ok(())
-//! # }
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod error;
 pub mod money;
@@ -322,9 +260,14 @@ impl<P: PaymentProvider> PaymentProcessor<P> {
     }
 
     /// How long to wait before retry number `attempt` (1-based).
+    ///
+    /// A gateway-supplied `Retry-After` wins outright and is bounded only by
+    /// [`MAX_SERVER_RETRY_AFTER_MS`], **not** by `max_retry_delay_ms` — see that
+    /// constant for why. `max_retry_delay_ms` bounds the local exponential
+    /// schedule alone.
     fn retry_delay(&self, error: &PaymentError, attempt: u32) -> Duration {
         // `max_retry_delay_ms` is `#[serde(default)]`, so a stored config can
-        // carry 0 — and a cap of 0 makes *both* branches below return
+        // carry 0 — and a cap of 0 makes the exponential branch below return
         // Duration::ZERO, firing max_retries + 1 requests back-to-back with no
         // pause at a gateway that just answered 429. A cap below the base delay
         // is a misconfiguration, not an instruction to remove the backoff, so
@@ -335,10 +278,20 @@ impl<P: PaymentProvider> PaymentProcessor<P> {
             .max(self.config.retry_delay_ms);
 
         // A gateway that told us how long to wait knows better than our
-        // schedule; honor it (still bounded by the cap).
+        // schedule; honor it, bounded only by MAX_SERVER_RETRY_AFTER_MS.
+        // Clipping it to `cap` re-throttles: retrying a `Retry-After: 300`
+        // after the local 30s just earns another 429 and burns quota.
         if let Some(server) = error.retry_after() {
             let ms = u64::try_from(server.as_millis()).unwrap_or(u64::MAX);
-            return Duration::from_millis(ms.min(cap));
+            if ms > MAX_SERVER_RETRY_AFTER_MS {
+                armature_log::warn!(
+                    target: "armature::payments",
+                    "gateway Retry-After of {}ms exceeds the {}ms ceiling; capping",
+                    ms,
+                    MAX_SERVER_RETRY_AFTER_MS
+                );
+            }
+            return Duration::from_millis(ms.min(MAX_SERVER_RETRY_AFTER_MS));
         }
 
         let base = self.config.retry_delay_ms;
@@ -486,10 +439,12 @@ pub struct ProcessorConfig {
     /// The delay for the first retry; subsequent retries grow exponentially
     /// from it, bounded by `max_retry_delay_ms`.
     pub retry_delay_ms: u64,
-    /// Upper bound on any single retry delay, in milliseconds.
+    /// Upper bound on the *locally scheduled* retry delay, in milliseconds.
     ///
-    /// Caps both exponential growth and an over-large server-supplied
-    /// `Retry-After`, so a misbehaving gateway cannot stall a caller for hours.
+    /// Bounds the exponential schedule only. A gateway-supplied `Retry-After`
+    /// deliberately overrides it and is bounded instead by
+    /// [`MAX_SERVER_RETRY_AFTER_MS`] — capping the gateway's own figure at the
+    /// local maximum just re-throttles the next attempt.
     #[serde(default = "default_max_retry_delay_ms")]
     pub max_retry_delay_ms: u64,
     /// Enable idempotency keys
@@ -498,10 +453,24 @@ pub struct ProcessorConfig {
     pub log_transactions: bool,
 }
 
-/// Default ceiling on a single retry delay (30s).
+/// Default ceiling on a single *locally scheduled* retry delay (30s).
 fn default_max_retry_delay_ms() -> u64 {
     30_000
 }
+
+/// Ceiling on a gateway-supplied `Retry-After`, in milliseconds (one hour).
+///
+/// A gateway's `Retry-After` wins over the local backoff — retrying a
+/// `Retry-After: 300` after `max_retry_delay_ms` (30s by default) just earns
+/// another 429 — so it is deliberately *not* bounded by
+/// [`ProcessorConfig::max_retry_delay_ms`]. But it arrives from outside the
+/// process, and uncapped a `Retry-After: 999999999` parks a charge for roughly
+/// 31 years. One hour is far above any legitimate throttle window, so this
+/// ceiling only bites on a hostile or broken header.
+///
+/// The direct counterpart of `armature_mail::MAX_SERVER_RETRY_AFTER`, which
+/// holds the same value for the same reason; keep the two in step.
+pub const MAX_SERVER_RETRY_AFTER_MS: u64 = 3_600_000;
 
 impl Default for ProcessorConfig {
     fn default() -> Self {
@@ -832,7 +801,11 @@ mod tests {
     }
 
     #[test]
-    fn server_retry_after_is_still_bounded_by_the_cap() {
+    fn server_retry_after_is_not_clipped_to_the_local_cap() {
+        // Capping the gateway's own figure at max_retry_delay_ms re-throttles:
+        // coming back after 5s when the gateway said 300s just earns another
+        // 429 and burns quota. armature-mail reached the same conclusion and
+        // named the same ceiling; the two crates must not disagree.
         let processor = PaymentProcessor::with_config(
             FakeProvider::new(true),
             ProcessorConfig {
@@ -840,9 +813,41 @@ mod tests {
                 ..Default::default()
             },
         );
-        // A gateway asking for an hour must not stall the caller for an hour.
-        let d = processor.retry_delay(&PaymentError::RateLimited(3600), 1);
-        assert_eq!(d, Duration::from_millis(5_000));
+        assert_eq!(
+            processor.retry_delay(&PaymentError::RateLimited(300), 1),
+            Duration::from_secs(300),
+            "the gateway's Retry-After must survive the local cap"
+        );
+    }
+
+    #[test]
+    fn an_absurd_server_retry_after_is_bounded_by_one_hour() {
+        let processor = PaymentProcessor::with_config(FakeProvider::new(true), fast_config());
+        // Roughly 31 years, uncapped.
+        let d = processor.retry_delay(&PaymentError::RateLimited(999_999_999), 1);
+        assert_eq!(d, Duration::from_millis(MAX_SERVER_RETRY_AFTER_MS));
+        // Exactly at the ceiling is honored verbatim.
+        assert_eq!(
+            processor.retry_delay(&PaymentError::RateLimited(3600), 1),
+            Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn the_local_schedule_is_still_bounded_by_max_retry_delay() {
+        // Loosening the server branch must not loosen the exponential one.
+        let processor = PaymentProcessor::with_config(
+            FakeProvider::new(true),
+            ProcessorConfig {
+                retry_delay_ms: 1_000,
+                max_retry_delay_ms: 5_000,
+                ..Default::default()
+            },
+        );
+        let err = PaymentError::Network("x".into());
+        for attempt in [5u32, 10, 64] {
+            assert!(processor.retry_delay(&err, attempt).as_millis() as u64 <= 5_000);
+        }
     }
 
     #[test]

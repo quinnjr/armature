@@ -83,9 +83,11 @@ async fn status_404_maps_to_unregistered() {
         "expected Unregistered, got {err:?}"
     );
     assert!(err.should_remove_device());
-    assert!(
-        !err.to_string().contains("127.0.0.1"),
-        "the endpoint must not be echoed into the error: {err}"
+    // Exact message: this error is built from a fixed string, not from the
+    // endpoint, so a `!contains("127.0.0.1")` assertion pinned nothing at all.
+    assert_eq!(
+        err.to_string(),
+        "Device unregistered: web push subscription is no longer valid"
     );
 }
 
@@ -95,13 +97,30 @@ async fn transport_failure_does_not_echo_the_endpoint_url() {
     // `From<reqwest::Error>` put the attacker-supplied endpoint — query string
     // and all — straight into the error text and the caller's logs. The send
     // path classifies transport failures locally with constant messages.
-    let config = WebPushConfig::new(VAPID_PRIVATE, "mailto:test@example.com")
-        .connect_timeout(Duration::from_millis(200));
-    let provider = WebPushProvider::new(config).expect("build provider");
+    //
+    // This used to connect to TEST-NET-1 (192.0.2.1) over the real network.
+    // Nothing guarantees that is unreachable from an arbitrary runner: a
+    // transparent proxy or CI egress gateway that answers turns `expect_err`
+    // into a panic, and a slow-failing route stalls the suite behind the 10s
+    // guard timeout. A local listener that accepts and immediately drops the
+    // connection is deterministic and offline.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
 
-    // A routable-but-dead address, so this is a connect failure rather than a
-    // validation rejection. TEST-NET-1 (RFC 5737) is reserved and unrouted.
-    let sub = subscription("https://192.0.2.1/push?tok=SECRETMARKER");
+    let _accept = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+
+    let config = WebPushConfig::new(VAPID_PRIVATE, "mailto:test@example.com")
+        .allow_insecure_loopback(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(2));
+    let provider = WebPushProvider::new(config).expect("build provider");
+    let sub = subscription(&format!("http://{addr}/push?tok=SECRETMARKER"));
 
     let err = tokio::time::timeout(
         Duration::from_secs(10),
@@ -109,12 +128,138 @@ async fn transport_failure_does_not_echo_the_endpoint_url() {
     )
     .await
     .expect("send should not hang")
-    .expect_err("connect to an unrouted address must fail");
+    .expect_err("a connection dropped mid-request must fail");
 
     let rendered = err.to_string();
     assert!(
-        !rendered.contains("192.0.2.1") && !rendered.contains("SECRETMARKER"),
+        !rendered.contains(&addr.to_string()) && !rendered.contains("SECRETMARKER"),
         "transport error echoed the attacker-supplied endpoint: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn connection_reset_after_connect_is_retryable_network() {
+    // A TCP reset after connect, a TLS renegotiation failure and a broken pipe
+    // mid-payload arrive as `is_request()`/`is_body()`, which used to be routed
+    // to `PushError::provider(None, ..)` — documented as deliberately
+    // non-retryable. So a push service that resets under load dropped
+    // notifications permanently, while the identical failure occurring during
+    // *connect* was retried. They are the same transient class.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let _accept = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+
+    let config = WebPushConfig::new(VAPID_PRIVATE, "mailto:test@example.com")
+        .allow_insecure_loopback(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(2));
+    let provider = WebPushProvider::new(config).expect("build provider");
+    let sub = subscription(&format!("http://{addr}/push"));
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.send_to_web_subscription(&sub, &notification()),
+    )
+    .await
+    .expect("send should not hang")
+    .expect_err("a connection dropped mid-request must fail");
+
+    assert!(
+        matches!(err, PushError::Network(_)),
+        "expected Network, got {err:?}"
+    );
+    assert!(
+        err.is_retryable(),
+        "a mid-request transport failure must be retryable: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_domain_endpoint_is_actually_resolved_before_connecting() {
+    // `validate_endpoint` only ever inspected `Host::Ipv4`/`Host::Ipv6`
+    // literals: `Some(Host::Domain(_))` had no arm at all, so
+    // `https://metadata.attacker.example/push` with an A record of
+    // 169.254.169.254 skipped every check — an easier bypass than any of the
+    // IPv6 embeddings `is_internal_v6` handles.
+    //
+    // Proving the resolution happens without depending on attacker-controlled
+    // DNS: an unresolvable `.invalid` name (RFC 2606) must now fail *before* a
+    // connection is attempted, with the resolution message. Previously it
+    // sailed through validation and failed at connect ("endpoint unreachable").
+    const HOST: &str = "metadata-guard-probe.invalid";
+
+    // A resolver that hijacks NXDOMAIN would make this vacuous; skip rather
+    // than assert something the environment has already invalidated.
+    if tokio::net::lookup_host((HOST, 443)).await.is_ok() {
+        eprintln!("skipping: this resolver hijacks NXDOMAIN for {HOST}");
+        return;
+    }
+
+    let provider = strict_provider();
+    let sub = subscription(&format!("https://{HOST}/push"));
+
+    let err = provider
+        .send_to_web_subscription(&sub, &notification())
+        .await
+        .expect_err("an unresolvable endpoint host must fail");
+
+    assert!(
+        matches!(err, PushError::Network(_)),
+        "expected Network, got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "Network error: web push endpoint host could not be resolved",
+        "the failure must come from the guard's own resolution, not from connect"
+    );
+    assert!(
+        !err.to_string().contains(HOST),
+        "the endpoint host must not be echoed: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_domain_resolving_to_loopback_is_rejected_without_opt_in() {
+    // The DNS half of the guard: `localhost` is caught by the literal loopback
+    // check, but any *other* name pointing at 127.0.0.1 is not, and that is the
+    // whole point of resolving. `localhost.` (fully-qualified, trailing dot)
+    // resolves identically but is not in the literal loopback set, so it
+    // exercises the resolved-address path offline.
+    if tokio::net::lookup_host(("localhost.", 80)).await.is_err() {
+        eprintln!("skipping: this resolver cannot resolve 'localhost.'");
+        return;
+    }
+
+    let server = StubServer::start_single(StubResponse::new(200, "")).await;
+    let port = server
+        .url()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
+        .expect("stub port");
+
+    let provider = strict_provider();
+    let sub = subscription(&format!("https://localhost.:{port}/push"));
+
+    let err = provider
+        .send_to_web_subscription(&sub, &notification())
+        .await
+        .expect_err("a domain resolving to loopback must be refused");
+
+    assert!(
+        matches!(err, PushError::Config(_)),
+        "expected Config, got {err:?}"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no connection should have been opened"
     );
 }
 

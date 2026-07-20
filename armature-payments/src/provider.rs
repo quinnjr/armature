@@ -251,7 +251,13 @@ pub(crate) fn classify_status(
         401 | 403 => PaymentError::Authentication(format!(
             "{provider} rejected credentials (HTTP {status}): {snippet}"
         )),
-        _ => PaymentError::Provider(format!("{provider} returned HTTP {status}: {snippet}")),
+        // The status rides along on the variant, not just inside the message:
+        // `PaymentError::is_retryable` reads it to tell a transient gateway 5xx
+        // from a permanent 4xx.
+        _ => PaymentError::provider(
+            status,
+            format!("{provider} returned HTTP {status}: {snippet}"),
+        ),
     }
 }
 
@@ -278,6 +284,14 @@ pub(crate) fn classify_status(
 /// token and the credential survives; splitting on punctuation reaches the
 /// credential wherever it is embedded.
 ///
+/// # Straddling the scan window
+///
+/// A token or digit run that crosses [`MAX_BODY_SCAN`] would be judged on its
+/// truncated fragment and fall under the length thresholds below — and because
+/// redaction *shrinks* the buffer before the [`MAX_BODY_SNIPPET`] output
+/// truncation, that fragment can still reach the output. The partial trailing
+/// token is therefore dropped before anything is scanned.
+///
 /// Deliberately `pub(crate)`: this is a redaction heuristic whose thresholds and
 /// prefix list must stay free to tune. Exporting it would both freeze those
 /// details under semver and advertise a best-effort scrubber as a security
@@ -285,32 +299,33 @@ pub(crate) fn classify_status(
 pub(crate) fn sanitize_body(body: &str) -> String {
     // Clip first: everything below is proportional to what we scan, and the
     // output can never exceed MAX_BODY_SNIPPET anyway.
-    let input = clip_to_char_boundary(body, MAX_BODY_SCAN);
+    let mut input = clip_to_char_boundary(body, MAX_BODY_SCAN);
     let was_clipped = input.len() < body.len();
+    if was_clipped {
+        input = drop_partial_trailing_token(input);
+    }
 
     let mut out = String::with_capacity(input.len() + REDACTION.len());
-    let mut digit_run = 0usize;
+    // Byte offset in `out` where the current PAN candidate begins, and how many
+    // digits it contains. The region may span separators — see `DigitRegion`.
+    let mut digits = DigitRegion::default();
     let mut token_start: Option<usize> = None;
     let mut redact_next_token = false;
 
     for ch in input.chars() {
-        if ch.is_ascii_digit() {
-            digit_run += 1;
-        } else {
-            flush_digit_run(&mut out, &mut digit_run);
-        }
+        digits.feed(&mut out, ch);
 
         if ch.is_ascii_alphanumeric() || ch == '_' {
             if token_start.is_none() {
                 token_start = Some(out.len());
             }
         } else {
-            flush_token(&mut out, &mut token_start, &mut redact_next_token);
+            flush_token(&mut out, &mut token_start, &mut redact_next_token, Some(ch));
         }
         out.push(ch);
     }
-    flush_digit_run(&mut out, &mut digit_run);
-    flush_token(&mut out, &mut token_start, &mut redact_next_token);
+    digits.flush(&mut out);
+    flush_token(&mut out, &mut token_start, &mut redact_next_token, None);
 
     let mut result = truncate_on_char_boundary(&out, MAX_BODY_SNIPPET);
     if was_clipped && !result.ends_with(TRUNCATION_MARKER) {
@@ -319,47 +334,133 @@ pub(crate) fn sanitize_body(body: &str) -> String {
     result
 }
 
-/// Drop a card-number-shaped digit run from the tail of `out`, in place.
+/// Trim a token cut in half by the scan window off the end of `input`.
 ///
-/// A run of 12+ digits is a PAN under every scheme's length, and gateway errors
-/// echo the submitted number back verbatim.
-fn flush_digit_run(out: &mut String, digit_run: &mut usize) {
-    if *digit_run >= 12 {
-        // Digits are ASCII, so the run's char count is also its byte length.
-        let keep = out.len() - *digit_run;
-        out.truncate(keep);
-        out.push_str(REDACTION);
+/// Only called when the body really was clipped, so nothing is lost from a body
+/// that fit.
+fn drop_partial_trailing_token(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut end = bytes.len();
+    // Every byte tested is ASCII, so this can never land mid-character.
+    while end > 0 && (bytes[end - 1].is_ascii_alphanumeric() || bytes[end - 1] == b'_') {
+        end -= 1;
     }
-    *digit_run = 0;
+    &input[..end]
+}
+
+/// A card-number-shaped digit run being accumulated at the tail of the output.
+///
+/// A PAN is 12–19 digits, and gateway errors echo the submitted number back
+/// verbatim — but they echo it *as the user typed it*, so `4242 4242 4242 4242`
+/// and `4242-4242-4242-4242` are just as common as the unseparated form. Reset
+/// on every non-digit (the previous behavior) saw those as four runs of four and
+/// passed the card straight through, so a single space or hyphen between digit
+/// groups keeps the run alive and the region redacted as a whole.
+#[derive(Default)]
+struct DigitRegion {
+    /// Byte offset in the output where the region starts.
+    start: Option<usize>,
+    /// Digits seen so far, ignoring separators.
+    count: usize,
+    /// A separator is being held open pending the next character; two in a row
+    /// (or one at the end) closes the region.
+    pending_separator: bool,
+}
+
+impl DigitRegion {
+    /// Longest number of digits that is definitely not a PAN.
+    const MIN_PAN_DIGITS: usize = 12;
+
+    /// Feed the next character, flushing the region if it ends here.
+    ///
+    /// Must be called *before* `ch` is pushed onto `out`, because flushing
+    /// truncates back to the start of the region.
+    fn feed(&mut self, out: &mut String, ch: char) {
+        if ch.is_ascii_digit() {
+            if self.start.is_none() {
+                self.start = Some(out.len());
+            }
+            self.count += 1;
+            self.pending_separator = false;
+        } else if matches!(ch, '-' | ' ') && self.count > 0 && !self.pending_separator {
+            // Tentatively part of the region; if the next character is not a
+            // digit the region closes and the separator stays in the output.
+            self.pending_separator = true;
+        } else {
+            self.flush(out);
+        }
+    }
+
+    /// Redact the accumulated region if it is long enough to be a card number.
+    fn flush(&mut self, out: &mut String) {
+        if let Some(start) = self.start {
+            // `start` can exceed `out.len()` when a credential-shaped token
+            // flush already truncated past it; that region is gone, so there is
+            // nothing left to redact.
+            if self.count >= Self::MIN_PAN_DIGITS && start <= out.len() {
+                out.truncate(start);
+                out.push_str(REDACTION);
+            }
+        }
+        *self = Self::default();
+    }
 }
 
 /// Replace the token ending at the tail of `out` if it looks like a credential.
 ///
+/// `separator` is the character that terminated the token (`None` at end of
+/// input); it decides whether a "redact the next token too" flag survives, which
+/// is what makes a JWT work — see below.
+///
 /// Works on the output buffer directly rather than collecting tokens into a
 /// `Vec<String>` and re-joining them, which cost a second full copy of the body
 /// plus one allocation per token.
-fn flush_token(out: &mut String, token_start: &mut Option<usize>, redact_next: &mut bool) {
+fn flush_token(
+    out: &mut String,
+    token_start: &mut Option<usize>,
+    redact_next: &mut bool,
+    separator: Option<char>,
+) {
     let Some(start) = token_start.take() else {
         return;
     };
-    let token = &out[start..];
-    if token.is_empty() {
+    // A digit-region flush may already have truncated past this token's start.
+    if start >= out.len() {
         return;
     }
+    let token = &out[start..];
 
     // A bare `Bearer` is only 6 characters, so the credential that matters is
     // the *next* token; `Authorization: Bearer <token>` is the usual shape.
-    let follows_bearer = *redact_next && token.len() >= 12;
-    *redact_next = token.eq_ignore_ascii_case("Bearer");
+    // `Basic` matters just as much: Braintree authenticates
+    // `public_key:private_key` and Mailgun `api:<key>`, both base64'd into an
+    // `Authorization: Basic` header that an error body echoing the request
+    // repeats verbatim — and base64 matches none of the prefixes below.
+    let was_armed = *redact_next;
+    let follows_scheme = was_armed && token.len() >= 12;
+    let arms_next = token.eq_ignore_ascii_case("Bearer") || token.eq_ignore_ascii_case("Basic");
 
-    let credential_shaped = token.len() >= 12
+    let credential_shaped = (token.len() >= 12
         && (token.starts_with("sk_")
             || token.starts_with("rk_")
             || token.starts_with("pk_")
             || token.starts_with("whsec_")
-            || token.starts_with("Bearer"));
+            || token.starts_with("Bearer")))
+        // A JWT always begins with the base64url of `{"` + `alg`, i.e. `eyJ`.
+        // PayPal's OAuth `access_token` and APNS/FCM provider tokens are all
+        // JWTs, and they arrive with no `Bearer` in front of them at all.
+        || (token.len() >= 16 && token.starts_with("eyJ"));
 
-    if credential_shaped || follows_bearer {
+    let redacted = credential_shaped || follows_scheme;
+
+    // Tokenization splits on every non-`[A-Za-z0-9_]` character, and that
+    // includes `.` — the JWT segment separator. Disarming here (the previous
+    // behavior) meant the header segment consumed the flag and the claims *and
+    // signature* were emitted verbatim. Staying armed across a `.`/`-`
+    // continuation of something we just redacted covers the whole token.
+    *redact_next = arms_next || ((was_armed || redacted) && matches!(separator, Some('.' | '-')));
+
+    if redacted {
         out.truncate(start);
         out.push_str(REDACTION);
     }
@@ -622,13 +723,28 @@ mod tests {
     }
 
     #[test]
-    fn other_statuses_fall_back_to_provider() {
+    fn other_statuses_fall_back_to_provider_carrying_the_status() {
         for status in [404u16, 400u16, 500u16] {
-            assert!(matches!(
-                classify_status("stripe", status, "nope", None),
-                PaymentError::Provider(_)
-            ));
+            let e = classify_status("stripe", status, "nope", None);
+            assert!(
+                matches!(e, PaymentError::Provider { status: Some(s), .. } if s == status),
+                "got {e:?}"
+            );
         }
+    }
+
+    #[test]
+    fn a_gateway_5xx_is_classified_retryable() {
+        // A 502 from a load balancer may never have reached the processor. The
+        // status has to ride on the variant for `is_retryable` to see it — with
+        // it dropped, every gateway 5xx permanently failed the charge and the
+        // idempotency machinery bought nothing.
+        for status in [500u16, 502, 503, 504] {
+            let e = classify_status("stripe", status, "bad gateway", None);
+            assert!(e.is_retryable(), "HTTP {status} should be retryable: {e:?}");
+        }
+        assert!(!classify_status("stripe", 400u16, "bad", None).is_retryable());
+        assert!(!classify_status("stripe", 404u16, "gone", None).is_retryable());
     }
 
     #[test]
@@ -692,6 +808,98 @@ mod tests {
     fn sanitize_redacts_a_pan_embedded_in_json_without_spaces() {
         let out = sanitize_body(r#"{"card":{"number":"4242424242424242"}}"#);
         assert!(!out.contains("4242424242424242"), "PAN leaked: {out}");
+    }
+
+    /// A realistic three-segment HS256 JWT.
+    const JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                       eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.\
+                       SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
+
+    #[test]
+    fn sanitize_redacts_every_segment_of_a_bearer_jwt() {
+        // Tokenization splits on every non-[A-Za-z0-9_] character, and that
+        // includes `.` — the JWT separator. The header segment consumed the
+        // "redact next" flag and reset it (it is not literally `Bearer`), so the
+        // claims *and the signature* were emitted verbatim. A JWT is the common
+        // bearer shape: PayPal's OAuth access_token and APNS/FCM provider tokens
+        // are all JWTs.
+        let out = sanitize_body(&format!(
+            r#"{{"error":"invalid_token","request":{{"Authorization":"Bearer {JWT}"}}}}"#
+        ));
+        for (n, segment) in JWT.split('.').enumerate() {
+            assert!(!out.contains(segment), "JWT segment {n} leaked: {out}");
+        }
+        assert!(out.contains(REDACTION), "got {out}");
+    }
+
+    #[test]
+    fn sanitize_redacts_a_bare_jwt_with_no_bearer_prefix() {
+        // PayPal's token endpoint answers with the JWT as a plain JSON value.
+        let out = sanitize_body(&format!(
+            r#"{{"access_token":"{JWT}","token_type":"Bearer","expires_in":32400}}"#
+        ));
+        for (n, segment) in JWT.split('.').enumerate() {
+            assert!(!out.contains(segment), "JWT segment {n} leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn sanitize_redacts_an_http_basic_credential() {
+        // Braintree authenticates `public_key:private_key` and Mailgun
+        // `api:<key>`, both as `Authorization: Basic <base64>`. There was no
+        // `Basic` follow-on rule and a base64 blob matches no prefix, so an
+        // error body echoing the request headers emitted a trivially reversible
+        // credential.
+        let credential = "cHVibGljX2tleTpwcml2YXRlX2tleV92ZXJ5X3NlY3JldA";
+        let out = sanitize_body(&format!(
+            r#"{{"message":"auth failed","headers":{{"Authorization":"Basic {credential}"}}}}"#
+        ));
+        assert!(!out.contains(credential), "basic credential leaked: {out}");
+        assert!(out.contains(REDACTION), "got {out}");
+    }
+
+    #[test]
+    fn sanitize_redacts_a_secret_straddling_the_scan_window() {
+        // Redaction runs on the input clipped to MAX_BODY_SCAN, so a run
+        // crossing that byte was judged on its truncated fragment and fell under
+        // the length thresholds. And because redaction *shrinks* the buffer
+        // before the MAX_BODY_SNIPPET output truncation, the fragment still
+        // reached the output — which this body arranges by making everything
+        // before the boundary redactable.
+        let filler = format!("{},", "4".repeat(50)); // 51 bytes -> "[redacted],"
+        let repeats = MAX_BODY_SCAN / filler.len(); // 40 -> exactly 2040 bytes
+        let mut body = filler.repeat(repeats);
+        assert!(body.len() < MAX_BODY_SCAN && body.len() + 16 > MAX_BODY_SCAN);
+        body.push_str("4242424242424242");
+
+        let out = sanitize_body(&body);
+        assert!(
+            !out.contains("4242"),
+            "a PAN fragment straddling the scan window leaked: {out}"
+        );
+        assert!(out.ends_with(TRUNCATION_MARKER), "got {out}");
+    }
+
+    #[test]
+    fn sanitize_redacts_a_pan_written_with_separators() {
+        // `digit_run` reset on every non-digit, so a card echoed back with the
+        // spacing the user typed produced four runs of four and passed through.
+        for pan in [
+            "4242-4242-4242-4242",
+            "4242 4242 4242 4242",
+            "4111 1111 1111 1111",
+            "3782 822463 10005",
+        ] {
+            let out = sanitize_body(&format!(
+                r#"{{"error":{{"param":"card[number]","value":"{pan}"}},"exp_year":"2031"}}"#
+            ));
+            for group in pan.split(['-', ' ']) {
+                assert!(!out.contains(group), "PAN group {group} leaked: {out}");
+            }
+            assert!(out.contains(REDACTION), "got {out}");
+            // Short digit runs are ordinary data and must still survive.
+            assert!(out.contains("2031"), "got {out}");
+        }
     }
 
     #[test]

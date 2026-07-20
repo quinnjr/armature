@@ -268,7 +268,22 @@ fn right_alignment_works_for_non_ascii_text() {
 /// The word wrapper carries a running width instead of rebuilding and
 /// re-measuring the whole accumulated line per word. Pin the *behaviour* that
 /// rewrite has to preserve: lines are broken at the content width, no line
-/// overflows it, and no word is dropped or duplicated.
+/// overflows it, no word is dropped or duplicated, and the fill is **greedy** —
+/// each line takes as many words as fit.
+///
+/// The maximality check and the absolute line count are both load-bearing. The
+/// "no line overflows" and "every word survives" assertions are satisfied by a
+/// degenerate wrapper that emits one word per line, and measuring with
+/// `estimate_text_width` — the same function the wrapper itself uses — makes
+/// the overflow assertion tautological under a wrong width model. The pinned
+/// `assert_eq!(lines.len(), 6)` is derived independently, from the Helvetica
+/// AFM advance widths: `"wordNN"` is
+/// `w(722) + o(556) + r(333) + d(556) + 2 digits(556 each) = 3279/1000 em`,
+/// i.e. 39.348 pt at 12 pt, and a space is 3.336 pt. Ten words measure
+/// `39.348 + 9 * 42.684 = 423.504` pt and eleven measure 466.188 pt, so with
+/// 451 pt of content width the greedy break is at ten words — 60 words over
+/// exactly 6 lines. A width model that is off by more than ~6% moves that
+/// number.
 #[test]
 fn word_wrap_breaks_at_the_content_width_without_losing_words() {
     let words: Vec<String> = (0..60).map(|i| format!("word{i:02}")).collect();
@@ -306,6 +321,31 @@ fn word_wrap_breaks_at_the_content_width_without_losing_words() {
             "wrapped line {line:?} measures {width} pt, over the {content_width} pt content width"
         );
     }
+
+    // Greedy fill: every line but the last must be *maximal* — adding the first
+    // word of the following line would have overflowed. Without this, one word
+    // per line satisfies every other assertion in this test.
+    for (index, pair) in lines.windows(2).enumerate() {
+        let (line, next) = (&pair[0], &pair[1]);
+        let next_word = next
+            .split_whitespace()
+            .next()
+            .expect("a wrapped line is never empty");
+        let overfull = PdfBuilder::estimate_text_width(&format!("{line} {next_word}"), 12.0);
+        assert!(
+            overfull > content_width,
+            "line {index} ({line:?}) had room for {next_word:?} at {overfull} pt of \
+             {content_width} pt: the wrapper broke early instead of filling greedily"
+        );
+    }
+
+    // Absolute pin, derived from the AFM widths in this test's doc comment
+    // rather than from `estimate_text_width` itself.
+    assert_eq!(
+        lines.len(),
+        6,
+        "60 six-character words at 12 pt fill exactly ten per 451 pt line, got {lines:?}"
+    );
 
     let round_tripped: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
     assert_eq!(
