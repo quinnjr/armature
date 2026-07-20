@@ -124,10 +124,12 @@ let config = AcmeConfig::new(
 )
 .with_accept_tos(true)
 .with_ca_certificate(root_pem);
-
-// Test only: accept the ephemeral self-signed cert of a local CA (e.g. Pebble).
-let _test_config = AcmeConfig::default().danger_accept_invalid_certs(true);
 ```
+
+TLS verification is always enforced. To talk to a private or test CA (Pebble,
+Boulder, an internal ACME server), fetch its root certificate and pass it to
+`with_ca_certificate` — there is deliberately no option to disable certificate
+validation.
 
 ## Renewal
 

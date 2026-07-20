@@ -6,9 +6,8 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 /// A running Pebble ACME test CA. Stops when dropped.
 pub struct PebbleCa {
-    // Never read directly after construction, but must be kept alive: dropping it
-    // stops the container (RAII lifecycle).
-    #[allow(dead_code)]
+    // Must be kept alive: dropping it stops the container (RAII lifecycle).
+    // Also read by `management_ca_pem` to address the container by id.
     container: ContainerAsync<GenericImage>,
     port: u16,
 }
@@ -37,15 +36,46 @@ impl PebbleCa {
     }
 
     /// The trust-anchor root certificate URL, e.g. `https://127.0.0.1:PORT/roots/0`.
+    ///
+    /// Note this is the root of the *issuance* chain (the CA that signs
+    /// certificates Pebble issues). It is **not** the root that signs Pebble's
+    /// own HTTPS interface — for that, use [`PebbleCa::management_ca_pem`].
     pub fn roots_url(&self) -> String {
         format!("https://127.0.0.1:{}/roots/0", self.port)
     }
 
-    /// Explains Pebble's self-signed CA: the ACME client under test must accept
-    /// Pebble's test root (served at `/roots/0`) — Workflow 4 wires a rustls
-    /// client config that trusts it.
+    /// The PEM root certificate that signs Pebble's own HTTPS ACME interface.
+    ///
+    /// Pebble serves its ACME API with a static test certificate signed by
+    /// `pebble.minica.pem`, which is baked into the image. A client that
+    /// verifies TLS (as it should) must trust *this* root to reach the
+    /// directory — fetching `/roots/0` instead yields `UnknownIssuer`, because
+    /// that endpoint returns the issuance root, not the interface root.
+    ///
+    /// The image is distroless, so the file is extracted with `docker cp`
+    /// rather than an in-container shell.
+    pub fn management_ca_pem(&self) -> Vec<u8> {
+        let dest = std::env::temp_dir().join(format!("pebble-minica-{}.pem", std::process::id()));
+        let status = std::process::Command::new("docker")
+            .arg("cp")
+            .arg(format!(
+                "{}:/test/certs/pebble.minica.pem",
+                self.container.id()
+            ))
+            .arg(&dest)
+            .status()
+            .expect("run docker cp for pebble minica");
+        assert!(status.success(), "docker cp of pebble.minica.pem failed");
+        let pem = std::fs::read(&dest).expect("read pebble minica pem");
+        let _ = std::fs::remove_file(&dest);
+        pem
+    }
+
+    /// Explains Pebble's self-signed CA: the ACME client under test must trust
+    /// Pebble's interface root ([`PebbleCa::management_ca_pem`]) to reach the
+    /// directory over verified TLS.
     pub fn ca_note() -> &'static str {
-        "Pebble uses a self-signed test CA; fetch its root from /roots/0 and trust it in the ACME client's TLS config."
+        "Pebble serves its ACME API with a cert signed by the image's pebble.minica.pem; trust that root (management_ca_pem) in the ACME client's TLS config. /roots/0 is the issuance root, not the interface root."
     }
 }
 

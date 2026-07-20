@@ -2,8 +2,9 @@
 //!
 //! Pebble runs with `PEBBLE_VA_ALWAYS_VALID=1`, so it auto-validates challenges
 //! without the client having to serve HTTP-01 tokens. Pebble's ACME HTTPS
-//! interface uses an ephemeral self-signed certificate, so the client trusts it
-//! via `danger_accept_invalid_certs(true)` (test-only).
+//! interface is signed by the image's `pebble.minica.pem`, which the test takes
+//! from the container and hands to the client via `with_ca_certificate` — the
+//! client always verifies TLS and has no option to disable verification.
 //!
 //! These tests self-skip when Docker is unavailable.
 
@@ -12,8 +13,18 @@ use armature_testkit::docker::docker_available;
 
 use armature_testkit::acme::PebbleCa;
 
-/// Build a config pointed at a running Pebble, trusting its self-signed CA.
-fn pebble_config(directory_url: String, tmp: &std::path::Path) -> AcmeConfig {
+/// Pebble's interface root certificate (PEM), taken from the image itself.
+///
+/// This is the root that signs Pebble's HTTPS ACME endpoint, so the client can
+/// verify TLS normally. (`/roots/0` is the *issuance* root and would yield
+/// `UnknownIssuer` here.) No TLS verification is disabled anywhere in these
+/// tests — the library under test has no option to do so.
+fn pebble_root_pem(ca: &PebbleCa) -> Vec<u8> {
+    ca.management_ca_pem()
+}
+
+/// Build a config pointed at a running Pebble, trusting its test root.
+fn pebble_config(directory_url: String, root_pem: Vec<u8>, tmp: &std::path::Path) -> AcmeConfig {
     AcmeConfig::new(
         directory_url,
         vec!["admin@example.com".to_string()],
@@ -25,7 +36,7 @@ fn pebble_config(directory_url: String, tmp: &std::path::Path) -> AcmeConfig {
     .with_accept_tos(true)
     .with_account_dir(tmp.join("accounts"))
     .with_cert_dir(tmp.join("certs"))
-    .danger_accept_invalid_certs(true)
+    .with_ca_certificate(root_pem)
 }
 
 fn tempdir(tag: &str) -> std::path::PathBuf {
@@ -50,7 +61,8 @@ async fn order_certificate_end_to_end() {
     {
         let ca = PebbleCa::start().await;
         let tmp = tempdir("orch");
-        let config = pebble_config(ca.directory_url(), &tmp);
+        let root_pem = pebble_root_pem(&ca);
+        let config = pebble_config(ca.directory_url(), root_pem.clone(), &tmp);
 
         let mut client = AcmeClient::new(config)
             .await
@@ -123,7 +135,7 @@ async fn order_certificate_end_to_end() {
             vec!["admin@example.com".to_string()],
             vec!["e2e.example.com".to_string()],
         )
-        .danger_accept_invalid_certs(true)
+        .with_ca_certificate(root_pem.clone())
         .with_renew_before_days(100_000);
         let renew_client = AcmeClient::new(renew_cfg)
             .await
@@ -146,7 +158,8 @@ async fn manual_flow_get_challenges_notify_finalize() {
     {
         let ca = PebbleCa::start().await;
         let tmp = tempdir("manual");
-        let config = pebble_config(ca.directory_url(), &tmp);
+        let root_pem = pebble_root_pem(&ca);
+        let config = pebble_config(ca.directory_url(), root_pem.clone(), &tmp);
 
         let mut client = AcmeClient::new(config).await.expect("create client");
         client.register_account().await.expect("register account");
