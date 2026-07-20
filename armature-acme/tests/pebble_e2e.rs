@@ -6,11 +6,11 @@
 //! from the container and hands to the client via `with_ca_certificate` — the
 //! client always verifies TLS and has no option to disable verification.
 //!
-//! These tests self-skip when Docker is unavailable.
+//! These tests self-skip when Docker is unavailable, unless
+//! `ARMATURE_REQUIRE_DOCKER=1` is set (CI), which turns the skip into a
+//! failure via `armature_testkit::skip_if_no_docker!`.
 
 use armature_acme::{AcmeClient, AcmeConfig};
-use armature_testkit::docker::docker_available;
-
 use armature_testkit::acme::PebbleCa;
 
 /// Pebble's interface root certificate (PEM), taken from the image itself.
@@ -54,10 +54,7 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn order_certificate_end_to_end() {
-    if !docker_available() {
-        eprintln!("skipping: Docker not available");
-        return;
-    }
+    armature_testkit::skip_if_no_docker!();
     {
         let ca = PebbleCa::start().await;
         let tmp = tempdir("orch");
@@ -151,10 +148,7 @@ async fn order_certificate_end_to_end() {
 
 #[tokio::test]
 async fn manual_flow_get_challenges_notify_finalize() {
-    if !docker_available() {
-        eprintln!("skipping: Docker not available");
-        return;
-    }
+    armature_testkit::skip_if_no_docker!();
     {
         let ca = PebbleCa::start().await;
         let tmp = tempdir("manual");

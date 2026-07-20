@@ -4,6 +4,111 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The request headers that accompany an inbound webhook.
+///
+/// Providers authenticate a webhook from different pieces of the request, so
+/// verification takes the whole header set rather than a single signature
+/// string:
+///
+/// - **Stripe** reads `Stripe-Signature`.
+/// - **PayPal** reads `PayPal-Auth-Algo`, `PayPal-Cert-Url`,
+///   `PayPal-Transmission-Id`, `PayPal-Transmission-Sig` and
+///   `PayPal-Transmission-Time`.
+/// - **Braintree** reads `bt_signature` (Braintree posts it as a form field;
+///   pass it here under that name).
+///
+/// Lookups are case-insensitive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "HashMap<String, String>", into = "HashMap<String, String>")]
+pub struct WebhookHeaders {
+    headers: HashMap<String, String>,
+}
+
+impl From<WebhookHeaders> for HashMap<String, String> {
+    /// Serialize as a bare map, mirroring the `from` shape.
+    ///
+    /// Without this the derived `Serialize` emitted the struct wrapper
+    /// (`{"headers":{..}}`) while `Deserialize` expected a bare map, so
+    /// `from_str(&to_string(&h))` failed — breaking any path that persists or
+    /// forwards headers, such as queuing a webhook for retry.
+    fn from(value: WebhookHeaders) -> Self {
+        value.headers
+    }
+}
+
+impl From<HashMap<String, String>> for WebhookHeaders {
+    /// Route deserialization through [`insert`](Self::insert) (via the
+    /// `FromIterator` impl below) so a wire map with mixed-case keys — e.g.
+    /// after a JSON round-trip through a webhook relay, queue, or replay tool
+    /// — still normalizes to lowercase. A derived `Deserialize` would instead
+    /// populate `headers` directly from the wire, silently breaking the
+    /// documented case-insensitivity invariant and rejecting genuine
+    /// webhooks whose producer sent e.g. `Stripe-Signature`.
+    fn from(map: HashMap<String, String>) -> Self {
+        map.into_iter().collect()
+    }
+}
+
+impl WebhookHeaders {
+    /// An empty header set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A header set containing a single entry.
+    pub fn single(name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self::new().with(name, value)
+    }
+
+    /// Add a header (builder style).
+    pub fn with(mut self, name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        self.insert(name, value);
+        self
+    }
+
+    /// Add a header.
+    pub fn insert(&mut self, name: impl AsRef<str>, value: impl Into<String>) {
+        self.headers
+            .insert(name.as_ref().to_ascii_lowercase(), value.into());
+    }
+
+    /// Case-insensitive lookup.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Look up a header, or fail with [`crate::PaymentError::InvalidWebhookSignature`].
+    ///
+    /// A missing signature header is a verification failure, never a
+    /// fall-through to acceptance.
+    pub fn require(&self, name: &str) -> crate::PaymentResult<&str> {
+        self.get(name)
+            .ok_or(crate::PaymentError::InvalidWebhookSignature)
+    }
+
+    /// Number of headers present.
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
+    /// Whether no headers are present.
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+}
+
+impl<K: AsRef<str>, V: Into<String>> FromIterator<(K, V)> for WebhookHeaders {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut headers = Self::new();
+        for (k, v) in iter {
+            headers.insert(k, v);
+        }
+        headers
+    }
+}
+
 /// Webhook event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
@@ -22,7 +127,12 @@ pub struct WebhookEvent {
 }
 
 /// Webhook event types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Hash` is derived so [`WebhookRouter`] can key its handler map on the enum
+/// itself, rather than on a formatted `Debug` string — keying on the enum
+/// avoids allocating a `String` on every registration *and* every routed
+/// event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEventType {
     // Charge events
@@ -181,6 +291,90 @@ pub enum WebhookData {
     Generic(serde_json::Value),
 }
 
+impl WebhookData {
+    /// Interpret a raw webhook object according to its event type.
+    ///
+    /// Providers should call this instead of always emitting
+    /// [`WebhookData::Generic`], so consumers can match on a typed payload
+    /// rather than re-parsing `serde_json::Value` themselves.
+    ///
+    /// This is deliberately lossless and total: the typed shapes are modeled on
+    /// Stripe's objects and other gateways differ, so any payload that does not
+    /// deserialize cleanly falls back to `Generic(raw)`. A handler therefore
+    /// never loses data, and adding a provider whose payload does not match
+    /// cannot turn into a parse failure at the webhook boundary.
+    ///
+    /// Note the enum is `#[serde(untagged)]`, so matching on the variant is the
+    /// only reliable way to tell a typed payload from a generic one.
+    ///
+    /// `raw` is taken by value: the fallback hands the original tree straight
+    /// back as `Generic` instead of deep-copying it, and the typed attempt
+    /// deserializes out of a borrow, so the success path parses without
+    /// cloning the payload and the fallback path reuses that same value rather
+    /// than copying it.
+    pub fn from_event_type(event_type: &WebhookEventType, raw: serde_json::Value) -> WebhookData {
+        use WebhookEventType as E;
+
+        fn typed<T, F>(raw: serde_json::Value, wrap: F) -> WebhookData
+        where
+            T: serde::de::DeserializeOwned,
+            F: FnOnce(T) -> WebhookData,
+        {
+            match T::deserialize(&raw) {
+                Ok(v) => wrap(v),
+                Err(_) => WebhookData::Generic(raw),
+            }
+        }
+
+        match event_type {
+            E::ChargeSucceeded
+            | E::ChargeFailed
+            | E::ChargeRefunded
+            | E::ChargeDisputed
+            | E::ChargeCaptured
+            | E::PaymentIntentSucceeded
+            | E::PaymentIntentFailed
+            | E::PaymentIntentCanceled
+            | E::PaymentIntentProcessing
+            | E::PaymentIntentRequiresAction => {
+                typed::<ChargeWebhookData, _>(raw, WebhookData::Charge)
+            }
+
+            E::CustomerCreated | E::CustomerUpdated | E::CustomerDeleted => {
+                typed::<CustomerWebhookData, _>(raw, WebhookData::Customer)
+            }
+
+            E::SubscriptionCreated
+            | E::SubscriptionUpdated
+            | E::SubscriptionCanceled
+            | E::SubscriptionTrialEnding
+            | E::SubscriptionPastDue => {
+                typed::<SubscriptionWebhookData, _>(raw, WebhookData::Subscription)
+            }
+
+            E::InvoiceCreated
+            | E::InvoicePaid
+            | E::InvoicePaymentFailed
+            | E::InvoiceUpcoming
+            | E::InvoiceFinalized => typed::<InvoiceWebhookData, _>(raw, WebhookData::Invoice),
+
+            E::PaymentMethodAttached | E::PaymentMethodDetached | E::PaymentMethodUpdated => {
+                typed::<PaymentMethodWebhookData, _>(raw, WebhookData::PaymentMethod)
+            }
+
+            // Payouts and disputes have no typed shape modeled yet, and an
+            // unknown event type by definition has none.
+            E::PayoutCreated
+            | E::PayoutPaid
+            | E::PayoutFailed
+            | E::DisputeCreated
+            | E::DisputeUpdated
+            | E::DisputeClosed
+            | E::Unknown(_) => WebhookData::Generic(raw),
+        }
+    }
+}
+
 /// Charge webhook data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChargeWebhookData {
@@ -188,10 +382,15 @@ pub struct ChargeWebhookData {
     pub amount: i64,
     pub currency: String,
     pub status: String,
+    #[serde(default)]
     pub customer: Option<String>,
+    #[serde(default)]
     pub payment_method: Option<String>,
+    #[serde(default)]
     pub failure_code: Option<String>,
+    #[serde(default)]
     pub failure_message: Option<String>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -199,8 +398,11 @@ pub struct ChargeWebhookData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomerWebhookData {
     pub id: String,
+    #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -210,10 +412,15 @@ pub struct SubscriptionWebhookData {
     pub id: String,
     pub customer: String,
     pub status: String,
+    #[serde(default)]
     pub current_period_start: i64,
+    #[serde(default)]
     pub current_period_end: i64,
+    #[serde(default)]
     pub cancel_at_period_end: bool,
+    #[serde(default)]
     pub trial_end: Option<i64>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -222,12 +429,17 @@ pub struct SubscriptionWebhookData {
 pub struct InvoiceWebhookData {
     pub id: String,
     pub customer: String,
+    #[serde(default)]
     pub subscription: Option<String>,
     pub status: String,
+    #[serde(default)]
     pub amount_due: i64,
+    #[serde(default)]
     pub amount_paid: i64,
     pub currency: String,
+    #[serde(default)]
     pub hosted_invoice_url: Option<String>,
+    #[serde(default)]
     pub pdf: Option<String>,
 }
 
@@ -235,6 +447,7 @@ pub struct InvoiceWebhookData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentMethodWebhookData {
     pub id: String,
+    #[serde(default)]
     pub customer: Option<String>,
     #[serde(rename = "type")]
     pub method_type: String,
@@ -252,7 +465,11 @@ pub trait WebhookHandler: Send + Sync {
 
 /// Webhook router for handling multiple event types
 pub struct WebhookRouter {
-    handlers: HashMap<String, Box<dyn WebhookHandler>>,
+    /// Keyed on the event type itself. Keying on `format!("{:?}", ..)` cost a
+    /// `String` allocation per routed event, and made the routing table depend
+    /// on `Debug` output — a formatting change would have silently unbound
+    /// every handler.
+    handlers: HashMap<WebhookEventType, Box<dyn WebhookHandler>>,
     default_handler: Option<Box<dyn WebhookHandler>>,
 }
 
@@ -271,8 +488,7 @@ impl WebhookRouter {
         event_type: WebhookEventType,
         handler: H,
     ) -> Self {
-        let key = format!("{:?}", event_type);
-        self.handlers.insert(key, Box::new(handler));
+        self.handlers.insert(event_type, Box::new(handler));
         self
     }
 
@@ -287,9 +503,7 @@ impl WebhookRouter {
         &self,
         event: &WebhookEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let key = format!("{:?}", event.event_type);
-
-        if let Some(handler) = self.handlers.get(&key) {
+        if let Some(handler) = self.handlers.get(&event.event_type) {
             handler.handle(event).await
         } else if let Some(ref handler) = self.default_handler {
             handler.handle(event).await
@@ -324,6 +538,185 @@ mod tests {
             WebhookEventType::from_str("unknown.event"),
             WebhookEventType::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn test_webhook_headers_deserialize_lowercases_keys() {
+        // Regression test: WebhookHeaders used to derive Deserialize, which
+        // populated the inner map straight from the wire and bypassed the
+        // lowercasing `insert()` normally enforces. A mixed-case producer
+        // (e.g. a relay re-encoding the original `Stripe-Signature` header)
+        // would then make `get("stripe-signature")` return `None`, rejecting
+        // every genuine webhook after a JSON round-trip.
+        #[derive(Deserialize)]
+        struct Wrapper {
+            headers: WebhookHeaders,
+        }
+
+        let wrapper: Wrapper =
+            serde_json::from_str(r#"{"headers":{"Stripe-Signature":"abc"}}"#).unwrap();
+        assert_eq!(wrapper.headers.get("stripe-signature"), Some("abc"));
+        assert_eq!(wrapper.headers.get("Stripe-Signature"), Some("abc"));
+    }
+
+    #[test]
+    fn test_webhook_headers_serde_round_trip() {
+        // Regression: `from = "HashMap<..>"` with a *derived* Serialize emitted
+        // {"headers":{..}} while deserialization expected a bare map, so a
+        // round-trip through JSON failed outright.
+        let headers = WebhookHeaders::new()
+            .with("Stripe-Signature", "t=1,v1=abc")
+            .with("Content-Type", "application/json");
+
+        let json = serde_json::to_string(&headers).unwrap();
+        let back: WebhookHeaders = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.get("stripe-signature"), Some("t=1,v1=abc"));
+        assert_eq!(back.get("Stripe-Signature"), Some("t=1,v1=abc"));
+        assert_eq!(back.get("content-type"), Some("application/json"));
+        assert_eq!(back.len(), headers.len());
+    }
+
+    #[test]
+    fn test_webhook_headers_serialize_as_bare_map() {
+        let headers = WebhookHeaders::single("A-Header", "v");
+        let value: serde_json::Value = serde_json::to_value(&headers).unwrap();
+        // A bare map, not a struct wrapper.
+        assert!(value.is_object());
+        assert_eq!(value.get("a-header").and_then(|v| v.as_str()), Some("v"));
+        assert!(value.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_webhook_data_typed_charge() {
+        let raw = serde_json::json!({
+            "id": "ch_123",
+            "amount": 2999,
+            "currency": "usd",
+            "status": "succeeded",
+            "customer": "cus_1"
+        });
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, raw);
+        match data {
+            WebhookData::Charge(c) => {
+                assert_eq!(c.id, "ch_123");
+                assert_eq!(c.amount, 2999);
+                assert_eq!(c.customer.as_deref(), Some("cus_1"));
+                // Absent metadata defaults rather than failing the parse.
+                assert!(c.metadata.is_empty());
+            }
+            other => panic!("expected Charge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_data_typed_subscription_and_invoice() {
+        let sub = serde_json::json!({
+            "id": "sub_1", "customer": "cus_1", "status": "active"
+        });
+        assert!(matches!(
+            WebhookData::from_event_type(&WebhookEventType::SubscriptionCreated, sub),
+            WebhookData::Subscription(_)
+        ));
+
+        let inv = serde_json::json!({
+            "id": "in_1", "customer": "cus_1", "status": "paid", "currency": "usd"
+        });
+        assert!(matches!(
+            WebhookData::from_event_type(&WebhookEventType::InvoicePaid, inv),
+            WebhookData::Invoice(_)
+        ));
+    }
+
+    #[test]
+    fn test_webhook_data_falls_back_to_generic_on_mismatch() {
+        // A payload that does not fit the typed shape must not be lost or
+        // error — it degrades to Generic with the original body intact.
+        let raw = serde_json::json!({"unexpected": "shape"});
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, raw.clone());
+        match data {
+            // The original tree is handed back intact, not a lossy rebuild.
+            WebhookData::Generic(v) => assert_eq!(v, raw),
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_data_unmodeled_event_types_are_generic() {
+        let raw = serde_json::json!({"id": "po_1"});
+        for et in [
+            WebhookEventType::PayoutCreated,
+            WebhookEventType::DisputeCreated,
+            WebhookEventType::Unknown("something.else".into()),
+        ] {
+            assert!(matches!(
+                WebhookData::from_event_type(&et, raw.clone()),
+                WebhookData::Generic(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_on_the_event_type_enum() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl WebhookHandler for Counting {
+            async fn handle(
+                &self,
+                _event: &WebhookEvent,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let matched = Arc::new(AtomicUsize::new(0));
+        let fallback = Arc::new(AtomicUsize::new(0));
+        let router = WebhookRouter::new()
+            .on(
+                WebhookEventType::ChargeSucceeded,
+                Counting(Arc::clone(&matched)),
+            )
+            // A payload-carrying variant must key on its payload too, which a
+            // Debug-string key only did by accident.
+            .on(
+                WebhookEventType::Unknown("vendor.custom".into()),
+                Counting(Arc::clone(&matched)),
+            )
+            .default(Counting(Arc::clone(&fallback)));
+
+        let event = |event_type| WebhookEvent {
+            id: "evt_1".into(),
+            event_type,
+            created_at: Utc::now(),
+            data: WebhookData::Generic(serde_json::Value::Null),
+            provider: "stripe".into(),
+            livemode: false,
+        };
+
+        router
+            .route(&event(WebhookEventType::ChargeSucceeded))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::Unknown("vendor.custom".into())))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::Unknown("vendor.other".into())))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::PayoutPaid))
+            .await
+            .unwrap();
+
+        assert_eq!(matched.load(Ordering::Relaxed), 2);
+        assert_eq!(fallback.load(Ordering::Relaxed), 2);
     }
 
     #[test]

@@ -479,10 +479,7 @@ mod tests {
     /// every checkout.
     #[tokio::test]
     async fn checkout_applies_connection_name_via_client_setname() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let config = RedisConfig::builder()
             .url(container.url())

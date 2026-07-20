@@ -398,7 +398,8 @@ impl<'a, C> Drop for TransactionGuard<'a, C> {
 /// ...` statement from `IsolationLevel::to_pg_sql`/`to_mysql_sql`; that
 /// string-building step is pure and needs no live database connection. The
 /// existing `isolation_level_tests` module below proves the level is
-/// actually *applied* by the server, but self-skips without Docker, so
+/// actually *applied* by the server, but self-skips without Docker (unless
+/// `ARMATURE_REQUIRE_DOCKER=1` makes that a failure), so
 /// Docker-free CI never exercises the enum -> SQL contract at all. These
 /// tests close that gap by asserting the mapping directly.
 #[cfg(test)]
@@ -531,10 +532,7 @@ mod isolation_level_tests {
 
     #[tokio::test]
     async fn transaction_with_isolation_actually_applies_the_level() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
 
         let container = armature_testkit::containers::PostgresContainer::start().await;
         let config = DieselConfig::new(container.url());
@@ -578,10 +576,7 @@ mod transaction_guard_tests {
 
     #[tokio::test]
     async fn rollback_actually_reverts_the_change() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
 
         let container = armature_testkit::containers::PostgresContainer::start().await;
         let config = DieselConfig::new(container.url());
@@ -616,10 +611,7 @@ mod transaction_guard_tests {
 
     #[tokio::test]
     async fn commit_actually_persists_the_change() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
 
         let container = armature_testkit::containers::PostgresContainer::start().await;
         let config = DieselConfig::new(container.url());

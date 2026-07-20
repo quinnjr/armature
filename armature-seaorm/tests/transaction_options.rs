@@ -4,7 +4,8 @@
 //! PostgreSQL connection, not just mapped by pure unit tests.
 //!
 //! Self-skips when Docker is unavailable via
-//! `armature_testkit::docker::docker_available()`.
+//! `armature_testkit::skip_if_no_docker!`, which instead fails the test when
+//! `ARMATURE_REQUIRE_DOCKER=1` is set (CI).
 
 use armature_seaorm::{
     Database, DatabaseConfig, IsolationLevel, TransactionExt, TransactionOptions,
@@ -13,10 +14,7 @@ use sea_orm::{ConnectionTrait, Statement};
 
 #[tokio::test]
 async fn begin_transaction_with_options_applies_isolation_and_read_only() {
-    if !armature_testkit::docker_available() {
-        eprintln!("skipping: docker not available");
-        return;
-    }
+    armature_testkit::skip_if_no_docker!();
 
     let container = armature_testkit::containers::PostgresContainer::start().await;
     let config = DatabaseConfig::new(container.url());

@@ -28,9 +28,14 @@ thiserror = "2.0"
 
 # Utilities
 tracing = "0.1"
-uuid = { version = "1.23", features = ["v4"] }
-base64 = "0.22"
 url = "2.5"
+# `futures-util` rather than the `futures` facade: the only use is
+# `stream::{self, StreamExt}`, and the facade additionally pulls in
+# futures-executor/futures-channel/futures-sink for nothing.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# Shared, refcounted request bodies so a batch send allocates and serializes
+# one APNS payload instead of one per device token.
+bytes = "1"
 
 # Web Push (VAPID). We use web-push only to build the VAPID signature and
 # the encrypted ECE payload; the notification is sent over our own reqwest
@@ -40,15 +45,17 @@ url = "2.5"
 # build host and stays pure-Rust/rustls like the rest of the workspace.
 web-push = { version = "0.11", default-features = false, optional = true }
 
-# JWT for FCM/APNS
-jsonwebtoken = { version = "10.4", optional = true }
+# JWT for FCM/APNS. `rust_crypto` is required: without it (or `aws_lc_rs`)
+# jsonwebtoken 10's `encode`/`decode` panic at runtime because no process-level
+# `CryptoProvider` can be auto-selected. `rust_crypto` keeps the pure-Rust
+# story consistent with the rest of this crate (rustls elsewhere, no libcurl).
+jsonwebtoken = { version = "10.4", optional = true, default-features = false, features = ["use_pem", "rust_crypto"] }
 
 # Cryptography for APNS
 p256 = { version = "0.13", features = ["ecdsa", "pem"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
-tokio-test = "0.4"
 armature-testkit = { path = "../armature-testkit" }
 
 [features]

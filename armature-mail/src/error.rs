@@ -37,8 +37,19 @@ pub enum MailError {
     Config(String),
 
     /// Provider API error.
-    #[error("Provider error: {0}")]
-    Provider(String),
+    ///
+    /// `status` carries the HTTP status the provider replied with, when there
+    /// was one. It is load-bearing: every API transport funnels its non-429
+    /// failures through this variant, so without the status a transient 503 is
+    /// indistinguishable from a permanent 400 and
+    /// [`MailError::is_retryable`] has to guess.
+    #[error("Provider error{}: {message}", .status.map(|s| format!(" ({s})")).unwrap_or_default())]
+    Provider {
+        /// HTTP status returned by the provider, if any.
+        status: Option<u16>,
+        /// Provider-supplied error message.
+        message: String,
+    },
 
     /// Authentication error.
     #[error("Authentication failed: {0}")]
@@ -70,12 +81,32 @@ pub enum MailError {
 }
 
 impl MailError {
+    /// Build a [`MailError::Provider`] from an HTTP status and message.
+    pub fn provider(status: impl Into<Option<u16>>, message: impl Into<String>) -> Self {
+        Self::Provider {
+            status: status.into(),
+            message: message.into(),
+        }
+    }
+
     /// Check if this error is retryable.
+    ///
+    /// A `Provider` error is retryable when the provider's status says the
+    /// failure is transient: any 5xx, plus 408 (Request Timeout) and 429 (Too
+    /// Many Requests). A 4xx is the provider rejecting the message itself, so
+    /// retrying it just burns quota and delays the dead-letter.
+    ///
+    /// A `Provider` error with no status is treated as *not* retryable: nothing
+    /// is known about it, and re-sending an email that may already have been
+    /// accepted is worse than surfacing the failure.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Smtp(_) | Self::Network(_) | Self::Timeout | Self::RateLimited(_)
-        )
+        match self {
+            Self::Smtp(_) | Self::Network(_) | Self::Timeout | Self::RateLimited(_) => true,
+            Self::Provider {
+                status: Some(s), ..
+            } => *s >= 500 || *s == 408 || *s == 429,
+            _ => false,
+        }
     }
 
     /// Get retry-after duration if rate limited.
@@ -130,5 +161,65 @@ impl From<handlebars::TemplateError> for MailError {
 impl From<tera::Error> for MailError {
     fn from(err: tera::Error) -> Self {
         Self::Template(err.to_string())
+    }
+}
+
+#[cfg(feature = "minijinja")]
+impl From<minijinja::Error> for MailError {
+    fn from(err: minijinja::Error) -> Self {
+        Self::Template(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Provider` used to be unconditionally non-retryable, so a transient
+    /// SendGrid/SES 5xx got zero retries and was dead-lettered on first attempt.
+    #[test]
+    fn transient_provider_statuses_are_retryable() {
+        for status in [500, 502, 503, 504, 408, 429] {
+            assert!(
+                MailError::provider(status, "transient").is_retryable(),
+                "{status} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_provider_statuses_are_not_retryable() {
+        for status in [400, 401, 403, 404, 413, 422] {
+            assert!(
+                !MailError::provider(status, "permanent").is_retryable(),
+                "{status} should not be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_without_a_status_is_not_retryable() {
+        assert!(!MailError::provider(None, "unknown").is_retryable());
+    }
+
+    #[test]
+    fn provider_display_includes_the_status() {
+        assert_eq!(
+            MailError::provider(503u16, "upstream down").to_string(),
+            "Provider error (503): upstream down"
+        );
+        assert_eq!(
+            MailError::provider(None, "no status").to_string(),
+            "Provider error: no status"
+        );
+    }
+
+    #[test]
+    fn rate_limited_exposes_retry_after() {
+        assert_eq!(
+            MailError::RateLimited(300).retry_after(),
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert_eq!(MailError::Timeout.retry_after(), None);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "armature-storage"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -14,8 +14,11 @@ categories = ["web-programming", "asynchronous"]
 [dependencies]
 # Async runtime
 tokio = { version = "1.52", features = ["fs", "io-util", "sync"] }
-tokio-util = { version = "0.7", features = ["io"] }
-futures = "0.3"
+# `futures-util`/`futures-core` rather than the `futures` facade: the only uses
+# are `TryStreamExt` (azure.rs) and the `Stream` trait (multipart.rs), so the
+# executor/sink/channel crates the facade pulls in are dead weight.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-core = "0.3"
 async-trait = "0.1"
 
 # Multipart parsing
@@ -23,13 +26,15 @@ multer = "3.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 
 # HTTP types
 bytes = "1.12"
 http = "1.4"
 mime = "0.3"
 mime_guess = "2.0"
+# Magic-byte content sniffing, so type allowlists check the payload and not
+# just the client-declared Content-Type.
+infer = "0.22"
 
 # Error handling
 thiserror = "2.0"
@@ -39,8 +44,6 @@ tracing = "0.1"
 uuid = { version = "1.23", features = ["v4"] }
 sha2 = "0.11"
 hex = "0.4"
-pin-project-lite = "0.2"
-tempfile = "3.27"
 
 # Cloud storage clients (optional features)
 # AWS S3
@@ -60,9 +63,18 @@ azure_core = { version = "1.0", optional = true }
 azure_identity = { version = "1.0", optional = true }
 base64 = { version = "0.22", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` on the final open in the local backend, and `MetadataExt::nlink`
+# for the hardlink containment check. Unix-only; nothing else needs it.
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
-tokio-test = "0.4"
+armature-testkit = { path = "../armature-testkit" }
+# Test-only: every use is behind `#[cfg(test)]`, in a doctest, or in tests/.
+tempfile = "3.27"
+serde_json = "1.0"
+futures = "0.3"
 
 [features]
 default = []

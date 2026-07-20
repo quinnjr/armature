@@ -22,12 +22,24 @@ impl Address {
     }
 
     /// Create a new address with a display name.
+    ///
+    /// The display name is rejected if it contains CR, LF, or any other ASCII
+    /// control character: it is emitted verbatim into a header by the Mailgun
+    /// and SendGrid transports, so a newline there is a header-injection
+    /// primitive (`"Foo\r\nBcc: evil@example.com"`).
     pub fn with_name(email: impl Into<String>, name: impl Into<String>) -> Result<Self> {
         let email = email.into();
         validate_email(&email)?;
+        let name = name.into();
+        validate_no_control_chars(&name).map_err(|_| {
+            MailError::InvalidAddress(format!(
+                "Display name contains control characters: {:?}",
+                name
+            ))
+        })?;
         Ok(Self {
             email,
-            name: Some(name.into()),
+            name: Some(name),
         })
     }
 
@@ -35,12 +47,30 @@ impl Address {
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
 
-        // Check for "Name <email>" format
-        if let Some(start) = s.find('<')
-            && let Some(end) = s.find('>')
-        {
+        // Check for "Name <email>" format.
+        //
+        // The closing `>` is searched for *after* `start` only: locating the two
+        // independently lets an input like `"a>b <x@y.com>"` produce an inverted
+        // slice range and panic.
+        if let Some(start) = s.find('<') {
+            let Some(end) = s[start + 1..].find('>').map(|i| i + start + 1) else {
+                return Err(MailError::InvalidAddress(format!(
+                    "Unterminated angle-addr: {}",
+                    s
+                )));
+            };
+
             let name = s[..start].trim().trim_matches('"');
             let email = s[start + 1..end].trim();
+
+            // A `>` in the display-name position is malformed per RFC 5322 and is
+            // exactly the shape that used to panic; reject rather than guess.
+            if name.contains('>') || name.contains('<') {
+                return Err(MailError::InvalidAddress(format!(
+                    "Malformed angle-addr: {}",
+                    s
+                )));
+            }
 
             if name.is_empty() {
                 return Self::new(email);
@@ -159,9 +189,36 @@ impl From<Address> for Mailbox {
     }
 }
 
+/// Reject CR, LF, and any other ASCII control character.
+///
+/// Every transport that writes headers by hand (Mailgun's form body, SendGrid's
+/// JSON) inherits its injection protection from this check; only the SMTP path
+/// is independently protected by lettre's encoder.
+pub(crate) fn validate_no_control_chars(value: &str) -> Result<()> {
+    if let Some(c) = value.chars().find(|c| c.is_ascii_control()) {
+        return Err(MailError::InvalidAddress(format!(
+            "Value contains control character {:?}",
+            c
+        )));
+    }
+    Ok(())
+}
+
 /// Validate an email address (basic validation).
 fn validate_email(email: &str) -> Result<()> {
-    let email = email.trim();
+    // Checked against the *raw* input, not a trimmed copy: `Address` stores the
+    // string as given, so trailing `\r\n` trimmed away here would still reach
+    // the wire. A `\r\n` on the API transports is a header-injection primitive.
+    validate_no_control_chars(email).map_err(|_| {
+        MailError::InvalidAddress(format!("Email contains control characters: {:?}", email))
+    })?;
+
+    if email.chars().any(char::is_whitespace) {
+        return Err(MailError::InvalidAddress(format!(
+            "Email contains whitespace: {:?}",
+            email
+        )));
+    }
 
     if email.is_empty() {
         return Err(MailError::InvalidAddress(
@@ -233,5 +290,33 @@ mod tests {
         assert!(Address::new("invalid").is_err());
         assert!(Address::new("@example.com").is_err());
         assert!(Address::new("test@").is_err());
+    }
+
+    /// `find('<')` and `find('>')` used to be located independently, so a `>`
+    /// before the `<` produced an inverted slice range and panicked.
+    #[test]
+    fn malformed_brackets_error_instead_of_panicking() {
+        for input in ["a>b <x@y.com>", ">", "<", "><", ">@<", "a>b", "<no-close"] {
+            let result = Address::parse(input);
+            assert!(
+                matches!(result, Err(MailError::InvalidAddress(_))),
+                "expected InvalidAddress for {input:?}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_in_email_is_rejected() {
+        assert!(Address::new("a@b.com\r\nBcc: evil@x.com").is_err());
+        assert!(Address::new("a@b.com\n").is_err());
+        assert!(Address::new("a @b.com").is_err());
+        assert!(Address::new("a@b.com\u{0}").is_err());
+    }
+
+    #[test]
+    fn crlf_in_display_name_is_rejected() {
+        assert!(Address::with_name("a@b.com", "Foo\r\nBcc: evil@x.com").is_err());
+        assert!(Address::with_name("a@b.com", "Foo\nBar").is_err());
+        assert!(Address::with_name("a@b.com", "Foo Bar").is_ok());
     }
 }

@@ -485,10 +485,7 @@ mod tests {
     /// rather than hanging or succeeding after the configured window.
     #[tokio::test]
     async fn command_timeout_bounds_live_command_execution() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let config = RedisConfig::builder()
             .url(container.url())
@@ -523,10 +520,16 @@ mod tests {
         );
     }
 
+    /// End-to-end proof (requires Docker) that the basic get/set/delete
+    /// convenience methods round-trip against a live server — including that
+    /// `delete` actually removes the key rather than merely returning
+    /// without erroring, which the sibling `command_timeout_bounds_live_command_execution`
+    /// test above does not exercise.
     #[tokio::test]
-    #[ignore = "requires Redis"]
-    async fn test_basic_operations() {
-        let config = RedisConfig::builder().url("redis://localhost:6379").build();
+    async fn basic_operations_round_trip_against_a_live_server() {
+        armature_testkit::skip_if_no_docker!();
+        let container = armature_testkit::containers::RedisContainer::start().await;
+        let config = RedisConfig::builder().url(container.url()).build();
 
         let redis = RedisService::new(config).await.unwrap();
 
@@ -535,7 +538,10 @@ mod tests {
         let value: Option<String> = redis.get_value("test_key").await.unwrap();
         assert_eq!(value, Some("test_value".to_string()));
 
-        // Clean up
-        redis.delete("test_key").await.unwrap();
+        // Delete must actually remove the key, not just avoid erroring.
+        let deleted = redis.delete("test_key").await.unwrap();
+        assert!(deleted, "delete should report the key was removed");
+        let value: Option<String> = redis.get_value("test_key").await.unwrap();
+        assert_eq!(value, None, "key should be gone after delete");
     }
 }

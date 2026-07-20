@@ -43,20 +43,11 @@ async fn wait_for_state(queue: &Queue, job_id: JobId, state: JobState, timeout: 
     }
 }
 
-macro_rules! require_docker {
-    () => {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
-    };
-}
-
 /// Higher-priority jobs must be dequeued before lower-priority ones regardless
 /// of enqueue order.
 #[tokio::test]
 async fn priority_dequeue_order() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "prio").await.unwrap();
     queue.clear().await.unwrap();
@@ -94,7 +85,7 @@ async fn priority_dequeue_order() {
 /// `processing`.
 #[tokio::test]
 async fn retry_with_backoff_reschedules_to_delayed() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "retry").await.unwrap();
     queue.clear().await.unwrap();
@@ -134,7 +125,7 @@ async fn retry_with_backoff_reschedules_to_delayed() {
 /// set and marked Dead.
 #[tokio::test]
 async fn dead_letter_routing_on_exhausted_retries() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let url = redis.url();
     let queue = Queue::new(url.clone(), "dead").await.unwrap();
@@ -164,7 +155,7 @@ async fn dead_letter_routing_on_exhausted_retries() {
 /// on a dequeue once it comes due.
 #[tokio::test]
 async fn delayed_job_is_promoted_when_due() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "delayed").await.unwrap();
     queue.clear().await.unwrap();
@@ -200,7 +191,7 @@ async fn delayed_job_is_promoted_when_due() {
 /// to a fire-and-forget spawn and workers hit "No handler for job type").
 #[tokio::test]
 async fn worker_happy_path_no_orphans() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "happy").await.unwrap();
     queue.clear().await.unwrap();
@@ -248,7 +239,7 @@ async fn worker_happy_path_no_orphans() {
 /// orphaning it in `processing` (WF3 data-loss fix).
 #[tokio::test]
 async fn process_batch_requeues_mismatched_type() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "batch").await.unwrap();
     queue.clear().await.unwrap();
@@ -299,7 +290,7 @@ async fn process_batch_requeues_mismatched_type() {
 /// runtime and expects the job to complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpu_intensive_handler_registers_in_async_context() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "cpu").await.unwrap();
     queue.clear().await.unwrap();
@@ -328,7 +319,7 @@ async fn cpu_intensive_handler_registers_in_async_context() {
 /// jobs.
 #[tokio::test]
 async fn max_size_counts_delayed_jobs() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let config = QueueConfig::new(redis.url(), "cap_delayed").with_max_size(1);
     let queue = Queue::with_config(config).await.unwrap();
@@ -351,7 +342,7 @@ async fn max_size_counts_delayed_jobs() {
 /// `max_size` must count in-flight `processing` jobs.
 #[tokio::test]
 async fn max_size_counts_processing_jobs() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let config = QueueConfig::new(redis.url(), "cap_processing").with_max_size(1);
     let queue = Queue::with_config(config).await.unwrap();
@@ -375,7 +366,7 @@ async fn max_size_counts_processing_jobs() {
 /// forever while the call still returned `Ok(())`.
 #[tokio::test]
 async fn complete_and_fail_drain_orphaned_processing_entry() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "orphan").await.unwrap();
     queue.clear().await.unwrap();
@@ -426,7 +417,7 @@ async fn complete_and_fail_drain_orphaned_processing_entry() {
 /// in `processing`.
 #[tokio::test]
 async fn process_batch_happy_path() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "batch_happy").await.unwrap();
     queue.clear().await.unwrap();
@@ -458,7 +449,7 @@ async fn process_batch_happy_path() {
 /// stays delayed and is not yet dequeuable.
 #[tokio::test]
 async fn enqueue_in_and_enqueue_at() {
-    require_docker!();
+    armature_testkit::skip_if_no_docker!();
     let redis = RedisContainer::start().await;
     let queue = Queue::new(redis.url(), "sched").await.unwrap();
     queue.clear().await.unwrap();

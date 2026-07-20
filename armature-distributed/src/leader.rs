@@ -312,10 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_leader_among_two_contenders() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let client = redis::Client::open(container.url()).expect("open redis client");
         let conn1 = client

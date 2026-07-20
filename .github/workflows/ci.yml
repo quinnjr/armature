@@ -126,6 +126,162 @@ jobs:
       - name: Run doc tests with SAML
         run: cargo test --doc --features full-with-saml
 
+  # ============================================================================
+  # TEST (per-member crates not reachable from the root `full` feature)
+  #
+  # The root package's `full` feature does not depend on the delivery-provider
+  # crates, so `cargo test --features full` never compiles them and the
+  # coverage job (`--workspace`) builds each member with only its *default*
+  # features. Both leave whole test suites — mail queue/Redis, files PDF, push
+  # APNS/Web-Push, storage S3/GCS/Azure — silently unexecuted. Test them
+  # explicitly with every feature enabled, and again with a *minimal* feature
+  # set so documented off-paths (e.g. `armature-files` without `embedded-font`,
+  # `armature-mail` with no template engine) are compiled rather than assumed.
+  #
+  # COVERAGE GAP: this matrix covers 12 of the workspace's 63 members; the
+  # rest are built only with default features. Rationale, the uncovered list,
+  # and the regeneration command live in TODO.md ("CI covers N of 63 workspace
+  # members") — keep the counts above in sync with it, and do not restate the
+  # list here.
+  #
+  # Members are added here with an explicit `minimal` feature string because
+  # some crates have no testable surface with zero features. Crates with *no*
+  # cargo features use `minimal: ""`, which skips the minimal step entirely:
+  # `--no-default-features` would select an identical set to `--all-features`
+  # and merely re-run the same (often container-backed) suite.
+  # ============================================================================
+
+  test-members:
+    name: Test member crates (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: armature-payments
+            minimal: "--no-default-features"
+          - crate: armature-mail
+            minimal: "--no-default-features"
+          - crate: armature-files
+            # `images` on, `embedded-font` off: the documented path where a
+            # TextWatermark without a font must error cleanly instead of
+            # panicking. Plain `--no-default-features` compiles no image code
+            # at all and would not cover it.
+            minimal: "--no-default-features --features images"
+          - crate: armature-push
+            minimal: "--no-default-features"
+          - crate: armature-storage
+            minimal: "--no-default-features"
+          # armature-queue and armature-distributed have Redis/testcontainer
+          # suites and no cargo features, so `--no-default-features` selects an
+          # identical set to `--all-features`; they are here for the Docker
+          # enforcement, which the `--all-features` step already applies.
+          - crate: armature-queue
+            minimal: ""
+          - crate: armature-distributed
+            minimal: ""
+          # The shared container harness itself. Its containers.rs/acme.rs
+          # tests call skip_if_no_docker!, so without this row the enforcement
+          # mechanism is never exercised under enforcement. They are all
+          # `#[ignore = "requires Docker"]`, so the row is pointless without
+          # --include-ignored: a plain `cargo test` would filter them out and
+          # report a green pass having run no container at all.
+          #
+          # `extra` is only threaded into the --all-features "Run tests" step
+          # below, not the minimal-features step: the `containers` feature
+          # that gates every ignored test is off under `--no-default-features`,
+          # so `--include-ignored` would be a no-op there.
+          - crate: armature-testkit
+            minimal: "--no-default-features"
+            extra: "-- --include-ignored"
+          - crate: armature-redis
+            minimal: "--no-default-features"
+          - crate: armature-seaorm
+            minimal: "--no-default-features"
+          # --all-features turns on both the postgres and mysql backends, which
+          # link libpq and libmysqlclient respectively.
+          - crate: armature-diesel
+            minimal: "--no-default-features"
+            apt: "libpq-dev libmysqlclient-dev"
+          # No cargo features. Its Pebble end-to-end suite is entirely
+          # Docker-gated via skip_if_no_docker!, so ARMATURE_REQUIRE_DOCKER=1
+          # protects it rather than breaking it.
+          - crate: armature-acme
+            minimal: ""
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        # Docker is present on ubuntu-latest, so container-gated suites must
+        # actually run here rather than self-skipping into a green pass.
+        # Enforced by `armature_testkit::skip_if_no_docker!`, which panics
+        # when this is set to "1" and no daemon is reachable. Every
+        # container-gated suite in the crates above routes through that macro;
+        # a hand-rolled `if !docker_available() { return; }` would bypass it.
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} --all-features --verbose ${{ matrix.extra }}
+      - name: Run doc tests
+        run: cargo test -p ${{ matrix.crate }} --all-features --doc
+      # Separate step so a minimal-feature failure is attributable rather than
+      # buried in the --all-features run. Skipped for feature-less crates,
+      # where it would be a byte-for-byte re-run of the step above. Does not
+      # thread `matrix.extra` through: today only `armature-testkit` sets it,
+      # and `--include-ignored` would be a no-op there under
+      # `--no-default-features` (see that row's comment) — if a future row
+      # needs an extra flag applied to this step too, give it its own matrix
+      # key rather than reusing `extra`.
+      - name: Run tests (minimal features)
+        if: matrix.minimal != ''
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
+
+  # ============================================================================
+  # TEST (armature-payments single-provider feature combinations)
+  #
+  # `armature-payments` gates `hmac`/`sha2`/`hex`/`base64` per provider, and
+  # those shapes are compiled nowhere else: `--all-features` and the default
+  # feature set both enable all three providers, so a provider-specific
+  # `use` left outside its `#[cfg]` only breaks for a downstream consumer
+  # building a single provider. Clippy with `-D warnings` is what turns that
+  # into a CI failure rather than a warning nobody reads.
+  # ============================================================================
+
+  test-payments-providers:
+    name: Test armature-payments (${{ matrix.provider }} only)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [stripe, paypal, braintree]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (single provider, warnings are errors)
+        run: |
+          cargo clippy -p armature-payments --all-targets \
+            --no-default-features --features ${{ matrix.provider }} \
+            -- -D warnings \
+            -A clippy::collapsible_if \
+            -A clippy::result_large_err \
+            -A dead_code \
+            -A clippy::useless_vec \
+            -A clippy::unwrap_or_default
+      - name: Run tests (single provider)
+        run: |
+          cargo test -p armature-payments --verbose \
+            --no-default-features --features ${{ matrix.provider }}
+
   doc-tests:
     name: Documentation Tests
     runs-on: ubuntu-latest
