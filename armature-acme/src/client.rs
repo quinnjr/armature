@@ -109,10 +109,6 @@ impl AcmeClient {
                 .map_err(|e| AcmeError::Internal(format!("invalid CA certificate: {e}")))?;
             builder = builder.add_root_certificate(cert);
         }
-        if config.danger_accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-
         let http_client = builder
             .build()
             .map_err(|e| AcmeError::Internal(e.to_string()))?;
