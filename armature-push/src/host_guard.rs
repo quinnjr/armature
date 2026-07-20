@@ -19,6 +19,27 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
+/// Build a `reqwest::Client` carrying both an overall and a connect-phase
+/// timeout.
+///
+/// FCM and APNS construct their HTTP client identically; this used to be an
+/// 8-line block (including this same explanatory comment) duplicated
+/// verbatim in both `fcm.rs` and `apns.rs`. `web_push.rs` does not use this:
+/// it additionally needs `.redirect(Policy::none())` and, for a resolved
+/// domain endpoint, `.resolve_to_addrs(..)` — configuration this helper
+/// deliberately does not force onto FCM/APNS.
+#[cfg(any(feature = "fcm", feature = "apns"))]
+pub(crate) fn build_push_client(
+    timeout: std::time::Duration,
+    connect_timeout: std::time::Duration,
+) -> crate::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .build()
+        .map_err(|e| crate::PushError::Config(e.to_string()))
+}
+
 /// True for IPv4 addresses that belong to internal/infrastructure ranges.
 ///
 /// Covers RFC 1918 private space (10/8, 172.16/12, 192.168/16), link-local

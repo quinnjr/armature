@@ -103,10 +103,10 @@ fn jpeg_with_orientation(width: u32, height: u32, orientation: u16) -> Bytes {
     Bytes::from(buf)
 }
 
-/// Finding #1 / #10: `MultiSizeBuilder::generate()` with the default
-/// (`Original`) output format must succeed and produce one output per size,
-/// preserving the source format — instead of erroring on every call because
-/// `Original` hit the catch-all `UnsupportedFormat` branch.
+/// `MultiSizeBuilder::generate()` with the default (`Original`) output
+/// format must succeed and produce one output per size, preserving the
+/// source format — instead of erroring on every call because `Original`
+/// hit the catch-all `UnsupportedFormat` branch.
 #[tokio::test]
 async fn multi_size_builder_generates_all_sizes_preserving_format() {
     let data = solid_png(300, 200, [10, 20, 30, 255]);
@@ -131,8 +131,8 @@ async fn multi_size_builder_generates_all_sizes_preserving_format() {
     }
 }
 
-/// Finding #1: `Pipeline::convert(OutputFormat::Original)` must round-trip
-/// (not error), preserving the detected source format.
+/// `Pipeline::convert(OutputFormat::Original)` must round-trip (not
+/// error), preserving the detected source format.
 ///
 /// Stronger than "still decodes": `Original` means the bytes are *already* in
 /// the requested format, so the pipeline must not touch the codec at all.
@@ -156,10 +156,10 @@ async fn convert_to_original_is_a_byte_identical_no_op() {
     );
 }
 
-/// Finding #14: chaining N image operations must cost one decode and one
-/// encode, not N of each. Byte-for-byte, `.grayscale().rotate(180)` through
-/// the pipeline must equal the same two operations applied to a single decode
-/// — which is only true if no intermediate re-encode happened.
+/// Chaining N image operations must cost one decode and one encode, not N
+/// of each. Byte-for-byte, `.grayscale().rotate(180)` through the pipeline
+/// must equal the same two operations applied to a single decode — which is
+/// only true if no intermediate re-encode happened.
 ///
 /// The fixture is deliberately *noisy*: with a flat single-colour JPEG the
 /// single-encode and N-encode paths produce byte-identical output (see
@@ -201,7 +201,7 @@ async fn chained_operations_encode_only_once() {
     );
 }
 
-/// Finding #6: an operation label must not embed the operation's payload.
+/// An operation label must not embed the operation's payload.
 /// `format!("{:?}", op)` on an `ImageWatermark` dumps the whole overlay
 /// buffer — `Bytes`'s `Debug` escapes every single byte — so a 2 MB overlay
 /// allocated a multi-megabyte `String` just to name an operation.
@@ -231,8 +231,8 @@ async fn operation_labels_do_not_embed_payloads() {
     }
 }
 
-/// Finding #4: a header declaring absurd dimensions must be refused with a
-/// clean error. `65535x65535` RGBA is a ~17 GB allocation; without decoder
+/// A header declaring absurd dimensions must be refused with a clean
+/// error. `65535x65535` RGBA is a ~17 GB allocation; without decoder
 /// limits a 40-byte file OOM-kills the process handling uploads.
 #[tokio::test]
 async fn oversized_image_header_is_rejected_not_allocated() {
@@ -359,9 +359,9 @@ async fn crop_bounds_check_does_not_overflow() {
     }
 }
 
-/// Finding #3: watermark text wider than the image must not underflow the
-/// position arithmetic. At the documented `font_size: 48.0` the rendered text
-/// is ~430 px wide — far wider than an ordinary thumbnail — which used to
+/// Watermark text wider than the image must not underflow the position
+/// arithmetic. At the documented `font_size: 48.0` the rendered text is
+/// ~430 px wide — far wider than an ordinary thumbnail — which used to
 /// panic in debug builds and silently drop the watermark in release.
 /// Relies on the embedded fallback font; see `custom_font_is_honored`
 /// for the `embedded-font`-disabled path.
@@ -390,8 +390,8 @@ async fn watermark_wider_than_the_image_does_not_underflow() {
     );
 }
 
-/// Finding #7: `color`'s alpha is the *global opacity* of the watermark and
-/// must be composited into RGB, not written into the alpha channel.
+/// `color`'s alpha is the *global opacity* of the watermark and must be
+/// composited into RGB, not written into the alpha channel.
 ///
 /// JPEG has no alpha channel, so a watermark that stored its opacity there
 /// came out fully opaque — a 25%-opacity black mark rendered as solid black.
@@ -433,9 +433,9 @@ async fn semi_transparent_watermark_stays_translucent_on_jpeg() {
     );
 }
 
-/// Finding #11: only *exact* quarter turns may take the lossless fast path.
-/// `normalized as u32` truncates, so 90.5 deg silently rendered as a plain
-/// 90 deg rotation and the fraction was discarded.
+/// Only *exact* quarter turns may take the lossless fast path. `normalized
+/// as u32` truncates, so 90.5 deg silently rendered as a plain 90 deg
+/// rotation and the fraction was discarded.
 #[tokio::test]
 async fn rotation_fast_path_requires_an_exact_quarter_turn() {
     let data = solid_png(60, 40, [10, 20, 30, 255]);
@@ -469,9 +469,9 @@ async fn rotation_fast_path_requires_an_exact_quarter_turn() {
     );
 }
 
-/// Finding #9: `process_image` must not return bytes in one format while
-/// reporting another. `image` decodes formats this crate cannot re-encode, and
-/// the old fallback quietly produced PNG bytes while `mime_type` still claimed
+/// `process_image` must not return bytes in one format while reporting
+/// another. `image` decodes formats this crate cannot re-encode, and the old
+/// fallback quietly produced PNG bytes while `mime_type` still claimed
 /// the source type — so a downstream `Storage::put` served a PNG under a
 /// `Content-Type` browsers refuse to render.
 #[tokio::test]
@@ -517,7 +517,7 @@ async fn unencodable_source_format_errors_instead_of_lying() {
     );
 }
 
-/// Finding #18: `StripMetadata` claims EXIF is gone; pin that claim.
+/// `StripMetadata` claims EXIF is gone; pin that claim.
 #[tokio::test]
 async fn strip_metadata_emits_no_exif() {
     let data = jpeg_with_orientation(8, 6, 6);
@@ -587,8 +587,8 @@ fn qoi_fixture() -> Bytes {
     Bytes::from(data)
 }
 
-/// Finding #3: converting a non-image input must error rather than silently
-/// returning the original bytes mislabeled as converted.
+/// Converting a non-image input must error rather than silently returning
+/// the original bytes mislabeled as converted.
 #[tokio::test]
 async fn convert_non_image_input_errors() {
     let data = Bytes::from_static(b"this is not an image, it's plain text data");
@@ -607,9 +607,9 @@ async fn convert_non_image_input_errors() {
     );
 }
 
-/// Finding #4: `OutputFormat::WebP` no longer carries an ignored `quality`
-/// field (the API was simplified to match the lossless-only implementation,
-/// rather than silently ignoring a quality setting). This is primarily a
+/// `OutputFormat::WebP` no longer carries an ignored `quality` field (the
+/// API was simplified to match the lossless-only implementation, rather
+/// than silently ignoring a quality setting). This is primarily a
 /// compile-time check — `OutputFormat::WebP { quality: .. }` would no longer
 /// compile — but we also confirm conversion still produces valid WebP bytes.
 #[tokio::test]
@@ -628,8 +628,8 @@ async fn webp_conversion_has_no_ignored_quality_param() {
         .expect("output should decode as WebP");
 }
 
-/// Finding #5: `ImageOp::AutoOrient` must actually read and apply the Exif
-/// orientation tag, instead of being a documented-but-unimplemented no-op.
+/// `ImageOp::AutoOrient` must actually read and apply the Exif orientation
+/// tag, instead of being a documented-but-unimplemented no-op.
 #[tokio::test]
 async fn auto_orient_applies_exif_rotation() {
     // Exif orientation 6 = "rotate 90 CW to display": for a stored 6x4 image
@@ -654,11 +654,11 @@ async fn auto_orient_applies_exif_rotation() {
     );
 }
 
-/// Finding #2: the text watermark must render actual glyph shapes, not a
-/// striped/solid box. On a solid background, real anti-aliased glyph
-/// rendering produces many distinct blended shades along glyph edges,
-/// whereas the old striped-box implementation only ever produced two
-/// colors (untouched background + one fully-blended stripe color).
+/// The text watermark must render actual glyph shapes, not a striped/solid
+/// box. On a solid background, real anti-aliased glyph rendering produces
+/// many distinct blended shades along glyph edges, whereas the old
+/// striped-box implementation only ever produced two colors (untouched
+/// background + one fully-blended stripe color).
 /// Relies on the embedded fallback font; see `custom_font_is_honored`
 /// for the `embedded-font`-disabled path.
 #[cfg(feature = "embedded-font")]
@@ -834,8 +834,8 @@ async fn convert_format_re_encodes_original_while_the_pipeline_passes_through() 
     );
 }
 
-/// Finding #19 (b): with `embedded-font` off and no font supplied, a text
-/// watermark must fail *cleanly* rather than panic or silently no-op.
+/// With `embedded-font` off and no font supplied, a text watermark must
+/// fail *cleanly* rather than panic or silently no-op.
 ///
 /// This is the documented reason the `--no-default-features --features images`
 /// CI matrix entry exists. Every other watermark test in this file is
@@ -864,7 +864,7 @@ async fn text_watermark_without_a_font_errors_cleanly() {
     );
 }
 
-/// Finding #19: the vendored font must be substitutable.
+/// The vendored font must be substitutable.
 ///
 /// `embedded-font` is default-on, but a downstream binary that does not want
 /// 760 KB of DejaVu Sans compiled in must be able to turn it off and supply

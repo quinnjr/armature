@@ -275,7 +275,7 @@ mod tests {
         );
     }
 
-    /// WF6 finding 3: `SesTransport::send` built `EmailContent::simple` from
+    /// `SesTransport::send` built `EmailContent::simple` from
     /// subject/text/html only and never read `email.attachments`, so attachments
     /// vanished with no error. Assert on the content `send` actually builds, not
     /// on a restatement of the branch condition.
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(simple.body().unwrap().text().unwrap().data(), "Hello");
     }
 
-    /// WF6 audit finding 7: an email carrying only threading headers took the
+    /// An email carrying only threading headers took the
     /// simple path, which has no representation for them, so `In-Reply-To` /
     /// `References` / `Message-ID` were dropped with no error.
     #[test]

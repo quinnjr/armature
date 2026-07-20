@@ -88,20 +88,20 @@ pub(crate) fn build_client(
 
 /// Seconds to wait, from a response's `Retry-After` header.
 ///
-/// Falls back to `default_secs` when the header is absent or unparseable.
-/// `Retry-After` may also be an HTTP-date; only the delta-seconds form is
-/// honored, which is what both providers send.
+/// Returns `None` when the header is absent or unparseable; the caller
+/// applies its own default via `.unwrap_or(default)`. `Retry-After` may also
+/// be an HTTP-date; only the delta-seconds form is honored, which is what
+/// both providers send.
 ///
 /// The retry schedule for a rate-limited job is keyed entirely off this value
 /// (`EmailQueueWorker::calculate_backoff` returns it verbatim), so a provider
 /// that told us to wait 300s and got retried after the local 5s default just
 /// gets re-throttled. Mailgun hardcoded 60 and ignored the header outright.
-pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap, default_secs: u64) -> u64 {
+pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(default_secs)
 }
 
 #[cfg(test)]
@@ -158,16 +158,16 @@ mod tests {
     #[test]
     fn retry_after_is_parsed_and_falls_back() {
         let mut headers = reqwest::header::HeaderMap::new();
-        assert_eq!(retry_after_secs(&headers, 60), 60);
+        assert_eq!(retry_after_secs(&headers), None);
 
         headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
-        assert_eq!(retry_after_secs(&headers, 60), 30);
+        assert_eq!(retry_after_secs(&headers), Some(30));
 
         // An HTTP-date form is not delta-seconds; fall back rather than guess.
         headers.insert(
             reqwest::header::RETRY_AFTER,
             "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
         );
-        assert_eq!(retry_after_secs(&headers, 60), 60);
+        assert_eq!(retry_after_secs(&headers), None);
     }
 }

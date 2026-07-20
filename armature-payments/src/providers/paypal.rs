@@ -68,10 +68,13 @@ impl PayPalProvider {
     /// # Errors
     ///
     /// Returns [`PaymentError::Config`] if the HTTP client cannot be built.
-    /// Fallible on purpose: the previous `unwrap_or_else(|_| Client::new())`
-    /// fallback produced a client with **no request and no connect timeout**,
-    /// which inside the processor's retry loop can hang a charge indefinitely —
-    /// silently, and with no log line to say the timeouts were lost.
+    /// Fallible on purpose: the obvious shortcut,
+    /// `build_http_client().unwrap_or_else(|_| Client::new())`, is worse than
+    /// failing outright. `Client::new()` carries **no request and no connect
+    /// timeout**, so that fallback would silently produce exactly the untimed
+    /// client the retry loop cannot tolerate — hanging a charge indefinitely
+    /// inside the processor's retry loop, with no log line to say the timeouts
+    /// were lost.
     pub fn new(
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
@@ -178,7 +181,8 @@ impl PayPalProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let retry_after = retry_after_secs(&response);
+            let retry_after =
+                retry_after_secs(response.headers()).and_then(|s| u32::try_from(s).ok());
             // A body that could not be read is not the same thing as an empty
             // body: `unwrap_or_default()` made a truncated response
             // indistinguishable from a gateway that legitimately sent nothing,
@@ -285,7 +289,7 @@ fn order_charge_status(status: &str) -> ChargeStatus {
 /// request and a throttle never triggered backoff.
 async fn paypal_error(response: reqwest::Response) -> PaymentError {
     let status = response.status();
-    let retry_after = retry_after_secs(&response);
+    let retry_after = retry_after_secs(response.headers()).and_then(|s| u32::try_from(s).ok());
     // A body that could not be read is not the same thing as an empty
     // body: `unwrap_or_default()` made a truncated response
     // indistinguishable from a gateway that legitimately sent nothing,

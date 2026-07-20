@@ -13,16 +13,16 @@ pub use money::*;
 pub use types::*;
 pub use webhook::*;
 
-// Deliberately *not* `pub use provider::*`. The glob dragged `sanitize_body`,
-// `classify_status` and `retry_after_secs` into the published API, where semver
-// would freeze them — `sanitize_body` worst of all, since it is a best-effort
-// redaction heuristic whose thresholds and prefix list need to stay tunable, and
-// exporting it advertises it as a security control. Those three are now
-// `pub(crate)`; what a third-party `PaymentProvider` implementor genuinely needs
-// is re-exported by name.
-pub use provider::{
-    PaymentProvider, ProviderClient, ProviderConfig, build_http_client, validate_base_url,
-};
+// Deliberately *not* `pub use provider::*`. A glob would also drag in
+// `sanitize_body`, `classify_status`, `retry_after_secs`, `build_http_client`,
+// `ProviderClient` and `validate_base_url` — internal HTTP plumbing, not API
+// surface. `sanitize_body` is worst of all: it is a best-effort redaction
+// heuristic whose thresholds and prefix list need to stay tunable, and
+// exporting it would advertise it as a security control. All six stay
+// `pub(crate)`; a third-party `PaymentProvider` implementor needs only the
+// trait itself and the config trait it is configured through, and both are
+// re-exported by name below.
+pub use provider::{PaymentProvider, ProviderConfig};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

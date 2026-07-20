@@ -228,4 +228,26 @@ mod tests {
             Err(MailError::TemplateNotFound(_))
         ));
     }
+
+    /// `tera_mut` must expose the real, live `tera::Tera` instance — a
+    /// function registered through it must actually run when a template
+    /// using it is rendered, not just compile.
+    #[test]
+    fn tera_mut_allows_registering_a_custom_function() {
+        let mut engine = TeraEngine::new();
+        engine.tera_mut().register_function(
+            "shout",
+            |kwargs: tera::Kwargs, _state: &tera::State| -> String {
+                let text: String = kwargs.get("text").ok().flatten().unwrap_or_default();
+                text.to_uppercase()
+            },
+        );
+        engine
+            .register_raw("greet/text", "{{ shout(text=name) }}")
+            .unwrap();
+
+        let result = engine.render("greet", &json!({"name": "world"})).unwrap();
+
+        assert_eq!(result.text.as_deref(), Some("WORLD"));
+    }
 }

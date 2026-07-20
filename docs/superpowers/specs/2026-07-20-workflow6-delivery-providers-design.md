@@ -5,6 +5,8 @@
 **Crates:** armature-mail, armature-push, armature-payments, armature-storage, armature-files
 **Findings:** 7 Critical · 33 Warning · 15 Info (55 total; see `.superpowers/sdd/wf6-findings.md`)
 
+**Status at merge:** this document is an accurate snapshot of round-1 scope only — it is not a map of what finally shipped. Three subsequent audit-and-fix commits on this branch (`fix(wf6): audit-battery follow-up`, `fix(wf6): second audit battery`, `fix(wf6): third audit battery`) found and closed 105 + 25 + 25 = 155 further findings across all five crates, including per-crate scoping drift (e.g. `armature-push` gained substantial new SSRF-hardening work not reflected below). See `CHANGELOG.md` for the authoritative description of what actually shipped.
+
 ## Problem
 
 The five "delivery provider" crates advertise integrations that silently do nothing, drop data, or — in the payments crate — **accept forged input as authentic**:

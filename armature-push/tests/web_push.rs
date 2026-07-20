@@ -181,87 +181,16 @@ async fn connection_reset_after_connect_is_retryable_network() {
     );
 }
 
-#[tokio::test]
-async fn a_domain_endpoint_is_actually_resolved_before_connecting() {
-    // `validate_endpoint` only ever inspected `Host::Ipv4`/`Host::Ipv6`
-    // literals: `Some(Host::Domain(_))` had no arm at all, so
-    // `https://metadata.attacker.example/push` with an A record of
-    // 169.254.169.254 skipped every check — an easier bypass than any of the
-    // IPv6 embeddings `is_internal_v6` handles.
-    //
-    // Proving the resolution happens without depending on attacker-controlled
-    // DNS: an unresolvable `.invalid` name (RFC 2606) must now fail *before* a
-    // connection is attempted, with the resolution message. Previously it
-    // sailed through validation and failed at connect ("endpoint unreachable").
-    const HOST: &str = "metadata-guard-probe.invalid";
-
-    // A resolver that hijacks NXDOMAIN would make this vacuous; skip rather
-    // than assert something the environment has already invalidated.
-    if tokio::net::lookup_host((HOST, 443)).await.is_ok() {
-        eprintln!("skipping: this resolver hijacks NXDOMAIN for {HOST}");
-        return;
-    }
-
-    let provider = strict_provider();
-    let sub = subscription(&format!("https://{HOST}/push"));
-
-    let err = provider
-        .send_to_web_subscription(&sub, &notification())
-        .await
-        .expect_err("an unresolvable endpoint host must fail");
-
-    assert!(
-        matches!(err, PushError::Network(_)),
-        "expected Network, got {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "Network error: web push endpoint host could not be resolved",
-        "the failure must come from the guard's own resolution, not from connect"
-    );
-    assert!(
-        !err.to_string().contains(HOST),
-        "the endpoint host must not be echoed: {err}"
-    );
-}
-
-#[tokio::test]
-async fn a_domain_resolving_to_loopback_is_rejected_without_opt_in() {
-    // The DNS half of the guard: `localhost` is caught by the literal loopback
-    // check, but any *other* name pointing at 127.0.0.1 is not, and that is the
-    // whole point of resolving. `localhost.` (fully-qualified, trailing dot)
-    // resolves identically but is not in the literal loopback set, so it
-    // exercises the resolved-address path offline.
-    if tokio::net::lookup_host(("localhost.", 80)).await.is_err() {
-        eprintln!("skipping: this resolver cannot resolve 'localhost.'");
-        return;
-    }
-
-    let server = StubServer::start_single(StubResponse::new(200, "")).await;
-    let port = server
-        .url()
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
-        .expect("stub port");
-
-    let provider = strict_provider();
-    let sub = subscription(&format!("https://localhost.:{port}/push"));
-
-    let err = provider
-        .send_to_web_subscription(&sub, &notification())
-        .await
-        .expect_err("a domain resolving to loopback must be refused");
-
-    assert!(
-        matches!(err, PushError::Config(_)),
-        "expected Config, got {err:?}"
-    );
-    assert!(
-        server.requests().is_empty(),
-        "no connection should have been opened"
-    );
-}
+// The two DNS-dependent regression tests that used to live here
+// (`a_domain_endpoint_is_actually_resolved_before_connecting` and
+// `a_domain_resolving_to_loopback_is_rejected_without_opt_in`) self-skipped
+// on any resolver that hijacks NXDOMAIN or cannot resolve a trailing-dot
+// FQDN, meaning they could report green having asserted nothing. Fixing that
+// requires driving `resolve_and_vet` from a fake resolver instead of the
+// ambient one; that seam (`FakeHostResolver`) is deliberately crate-private
+// (see `web_push.rs`), so the deterministic replacements for both tests now
+// live as unit tests in `src/web_push.rs`'s own `#[cfg(test)] mod tests`,
+// alongside the rest of the pinning-mechanism tests that need the same seam.
 
 #[tokio::test]
 async fn status_410_maps_to_unregistered() {

@@ -213,7 +213,21 @@ impl FcmConfig {
 
 /// Reject a credential-bearing URL that is neither https nor an opted-in
 /// loopback http URL.
-fn validate_base_url(label: &str, raw: &str, allow_insecure_loopback: bool) -> Result<()> {
+///
+/// This checks the *scheme* (plus, for loopback, the opt-in flag) only. It is
+/// **not** an SSRF guard: it does not resolve the host, and does not vet
+/// resolved addresses against internal/link-local ranges. `web_push`'s
+/// `validate_endpoint` is the function that does that fuller, DNS-rebinding-
+/// aware check; this one is named for exactly what it guarantees so the two
+/// are not mistaken for each other.
+///
+/// The gap is acceptable here: unlike a Web Push subscription endpoint, which
+/// is attacker-influenced input arriving on every send, the values checked
+/// here are `FcmConfig::api_base` and `FcmConfig::token_uri` — set once by
+/// the application developer, defaulting to Google's real endpoints.
+/// Overriding them is a test seam for pointing at a local stub server, not a
+/// per-notification input from an untrusted party.
+fn require_https_or_loopback(label: &str, raw: &str, allow_insecure_loopback: bool) -> Result<()> {
     let url = url::Url::parse(raw)
         .map_err(|e| PushError::Config(format!("invalid FCM {label} URL: {e}")))?;
 
@@ -268,8 +282,8 @@ impl FcmProvider {
     /// if the token endpoint is unreachable. Construct it where you can
     /// tolerate that, or retry.
     pub async fn new(config: FcmConfig) -> Result<Self> {
-        validate_base_url("api_base", &config.api_base, config.allow_insecure_loopback)?;
-        validate_base_url(
+        require_https_or_loopback("api_base", &config.api_base, config.allow_insecure_loopback)?;
+        require_https_or_loopback(
             "token_uri",
             &config.credentials.token_uri,
             config.allow_insecure_loopback,
@@ -278,11 +292,7 @@ impl FcmProvider {
         // A connect timeout is new here: previously only an overall timeout was
         // set, so a TCP connect that hung (a black-holed route rather than a
         // refused connection) consumed the entire 30s budget before failing.
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .connect_timeout(config.connect_timeout)
-            .build()
-            .map_err(|e| PushError::Config(e.to_string()))?;
+        let client = crate::host_guard::build_push_client(config.timeout, config.connect_timeout)?;
 
         let provider = Self {
             config,
@@ -814,7 +824,7 @@ mod tests {
 
     #[test]
     fn non_https_api_base_is_rejected_without_opt_in() {
-        let err = validate_base_url("api_base", "http://fcm.example.com", false)
+        let err = require_https_or_loopback("api_base", "http://fcm.example.com", false)
             .expect_err("plain http against a public host must be rejected");
         assert!(matches!(err, PushError::Config(_)), "got {err:?}");
     }
@@ -822,18 +832,18 @@ mod tests {
     #[test]
     fn loopback_http_requires_explicit_opt_in() {
         assert!(
-            validate_base_url("api_base", "http://127.0.0.1:8080", false).is_err(),
+            require_https_or_loopback("api_base", "http://127.0.0.1:8080", false).is_err(),
             "loopback http must be refused unless opted in"
         );
-        assert!(validate_base_url("api_base", "http://127.0.0.1:8080", true).is_ok());
-        assert!(validate_base_url("api_base", "http://localhost:8080", true).is_ok());
+        assert!(require_https_or_loopback("api_base", "http://127.0.0.1:8080", true).is_ok());
+        assert!(require_https_or_loopback("api_base", "http://localhost:8080", true).is_ok());
     }
 
     #[test]
     fn non_loopback_http_is_rejected_even_with_opt_in() {
         // The opt-in relaxes the scheme only for loopback, never for a
         // routable host.
-        let err = validate_base_url("api_base", "http://169.254.169.254", true)
+        let err = require_https_or_loopback("api_base", "http://169.254.169.254", true)
             .expect_err("opt-in must not permit http to a non-loopback host");
         assert!(matches!(err, PushError::Config(_)), "got {err:?}");
     }
@@ -899,6 +909,6 @@ mod tests {
 
     #[test]
     fn https_is_always_accepted() {
-        assert!(validate_base_url("api_base", "https://fcm.googleapis.com", false).is_ok());
+        assert!(require_https_or_loopback("api_base", "https://fcm.googleapis.com", false).is_ok());
     }
 }

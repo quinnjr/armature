@@ -264,7 +264,10 @@ async fn processing_is_tracked_between_pop_and_complete() {
         "popped jobs must be counted as processing"
     );
 
-    backend.complete(&jobs[0].id).await.unwrap();
+    backend
+        .complete(&jobs[0].id, jobs[0].claim_token)
+        .await
+        .unwrap();
     backend.fail(jobs[1].clone(), "boom").await.unwrap();
     backend.dead_letter(jobs[2].clone()).await.unwrap();
 
@@ -547,9 +550,11 @@ async fn repeated_reclaims_dead_letter_the_job_instead_of_looping_forever() {
 /// `reclaim_stale` moved the id to `:retry` but left the body; the still-live
 /// worker's `complete` then `DEL`ed the body, so the redelivery found
 /// `payload == None`, logged an `error!`, `LPUSH`ed to `:lost`, and dead-lettered
-/// a stub — for an email that was successfully delivered. Claims are now
-/// generational: whichever of the two `ZREM`s `:processing` first wins, and the
-/// loser is a no-op.
+/// a stub — for an email that was successfully delivered. This specific race is
+/// two-party (the original worker vs. the sweep re-scoring the *same* claim,
+/// not yet a new one), so the claim token `CLAIM_STALE` reports back is
+/// unchanged from the one `pop` minted — `complete` presenting it still matches
+/// and wins normally.
 #[tokio::test]
 async fn a_reclaim_racing_a_live_complete_does_not_fabricate_a_loss() {
     require_docker!();
@@ -568,9 +573,13 @@ async fn a_reclaim_racing_a_live_complete_does_not_fabricate_a_loss() {
     // The sweeper decides this claim is stale and takes it back...
     assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
 
-    // ...and only then does the original worker report success. It no longer
-    // owns the claim, so it must leave the body alone.
-    backend.complete(&claimed[0].id).await.unwrap();
+    // ...and only then does the original worker report success. Its claim
+    // token is unchanged by the reclaim (see the test doc above), so this
+    // still matches and wins normally.
+    backend
+        .complete(&claimed[0].id, claimed[0].claim_token)
+        .await
+        .unwrap();
 
     let stats = queue.stats().await.unwrap();
     assert_eq!(
@@ -601,11 +610,12 @@ async fn a_reclaim_racing_a_live_complete_does_not_fabricate_a_loss() {
 ///
 /// The sweeper sees the same symptom — a stale claim with no body — in two
 /// opposite situations, and the naive reading ("the worker must have completed
-/// it") turns an evicted email into a `debug!` line. The discriminator is the
-/// `ZREM` reply: `complete` and `discard` are gated on `ZREM :processing == 1`,
-/// so an owner that finished has already taken the claim and the sweeper's
-/// `ZREM` returns 0. Here nobody completed it, the claim is still ours, and the
-/// caller was told this email was enqueued — so it belongs in `:lost`.
+/// it") turns an evicted email into a `debug!` line. The discriminator is
+/// `RELEASE_IF_OWNED`'s reply: it releases the claim only if the token it is
+/// given still matches the current one, so an owner that finished has already
+/// taken (and cleared) the claim and the sweeper's release returns 0. Here
+/// nobody completed it, the claim is still ours, and the caller was told this
+/// email was enqueued — so it belongs in `:lost`.
 #[tokio::test]
 async fn an_evicted_body_under_a_live_claim_is_recorded_as_lost() {
     require_docker!();
@@ -673,7 +683,10 @@ async fn a_completed_job_is_not_resurrected_by_a_later_sweep() {
 
     backend.push(EmailJob::new(test_email(0))).await.unwrap();
     let claimed = backend.pop(1).await.unwrap();
-    backend.complete(&claimed[0].id).await.unwrap();
+    backend
+        .complete(&claimed[0].id, claimed[0].claim_token)
+        .await
+        .unwrap();
 
     assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 0);
     let stats = queue.stats().await.unwrap();
@@ -738,8 +751,14 @@ async fn discard_releases_the_claim_without_counting_a_success() {
     }
     let jobs = backend.pop(2).await.unwrap();
 
-    backend.complete(&jobs[0].id).await.unwrap();
-    backend.discard(&jobs[1].id).await.unwrap();
+    backend
+        .complete(&jobs[0].id, jobs[0].claim_token)
+        .await
+        .unwrap();
+    backend
+        .discard(&jobs[1].id, jobs[1].claim_token)
+        .await
+        .unwrap();
 
     let stats = queue.stats().await.unwrap();
     assert_eq!(stats.processed, 1, "discard must not count as processed");
@@ -796,6 +815,146 @@ async fn a_lost_job_is_recorded_even_with_the_dlq_disabled() {
         lost[0].contains(&job_id),
         "stub does not name the job: {lost:?}"
     );
+}
+
+/// The three-party race the fencing token exists to close: a claim reclaimed
+/// by the sweeper *and re-popped by a second worker* before the original
+/// worker's stale finalize arrives. Without a token, `complete`/`discard`/
+/// `fail`/`dead_letter` decided ownership by id membership alone — the second
+/// worker's fresh claim reuses the same id, so the first worker's stale
+/// `complete` looked identical to a legitimate one, released the *second*
+/// worker's claim, and a subsequent `fail`/`dead_letter` from the second
+/// worker then found nothing to act on: the job vanished from every set with
+/// no trace, despite `enqueue` having told the caller it succeeded.
+#[tokio::test]
+async fn a_stale_claims_finalize_does_not_destroy_a_newer_live_claim() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:claim-fencing");
+    let backend = RedisBackend::new(redis, config);
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+
+    // Worker A claims it.
+    let first_claim = backend.pop(1).await.unwrap();
+    assert_eq!(first_claim.len(), 1);
+    let stale_token = first_claim[0].claim_token;
+    assert_ne!(stale_token, 0, "a popped job must carry a real claim token");
+
+    // The sweeper reclaims it (A was too slow) and worker B re-pops it from
+    // `:retry`, minting a fresh claim under the same job id.
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+    let second_claim = backend.pop(1).await.unwrap();
+    assert_eq!(second_claim.len(), 1);
+    assert_eq!(second_claim[0].id, first_claim[0].id, "same job id");
+    assert_ne!(
+        second_claim[0].claim_token, stale_token,
+        "re-popping from :retry must mint a fresh token, not reuse the stale one"
+    );
+
+    // Worker A, unaware it was reclaimed, finally reports back with its
+    // now-stale token.
+    backend
+        .complete(&first_claim[0].id, stale_token)
+        .await
+        .unwrap();
+
+    // B's live claim must be untouched: still claimed, not completed.
+    let stats = backend.stats().await.unwrap();
+    assert_eq!(
+        stats.processing, 1,
+        "A's stale complete must not release B's live claim: {stats:?}"
+    );
+    assert_eq!(
+        stats.processed, 0,
+        "A's stale complete must not be counted as a delivery: {stats:?}"
+    );
+
+    // B's own finalize, with the correct token, must succeed normally — and
+    // the job must not have vanished in between.
+    backend
+        .complete(&second_claim[0].id, second_claim[0].claim_token)
+        .await
+        .unwrap();
+    let stats = backend.stats().await.unwrap();
+    assert_eq!(stats.processing, 0);
+    assert_eq!(
+        stats.processed, 1,
+        "B's genuine completion must count: {stats:?}"
+    );
+}
+
+/// As above, but the stale caller's terminal call is `fail` — the shape that
+/// previously lost mail outright, since a `fail` that wins the id-only gate
+/// resurrects a stale attempt count on top of destroying the live claim.
+#[tokio::test]
+async fn a_stale_claims_fail_does_not_destroy_a_newer_live_claim() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:claim-fencing-fail");
+    let backend = RedisBackend::new(redis, config);
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+
+    let first_claim = backend.pop(1).await.unwrap();
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+    let second_claim = backend.pop(1).await.unwrap();
+
+    // A's stale `fail` must be a no-op.
+    backend
+        .fail(first_claim[0].clone(), "stale worker A timed out")
+        .await
+        .unwrap();
+
+    let stats = backend.stats().await.unwrap();
+    assert_eq!(
+        stats.processing, 1,
+        "A's stale fail must not touch B's live claim: {stats:?}"
+    );
+
+    // B's live claim can still be legitimately finalized afterward.
+    backend
+        .complete(&second_claim[0].id, second_claim[0].claim_token)
+        .await
+        .unwrap();
+    assert_eq!(backend.stats().await.unwrap().processing, 0);
+}
+
+/// `reclaim_stale` must respect `dead_letter_queue(false)` the same way the
+/// normal worker-exhaustion path already does: discard without a durable
+/// record when a job exhausts its retries through repeated reclaims, rather
+/// than writing to `:dead` unconditionally.
+#[tokio::test]
+async fn reclaim_stale_respects_a_disabled_dead_letter_queue() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default()
+        .queue_name("armature:test:reclaim-no-dlq")
+        .dead_letter_queue(false);
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config).unwrap();
+
+    let job = EmailJob::new(test_email(0)).max_retries(0);
+    backend.push(job).await.unwrap();
+
+    // `max_retries(0)`: the reclaim's own `attempts += 1` is immediately
+    // exhausting, so a single sweep is enough to hit the DLQ-disabled path.
+    assert_eq!(backend.pop(1).await.unwrap().len(), 1);
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(
+        stats.dead_letter, 0,
+        "dead_letter_queue(false) must not accumulate a durable record: {stats:?}"
+    );
+    assert_eq!(stats.retrying, 0);
+    assert_eq!(stats.processing, 0);
 }
 
 struct HangingTransport;

@@ -273,10 +273,9 @@ impl Transport for MailgunTransport {
             // Previously hardcoded 60 and ignored the header. The queue's whole
             // retry schedule for a throttled job is keyed off this value, so
             // discarding a `Retry-After: 300` guaranteed a re-throttle.
-            Err(MailError::RateLimited(retry_after_secs(
-                response.headers(),
-                60,
-            )))
+            Err(MailError::RateLimited(
+                retry_after_secs(response.headers()).unwrap_or(60),
+            ))
         } else {
             // Not `unwrap_or_default()`: a truncated read would be
             // indistinguishable from a provider that sent an empty body.
@@ -313,7 +312,7 @@ mod tests {
             .collect()
     }
 
-    /// WF6 audit finding 16: the `h:` prefix is what makes Mailgun honor a
+    /// The `h:` prefix is what makes Mailgun honor a
     /// custom header at all, and dropping it fails silently — the message is
     /// still accepted, just without the header.
     #[test]
@@ -343,7 +342,7 @@ mod tests {
         assert_eq!(find(&fields, "h:X-Tag"), ["a", "b"]);
     }
 
-    /// WF6 audit finding 7: Mailgun never read `message_id`/`in_reply_to`/
+    /// Mailgun never read `message_id`/`in_reply_to`/
     /// `references`, so threading was silently lost.
     #[test]
     fn threading_headers_are_emitted() {
@@ -385,7 +384,7 @@ mod tests {
         assert_eq!(find(&fields, "h:Reply-To"), ["reply@example.com"]);
     }
 
-    /// WF6 audit finding 8: Mailgun writes header values into the form body
+    /// Mailgun writes header values into the form body
     /// verbatim, so a CRLF would inject a header. `Email::validate` — which
     /// `send` calls first — must reject it, and nothing may reach the form.
     #[test]

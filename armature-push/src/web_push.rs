@@ -78,10 +78,109 @@ enum EndpointTarget {
 /// resolves to 127.0.0.1 is the classic way to launder the loopback check.
 /// (`is_internal_v6` already covers IPv6 loopback; `is_internal_v4`
 /// deliberately does not, so it is added explicitly.)
+///
+/// [`resolve_and_vet`] applies one additional, narrower exemption on top of
+/// this function rather than inside it: a *resolved* loopback answer is let
+/// through when the caller has opted into `allow_insecure_loopback`,
+/// mirroring the exemption [`validate_endpoint`] already gives a *literal*
+/// loopback URL (see [`is_pure_loopback`]). This function's own verdict stays
+/// unconditional.
 fn is_internal_addr(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_internal_v4(&v4) || v4.is_loopback(),
         IpAddr::V6(v6) => is_internal_v6(&v6),
+    }
+}
+
+/// True for a resolved address that is loopback in any spelling: plain IPv4
+/// loopback, plain IPv6 loopback, or an IPv4-mapped/compatible IPv6 embedding
+/// of either.
+///
+/// Split out from [`is_internal_addr`] so [`resolve_and_vet`] can exempt
+/// *just* this case under `allow_insecure_loopback` — the same opt-in that
+/// already exempts a literal loopback URL in [`validate_endpoint`] — without
+/// relaxing any of the other internal ranges `is_internal_addr` rejects.
+fn is_pure_loopback(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4().is_some_and(|v4| v4.is_loopback()),
+    }
+}
+
+/// Abstraction over "resolve `host` as if connecting to it on `port`," so
+/// [`resolve_and_vet`] can be driven by fixed, controlled records in tests
+/// instead of the ambient DNS resolver.
+///
+/// Without this seam, the DNS-dependent regression tests in
+/// `tests/web_push.rs` asked the *real* resolver a throwaway question first
+/// and skipped themselves if the answer was not what they expected (a
+/// resolver that hijacks NXDOMAIN into a landing page, or one that cannot
+/// resolve a trailing-dot FQDN) — meaning they could report green having
+/// asserted nothing at all, on exactly the kind of network/CI image where a
+/// DNS-dependent guard most needs checking.
+#[async_trait]
+pub(crate) trait HostResolver: Send + Sync {
+    /// Resolve `host` as if connecting to it on `port`. Mirrors
+    /// `tokio::net::lookup_host`'s contract: an empty `Ok` and an `Err` are
+    /// both possible failure shapes, so callers must handle both.
+    async fn lookup_host(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+}
+
+/// Production resolver: a thin wrapper over `tokio::net::lookup_host`.
+struct TokioHostResolver;
+
+#[async_trait]
+impl HostResolver for TokioHostResolver {
+    async fn lookup_host(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        Ok(tokio::net::lookup_host((host, port)).await?.collect())
+    }
+}
+
+/// A fixed-answer resolver for deterministic tests.
+///
+/// Crate-private and test-only: it exists purely so this module's own
+/// `#[cfg(test)] mod tests` can drive [`resolve_and_vet`] (via
+/// [`WebPushProvider::new_with_resolver`]) without depending on the ambient
+/// DNS resolver.
+#[cfg(test)]
+type FakeResolverRecords =
+    std::sync::Arc<std::sync::Mutex<HashMap<(String, u16), Vec<SocketAddr>>>>;
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct FakeHostResolver {
+    records: FakeResolverRecords,
+}
+
+#[cfg(test)]
+impl FakeHostResolver {
+    /// A resolver with no records. Every lookup fails as "unresolvable" until
+    /// [`Self::set`] is called for that exact `host`/`port` pair.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record (or replace) the fixed answer for `host:port`.
+    pub(crate) fn set(&self, host: &str, port: u16, addrs: Vec<SocketAddr>) {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((host.to_string(), port), addrs);
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl HostResolver for FakeHostResolver {
+    async fn lookup_host(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(host.to_string(), port))
+            .cloned()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "fake resolver: no record")
+            })
     }
 }
 
@@ -90,22 +189,45 @@ fn is_internal_addr(ip: IpAddr) -> bool {
 /// Rejecting on `any` rather than `all` is deliberate: a resolver that returns
 /// one public and one internal address would otherwise leave the choice of
 /// which to dial up to the connector.
-async fn resolve_and_vet(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+///
+/// The lookup itself is wrapped in `connect_timeout`, not just the connection
+/// that follows it. `resolver.lookup_host` runs (in production) on tokio's
+/// blocking pool, shared process-wide; with no timeout, a Web Push
+/// subscription endpoint pointed at a DNS tarpit (an attacker-controlled
+/// hostname resolving via a non-responsive authoritative server) held the
+/// lookup for the full resolver retry budget, and enough concurrent malicious
+/// endpoints could exhaust the shared pool. A timeout is folded into the same
+/// "unresolvable" error a hard DNS failure already produces.
+///
+/// `allow_insecure_loopback` exempts a *resolved* loopback answer, the same
+/// way [`validate_endpoint`] already exempts a *literal* loopback URL. It
+/// does not relax any other internal range: see [`is_pure_loopback`].
+async fn resolve_and_vet(
+    resolver: &dyn HostResolver,
+    host: &str,
+    port: u16,
+    connect_timeout: Duration,
+    allow_insecure_loopback: bool,
+) -> Result<Vec<SocketAddr>> {
     // The host is attacker-influenced, so — as everywhere else in this module —
     // it is never echoed into the error text.
     let unresolvable =
         || PushError::Network("web push endpoint host could not be resolved".to_string());
 
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| unresolvable())?
-        .collect();
+    let addrs: Vec<SocketAddr> =
+        tokio::time::timeout(connect_timeout, resolver.lookup_host(host, port))
+            .await
+            .map_err(|_elapsed| unresolvable())?
+            .map_err(|_io_err| unresolvable())?;
 
     if addrs.is_empty() {
         return Err(unresolvable());
     }
 
-    if addrs.iter().any(|addr| is_internal_addr(addr.ip())) {
+    if addrs.iter().any(|addr| {
+        let ip = addr.ip();
+        !(allow_insecure_loopback && is_pure_loopback(ip)) && is_internal_addr(ip)
+    }) {
         return Err(PushError::Config(
             "web push endpoint resolves to an internal address".to_string(),
         ));
@@ -366,11 +488,33 @@ pub struct WebPushProvider {
     /// Caching them keeps a batch to one push service from paying a fresh
     /// resolution and a fresh connection pool per notification.
     pinned_clients: std::sync::Mutex<HashMap<String, PinnedClient>>,
+    /// DNS resolution seam for [`resolve_and_vet`]. Always [`TokioHostResolver`]
+    /// outside tests; see [`WebPushProvider::new_with_resolver`].
+    resolver: Box<dyn HostResolver>,
 }
 
 impl WebPushProvider {
     /// Create a new Web Push provider.
     pub fn new(config: WebPushConfig) -> Result<Self> {
+        Self::build(config, Box::new(TokioHostResolver))
+    }
+
+    /// Test-only constructor: builds a provider whose DNS resolution is
+    /// driven entirely by `resolver` instead of the ambient system resolver.
+    ///
+    /// Crate-private: it exists so this module's own tests can exercise
+    /// [`resolve_and_vet`] and the pinning path in [`Self::vetted_client`]
+    /// deterministically, without depending on the DNS environment the test
+    /// happens to run in.
+    #[cfg(test)]
+    pub(crate) fn new_with_resolver(
+        config: WebPushConfig,
+        resolver: FakeHostResolver,
+    ) -> Result<Self> {
+        Self::build(config, Box::new(resolver))
+    }
+
+    fn build(config: WebPushConfig, resolver: Box<dyn HostResolver>) -> Result<Self> {
         // The subscription endpoint is attacker-influenced (it comes from a push
         // subscription), so the client refuses redirects and always carries
         // connect/overall timeouts — configurable, but never absent. Host/scheme
@@ -390,6 +534,7 @@ impl WebPushProvider {
             client,
             vapid,
             pinned_clients: std::sync::Mutex::new(HashMap::new()),
+            resolver,
         })
     }
 
@@ -414,7 +559,14 @@ impl WebPushProvider {
             }
         }
 
-        let addrs = resolve_and_vet(host, port).await?;
+        let addrs = resolve_and_vet(
+            self.resolver.as_ref(),
+            host,
+            port,
+            self.config.connect_timeout,
+            self.config.allow_insecure_loopback,
+        )
+        .await?;
 
         // Same settings as `self.client` — redirects refused, both timeouts
         // present — plus the resolution override that closes the rebinding
@@ -553,8 +705,21 @@ impl WebPushProvider {
         // Content-Encoding / Content-Type / crypto headers, encrypted body) so we
         // don't depend on its isahc/libcurl client. If you bump web-push, re-diff
         // this against that function to keep the headers in sync.
+        //
+        // The target URL is built from `subscription.endpoint` directly, not
+        // `message.endpoint`. `message.endpoint` is web-push's own re-parse of
+        // that same string (via `http::Uri`, a different parser from the
+        // `url::Url` that `validate_endpoint` used to derive the host handed to
+        // `resolve_to_addrs`, and that reqwest itself uses internally). Passing
+        // `message.endpoint` here risked the override key and the host actually
+        // dialed diverging on a normalization difference between the two
+        // parsers (e.g. a trailing-dot FQDN) — on any mismatch,
+        // `resolve_to_addrs` silently falls back to the system resolver,
+        // reopening the DNS-rebinding window pinning exists to close. Using the
+        // identical string both times makes the two parses agree by
+        // construction rather than by coincidence.
         let mut request = client
-            .post(message.endpoint.to_string())
+            .post(subscription.endpoint.as_str())
             .header("TTL", message.ttl.to_string())
             .header("Urgency", urgency_header_value(notification.urgency));
 
@@ -738,6 +903,22 @@ impl PushProvider for WebPushProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use armature_testkit::{StubResponse, StubServer};
+
+    /// A valid VAPID key (borrowed from web-push's own test vectors), so a
+    /// provider built with it actually succeeds and proves out timeout/
+    /// resolver plumbing rather than failing at key parsing first.
+    const VALID_VAPID_KEY: &str = "IQ9Ur0ykXoHS9gzfYX0aBjy9lvdrjx_PFUXmie9YRcY";
+
+    /// A provider whose resolver is `resolver` and whose SSRF guard permits
+    /// loopback — the shape every `StubServer`-backed test in this module
+    /// needs, since `resolve_and_vet` only accepts a resolved loopback answer
+    /// under this opt-in.
+    fn provider_with_resolver(resolver: FakeHostResolver) -> WebPushProvider {
+        let config = WebPushConfig::new(VALID_VAPID_KEY, "mailto:test@example.com")
+            .allow_insecure_loopback(true);
+        WebPushProvider::new_with_resolver(config, resolver).expect("build provider")
+    }
 
     #[test]
     fn debug_does_not_leak_vapid_private_key() {
@@ -769,9 +950,7 @@ mod tests {
     fn timeout_builders_override_the_defaults() {
         // A valid VAPID key, so the provider actually builds and we prove the
         // configured timeouts are accepted by the reqwest client builder.
-        const VAPID_PRIVATE: &str = "IQ9Ur0ykXoHS9gzfYX0aBjy9lvdrjx_PFUXmie9YRcY";
-
-        let config = WebPushConfig::new(VAPID_PRIVATE, "mailto:admin@example.com")
+        let config = WebPushConfig::new(VALID_VAPID_KEY, "mailto:admin@example.com")
             .timeout(Duration::from_millis(250))
             .connect_timeout(Duration::from_millis(50));
         assert_eq!(config.timeout, Duration::from_millis(250));
@@ -924,29 +1103,327 @@ mod tests {
     async fn resolve_and_vet_refuses_a_host_that_resolves_to_loopback() {
         // `lookup_host` parses an IP literal without touching DNS, so this runs
         // offline while still exercising the real resolve-then-vet path.
-        let err = resolve_and_vet("127.0.0.1", 443)
-            .await
-            .expect_err("a loopback answer must be refused");
+        let err = resolve_and_vet(
+            &TokioHostResolver,
+            "127.0.0.1",
+            443,
+            Duration::from_secs(1),
+            false,
+        )
+        .await
+        .expect_err("a loopback answer must be refused");
         assert!(matches!(err, PushError::Config(_)), "got {err:?}");
 
-        let err = resolve_and_vet("169.254.169.254", 443)
-            .await
-            .expect_err("a link-local answer must be refused");
+        let err = resolve_and_vet(
+            &TokioHostResolver,
+            "169.254.169.254",
+            443,
+            Duration::from_secs(1),
+            false,
+        )
+        .await
+        .expect_err("a link-local answer must be refused");
         assert!(matches!(err, PushError::Config(_)), "got {err:?}");
     }
 
     #[tokio::test]
     async fn resolve_and_vet_accepts_a_public_answer_and_never_echoes_the_host() {
-        let addrs = resolve_and_vet("93.184.216.34", 443)
-            .await
-            .expect("a public answer must be accepted");
+        let addrs = resolve_and_vet(
+            &TokioHostResolver,
+            "93.184.216.34",
+            443,
+            Duration::from_secs(1),
+            false,
+        )
+        .await
+        .expect("a public answer must be accepted");
         assert_eq!(addrs.len(), 1);
         assert_eq!(addrs[0].port(), 443);
 
-        let err = resolve_and_vet("169.254.169.254", 443).await.unwrap_err();
+        let err = resolve_and_vet(
+            &TokioHostResolver,
+            "169.254.169.254",
+            443,
+            Duration::from_secs(1),
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(
             !err.to_string().contains("169.254"),
             "the attacker-influenced host must not be echoed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_and_vet_accepts_a_loopback_answer_when_opted_in() {
+        // The DNS-resolved mirror of `validate_endpoint`'s literal-loopback
+        // exemption: opting in accepts a resolved loopback answer, but every
+        // other internal range stays refused regardless.
+        let addrs = resolve_and_vet(
+            &TokioHostResolver,
+            "127.0.0.1",
+            443,
+            Duration::from_secs(1),
+            true,
+        )
+        .await
+        .expect("a loopback answer must be accepted when opted in");
+        assert_eq!(addrs, vec![SocketAddr::from(([127, 0, 0, 1], 443))]);
+
+        let err = resolve_and_vet(
+            &TokioHostResolver,
+            "169.254.169.254",
+            443,
+            Duration::from_secs(1),
+            true,
+        )
+        .await
+        .expect_err("a link-local answer must stay refused even with loopback opted in");
+        assert!(matches!(err, PushError::Config(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_and_vet_times_out_on_a_hanging_resolver() {
+        // `resolver.lookup_host` used to run with no timeout, on tokio's
+        // shared blocking pool in production. A hostname aimed at a DNS
+        // tarpit held that pool for the full resolver retry budget; enough
+        // concurrent malicious endpoints exhausted it process-wide. A
+        // resolver that never returns exercises the same failure mode
+        // offline, and the outer `tokio::time::timeout` guarantees this test
+        // itself cannot hang if the fix regresses.
+        struct HangingResolver;
+
+        #[async_trait]
+        impl HostResolver for HangingResolver {
+            async fn lookup_host(
+                &self,
+                _host: &str,
+                _port: u16,
+            ) -> std::io::Result<Vec<SocketAddr>> {
+                std::future::pending::<std::io::Result<Vec<SocketAddr>>>().await
+            }
+        }
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            resolve_and_vet(
+                &HangingResolver,
+                "tarpit.example",
+                443,
+                Duration::from_millis(50),
+                false,
+            ),
+        )
+        .await
+        .expect("resolve_and_vet must time out on its own rather than hang the caller")
+        .expect_err("a hanging resolver must be treated as unresolvable");
+
+        assert!(
+            matches!(err, PushError::Network(_)),
+            "expected Network, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Network error: web push endpoint host could not be resolved",
+            "a resolver timeout must map to the same error as a resolution failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_web_subscription_fails_on_an_unresolvable_domain_endpoint() {
+        // `validate_endpoint` only ever inspected `Host::Ipv4`/`Host::Ipv6`
+        // literals: `Some(Host::Domain(_))` had no arm at all, so
+        // `https://metadata.attacker.example/push` with an A record of
+        // 169.254.169.254 skipped every check — an easier bypass than any of
+        // the IPv6 embeddings `is_internal_v6` handles.
+        //
+        // Proving the resolution actually happens as part of the public send
+        // path, without depending on the ambient DNS resolver: this used to
+        // ask the real resolver a throwaway question first and skip itself if
+        // a resolver hijacking NXDOMAIN into a landing page made the
+        // assertion vacuous — meaning it could report green having asserted
+        // nothing, on exactly the kind of network/CI image where this guard
+        // most needs checking. A fake resolver with no record for the host
+        // fails deterministically, the same way, on every machine.
+        const HOST: &str = "metadata-guard-probe.invalid";
+
+        let config = WebPushConfig::new(VALID_VAPID_KEY, "mailto:test@example.com");
+        let provider =
+            WebPushProvider::new_with_resolver(config, FakeHostResolver::new()).expect("build");
+        let sub = WebPushSubscription::new(format!("https://{HOST}/push"), "p256dh", "auth");
+
+        let err = provider
+            .send_to_web_subscription(&sub, &Notification::new("Hello", "World"))
+            .await
+            .expect_err("an unresolvable endpoint host must fail");
+
+        assert!(
+            matches!(err, PushError::Network(_)),
+            "expected Network, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Network error: web push endpoint host could not be resolved",
+            "the failure must come from the guard's own resolution, not from connect"
+        );
+        assert!(
+            !err.to_string().contains(HOST),
+            "the endpoint host must not be echoed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_web_subscription_rejects_a_domain_resolving_to_loopback_without_opt_in() {
+        // The DNS half of the guard: `localhost` is caught by the literal
+        // loopback check, but any *other* name pointing at 127.0.0.1 is not,
+        // and that is the whole point of resolving. This used to rely on the
+        // ambient resolver's handling of `localhost.` (trailing dot) to
+        // exercise that path offline, and skipped itself if the resolver
+        // could not resolve it — meaning it could report green having
+        // asserted nothing. A fake resolver records the same answer
+        // deterministically instead.
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let addr: SocketAddr = server
+            .url()
+            .trim_start_matches("http://")
+            .parse()
+            .expect("stub address");
+
+        const HOST: &str = "domain-resolves-to-loopback-probe.invalid";
+        let resolver = FakeHostResolver::new();
+        resolver.set(HOST, addr.port(), vec![addr]);
+
+        // Production defaults: loopback is *not* exempt, even for a resolved
+        // answer (that opt-in is exercised separately, at the
+        // `resolve_and_vet` level, by
+        // `resolve_and_vet_accepts_a_loopback_answer_when_opted_in`).
+        let config = WebPushConfig::new(VALID_VAPID_KEY, "mailto:test@example.com");
+        let provider =
+            WebPushProvider::new_with_resolver(config, resolver).expect("build provider");
+        let sub = WebPushSubscription::new(
+            format!("https://{HOST}:{}/push", addr.port()),
+            "p256dh",
+            "auth",
+        );
+
+        let err = provider
+            .send_to_web_subscription(&sub, &Notification::new("Hello", "World"))
+            .await
+            .expect_err("a domain resolving to loopback must be refused");
+
+        assert!(
+            matches!(err, PushError::Config(_)),
+            "expected Config, got {err:?}"
+        );
+        assert!(
+            server.requests().is_empty(),
+            "no connection should have been opened"
+        );
+    }
+
+    #[tokio::test]
+    async fn vetted_client_actually_connects_to_the_address_it_vetted() {
+        // Every existing test targeting `vetted_client` either hits an
+        // IP-literal endpoint (never reaching this code) or errors out of
+        // `resolve_and_vet` before reaching the pinning logic — deleting
+        // `.resolve_to_addrs(host, &addrs)` outright would not fail a single
+        // test. Prove a pinned client actually completes a request against
+        // the address it vetted.
+        //
+        // This also stands in as the regression test for the
+        // `resolve_to_addrs`-key-vs-connect-time-host divergence fix in
+        // `send_prepared`: `HOST` is an RFC 2606 `.invalid` name, which no
+        // real resolver can ever answer. If the pinning override were keyed
+        // by a host string that diverges even slightly from the one actually
+        // dialed, reqwest would silently fall back to the system resolver —
+        // which, for `.invalid`, can only fail. The request below only
+        // succeeds if the override is actually used to reach `server`.
+        //
+        // Exercised at `vetted_client` directly rather than through
+        // `send_to_web_subscription`: a *domain* endpoint (unlike a loopback
+        // literal) requires `https` regardless of `allow_insecure_loopback`,
+        // and `StubServer` only speaks plain http.
+        const HOST: &str = "vetted-client-connect-probe.invalid";
+
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let addr: SocketAddr = server
+            .url()
+            .trim_start_matches("http://")
+            .parse()
+            .expect("stub address");
+
+        let resolver = FakeHostResolver::new();
+        resolver.set(HOST, addr.port(), vec![addr]);
+        let provider = provider_with_resolver(resolver);
+
+        let client = provider
+            .vetted_client(HOST, addr.port())
+            .await
+            .expect("a loopback answer must be accepted when opted in");
+
+        let response = client
+            .get(format!("http://{HOST}:{}/", addr.port()))
+            .send()
+            .await
+            .expect("the pinned client must actually reach the vetted address");
+        assert_eq!(response.status(), 200);
+        server.assert_received("GET", "/");
+    }
+
+    #[tokio::test]
+    async fn vetted_client_keeps_using_the_originally_vetted_address_after_a_later_dns_change() {
+        // A rebinding attempt *after* vetting must not redirect an
+        // already-pinned client. `stub_b` stands in for the address an
+        // attacker's DNS would answer with on a second lookup.
+        const HOST: &str = "vetted-client-rebind-probe.invalid";
+
+        let stub_a = StubServer::start_single(StubResponse::new(200, "")).await;
+        let stub_b = StubServer::start_single(StubResponse::new(200, "")).await;
+        let addr_a: SocketAddr = stub_a.url().trim_start_matches("http://").parse().unwrap();
+        let addr_b: SocketAddr = stub_b.url().trim_start_matches("http://").parse().unwrap();
+
+        let resolver = FakeHostResolver::new();
+        resolver.set(HOST, addr_a.port(), vec![addr_a]);
+        let provider = provider_with_resolver(resolver.clone());
+
+        let first = provider
+            .vetted_client(HOST, addr_a.port())
+            .await
+            .expect("first vet must succeed");
+        first
+            .get(format!("http://{HOST}:{}/", addr_a.port()))
+            .send()
+            .await
+            .expect("the first request must reach stub_a");
+        stub_a.assert_received("GET", "/");
+        assert!(
+            stub_b.requests().is_empty(),
+            "stub_b must not have been contacted yet"
+        );
+
+        // Simulate the DNS answer changing after vetting. If pinning were not
+        // holding, the next request would land on stub_b instead.
+        resolver.set(HOST, addr_a.port(), vec![addr_b]);
+
+        let second = provider
+            .vetted_client(HOST, addr_a.port())
+            .await
+            .expect("the cached pinned client must still be returned");
+        second
+            .get(format!("http://{HOST}:{}/", addr_a.port()))
+            .send()
+            .await
+            .expect("the second request must still reach stub_a");
+
+        assert_eq!(
+            stub_a.requests().len(),
+            2,
+            "the pinned client must keep landing on stub_a"
+        );
+        assert!(
+            stub_b.requests().is_empty(),
+            "stub_b must never be contacted: pinning must survive a changed DNS answer"
         );
     }
 

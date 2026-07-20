@@ -167,9 +167,14 @@ impl AzureBlobStorage {
     }
 
     /// Get the public URL for a key.
-    pub fn public_url(&self, key: &str) -> String {
-        let full_key = self.full_key(key);
-        if self.config.use_emulator {
+    ///
+    /// `key` is validated (rejecting `..` traversal segments) and
+    /// percent-encoded before being interpolated into the URL, so it cannot
+    /// escape the intended path or inject a query, a fragment, or a header
+    /// break.
+    pub fn public_url(&self, key: &str) -> Result<String> {
+        let full_key = crate::storage::encode_key_for_url(&self.full_key(key))?;
+        Ok(if self.config.use_emulator {
             format!(
                 "http://127.0.0.1:10000/devstoreaccount1/{}/{}",
                 self.config.container, full_key
@@ -179,7 +184,7 @@ impl AzureBlobStorage {
                 "https://{}.blob.core.windows.net/{}/{}",
                 self.config.account, self.config.container, full_key
             )
-        }
+        })
     }
 
     /// Get a blob client for a key.
@@ -256,7 +261,7 @@ impl Storage for AzureBlobStorage {
         // Build metadata
         let mut metadata = StorageMetadata::new(key, size)
             .with_content_type(content_type)
-            .with_url(self.public_url(key));
+            .with_url(self.public_url(key)?);
 
         if let Some(checksum) = checksum {
             metadata = metadata.with_checksum(checksum);
@@ -311,7 +316,7 @@ impl Storage for AzureBlobStorage {
             .content_length()
             .map_err(|e| StorageError::Storage(e.to_string()))?
             .unwrap_or(0);
-        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key));
+        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key)?);
 
         if let Some(ct) = properties
             .content_type()
@@ -438,7 +443,7 @@ impl Storage for AzureBlobStorage {
             let properties = blob.properties.unwrap_or_default();
             let size = properties.content_length.unwrap_or(0);
             let mut metadata =
-                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key)?);
 
             if let Some(ct) = &properties.content_type {
                 metadata = metadata.with_content_type(ct);
@@ -476,7 +481,7 @@ impl Storage for AzureBlobStorage {
     }
 
     async fn url(&self, key: &str) -> Result<Option<String>> {
-        Ok(Some(self.public_url(key)))
+        Ok(Some(self.public_url(key)?))
     }
 
     async fn temporary_url(&self, _key: &str, _expires_in: Duration) -> Result<Option<String>> {
@@ -753,6 +758,39 @@ mod tests {
         );
     }
 
+    /// `url`/`public_url` used to interpolate the raw key into the URL
+    /// string: a key of `../../admin` walked out of the intended path, and one
+    /// containing `?`, `#` or CRLF injected a query, a fragment, or a header
+    /// break.
+    #[tokio::test]
+    async fn url_rejects_traversal_and_percent_encodes_special_characters() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage = stub_azure_storage(&server).await;
+
+        let err = storage
+            .url("../../admin")
+            .await
+            .expect_err("a traversal key must be rejected");
+        assert!(
+            matches!(err, StorageError::InvalidFileName(_)),
+            "expected InvalidFileName, got {err:?}"
+        );
+
+        let url = storage
+            .url("report?admin=1#frag\r\nX-Injected: 1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !url.contains(['?', '#', '\r', '\n']),
+            "the raw special characters must not survive into the URL: {url}"
+        );
+        assert!(
+            url.ends_with("report%3Fadmin%3D1%23frag%0D%0AX-Injected%3A%201"),
+            "got: {url}"
+        );
+    }
+
     #[tokio::test]
     async fn emulator_config_uses_the_default_azurite_endpoint() {
         let storage =
@@ -763,9 +801,10 @@ mod tests {
         assert!(
             storage
                 .public_url("k.txt")
+                .unwrap()
                 .starts_with("http://127.0.0.1:10000/"),
             "got: {}",
-            storage.public_url("k.txt")
+            storage.public_url("k.txt").unwrap()
         );
     }
 }

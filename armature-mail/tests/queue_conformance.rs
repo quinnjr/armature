@@ -349,7 +349,10 @@ async fn in_memory_processing_is_tracked_between_pop_and_complete() {
         "popped jobs must be counted as processing"
     );
 
-    backend.complete(&jobs[0].id).await.unwrap();
+    backend
+        .complete(&jobs[0].id, jobs[0].claim_token)
+        .await
+        .unwrap();
     backend.fail(jobs[1].clone(), "boom").await.unwrap();
     backend.dead_letter(jobs[2].clone()).await.unwrap();
 
@@ -389,11 +392,11 @@ impl armature_mail::EmailQueueBackend for Shared {
     async fn pop(&self, count: usize) -> Result<Vec<EmailJob>> {
         self.0.pop(count).await
     }
-    async fn complete(&self, job_id: &str) -> Result<()> {
-        self.0.complete(job_id).await
+    async fn complete(&self, job_id: &str, claim_token: u64) -> Result<()> {
+        self.0.complete(job_id, claim_token).await
     }
-    async fn discard(&self, job_id: &str) -> Result<()> {
-        self.0.discard(job_id).await
+    async fn discard(&self, job_id: &str, claim_token: u64) -> Result<()> {
+        self.0.discard(job_id, claim_token).await
     }
     async fn fail(&self, job: EmailJob, error: &str) -> Result<()> {
         self.0.fail(job, error).await

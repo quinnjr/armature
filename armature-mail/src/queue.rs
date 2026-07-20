@@ -25,7 +25,12 @@
 //! let _job_id = queue.enqueue(email).await?;
 //!
 //! // Start the queue worker (in a separate task). The worker takes a shared
-//! // mailer so retries do not deep-copy the email.
+//! // mailer so retries do not deep-copy the email. Construct it with
+//! // `.retries(0)`: the queue owns retry/backoff decisions via
+//! // `EmailJob::attempts` and the provider's `Retry-After`, and a mailer with
+//! // its own internal retry loop stacks those retries *inside* `job_timeout`,
+//! // discarding `Retry-After` fidelity and multiplying real provider attempts
+//! // per queue-level attempt.
 //! let mailer = Arc::new(Mailer::smtp(SmtpConfig::new("smtp.example.com")).await?);
 //! let worker = queue.worker(mailer);
 //! tokio::spawn(worker.run());
@@ -66,6 +71,20 @@ pub struct EmailJob {
     /// Optional metadata.
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
+    /// Fencing token for the claim currently held on this job, if any.
+    ///
+    /// Minted fresh by whichever backend operation claims the job (`pop`, or a
+    /// backend's internal re-claim during `reclaim_stale`) and required back by
+    /// `complete`/`discard`/`fail`/`dead_letter` before they will release it.
+    /// Without this, ownership was decided by id membership alone: a job
+    /// reclaimed and re-popped by a second worker reused the same id, so a
+    /// finalize call from the first worker's now-stale claim was
+    /// indistinguishable from one for the second worker's live claim and could
+    /// destroy it. Never persisted — the authoritative value lives with the
+    /// backend (the Redis `:claim` hash, or the in-memory processing map), and
+    /// a claim always overwrites whatever value a job happened to carry.
+    #[serde(skip)]
+    pub claim_token: u64,
 }
 
 impl EmailJob {
@@ -93,6 +112,7 @@ impl EmailJob {
             last_error: None,
             priority: 5,
             metadata: std::collections::HashMap::new(),
+            claim_token: 0,
         }
     }
 
@@ -293,21 +313,69 @@ impl EmailQueueConfig {
                 self.visibility_timeout, self.job_timeout
             )));
         }
+        // `batch_size == 0` makes every `pop` a silent no-op forever: the
+        // worker looks alive (it polls and sleeps on schedule) but never
+        // fetches a job. `concurrency == 0` caps the send semaphore at zero
+        // permits, so a job that *is* popped claims a slot and then blocks
+        // forever waiting for a permit that will never be issued — stuck
+        // exactly where the sweep would otherwise reclaim it after
+        // `visibility_timeout`, except the queue never stops "running" to
+        // surface the problem. Both are past the point this check exists to
+        // catch bad config instead of a queue that silently never drains.
+        if self.batch_size == 0 {
+            return Err(MailError::Config(
+                "batch_size must be at least 1; a queue that never fetches jobs cannot make \
+                 progress"
+                    .to_string(),
+            ));
+        }
+        if self.concurrency == 0 {
+            return Err(MailError::Config(
+                "concurrency must be at least 1; a queue with no workers claims jobs it can \
+                 never finish, and the sweep loop that would recover them never runs either"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
 
 /// Email queue backend trait.
+///
+/// # Claim fencing
+///
+/// [`Self::pop`] and a backend's own re-claim during [`Self::reclaim_stale`]
+/// each mint a fresh claim token into the returned/reclaimed
+/// [`EmailJob::claim_token`]. [`Self::complete`] and [`Self::discard`] must be
+/// called with that same token, and [`Self::fail`]/[`Self::dead_letter`] read
+/// it off the `EmailJob` they are given; every one of the four MUST verify the
+/// presented token still matches the current claim before releasing it, and
+/// treat a mismatch — not just a missing claim — as "not owned" and no-op.
+///
+/// Id membership alone is not enough: a job reclaimed by the sweeper and
+/// re-popped by a second worker reuses the same id for its new claim, so a
+/// finalize call arriving late from the *first* worker's now-stale claim is
+/// indistinguishable, by id alone, from one for the second worker's live
+/// claim, and can destroy it — losing the job if the destroying call is
+/// `fail`/`dead_letter`, since the live claim's own eventual finalize then
+/// finds nothing to act on.
 #[async_trait::async_trait]
 pub trait EmailQueueBackend: Send + Sync {
     /// Push a job to the queue.
     async fn push(&self, job: EmailJob) -> Result<()>;
 
-    /// Push several jobs at once.
+    /// Push several jobs at once, all-or-nothing.
     ///
-    /// The default implementation pushes them one at a time; backends that can
-    /// batch (e.g. Redis pipelining) should override this to avoid paying the
-    /// per-job round-trip cost N times.
+    /// The default implementation pushes them one at a time — NOT
+    /// all-or-nothing, since an error partway through leaves a prefix already
+    /// durably pushed — and is only correct for a backend where `push` cannot
+    /// partially fail (there is no such backend in this crate; both
+    /// [`InMemoryBackend`] and [`RedisBackend`] override this with a real
+    /// atomic implementation). Backends that can batch (e.g. Redis pipelining)
+    /// should override this to avoid paying the per-job round-trip cost N
+    /// times, and must keep the all-or-nothing property: a caller that retries
+    /// a whole batch after seeing `Err` must not risk double-enqueuing a
+    /// prefix that actually landed.
     async fn push_batch(&self, jobs: Vec<EmailJob>) -> Result<()> {
         for job in jobs {
             self.push(job).await?;
@@ -316,6 +384,9 @@ pub trait EmailQueueBackend: Send + Sync {
     }
 
     /// Pop jobs from the queue.
+    ///
+    /// Each returned [`EmailJob`] carries a freshly minted
+    /// [`EmailJob::claim_token`] — see the trait-level "Claim fencing" section.
     async fn pop(&self, count: usize) -> Result<Vec<EmailJob>>;
 
     /// Mark a job as successfully sent.
@@ -323,7 +394,10 @@ pub trait EmailQueueBackend: Send + Sync {
     /// Releases the claim taken by [`Self::pop`], deletes the job body, and
     /// increments [`QueueStats::processed`]. Only call this for a job that was
     /// actually delivered — see [`Self::discard`] for the failure case.
-    async fn complete(&self, job_id: &str) -> Result<()>;
+    /// `claim_token` must be the value [`Self::pop`] (or a reclaim) minted for
+    /// this job; a stale or mismatched token is a no-op, not an error — see the
+    /// trait-level "Claim fencing" section.
+    async fn complete(&self, job_id: &str, claim_token: u64) -> Result<()>;
 
     /// Release a claim and delete a job *without* counting it as processed.
     ///
@@ -331,13 +405,18 @@ pub trait EmailQueueBackend: Send + Sync {
     /// failure with the dead-letter queue disabled. `complete` was used for this,
     /// which incremented the success counter with failures, so
     /// [`QueueStats::processed`] could not back a delivery-rate alert: a run
-    /// where every send failed reported 100% processed.
-    async fn discard(&self, job_id: &str) -> Result<()>;
+    /// where every send failed reported 100% processed. `claim_token` is
+    /// verified the same way as in [`Self::complete`].
+    async fn discard(&self, job_id: &str, claim_token: u64) -> Result<()>;
 
     /// Mark a job as failed and schedule retry.
+    ///
+    /// `job.claim_token` is verified the same way as in [`Self::complete`].
     async fn fail(&self, job: EmailJob, error: &str) -> Result<()>;
 
     /// Move a job to the dead letter queue.
+    ///
+    /// `job.claim_token` is verified the same way as in [`Self::complete`].
     async fn dead_letter(&self, job: EmailJob) -> Result<()>;
 
     /// Return jobs claimed longer than `visibility_timeout` ago to the queue.
@@ -359,8 +438,12 @@ pub trait EmailQueueBackend: Send + Sync {
     ///
     /// Implementations MUST increment [`EmailJob::attempts`] on the reclaimed
     /// job and route it to the dead-letter queue once
-    /// [`EmailJob::should_retry`] is false. A job that kills its worker — OOM on
-    /// a large attachment, a transport panic, a `job_timeout` outliving the
+    /// [`EmailJob::should_retry`] is false — **and must respect
+    /// [`EmailQueueConfig::dead_letter_queue`] when doing so**, discarding
+    /// (dropping without a durable record) exactly as the normal worker
+    /// exhaustion path does when the dead-letter queue is disabled, rather than
+    /// writing to it unconditionally. A job that kills its worker — OOM on a
+    /// large attachment, a transport panic, a `job_timeout` outliving the
     /// visibility timeout — is otherwise redelivered with `attempts` frozen, so
     /// it never reaches the dead-letter queue and is re-sent every
     /// `visibility_timeout` forever. If the send had actually succeeded before
@@ -403,9 +486,11 @@ pub struct QueueStats {
 /// All three collections — the pending queue, the processing claims, and the
 /// dead-letter list — live behind **one** `Mutex`. They were three, and the
 /// operations disagreed about the order to take them in: `pop` took
-/// `queue → processing`, `fail` and `reclaim_stale` took them the other way
-/// round. `tokio::sync::Mutex` is FIFO and non-reentrant, so a worker with
-/// `concurrency > 1` whose per-job task called `fail` while the poll loop sat in
+/// `queue → processing`, `reclaim_stale` took them the other way round (`fail`
+/// never held both at once — its `processing` lock was an unnamed temporary,
+/// released at the end of the statement that took it, before `queue` was ever
+/// locked). `tokio::sync::Mutex` is FIFO and non-reentrant, so a worker with
+/// `concurrency > 1` whose sweep interval landed while the poll loop sat in
 /// `pop` parked forever — no error, no log, no panic. A single lock makes that
 /// class of bug unrepresentable; do not split it back apart.
 pub struct InMemoryBackend {
@@ -413,6 +498,10 @@ pub struct InMemoryBackend {
     processed: std::sync::atomic::AtomicU64,
     /// Cap on the queue and, separately, on the dead-letter list.
     max_depth: usize,
+    /// Mirrors [`EmailQueueConfig::dead_letter_queue`]; `reclaim_stale` must
+    /// honor it the same way the normal worker-exhaustion path does, rather
+    /// than dead-lettering unconditionally.
+    dead_letter_queue_enabled: bool,
 }
 
 /// Everything `InMemoryBackend` guards, under a single lock.
@@ -420,15 +509,31 @@ pub struct InMemoryBackend {
 struct InMemoryState {
     queue: std::collections::VecDeque<EmailJob>,
     /// Jobs handed out by `pop` and not yet completed, failed, or dead-lettered,
-    /// keyed by id and carrying the claim time plus the job itself.
+    /// keyed by id and carrying the claim time, the fencing token minted for
+    /// this claim, and the job itself.
     ///
     /// The job is retained so `reclaim_stale` can actually put it back: `pop`
     /// removed it from `queue`, so without a copy here a crashed worker's job is
-    /// unrecoverable.
-    processing: std::collections::HashMap<String, (i64, EmailJob)>,
+    /// unrecoverable. The token is compared against whatever `complete`/
+    /// `discard`/`fail`/`dead_letter` are called with — see
+    /// [`EmailQueueBackend`]'s "Claim fencing" section — so a finalize call
+    /// from a claim this entry has since superseded is rejected as stale
+    /// rather than tearing down the current one.
+    processing: std::collections::HashMap<String, (i64, u64, EmailJob)>,
     /// Bounded — every retained job holds an `Arc<Email>` with full
     /// attachments, so a steadily failing queue must not grow it without limit.
     dead_letter: std::collections::VecDeque<EmailJob>,
+    /// Monotonic source for claim fencing tokens. `0` is reserved to mean
+    /// "unclaimed" ([`EmailJob::new`]'s default), so the first real token is 1.
+    claim_seq: u64,
+}
+
+impl InMemoryState {
+    /// Mint the next claim fencing token.
+    fn next_claim_token(&mut self) -> u64 {
+        self.claim_seq += 1;
+        self.claim_seq
+    }
 }
 
 impl InMemoryState {
@@ -470,7 +575,20 @@ impl InMemoryBackend {
             state: tokio::sync::Mutex::new(InMemoryState::default()),
             processed: std::sync::atomic::AtomicU64::new(0),
             max_depth: max_depth.max(1),
+            dead_letter_queue_enabled: true,
         }
+    }
+
+    /// Set whether `reclaim_stale` dead-letters exhausted jobs (default: `true`,
+    /// matching [`EmailQueueConfig::default`]'s `dead_letter_queue`).
+    ///
+    /// When `false`, a job that exhausts its retries through repeated reclaims
+    /// is discarded — dropped without a durable record — exactly as the normal
+    /// worker-exhaustion path already does with the dead-letter queue disabled,
+    /// rather than being written to it regardless of this setting.
+    pub fn dead_letter_queue(mut self, enabled: bool) -> Self {
+        self.dead_letter_queue_enabled = enabled;
+        self
     }
 
     /// Snapshot of the dead-letter list, oldest first.
@@ -507,6 +625,30 @@ impl EmailQueueBackend for InMemoryBackend {
         Ok(())
     }
 
+    /// All-or-nothing: checked against the whole batch under one lock
+    /// acquisition, rather than the default trait implementation's per-job
+    /// loop, which could push a prefix of the batch before hitting
+    /// `max_queue_depth` partway through and returning `Err` — a caller that
+    /// retries the whole batch after that would double-enqueue the prefix.
+    async fn push_batch(&self, jobs: Vec<EmailJob>) -> Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        if state.queue.len() + jobs.len() > self.max_depth {
+            return Err(MailError::Queue(format!(
+                "in-memory queue cannot hold {} more jobs ({} already queued, \
+                 max_queue_depth = {}); push_batch is all-or-nothing, so none of this batch was \
+                 enqueued",
+                jobs.len(),
+                state.queue.len(),
+                self.max_depth
+            )));
+        }
+        state.queue.extend(jobs);
+        Ok(())
+    }
+
     async fn pop(&self, count: usize) -> Result<Vec<EmailJob>> {
         let mut state = self.state.lock().await;
         let now = chrono_now_ms();
@@ -528,48 +670,72 @@ impl EmailQueueBackend for InMemoryBackend {
         // Claim the popped jobs so `QueueStats::processing` is observable, a
         // job in flight is distinguishable from one that was never popped, and
         // `reclaim_stale` has both a claim time and a job body to work from.
+        // Each claim mints a fresh fencing token — see [`EmailQueueBackend`]'s
+        // "Claim fencing" section for why id membership alone is not enough.
         let claimed_at = chrono_now_ms();
-        for job in &jobs {
+        for job in &mut jobs {
+            let token = state.next_claim_token();
+            job.claim_token = token;
             state
                 .processing
-                .insert(job.id.clone(), (claimed_at, job.clone()));
+                .insert(job.id.clone(), (claimed_at, token, job.clone()));
         }
 
         Ok(jobs)
     }
 
-    async fn complete(&self, job_id: &str) -> Result<()> {
-        // Only count a job the caller still owns. If `reclaim_stale` already
-        // took the claim back, the reclaimed generation is the live one and this
-        // caller must not also increment the success counter for it.
-        if self.state.lock().await.processing.remove(job_id).is_none() {
+    async fn complete(&self, job_id: &str, claim_token: u64) -> Result<()> {
+        // Only count a job the caller still owns: present in `processing`
+        // *and* under the same claim token it was handed. A token mismatch
+        // means a reclaim-then-repop already gave this id to a newer claim,
+        // which this call must not tear down — see the trait's "Claim
+        // fencing" section.
+        let mut state = self.state.lock().await;
+        let still_owned = matches!(
+            state.processing.get(job_id),
+            Some((_, token, _)) if *token == claim_token
+        );
+        if !still_owned {
             debug!(
                 job_id = %job_id,
-                "Completed an email job whose claim was already reclaimed; \
-                 the reclaimed copy will be redelivered"
+                "Completed an email job whose claim was stale (already reclaimed or superseded); \
+                 the current claim will be redelivered"
             );
             return Ok(());
         }
+        state.processing.remove(job_id);
         self.processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    async fn discard(&self, job_id: &str) -> Result<()> {
+    async fn discard(&self, job_id: &str, claim_token: u64) -> Result<()> {
         // Deliberately does not touch `processed`: this job was never sent.
-        self.state.lock().await.processing.remove(job_id);
+        let mut state = self.state.lock().await;
+        let still_owned = matches!(
+            state.processing.get(job_id),
+            Some((_, token, _)) if *token == claim_token
+        );
+        if still_owned {
+            state.processing.remove(job_id);
+        }
         Ok(())
     }
 
     async fn fail(&self, mut job: EmailJob, error: &str) -> Result<()> {
         let mut state = self.state.lock().await;
-        // Ownership check, as in `complete`: a job the sweeper already put back
-        // must not be re-queued a second time here, or one crashed send becomes
-        // two live copies of the same email.
-        if state.processing.remove(&job.id).is_none() {
-            debug!(job_id = %job.id, "Failed an email job whose claim was already reclaimed");
+        // Ownership check, as in `complete`: a job whose claim has since been
+        // superseded must not be re-queued a second time here, or one crashed
+        // send becomes two live copies of the same email.
+        let still_owned = matches!(
+            state.processing.get(&job.id),
+            Some((_, token, _)) if *token == job.claim_token
+        );
+        if !still_owned {
+            debug!(job_id = %job.id, "Failed an email job whose claim was stale");
             return Ok(());
         }
+        state.processing.remove(&job.id);
         job.last_error = Some(error.to_string());
         state.queue.push_back(job);
         Ok(())
@@ -577,13 +743,18 @@ impl EmailQueueBackend for InMemoryBackend {
 
     async fn dead_letter(&self, job: EmailJob) -> Result<()> {
         let mut state = self.state.lock().await;
-        if state.processing.remove(&job.id).is_none() {
+        let still_owned = matches!(
+            state.processing.get(&job.id),
+            Some((_, token, _)) if *token == job.claim_token
+        );
+        if !still_owned {
             debug!(
                 job_id = %job.id,
-                "Dead-lettered an email job whose claim was already reclaimed"
+                "Dead-lettered an email job whose claim was stale"
             );
             return Ok(());
         }
+        state.processing.remove(&job.id);
         state.push_dead_letter(job, self.max_depth);
         Ok(())
     }
@@ -595,7 +766,7 @@ impl EmailQueueBackend for InMemoryBackend {
         let mut stale: Vec<String> = state
             .processing
             .iter()
-            .filter(|(_, (claimed_at, _))| *claimed_at <= cutoff)
+            .filter(|(_, (claimed_at, _, _))| *claimed_at <= cutoff)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -609,7 +780,7 @@ impl EmailQueueBackend for InMemoryBackend {
         let mut reclaimed = 0u64;
         let mut deferred = 0u64;
         for id in stale {
-            let Some((claimed_at, job)) = state.processing.remove(&id) else {
+            let Some((claimed_at, old_token, job)) = state.processing.remove(&id) else {
                 continue;
             };
 
@@ -620,16 +791,31 @@ impl EmailQueueBackend for InMemoryBackend {
             reclaimed_job.attempts += 1;
             // Due immediately: the previous attempt already served as the delay.
             reclaimed_job.next_retry_at = None;
+            // Going back to `queue` unclaimed; the next `pop` mints a fresh
+            // token. This job's old claim is fully released the moment it
+            // leaves `processing` below, so a finalize call that arrives late
+            // from the worker that held it is rejected as stale by the token
+            // check in `complete`/`discard`/`fail`/`dead_letter`.
+            reclaimed_job.claim_token = 0;
 
             if !reclaimed_job.should_retry() {
-                warn!(
-                    job_id = %reclaimed_job.id,
-                    attempts = reclaimed_job.attempts,
-                    "Email job exhausted its attempts through repeated reclaims; dead-lettering"
-                );
-                // The dead-letter list evicts at the cap rather than rejecting,
-                // so this path is never blocked by `max_depth`.
-                state.push_dead_letter(reclaimed_job, self.max_depth);
+                if self.dead_letter_queue_enabled {
+                    warn!(
+                        job_id = %reclaimed_job.id,
+                        attempts = reclaimed_job.attempts,
+                        "Email job exhausted its attempts through repeated reclaims; dead-lettering"
+                    );
+                    // The dead-letter list evicts at the cap rather than
+                    // rejecting, so this path is never blocked by `max_depth`.
+                    state.push_dead_letter(reclaimed_job, self.max_depth);
+                } else {
+                    error!(
+                        job_id = %reclaimed_job.id,
+                        attempts = reclaimed_job.attempts,
+                        "Email job exhausted its attempts through repeated reclaims and \
+                         dead_letter_queue is disabled; dropping without a durable record"
+                    );
+                }
                 reclaimed += 1;
                 continue;
             }
@@ -640,7 +826,7 @@ impl EmailQueueBackend for InMemoryBackend {
             // rather than being dropped, and the next sweep picks it up once the
             // queue has drained.
             if state.queue.len() >= self.max_depth {
-                state.processing.insert(id, (claimed_at, job));
+                state.processing.insert(id, (claimed_at, old_token, job));
                 deferred += 1;
                 continue;
             }
@@ -691,14 +877,20 @@ impl EmailQueueBackend for InMemoryBackend {
     }
 }
 
-/// Release the claim and delete the body, but only for the caller that still
-/// owns the claim.
+/// Release the claim and delete the body, but only for the caller presenting
+/// the token that currently owns the claim.
 ///
-/// `KEYS = [processing, job, stats]`, `ARGV = [job_id]`. Returns 1 when this
-/// caller owned the claim, 0 when `reclaim_stale` had already taken it back.
+/// `KEYS = [processing, job, stats, claim]`, `ARGV = [job_id, claim_token]`.
+/// Returns 1 when the presented token matched (this caller owned the claim),
+/// 0 otherwise — including when `reclaim_stale` re-popped this id under a
+/// newer claim in between, which id-only membership in `processing` cannot
+/// distinguish from "still ours". See [`EmailQueueBackend`]'s "Claim fencing"
+/// section.
 #[cfg(feature = "redis")]
 const COMPLETE_IF_OWNED: &str = r#"
-    if redis.call('ZREM', KEYS[1], ARGV[1]) == 1 then
+    if redis.call('HGET', KEYS[4], ARGV[1]) == ARGV[2] then
+        redis.call('ZREM', KEYS[1], ARGV[1])
+        redis.call('HDEL', KEYS[4], ARGV[1])
         redis.call('DEL', KEYS[2])
         redis.call('HINCRBY', KEYS[3], 'processed', 1)
         return 1
@@ -708,22 +900,28 @@ const COMPLETE_IF_OWNED: &str = r#"
 
 /// As [`COMPLETE_IF_OWNED`] without the `processed` increment.
 ///
-/// `KEYS = [processing, job]`, `ARGV = [job_id]`.
+/// `KEYS = [processing, job, claim]`, `ARGV = [job_id, claim_token]`.
 #[cfg(feature = "redis")]
 const DISCARD_IF_OWNED: &str = r#"
-    if redis.call('ZREM', KEYS[1], ARGV[1]) == 1 then
+    if redis.call('HGET', KEYS[3], ARGV[1]) == ARGV[2] then
+        redis.call('ZREM', KEYS[1], ARGV[1])
+        redis.call('HDEL', KEYS[3], ARGV[1])
         redis.call('DEL', KEYS[2])
         return 1
     end
     return 0
 "#;
 
-/// Store the updated body and schedule a retry, for the claim's owner only.
+/// Store the updated body and schedule a retry, for the current claim's owner
+/// only.
 ///
-/// `KEYS = [processing, job, retry]`, `ARGV = [job_id, body, score]`.
+/// `KEYS = [processing, job, retry, claim]`, `ARGV = [job_id, body, score,
+/// claim_token]`.
 #[cfg(feature = "redis")]
 const FAIL_IF_OWNED: &str = r#"
-    if redis.call('ZREM', KEYS[1], ARGV[1]) == 1 then
+    if redis.call('HGET', KEYS[4], ARGV[1]) == ARGV[4] then
+        redis.call('ZREM', KEYS[1], ARGV[1])
+        redis.call('HDEL', KEYS[4], ARGV[1])
         redis.call('SET', KEYS[2], ARGV[2])
         redis.call('ZADD', KEYS[3], ARGV[3], ARGV[1])
         return 1
@@ -731,14 +929,31 @@ const FAIL_IF_OWNED: &str = r#"
     return 0
 "#;
 
-/// Move the job to the dead-letter list, for the claim's owner only.
+/// Move the job to the dead-letter list, for the current claim's owner only.
 ///
-/// `KEYS = [processing, dead_letter, job]`, `ARGV = [job_id, body]`.
+/// `KEYS = [processing, dead_letter, job, claim]`, `ARGV = [job_id, body,
+/// claim_token]`.
 #[cfg(feature = "redis")]
 const DEAD_LETTER_IF_OWNED: &str = r#"
-    if redis.call('ZREM', KEYS[1], ARGV[1]) == 1 then
+    if redis.call('HGET', KEYS[4], ARGV[1]) == ARGV[3] then
+        redis.call('ZREM', KEYS[1], ARGV[1])
+        redis.call('HDEL', KEYS[4], ARGV[1])
         redis.call('LPUSH', KEYS[2], ARGV[2])
         redis.call('DEL', KEYS[3])
+        return 1
+    end
+    return 0
+"#;
+
+/// As [`DISCARD_IF_OWNED`], for [`RedisBackend::reclaim_stale`]'s missing-body
+/// release path: releases the claim without a job body to delete.
+///
+/// `KEYS = [processing, claim]`, `ARGV = [job_id, claim_token]`.
+#[cfg(feature = "redis")]
+const RELEASE_IF_OWNED: &str = r#"
+    if redis.call('HGET', KEYS[2], ARGV[1]) == ARGV[2] then
+        redis.call('ZREM', KEYS[1], ARGV[1])
+        redis.call('HDEL', KEYS[2], ARGV[1])
         return 1
     end
     return 0
@@ -749,19 +964,69 @@ const DEAD_LETTER_IF_OWNED: &str = r#"
 /// Re-scoring to `ARGV[3]` (now) *is* the claim: a concurrent sweeper's range
 /// query no longer sees them, and the id stays in `:processing` so a crash
 /// before the sweeper finalizes simply defers it to the next sweep rather than
-/// stranding it.
+/// stranding it. Deliberately does NOT mint a new claim token — the original
+/// claim (worker vs. this sweep) is still being arbitrated between exactly two
+/// parties at this point, which the existing token continues to do correctly.
+/// A fresh token is only needed once the job is later re-popped from `:retry`
+/// or `:pending` into a genuinely new claim (see [`CLAIM_RETRY`] /
+/// [`CLAIM_PENDING`]), which is the three-party case id-only membership could
+/// not distinguish.
 ///
-/// `KEYS = [processing]`, `ARGV = [cutoff, limit, now]`. The `LIMIT` is not
-/// optional: as a *write* script this cannot be `SCRIPT KILL`ed, so an
-/// unbounded batch after a fleet restart blocks single-threaded Redis for the
-/// whole backlog with `SHUTDOWN NOSAVE` as the only way out.
+/// Also returns each id's current claim token (or `"0"`, the reserved
+/// "unclaimed" sentinel, if none is recorded — which only happens if a
+/// concurrent finalize already released the claim between the `ZRANGEBYSCORE`
+/// above and here) so the caller can finalize through the same
+/// `*_IF_OWNED` gate every other release path uses, rather than assuming it
+/// still owns whatever this script just touched.
+///
+/// `KEYS = [processing, claim]`, `ARGV = [cutoff, limit, now]`. Returns a flat
+/// array `id1, token1, id2, token2, …`. The `LIMIT` is not optional: as a
+/// *write* script this cannot be `SCRIPT KILL`ed, so an unbounded batch after
+/// a fleet restart blocks single-threaded Redis for the whole backlog with
+/// `SHUTDOWN NOSAVE` as the only way out.
 #[cfg(feature = "redis")]
 const CLAIM_STALE: &str = r#"
     local ids = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
+    local result = {}
     for i = 1, #ids do
         redis.call('ZADD', KEYS[1], ARGV[3], ids[i])
+        local token = redis.call('HGET', KEYS[2], ids[i])
+        table.insert(result, ids[i])
+        if token then
+            table.insert(result, token)
+        else
+            table.insert(result, "0")
+        end
     end
-    return ids
+    return result
+"#;
+
+/// Atomically claim due jobs from the main pending queue.
+///
+/// `ZPOPMIN` followed by a separate `ZADD` into `:processing` is not a claim:
+/// a crash, or any transient error, between the two leaves the id in neither
+/// set, unrecoverable by `reclaim_stale` (which only scans `:processing`) —
+/// silent, permanent loss with no concurrency required. Doing the pop, the
+/// processing-set claim, and the token mint in one `EVAL` closes that window
+/// the same way [`CLAIM_RETRY`] already does for the retry side.
+///
+/// `KEYS = [pending, processing, claim, claim_seq]`, `ARGV = [count, now]`.
+/// Returns a flat array `id1, token1, id2, token2, …`.
+#[cfg(feature = "redis")]
+const CLAIM_PENDING: &str = r#"
+    local popped = redis.call('ZPOPMIN', KEYS[1], ARGV[1])
+    local result = {}
+    local i = 1
+    while i <= #popped do
+        local id = popped[i]
+        local token = redis.call('INCR', KEYS[4])
+        redis.call('ZADD', KEYS[2], ARGV[2], id)
+        redis.call('HSET', KEYS[3], id, token)
+        table.insert(result, id)
+        table.insert(result, token)
+        i = i + 2
+    end
+    return result
 "#;
 
 /// Redis-backed email queue.
@@ -818,6 +1083,29 @@ impl RedisBackend {
         format!("{}:processing", self.config.queue_name)
     }
 
+    /// Hash mapping a claimed job id to the fencing token minted for its
+    /// current claim.
+    ///
+    /// The authoritative source of "who owns this claim right now" — see
+    /// [`EmailQueueBackend`]'s "Claim fencing" section. A field is present iff
+    /// the id is currently claimed; every claim (`CLAIM_PENDING`,
+    /// `CLAIM_RETRY`) `HSET`s it and every release (`COMPLETE_IF_OWNED`,
+    /// `DISCARD_IF_OWNED`, `FAIL_IF_OWNED`, `DEAD_LETTER_IF_OWNED`,
+    /// `RELEASE_IF_OWNED`) `HDEL`s it in the same script as the `processing`
+    /// `ZREM`, so the two never disagree about which ids are claimed.
+    fn claim_key(&self) -> String {
+        format!("{}:claim", self.config.queue_name)
+    }
+
+    /// Monotonic counter minting claim fencing tokens via `INCR`.
+    ///
+    /// A counter rather than a random value: it is simpler, needs no entropy
+    /// source inside a Lua script, and gives claims a natural generation order
+    /// for free.
+    fn claim_seq_key(&self) -> String {
+        format!("{}:claim_seq", self.config.queue_name)
+    }
+
     /// Number of stale claims one `reclaim_stale` `EVAL` may touch.
     ///
     /// The script is a *write* script, so once it is running `SCRIPT KILL`
@@ -858,6 +1146,10 @@ impl RedisBackend {
             .to_string();
 
             pipe.cmd("ZREM").arg(self.processing_key()).arg(id);
+            // Every claim release cleans up its `:claim` entry (see
+            // `claim_key`'s doc) so the hash never disagrees with `processing`
+            // about which ids are claimed, and so it does not grow forever.
+            pipe.cmd("HDEL").arg(self.claim_key()).arg(id);
             // Recorded regardless of `dead_letter_queue`: the body is about to
             // be deleted, so this stub is the only remaining trace of a job the
             // caller was told had been enqueued.
@@ -890,32 +1182,95 @@ impl RedisBackend {
     /// single worker. Doing the range, the removal, and the processing-set claim
     /// in one `EVAL` makes the script the single point that decides ownership:
     /// Redis runs it to completion before any other client's command.
+    ///
+    /// Also mints a fresh claim fencing token per id — see
+    /// [`EmailQueueBackend`]'s "Claim fencing" section — since this is a
+    /// genuinely new claim, distinct from whatever claim this id may have held
+    /// before landing on `:retry`.
+    ///
+    /// Returns `(id, claim_token)` pairs.
     async fn claim_retry_ids(
         &self,
         conn: &mut impl redis::aio::ConnectionLike,
         now: f64,
         count: usize,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, u64)>> {
         const CLAIM_RETRY: &str = r#"
             local ids = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
+            local result = {}
             for i = 1, #ids do
                 redis.call('ZREM', KEYS[1], ids[i])
                 redis.call('ZADD', KEYS[2], ARGV[3], ids[i])
+                local token = redis.call('INCR', KEYS[4])
+                redis.call('HSET', KEYS[3], ids[i], token)
+                table.insert(result, ids[i])
+                table.insert(result, token)
             end
-            return ids
+            return result
         "#;
 
-        redis::cmd("EVAL")
+        let flat: Vec<redis::Value> = redis::cmd("EVAL")
             .arg(CLAIM_RETRY)
-            .arg(2)
+            .arg(4)
             .arg(self.retry_key())
             .arg(self.processing_key())
+            .arg(self.claim_key())
+            .arg(self.claim_seq_key())
             .arg(now)
             .arg(count)
             .arg(now)
             .query_async(conn)
             .await
-            .map_err(|e| MailError::Queue(e.to_string()))
+            .map_err(|e| MailError::Queue(e.to_string()))?;
+
+        Self::pairs_from_flat(flat)
+    }
+
+    /// Atomically claim due jobs from the main pending queue.
+    ///
+    /// See [`CLAIM_PENDING`] for why this must be one script rather than the
+    /// `ZPOPMIN` + separate `ZADD` it replaces. Returns `(id, claim_token)`
+    /// pairs.
+    async fn claim_pending_ids(
+        &self,
+        conn: &mut impl redis::aio::ConnectionLike,
+        now: f64,
+        count: usize,
+    ) -> Result<Vec<(String, u64)>> {
+        let flat: Vec<redis::Value> = redis::cmd("EVAL")
+            .arg(CLAIM_PENDING)
+            .arg(4)
+            .arg(self.pending_key())
+            .arg(self.processing_key())
+            .arg(self.claim_key())
+            .arg(self.claim_seq_key())
+            .arg(count)
+            .arg(now)
+            .query_async(conn)
+            .await
+            .map_err(|e| MailError::Queue(e.to_string()))?;
+
+        Self::pairs_from_flat(flat)
+    }
+
+    /// Decode a flat `[id1, token1, id2, token2, …]` `EVAL` reply into pairs.
+    fn pairs_from_flat(flat: Vec<redis::Value>) -> Result<Vec<(String, u64)>> {
+        use redis::FromRedisValue;
+
+        let mut pairs = Vec::with_capacity(flat.len() / 2);
+        let mut iter = flat.into_iter();
+        while let (Some(id), Some(token)) = (iter.next(), iter.next()) {
+            let id = String::from_redis_value(id).map_err(|e| MailError::Queue(e.to_string()))?;
+            // Tokens travel through Lua/RESP as bulk strings; parse explicitly
+            // rather than relying on numeric RESP coercion.
+            let token_str =
+                String::from_redis_value(token).map_err(|e| MailError::Queue(e.to_string()))?;
+            let token: u64 = token_str
+                .parse()
+                .map_err(|_| MailError::Queue(format!("non-numeric claim token: {token_str}")))?;
+            pairs.push((id, token));
+        }
+        Ok(pairs)
     }
 }
 
@@ -955,6 +1310,13 @@ impl EmailQueueBackend for RedisBackend {
 
     /// Enqueue every job in one pipelined round-trip (one connection acquire,
     /// one SET+ZADD batch) instead of N sequential `push` calls.
+    ///
+    /// Wrapped in `MULTI`/`EXEC` (`.atomic()`) so the batch is genuinely
+    /// all-or-nothing: a plain pipeline applies each command as it arrives, so
+    /// a connection reset partway through could leave a prefix of jobs durably
+    /// enqueued while this call still returns `Err` — a caller that
+    /// reasonably retries the whole batch after that would double-enqueue the
+    /// jobs that had already landed.
     async fn push_batch(&self, jobs: Vec<EmailJob>) -> Result<()> {
         if jobs.is_empty() {
             return Ok(());
@@ -967,6 +1329,7 @@ impl EmailQueueBackend for RedisBackend {
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         let mut pipe = redis::pipe();
+        pipe.atomic();
         for job in &jobs {
             let job_json = serde_json::to_string(job)?;
             let score = job.priority as f64 * 1_000_000_000.0 + job.created_at as f64;
@@ -1002,67 +1365,37 @@ impl EmailQueueBackend for RedisBackend {
         // `2 * count` jobs, contradicting `InMemoryBackend::pop`, which honors
         // `count` exactly.
         //
-        // The retry claim is one atomic `EVAL` — range, remove, and claim into
-        // `:processing` — so exactly one caller can win a given id. It also
-        // means these ids are *already* in the processing set below.
-        let retry_ids: Vec<String> = self.claim_retry_ids(&mut conn, now, count).await?;
+        // Both claims are a single atomic `EVAL` each — range/pop, processing-set
+        // claim, and fencing-token mint together — so exactly one caller can win
+        // a given id, and a crash between the pop and the claim cannot strand it
+        // in neither set. See `CLAIM_RETRY` and `CLAIM_PENDING`.
+        let retry_pairs = self.claim_retry_ids(&mut conn, now, count).await?;
 
-        let remaining = count.saturating_sub(retry_ids.len());
-
-        // `ZPOPMIN key <count>` replies with a flat `member,score,member,score…`
-        // array in RESP2 and a nested array in RESP3. Deserializing into
-        // `Vec<String>` therefore produced `2 * count` entries — every other one a
-        // score, which became a bogus `…:job:<score>` key in the MGET below — and
-        // failed outright under RESP3. `Vec<(String, f64)>` is correct for both.
-        let pending: Vec<(String, f64)> = if remaining > 0 {
-            redis::cmd("ZPOPMIN")
-                .arg(self.pending_key())
-                .arg(remaining)
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| MailError::Queue(e.to_string()))?
+        let remaining = count.saturating_sub(retry_pairs.len());
+        let pending_pairs = if remaining > 0 {
+            self.claim_pending_ids(&mut conn, now, remaining).await?
         } else {
             Vec::new()
         };
 
-        let pending_ids: Vec<String> = pending.into_iter().map(|(id, _score)| id).collect();
-
-        // Claim the ids popped from pending: they are now off that set, so
-        // without this a crash between here and `complete` loses them with no
-        // trace. The score is the claim time, which `reclaim_stale` keys off.
-        // The retry ids were claimed atomically inside `claim_retry_ids`.
-        if !pending_ids.is_empty() {
-            redis::cmd("ZADD")
-                .arg(self.processing_key())
-                .arg(
-                    pending_ids
-                        .iter()
-                        .flat_map(|id| [now.to_string(), id.clone()])
-                        .collect::<Vec<_>>(),
-                )
-                .query_async::<()>(&mut conn)
-                .await
-                .map_err(|e| MailError::Queue(e.to_string()))?;
-        }
-
-        let ids: Vec<String> = retry_ids.into_iter().chain(pending_ids).collect();
-        if ids.is_empty() {
+        let pairs: Vec<(String, u64)> = retry_pairs.into_iter().chain(pending_pairs).collect();
+        if pairs.is_empty() {
             return Ok(Vec::new());
         }
 
         // Fetch every job body in a single MGET rather than one GET per id: this
         // runs on the worker's hot path, and N round-trips per poll dominates the
         // poll cost once batch_size grows.
-        let keys: Vec<String> = ids.iter().map(|id| self.job_key(id)).collect();
+        let keys: Vec<String> = pairs.iter().map(|(id, _)| self.job_key(id)).collect();
         let payloads: Vec<Option<String>> = redis::cmd("MGET")
             .arg(&keys)
             .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
-        let mut jobs = Vec::with_capacity(ids.len());
+        let mut jobs = Vec::with_capacity(pairs.len());
         let mut lost: Vec<String> = Vec::new();
-        for (id, payload) in ids.iter().zip(payloads) {
+        for ((id, token), payload) in pairs.iter().zip(payloads) {
             // The id is already off the pending/retry sets here, so anything we
             // drop is gone for good — and `enqueue` told the caller it succeeded.
             // Never fail silently: log, and dead-letter the id so it is at least
@@ -1080,8 +1413,16 @@ impl EmailQueueBackend for RedisBackend {
                 lost.push(id.clone());
                 continue;
             };
-            match serde_json::from_str(&json) {
-                Ok(job) => jobs.push(job),
+            match serde_json::from_str::<EmailJob>(&json) {
+                Ok(mut job) => {
+                    // Authoritative: the token this claim just minted, not
+                    // whatever this job's body happened to carry from a
+                    // previous claim (`claim_token` is `#[serde(skip)]`, so a
+                    // freshly-pushed job deserializes it as the `0` sentinel
+                    // regardless).
+                    job.claim_token = *token;
+                    jobs.push(job);
+                }
                 Err(e) => {
                     debug!(job_id = %id, error = %e, "Email job body is not deserializable");
                     lost.push(id.clone());
@@ -1108,25 +1449,28 @@ impl EmailQueueBackend for RedisBackend {
         Ok(jobs)
     }
 
-    async fn complete(&self, job_id: &str) -> Result<()> {
+    async fn complete(&self, job_id: &str, claim_token: u64) -> Result<()> {
         let mut conn = self
             .redis
             .get()
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
-        // Everything is conditional on still owning the claim. `ZREM` returning
-        // 0 means `reclaim_stale` already took this job back and a redelivery is
-        // live; deleting the body here would leave that redelivery with an id
-        // and no payload, which `pop` records as a *lost* email — for a message
-        // that was in fact delivered.
+        // Everything is conditional on the presented token still matching the
+        // current claim. A mismatch means `reclaim_stale` already took this job
+        // back *and* it has since been re-popped into a newer live claim;
+        // deleting the body here would destroy that claim's payload out from
+        // under it, which `pop`'s next reader would misread as a job lost to
+        // eviction rather than one already in flight elsewhere.
         let owned: i64 = redis::cmd("EVAL")
             .arg(COMPLETE_IF_OWNED)
-            .arg(3)
+            .arg(4)
             .arg(self.processing_key())
             .arg(self.job_key(job_id))
             .arg(self.stats_key())
+            .arg(self.claim_key())
             .arg(job_id)
+            .arg(claim_token)
             .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
@@ -1134,8 +1478,8 @@ impl EmailQueueBackend for RedisBackend {
         if owned == 0 {
             warn!(
                 job_id = %job_id,
-                "Email job was delivered but its claim had already been reclaimed; \
-                 the reclaimed copy will be redelivered (deduplicate on Message-ID)"
+                "Email job was delivered but its claim was stale (already reclaimed or \
+                 superseded); the current claim will be redelivered (deduplicate on Message-ID)"
             );
             return Ok(());
         }
@@ -1144,7 +1488,7 @@ impl EmailQueueBackend for RedisBackend {
         Ok(())
     }
 
-    async fn discard(&self, job_id: &str) -> Result<()> {
+    async fn discard(&self, job_id: &str, claim_token: u64) -> Result<()> {
         let mut conn = self
             .redis
             .get()
@@ -1156,10 +1500,12 @@ impl EmailQueueBackend for RedisBackend {
         // counter with failures.
         redis::cmd("EVAL")
             .arg(DISCARD_IF_OWNED)
-            .arg(2)
+            .arg(3)
             .arg(self.processing_key())
             .arg(self.job_key(job_id))
+            .arg(self.claim_key())
             .arg(job_id)
+            .arg(claim_token)
             .query_async::<i64>(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
@@ -1198,23 +1544,25 @@ impl EmailQueueBackend for RedisBackend {
             let now = chrono_now_ms();
             let cutoff = now - visibility_timeout.as_millis() as i64;
 
-            let ids: Vec<String> = redis::cmd("EVAL")
+            let flat: Vec<redis::Value> = redis::cmd("EVAL")
                 .arg(CLAIM_STALE)
-                .arg(1)
+                .arg(2)
                 .arg(self.processing_key())
+                .arg(self.claim_key())
                 .arg(cutoff)
                 .arg(Self::RECLAIM_BATCH)
                 .arg(now)
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| MailError::Queue(e.to_string()))?;
+            let pairs = Self::pairs_from_flat(flat)?;
 
-            if ids.is_empty() {
+            if pairs.is_empty() {
                 break;
             }
 
-            let batch = ids.len();
-            let keys: Vec<String> = ids.iter().map(|id| self.job_key(id)).collect();
+            let batch = pairs.len();
+            let keys: Vec<String> = pairs.iter().map(|(id, _)| self.job_key(id)).collect();
             let payloads: Vec<Option<String>> = redis::cmd("MGET")
                 .arg(&keys)
                 .query_async(&mut conn)
@@ -1222,25 +1570,30 @@ impl EmailQueueBackend for RedisBackend {
                 .map_err(|e| MailError::Queue(e.to_string()))?;
 
             let mut reclaimed = 0u64;
-            for (id, payload) in ids.iter().zip(payloads) {
+            for ((id, token), payload) in pairs.iter().zip(payloads) {
                 let Some(json) = payload else {
                     // A missing body has two causes and they need opposite
                     // handling, so do not guess: release the claim and let the
-                    // `ZREM` reply say which happened.
+                    // reply say which happened.
                     //
-                    // `complete`/`discard` are gated on `ZREM :processing == 1`,
-                    // so if the owning worker finished between the re-score and
-                    // this `MGET` it already took the claim — our `ZREM` returns
-                    // 0 and the email was *delivered*. If the claim is still
-                    // ours (returns 1) nobody completed it, so the body was
-                    // evicted under memory pressure and the email is genuinely
-                    // lost. Reporting the first as a loss is the fabricated
-                    // failure this sweeper was fixed to stop emitting; staying
-                    // silent about the second re-hides the loss that
-                    // `discard_lost` exists to record.
-                    let owned: i64 = redis::cmd("ZREM")
+                    // `complete`/`discard` are gated on the presented token
+                    // still matching the current claim, so if the owning
+                    // worker finished between the re-score and this `MGET` it
+                    // already took the claim — our release returns 0 and the
+                    // email was *delivered*. If the claim is still ours
+                    // (returns 1) nobody completed it, so the body was evicted
+                    // under memory pressure and the email is genuinely lost.
+                    // Reporting the first as a loss is the fabricated failure
+                    // this sweeper was fixed to stop emitting; staying silent
+                    // about the second re-hides the loss that `discard_lost`
+                    // exists to record.
+                    let owned: i64 = redis::cmd("EVAL")
+                        .arg(RELEASE_IF_OWNED)
+                        .arg(2)
                         .arg(self.processing_key())
+                        .arg(self.claim_key())
                         .arg(id)
+                        .arg(token)
                         .query_async(&mut conn)
                         .await
                         .map_err(|e| MailError::Queue(e.to_string()))?;
@@ -1271,7 +1624,8 @@ impl EmailQueueBackend for RedisBackend {
                     } else {
                         debug!(
                             job_id = %id,
-                            "Stale claim released; the owning worker had already completed it"
+                            "Stale claim released; the owning worker had already completed it, \
+                             or a newer claim has since superseded it"
                         );
                     }
                     continue;
@@ -1297,17 +1651,19 @@ impl EmailQueueBackend for RedisBackend {
                 let acted: i64 = if job.should_retry() {
                     redis::cmd("EVAL")
                         .arg(FAIL_IF_OWNED)
-                        .arg(3)
+                        .arg(4)
                         .arg(self.processing_key())
                         .arg(self.job_key(id))
                         .arg(self.retry_key())
+                        .arg(self.claim_key())
                         .arg(id)
                         .arg(&body)
                         .arg(now)
+                        .arg(token)
                         .query_async(&mut conn)
                         .await
                         .map_err(|e| MailError::Queue(e.to_string()))?
-                } else {
+                } else if self.config.dead_letter_queue {
                     warn!(
                         job_id = %id,
                         attempts = job.attempts,
@@ -1315,12 +1671,32 @@ impl EmailQueueBackend for RedisBackend {
                     );
                     redis::cmd("EVAL")
                         .arg(DEAD_LETTER_IF_OWNED)
-                        .arg(3)
+                        .arg(4)
                         .arg(self.processing_key())
                         .arg(self.dead_letter_key())
                         .arg(self.job_key(id))
+                        .arg(self.claim_key())
                         .arg(id)
                         .arg(&body)
+                        .arg(token)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(|e| MailError::Queue(e.to_string()))?
+                } else {
+                    error!(
+                        job_id = %id,
+                        attempts = job.attempts,
+                        "Email job exhausted its attempts through repeated reclaims and \
+                         dead_letter_queue is disabled; dropping without a durable record"
+                    );
+                    redis::cmd("EVAL")
+                        .arg(DISCARD_IF_OWNED)
+                        .arg(3)
+                        .arg(self.processing_key())
+                        .arg(self.job_key(id))
+                        .arg(self.claim_key())
+                        .arg(id)
+                        .arg(token)
                         .query_async(&mut conn)
                         .await
                         .map_err(|e| MailError::Queue(e.to_string()))?
@@ -1364,24 +1740,28 @@ impl EmailQueueBackend for RedisBackend {
 
         let score = job.next_retry_at.unwrap_or_else(chrono_now_ms);
 
-        // Ownership-gated, like `complete`: if the sweeper already reclaimed
-        // this id it is on `:retry` with its own body, and writing ours over the
-        // top would resurrect a stale attempt count.
+        // Ownership-gated, like `complete`: if the presented token no longer
+        // matches the current claim, either the sweeper already reclaimed this
+        // id (it is on `:retry` with its own body) or a newer claim now holds
+        // it, and writing ours over the top would resurrect a stale attempt
+        // count or clobber a live claim.
         let owned: i64 = redis::cmd("EVAL")
             .arg(FAIL_IF_OWNED)
-            .arg(3)
+            .arg(4)
             .arg(self.processing_key())
             .arg(self.job_key(&job.id))
             .arg(self.retry_key())
+            .arg(self.claim_key())
             .arg(&job.id)
             .arg(&job_json)
             .arg(score)
+            .arg(job.claim_token)
             .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         if owned == 0 {
-            debug!(job_id = %job.id, "Failed an email job whose claim was already reclaimed");
+            debug!(job_id = %job.id, "Failed an email job whose claim was stale");
             return Ok(());
         }
 
@@ -1399,18 +1779,20 @@ impl EmailQueueBackend for RedisBackend {
 
         let owned: i64 = redis::cmd("EVAL")
             .arg(DEAD_LETTER_IF_OWNED)
-            .arg(3)
+            .arg(4)
             .arg(self.processing_key())
             .arg(self.dead_letter_key())
             .arg(self.job_key(&job.id))
+            .arg(self.claim_key())
             .arg(&job.id)
             .arg(&job_json)
+            .arg(job.claim_token)
             .query_async(&mut conn)
             .await
             .map_err(|e| MailError::Queue(e.to_string()))?;
 
         if owned == 0 {
-            debug!(job_id = %job.id, "Dead-lettered an email job whose claim was already reclaimed");
+            debug!(job_id = %job.id, "Dead-lettered an email job whose claim was stale");
             return Ok(());
         }
 
@@ -1491,7 +1873,10 @@ impl EmailQueue {
     pub fn in_memory(config: EmailQueueConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
-            backend: Arc::new(InMemoryBackend::with_max_depth(config.max_queue_depth)),
+            backend: Arc::new(
+                InMemoryBackend::with_max_depth(config.max_queue_depth)
+                    .dead_letter_queue(config.dead_letter_queue),
+            ),
             config,
         })
     }
@@ -1606,21 +1991,18 @@ impl EmailQueueWorker {
             "Email queue worker started"
         );
 
-        let (job_tx, job_rx) = worker_channel::bounded::<EmailJob>(self.config.batch_size * 2);
-        let job_rx = Arc::new(job_rx);
-
-        // Spawn worker tasks
-        let mut handles = Vec::new();
-        for i in 0..self.config.concurrency {
-            let rx = job_rx.clone();
-            let queue = self.queue.clone();
-            let mailer = self.mailer.clone();
-            let config = self.config.clone();
-
-            handles.push(tokio::spawn(async move {
-                Self::process_jobs(i, rx, queue, mailer, config).await;
-            }));
-        }
+        // Caps how many jobs are actually sending at once; claimed-but-waiting
+        // jobs (below) are not counted against it. `acquire_owned` rather than
+        // `acquire`: the permit is moved into a spawned task and held for the
+        // job's full duration, so it must not borrow from this stack frame.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
+        // One task per job rather than a fixed pool of `concurrency` long-lived
+        // loops reading off a shared channel: a panic inside a spawned task
+        // (e.g. `mailer.send_shared`, or a template/transport bug) is contained
+        // by tokio's task boundary and surfaces as a `JoinError` here, instead
+        // of unwinding a whole worker loop and silently, permanently shrinking
+        // effective concurrency by one with nothing to log it.
+        let mut tasks = tokio::task::JoinSet::new();
 
         // How often the poll loop sweeps for jobs whose worker died mid-send.
         // A quarter of the visibility timeout bounds the extra latency such a
@@ -1628,7 +2010,7 @@ impl EmailQueueWorker {
         let sweep_interval = (self.config.visibility_timeout / 4).max(self.config.poll_interval);
         let mut last_sweep = std::time::Instant::now();
 
-        // Main loop: fetch jobs and distribute to workers
+        // Main loop: fetch jobs and spawn a task per job
         loop {
             if let Some(ref mut shutdown) = self.shutdown
                 && shutdown.try_recv().is_ok()
@@ -1655,15 +2037,33 @@ impl EmailQueueWorker {
                 }
             }
 
+            // Drain finished tasks promptly (rather than only at shutdown) so a
+            // panic is logged as soon as it happens and `tasks` does not grow
+            // without bound across a long-running worker.
+            while let Some(result) = tasks.try_join_next() {
+                Self::log_task_outcome(result);
+            }
+
             match self.queue.pop(self.config.batch_size).await {
                 Ok(jobs) => {
                     if jobs.is_empty() {
                         tokio::time::sleep(self.config.poll_interval).await;
                     } else {
                         for job in jobs {
-                            if job_tx.send(job).await.is_err() {
-                                break;
-                            }
+                            let semaphore = semaphore.clone();
+                            let queue = self.queue.clone();
+                            let mailer = self.mailer.clone();
+                            let config = self.config.clone();
+                            tasks.spawn(async move {
+                                // Acquire before doing any work, so at most
+                                // `concurrency` sends run at once; held until
+                                // the job is fully finalized, so a slot only
+                                // frees once complete/fail/dead_letter/discard
+                                // has actually run. The semaphore is never
+                                // closed, so `.await` here cannot fail.
+                                let _permit = semaphore.acquire_owned().await;
+                                Self::process_one_job(job, queue, mailer, config).await;
+                            });
                         }
                     }
                 }
@@ -1674,49 +2074,56 @@ impl EmailQueueWorker {
             }
         }
 
-        // Wait for workers to finish
-        drop(job_tx);
-        for handle in handles {
-            let _ = handle.await;
+        // Drain remaining in-flight jobs rather than abandoning them mid-send;
+        // any panic surfaces here instead of being silently discarded.
+        while let Some(result) = tasks.join_next().await {
+            Self::log_task_outcome(result);
         }
 
         info!("Email queue worker stopped");
     }
 
-    async fn process_jobs(
-        worker_id: usize,
-        rx: Arc<worker_channel::Receiver<EmailJob>>,
+    fn log_task_outcome(result: std::result::Result<(), tokio::task::JoinError>) {
+        if let Err(join_err) = result
+            && join_err.is_panic()
+        {
+            error!(
+                error = %join_err,
+                "An email job's send task panicked; its claim will be recovered by the next \
+                 sweep once the visibility timeout elapses"
+            );
+        }
+    }
+
+    async fn process_one_job(
+        mut job: EmailJob,
         queue: Arc<dyn EmailQueueBackend>,
         mailer: Arc<Mailer>,
         config: EmailQueueConfig,
     ) {
-        while let Ok(mut job) = rx.recv().await {
-            debug!(worker = worker_id, job_id = %job.id, "Processing email job");
+        debug!(job_id = %job.id, "Processing email job");
 
-            // Bound every send by `job_timeout`: without this a transport that
-            // hangs (dead SMTP socket, provider that never responds) holds this
-            // worker slot forever. An elapsed timeout is a retryable failure.
-            //
-            // Dropping the future does NOT un-send anything: a slow `250 OK` that
-            // arrives after the deadline means the message WAS delivered, and the
-            // job is still requeued. That redelivery is why `EmailJob::new` stamps
-            // a stable `Message-ID` — every attempt carries the same one, so a
-            // receiving MTA can deduplicate. Configure the transport-level timeout
-            // (`SmtpConfig::timeout`) below `job_timeout` so the peer connection is
-            // torn down deterministically instead of the future merely being
-            // dropped.
-            //
-            // `Arc::clone` here is a refcount bump, not a copy of the attachments.
-            let outcome = match tokio::time::timeout(
-                config.job_timeout,
-                mailer.send_shared(job.email.clone()),
-            )
-            .await
+        // Bound every send by `job_timeout`: without this a transport that
+        // hangs (dead SMTP socket, provider that never responds) holds this
+        // permit forever. An elapsed timeout is a retryable failure.
+        //
+        // Dropping the future does NOT un-send anything: a slow `250 OK` that
+        // arrives after the deadline means the message WAS delivered, and the
+        // job is still requeued. That redelivery is why `EmailJob::new` stamps
+        // a stable `Message-ID` — every attempt carries the same one, so a
+        // receiving MTA can deduplicate. Configure the transport-level timeout
+        // (`SmtpConfig::timeout`) below `job_timeout` so the peer connection is
+        // torn down deterministically instead of the future merely being
+        // dropped.
+        //
+        // `Arc::clone` here is a refcount bump, not a copy of the attachments.
+        let outcome =
+            match tokio::time::timeout(config.job_timeout, mailer.send_shared(job.email.clone()))
+                .await
             {
                 Ok(result) => result,
                 Err(_) => {
                     warn!(
-                        worker = worker_id,
                         job_id = %job.id,
                         timeout = ?config.job_timeout,
                         message_id = ?job.email.message_id,
@@ -1727,49 +2134,47 @@ impl EmailQueueWorker {
                 }
             };
 
-            match outcome {
-                Ok(()) => {
-                    if let Err(e) = queue.complete(&job.id).await {
-                        error!(job_id = %job.id, error = %e, "Failed to mark job complete");
-                    }
+        match outcome {
+            Ok(()) => {
+                if let Err(e) = queue.complete(&job.id, job.claim_token).await {
+                    error!(job_id = %job.id, error = %e, "Failed to mark job complete");
                 }
-                Err(e) => {
-                    let error_msg = e.to_string();
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
 
-                    if job.should_retry() && e.is_retryable() {
-                        // Calculate backoff delay, honoring the provider's
-                        // `Retry-After` when it gave us one.
-                        let delay = Self::calculate_backoff(&config, job.attempts, &e);
-                        job.prepare_retry(delay);
+                if job.should_retry() && e.is_retryable() {
+                    // Calculate backoff delay, honoring the provider's
+                    // `Retry-After` when it gave us one.
+                    let delay = Self::calculate_backoff(&config, job.attempts, &e);
+                    job.prepare_retry(delay);
 
-                        if let Err(err) = queue.fail(job, &error_msg).await {
-                            error!(error = %err, "Failed to schedule job retry");
-                        }
-                    } else if config.dead_letter_queue {
-                        job.last_error = Some(error_msg);
-                        if let Err(err) = queue.dead_letter(job).await {
-                            error!(error = %err, "Failed to move job to dead letter queue");
-                        }
-                    } else {
-                        // With the DLQ disabled there is nowhere to put the job,
-                        // but it must not disappear without a trace: `enqueue`
-                        // returned an id to a caller that believes the email is
-                        // still in flight.
-                        error!(
-                            worker = worker_id,
-                            job_id = %job.id,
-                            attempts = job.attempts,
-                            error = %error_msg,
-                            "Email job failed permanently and was dropped \
-                             (dead_letter_queue is disabled)"
-                        );
-                        // `discard`, not `complete`: this email was never sent,
-                        // and `complete` increments `QueueStats::processed`,
-                        // which would inflate the success counter with failures
-                        // and make a delivery-rate alert unbuildable.
-                        if let Err(err) = queue.discard(&job.id).await {
-                            error!(job_id = %job.id, error = %err, "Failed to discard job");
-                        }
+                    if let Err(err) = queue.fail(job, &error_msg).await {
+                        error!(error = %err, "Failed to schedule job retry");
+                    }
+                } else if config.dead_letter_queue {
+                    job.last_error = Some(error_msg);
+                    if let Err(err) = queue.dead_letter(job).await {
+                        error!(error = %err, "Failed to move job to dead letter queue");
+                    }
+                } else {
+                    // With the DLQ disabled there is nowhere to put the job,
+                    // but it must not disappear without a trace: `enqueue`
+                    // returned an id to a caller that believes the email is
+                    // still in flight.
+                    error!(
+                        job_id = %job.id,
+                        attempts = job.attempts,
+                        error = %error_msg,
+                        "Email job failed permanently and was dropped \
+                         (dead_letter_queue is disabled)"
+                    );
+                    // `discard`, not `complete`: this email was never sent,
+                    // and `complete` increments `QueueStats::processed`,
+                    // which would inflate the success counter with failures
+                    // and make a delivery-rate alert unbuildable.
+                    if let Err(err) = queue.discard(&job.id, job.claim_token).await {
+                        error!(job_id = %job.id, error = %err, "Failed to discard job");
                     }
                 }
             }
@@ -1808,6 +2213,40 @@ impl EmailQueueWorker {
     }
 }
 
+/// Extension trait for Mailer to add queue support.
+pub trait MailerQueueExt {
+    /// Create an in-memory email queue.
+    ///
+    /// The queue itself is transport-agnostic — the transport is bound later,
+    /// when a worker is created with [`EmailQueue::worker`], not by this call.
+    /// The mailer is therefore not consulted here; this method exists purely as
+    /// a discoverable entry point from a `Mailer`.
+    fn queue(&self, config: EmailQueueConfig) -> Result<EmailQueue>;
+
+    /// Create a Redis-backed email queue.
+    #[cfg(feature = "redis")]
+    fn queue_redis(
+        &self,
+        redis: Arc<armature_redis::RedisService>,
+        config: EmailQueueConfig,
+    ) -> Result<EmailQueue>;
+}
+
+impl MailerQueueExt for Mailer {
+    fn queue(&self, config: EmailQueueConfig) -> Result<EmailQueue> {
+        EmailQueue::in_memory(config)
+    }
+
+    #[cfg(feature = "redis")]
+    fn queue_redis(
+        &self,
+        redis: Arc<armature_redis::RedisService>,
+        config: EmailQueueConfig,
+    ) -> Result<EmailQueue> {
+        EmailQueue::redis(redis, config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1818,9 +2257,9 @@ mod tests {
             .max_retry_delay(Duration::from_secs(300))
     }
 
-    /// WF6 audit finding 20: `MailError::retry_after` was parsed from the
-    /// provider's `Retry-After` header and then ignored by both retry paths, so
-    /// a `Retry-After: 300` was retried after the local delay and re-throttled.
+    /// `MailError::retry_after` was parsed from the provider's `Retry-After`
+    /// header and then ignored by both retry paths, so a `Retry-After: 300`
+    /// was retried after the local delay and re-throttled.
     #[test]
     fn backoff_honors_the_providers_retry_after() {
         let delay = EmailQueueWorker::calculate_backoff(&config(), 0, &MailError::RateLimited(300));
@@ -1914,8 +2353,14 @@ mod tests {
         backend.push(EmailJob::new(queued_email())).await.unwrap();
 
         let jobs = backend.pop(2).await.unwrap();
-        backend.complete(&jobs[0].id).await.unwrap();
-        backend.discard(&jobs[1].id).await.unwrap();
+        backend
+            .complete(&jobs[0].id, jobs[0].claim_token)
+            .await
+            .unwrap();
+        backend
+            .discard(&jobs[1].id, jobs[1].claim_token)
+            .await
+            .unwrap();
 
         let stats = backend.stats().await.unwrap();
         assert_eq!(stats.processed, 1, "discard must not count as processed");
@@ -2036,10 +2481,30 @@ mod tests {
 
         // Once the queue drains, the next sweep picks them up.
         for job in backend.pop(2).await.unwrap() {
-            backend.complete(&job.id).await.unwrap();
+            backend.complete(&job.id, job.claim_token).await.unwrap();
         }
         assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 2);
         assert_eq!(backend.stats().await.unwrap().pending, 2);
+    }
+
+    /// `batch_size`/`concurrency` of 0 make the queue silently unable to
+    /// progress rather than throwing a clear config error at startup.
+    #[test]
+    fn a_zero_batch_size_or_concurrency_is_rejected() {
+        let err = EmailQueueConfig::default()
+            .batch_size(0)
+            .validate()
+            .expect_err("batch_size=0 must be rejected");
+        assert!(matches!(err, MailError::Config(_)), "{err}");
+
+        let err = EmailQueueConfig::default()
+            .concurrency(0)
+            .validate()
+            .expect_err("concurrency=0 must be rejected");
+        assert!(matches!(err, MailError::Config(_)), "{err}");
+
+        // The default is unaffected.
+        EmailQueueConfig::default().validate().unwrap();
     }
 
     /// A `visibility_timeout` that does not clear `job_timeout` redelivers every
@@ -2088,11 +2553,15 @@ mod tests {
         ));
     }
 
-    /// `pop` took `queue → processing` while `fail` and `reclaim_stale` took
-    /// them the other way round. `tokio::sync::Mutex` is FIFO and non-reentrant,
-    /// so with `concurrency > 1` the poll loop and a per-job task parked forever
-    /// — silently. The three locks are now one; this test hangs against the old
-    /// code and is why the collapse must not be undone.
+    /// `pop` took `queue → processing` while `reclaim_stale` took them the
+    /// other way round (`fail` never held both at once — see
+    /// [`InMemoryBackend`]'s locking docs). `tokio::sync::Mutex` is FIFO and
+    /// non-reentrant, so with `concurrency > 1` a poll sitting in `pop` and a
+    /// concurrent sweep could park each other forever — silently. The three
+    /// locks are now one; this test hangs against the old code and is why the
+    /// collapse must not be undone. `fail` is still exercised here as a
+    /// realistic concurrent caller, even though it was never the operation
+    /// that inverted the lock order.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_pop_fail_and_reclaim_never_deadlock() {
         let backend = Arc::new(InMemoryBackend::with_max_depth(10_000));
@@ -2139,7 +2608,10 @@ mod tests {
         backend.push(EmailJob::new(queued_email())).await.unwrap();
 
         let jobs = backend.pop(1).await.unwrap();
-        backend.complete(&jobs[0].id).await.unwrap();
+        backend
+            .complete(&jobs[0].id, jobs[0].claim_token)
+            .await
+            .unwrap();
 
         assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 0);
         assert_eq!(backend.stats().await.unwrap().pending, 0);
@@ -2163,7 +2635,7 @@ mod tests {
 
         // Drain the two queued jobs so the pushes below fit under the cap.
         for job in backend.pop(2).await.unwrap() {
-            backend.complete(&job.id).await.unwrap();
+            backend.complete(&job.id, job.claim_token).await.unwrap();
         }
 
         // The dead-letter list evicts rather than rejects, so a new permanent
@@ -2178,89 +2650,150 @@ mod tests {
         assert_eq!(backend.stats().await.unwrap().dead_letter, 2);
         assert_eq!(backend.dead_letter_jobs().await.len(), 2);
     }
-}
 
-/// Extension trait for Mailer to add queue support.
-pub trait MailerQueueExt {
-    /// Create an in-memory email queue.
+    /// The core of the claim-fencing fix: a stale claim's finalize call must
+    /// not destroy a newer, live claim on the same job id.
     ///
-    /// The queue itself is transport-agnostic — the transport is bound later,
-    /// when a worker is created with [`EmailQueue::worker`], not by this call.
-    /// The mailer is therefore not consulted here; this method exists purely as
-    /// a discoverable entry point from a `Mailer`.
-    fn queue(&self, config: EmailQueueConfig) -> Result<EmailQueue>;
+    /// Without a fencing token, ownership was decided by id membership alone.
+    /// Worker A's claim is reclaimed by the sweeper and the job is re-popped
+    /// by worker B — a fresh claim, same id. If A's `complete` then fires,
+    /// id-only membership cannot tell A's now-stale claim apart from B's live
+    /// one: it would remove B's entry, and if B's own `fail`/`dead_letter`
+    /// follows, its gate would find nothing to act on and the job would
+    /// vanish with no trace.
+    #[tokio::test]
+    async fn a_stale_claims_finalize_does_not_destroy_a_newer_live_claim() {
+        let backend = InMemoryBackend::new();
+        backend.push(EmailJob::new(queued_email())).await.unwrap();
 
-    /// Create a Redis-backed email queue.
-    #[cfg(feature = "redis")]
-    fn queue_redis(
-        &self,
-        redis: Arc<armature_redis::RedisService>,
-        config: EmailQueueConfig,
-    ) -> Result<EmailQueue>;
-}
+        // Worker A claims it.
+        let first_claim = backend.pop(1).await.unwrap();
+        assert_eq!(first_claim.len(), 1);
+        let stale_token = first_claim[0].claim_token;
+        assert_ne!(stale_token, 0, "a popped job must carry a real claim token");
 
-impl MailerQueueExt for Mailer {
-    fn queue(&self, config: EmailQueueConfig) -> Result<EmailQueue> {
-        EmailQueue::in_memory(config)
+        // The sweeper reclaims it (A was too slow) and worker B re-pops it,
+        // minting a fresh claim under the same job id.
+        assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+        let second_claim = backend.pop(1).await.unwrap();
+        assert_eq!(second_claim.len(), 1);
+        assert_eq!(second_claim[0].id, first_claim[0].id, "same job id");
+        assert_ne!(
+            second_claim[0].claim_token, stale_token,
+            "the re-claim must mint a fresh token, not reuse the stale one"
+        );
+
+        // Worker A, unaware it was reclaimed, finally reports back with its
+        // now-stale token.
+        backend
+            .complete(&first_claim[0].id, stale_token)
+            .await
+            .unwrap();
+
+        // B's live claim must be untouched: still claimed, not completed.
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(
+            stats.processing, 1,
+            "A's stale complete must not release B's live claim: {stats:?}"
+        );
+        assert_eq!(
+            stats.processed, 0,
+            "A's stale complete must not be counted as a delivery: {stats:?}"
+        );
+
+        // B's own finalize, with the correct token, must succeed normally.
+        backend
+            .complete(&second_claim[0].id, second_claim[0].claim_token)
+            .await
+            .unwrap();
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(stats.processing, 0);
+        assert_eq!(
+            stats.processed, 1,
+            "B's genuine completion must count: {stats:?}"
+        );
     }
 
-    #[cfg(feature = "redis")]
-    fn queue_redis(
-        &self,
-        redis: Arc<armature_redis::RedisService>,
-        config: EmailQueueConfig,
-    ) -> Result<EmailQueue> {
-        EmailQueue::redis(redis, config)
-    }
-}
+    /// As above, but the stale caller's terminal call is `fail` — the
+    /// scenario that previously lost mail outright: A's stale `fail` would
+    /// destroy B's live claim, and B's own later finalize would then find
+    /// nothing to act on, leaving the job in no set at all.
+    #[tokio::test]
+    async fn a_stale_claims_fail_does_not_destroy_a_newer_live_claim() {
+        let backend = InMemoryBackend::new();
+        backend.push(EmailJob::new(queued_email())).await.unwrap();
 
-/// Minimal MPMC channel for handing jobs from the poll loop to the worker
-/// tasks.
-///
-/// A deliberate shim, not a stub: `tokio::sync::mpsc` has one receiver, and the
-/// worker needs `concurrency` of them sharing a queue. Wrapping the receiver in
-/// an `Arc<Mutex<_>>` gives exactly that in a dozen lines and keeps a
-/// third-party MPMC crate off the dependency list for a channel this crate uses
-/// in one place.
-mod worker_channel {
-    use std::sync::Arc;
-    use tokio::sync::{Mutex, mpsc};
+        let first_claim = backend.pop(1).await.unwrap();
+        assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+        let second_claim = backend.pop(1).await.unwrap();
 
-    pub struct Sender<T> {
-        tx: mpsc::Sender<T>,
-    }
+        // A's stale `fail` must be a no-op, not a resurrection of a dead claim.
+        backend
+            .fail(first_claim[0].clone(), "stale worker A timed out")
+            .await
+            .unwrap();
 
-    pub struct Receiver<T> {
-        rx: Arc<Mutex<mpsc::Receiver<T>>>,
-    }
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(
+            stats.processing, 1,
+            "A's stale fail must not touch B's live claim: {stats:?}"
+        );
+        assert_eq!(
+            stats.pending, 0,
+            "must not requeue a second copy: {stats:?}"
+        );
 
-    pub fn bounded<T>(size: usize) -> (Sender<T>, Receiver<T>) {
-        let (tx, rx) = mpsc::channel(size);
-        (
-            Sender { tx },
-            Receiver {
-                rx: Arc::new(Mutex::new(rx)),
-            },
-        )
+        // B can still legitimately finalize its own live claim afterward.
+        backend
+            .complete(&second_claim[0].id, second_claim[0].claim_token)
+            .await
+            .unwrap();
+        assert_eq!(backend.stats().await.unwrap().processing, 0);
     }
 
-    impl<T> Sender<T> {
-        pub async fn send(&self, value: T) -> Result<(), ()> {
-            self.tx.send(value).await.map_err(|_| ())
-        }
+    /// `push_batch` is all-or-nothing: a batch that would breach
+    /// `max_queue_depth` must enqueue none of it, not a prefix a caller's
+    /// retry-the-whole-batch would then double up.
+    #[tokio::test]
+    async fn push_batch_is_all_or_nothing_at_the_depth_cap() {
+        let backend = InMemoryBackend::with_max_depth(3);
+        let jobs: Vec<EmailJob> = (0..5).map(|_| EmailJob::new(queued_email())).collect();
+
+        let err = backend
+            .push_batch(jobs)
+            .await
+            .expect_err("a batch larger than the cap must be rejected entirely");
+        assert!(matches!(err, MailError::Queue(_)), "{err}");
+
+        assert_eq!(
+            backend.stats().await.unwrap().pending,
+            0,
+            "none of the rejected batch may have been enqueued"
+        );
     }
 
-    impl<T> Clone for Receiver<T> {
-        fn clone(&self) -> Self {
-            Self {
-                rx: self.rx.clone(),
-            }
-        }
-    }
+    /// `reclaim_stale` must respect `dead_letter_queue(false)` the same way
+    /// the normal worker-exhaustion path does: discard without a durable
+    /// record, rather than writing to the dead-letter list regardless of the
+    /// setting.
+    #[tokio::test]
+    async fn reclaim_stale_respects_a_disabled_dead_letter_queue() {
+        let backend = InMemoryBackend::new().dead_letter_queue(false);
+        let job = EmailJob::new(queued_email()).max_retries(0);
+        backend.push(job).await.unwrap();
 
-    impl<T> Receiver<T> {
-        pub async fn recv(&self) -> Result<T, ()> {
-            self.rx.lock().await.recv().await.ok_or(())
-        }
+        // `max_retries(0)`: the reclaim's own `attempts += 1` is immediately
+        // exhausting, so a single sweep is enough to hit the DLQ-disabled path.
+        let popped = backend.pop(1).await.unwrap();
+        assert_eq!(popped.len(), 1);
+        assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(
+            stats.dead_letter, 0,
+            "dead_letter_queue(false) must not accumulate a durable record: {stats:?}"
+        );
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.processing, 0);
     }
 }

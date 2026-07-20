@@ -6,6 +6,7 @@ use crate::{
     webhook::{WebhookEvent, WebhookHeaders},
 };
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 
 /// Request timeout applied to every provider HTTP call.
@@ -169,7 +170,7 @@ pub trait ProviderConfig {
 /// task and any transaction state open. This applies a 30s overall request
 /// timeout and a 10s connect timeout so a dead gateway surfaces as a retryable
 /// `Network` error instead.
-pub fn build_http_client() -> PaymentResult<reqwest::Client> {
+pub(crate) fn build_http_client() -> PaymentResult<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -189,7 +190,7 @@ pub fn build_http_client() -> PaymentResult<reqwest::Client> {
 /// The returned string has any trailing slash stripped, so callers can keep
 /// building request URLs as `format!("{base}{path}")` with a leading-slash path
 /// without producing a double slash.
-pub fn validate_base_url(url: &str) -> PaymentResult<String> {
+pub(crate) fn validate_base_url(url: &str) -> PaymentResult<String> {
     let parsed = url::Url::parse(url)
         .map_err(|e| PaymentError::Config(format!("invalid base URL {url:?}: {e}")))?;
 
@@ -504,9 +505,8 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
 /// classifier next door. `pub(crate)` rather than `pub` — it is an internal
 /// helper, and a glob re-export would otherwise put it in the published API.
 #[cfg(any(feature = "stripe", feature = "paypal", feature = "braintree"))]
-pub(crate) fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
-    response
-        .headers()
+pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
@@ -516,22 +516,15 @@ pub(crate) fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
 }
 
 /// Common HTTP client for providers
-pub struct ProviderClient {
+///
+/// `Debug` is derived: `api_key` is a [`SecretString`], whose own `Debug` impl
+/// already redacts it, so a hand-rolled impl would only duplicate what
+/// `secrecy` already guarantees.
+#[derive(Debug)]
+pub(crate) struct ProviderClient {
     client: reqwest::Client,
     base_url: String,
-    api_key: String,
-}
-
-impl std::fmt::Debug for ProviderClient {
-    /// Hand-written so `api_key` never reaches a log or a panic message. A
-    /// derived `Debug` would print `sk_live_…` verbatim from any
-    /// `unwrap`/`assert` that happens to format this struct.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderClient")
-            .field("base_url", &self.base_url)
-            .field("api_key", &"[redacted]")
-            .finish_non_exhaustive()
-    }
+    api_key: SecretString,
 }
 
 impl ProviderClient {
@@ -567,7 +560,7 @@ impl ProviderClient {
         Ok(Self {
             client: build()?,
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key: SecretString::new(api_key.into().into()),
         })
     }
 
@@ -577,12 +570,21 @@ impl ProviderClient {
         Ok(self
             .client
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .send()
             .await?)
     }
 
     /// POST request with JSON body
+    ///
+    /// No current provider endpoint needs a raw JSON body — Stripe's API is
+    /// form-encoded throughout, which is the only gateway [`ProviderClient`]
+    /// backs. Kept `#[allow(dead_code)]` rather than removed: now that this
+    /// type is `pub(crate)`, an unused method is flagged as dead code, but
+    /// dropping it would leave the verb set (`get`/`post`/`post_form`/
+    /// `post_form_idempotent`/`delete`) incomplete for the next JSON-bodied
+    /// endpoint this client is pointed at.
+    #[allow(dead_code)]
     pub async fn post<T: serde::Serialize>(
         &self,
         path: &str,
@@ -592,7 +594,7 @@ impl ProviderClient {
         Ok(self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(body)
             .send()
             .await?)
@@ -619,7 +621,11 @@ impl ProviderClient {
         idempotency_key: Option<&str>,
     ) -> PaymentResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self.client.post(&url).bearer_auth(&self.api_key).form(body);
+        let mut req = self
+            .client
+            .post(&url)
+            .bearer_auth(self.api_key.expose_secret())
+            .form(body);
         if let Some(key) = idempotency_key {
             req = req.header("Idempotency-Key", key);
         }
@@ -632,7 +638,7 @@ impl ProviderClient {
         Ok(self
             .client
             .delete(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .send()
             .await?)
     }

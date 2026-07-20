@@ -129,8 +129,9 @@ pub struct WebhookEvent {
 /// Webhook event types
 ///
 /// `Hash` is derived so [`WebhookRouter`] can key its handler map on the enum
-/// itself; it previously keyed on `format!("{:?}", event_type)`, allocating a
-/// `String` on every registration *and* every routed event.
+/// itself, rather than on a formatted `Debug` string — keying on the enum
+/// avoids allocating a `String` on every registration *and* every routed
+/// event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEventType {
@@ -299,19 +300,18 @@ impl WebhookData {
     ///
     /// This is deliberately lossless and total: the typed shapes are modeled on
     /// Stripe's objects and other gateways differ, so any payload that does not
-    /// deserialize cleanly falls back to `Generic(raw.clone())`. A handler
-    /// therefore never loses data, and adding a provider whose payload does not
-    /// match cannot turn into a parse failure at the webhook boundary.
+    /// deserialize cleanly falls back to `Generic(raw)`. A handler therefore
+    /// never loses data, and adding a provider whose payload does not match
+    /// cannot turn into a parse failure at the webhook boundary.
     ///
     /// Note the enum is `#[serde(untagged)]`, so matching on the variant is the
     /// only reliable way to tell a typed payload from a generic one.
     ///
     /// `raw` is taken by value: the fallback hands the original tree straight
     /// back as `Generic` instead of deep-copying it, and the typed attempt
-    /// deserializes out of a borrow. The previous version called
-    /// `serde_json::from_value(raw.clone())` — a full recursive copy of the
-    /// whole payload on the success path — and cloned a second time to build
-    /// the fallback.
+    /// deserializes out of a borrow, so the success path parses without
+    /// cloning the payload and the fallback path reuses that same value rather
+    /// than copying it.
     pub fn from_event_type(event_type: &WebhookEventType, raw: serde_json::Value) -> WebhookData {
         use WebhookEventType as E;
 

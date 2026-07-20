@@ -133,10 +133,9 @@ impl Transport for SendGridTransport {
             debug!("Email sent successfully via SendGrid");
             Ok(())
         } else if status.as_u16() == 429 {
-            Err(MailError::RateLimited(retry_after_secs(
-                response.headers(),
-                60,
-            )))
+            Err(MailError::RateLimited(
+                retry_after_secs(response.headers()).unwrap_or(60),
+            ))
         } else {
             // Not `unwrap_or_default()`: that renders a connection dropped
             // mid-body identically to a provider that genuinely sent none,
@@ -369,7 +368,7 @@ mod tests {
             .text("Hello")
     }
 
-    /// WF6 findings 4 and 5: custom headers and priority were stored on `Email`
+    /// Custom headers and priority were stored on `Email`
     /// but never reached the SendGrid payload.
     #[test]
     fn payload_carries_custom_headers_and_priority() {
@@ -385,7 +384,7 @@ mod tests {
         assert_eq!(headers["Importance"], "High");
     }
 
-    /// WF6 audit finding 9: collecting into a `BTreeMap` meant
+    /// Collecting into a `BTreeMap` meant
     /// `.header("X-Tag","a").header("X-Tag","b")` reached SendGrid as a single
     /// `X-Tag: b` — the first value silently dropped — and alphabetised the
     /// emission order. SendGrid's `headers` really is single-valued, so
@@ -419,7 +418,7 @@ mod tests {
         );
     }
 
-    /// WF6 audit finding 7: SendGrid never read `message_id`/`in_reply_to`/
+    /// SendGrid never read `message_id`/`in_reply_to`/
     /// `references`, so threading was silently lost.
     #[test]
     fn threading_headers_are_emitted() {
@@ -439,7 +438,7 @@ mod tests {
         );
     }
 
-    /// WF6 audit finding 8: SendGrid writes header values into raw JSON, so a
+    /// SendGrid writes header values into raw JSON, so a
     /// CRLF in a value would inject a header. `send` calls `validate` first;
     /// this asserts nothing poisoned can reach the payload regardless.
     #[test]

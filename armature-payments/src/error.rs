@@ -49,11 +49,11 @@ pub enum PaymentError {
     ///
     /// `status` carries the HTTP status the gateway replied with, when there
     /// was one. It is load-bearing: every provider funnels its otherwise
-    /// unclassified failures through this variant, so without the status a
-    /// transient 502 from a load balancer is indistinguishable from a permanent
-    /// 400 and [`PaymentError::is_retryable`] has to guess — which it
-    /// previously did, answering `false` and permanently failing a charge that
-    /// an idempotency key made provably safe to replay.
+    /// unclassified failures through this variant, so without it a transient
+    /// 502 from a load balancer is indistinguishable from a permanent 400, and
+    /// [`PaymentError::is_retryable`] has no way to tell a charge that is
+    /// provably safe to replay (because it carries an idempotency key) from
+    /// one that must permanently fail.
     ///
     /// Mirrors `armature_push::PushError::Provider` and the same treatment in
     /// `armature-mail`, so 5xx means the same thing in all three crates.

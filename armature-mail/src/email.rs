@@ -660,7 +660,7 @@ mod tests {
         assert!(wire.contains("multipart/mixed"), "no mixed part:\n{wire}");
     }
 
-    /// WF6 finding 6: inline attachments were built with `Attachment::new`, so they
+    /// Inline attachments were built with `Attachment::new`, so they
     /// carried no Content-ID and no inline disposition — every documented `cid:`
     /// reference in the HTML failed to resolve. They must now be emitted inside a
     /// `multipart/related` with both headers.
@@ -713,7 +713,7 @@ mod tests {
         );
     }
 
-    /// WF6 finding 4: `Email::header` was stored but read by no transport.
+    /// `Email::header` was stored but read by no transport.
     #[test]
     fn custom_headers_are_emitted() {
         let email = base()
@@ -732,7 +732,7 @@ mod tests {
         );
     }
 
-    /// WF6 finding 5: `Email::priority` was clamped and stored but never emitted.
+    /// `Email::priority` was clamped and stored but never emitted.
     #[test]
     fn priority_is_emitted_as_headers() {
         let wire = formatted(&base().high_priority());
@@ -752,7 +752,7 @@ mod tests {
         assert!(!formatted(&email).contains("X-Priority"));
     }
 
-    /// WF6 finding 11: the fluent builders used to swallow parse errors with
+    /// The fluent builders used to swallow parse errors with
     /// `.ok()` / `if let Ok`, so a caller could silently send to fewer recipients
     /// than it asked for. The error must now reach `validate()`.
     #[test]
@@ -807,7 +807,7 @@ mod tests {
         assert!(matches!(email.to_lettre(), Err(MailError::Attachment(_))));
     }
 
-    /// WF6 audit finding 15: `(Some(cid), _)` made *any* attachment carrying a
+    /// `(Some(cid), _)` made *any* attachment carrying a
     /// content-id inline, so an explicit `ContentDisposition::Attachment` was
     /// ignored and no mail client offered the file for download.
     #[test]
@@ -837,7 +837,7 @@ mod tests {
         assert!(!wire.contains("<<"), "{wire}");
     }
 
-    /// WF6 audit finding 8: header values were never validated, so a `\r\n` in a
+    /// Header values were never validated, so a `\r\n` in a
     /// value let a caller inject arbitrary headers on the Mailgun and SendGrid
     /// transports, which write the value verbatim.
     #[test]

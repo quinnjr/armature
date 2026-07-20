@@ -181,9 +181,14 @@ impl S3Storage {
     }
 
     /// Get the public URL for a key (if bucket is public).
-    pub fn public_url(&self, key: &str) -> String {
-        let full_key = self.full_key(key);
-        if let Some(endpoint) = &self.config.endpoint {
+    ///
+    /// `key` is validated (rejecting `..` traversal segments) and
+    /// percent-encoded before being interpolated into the URL, so it cannot
+    /// escape the intended path or inject a query, a fragment, or a header
+    /// break.
+    pub fn public_url(&self, key: &str) -> Result<String> {
+        let full_key = crate::storage::encode_key_for_url(&self.full_key(key))?;
+        Ok(if let Some(endpoint) = &self.config.endpoint {
             format!("{}/{}/{}", endpoint, self.config.bucket, full_key)
         } else if let Some(region) = &self.config.region {
             format!(
@@ -195,7 +200,7 @@ impl S3Storage {
                 "https://{}.s3.amazonaws.com/{}",
                 self.config.bucket, full_key
             )
-        }
+        })
     }
 }
 
@@ -282,7 +287,7 @@ impl Storage for S3Storage {
         // Build metadata
         let mut metadata = StorageMetadata::new(key, size)
             .with_content_type(content_type)
-            .with_url(self.public_url(key));
+            .with_url(self.public_url(key)?);
 
         if let Some(checksum) = checksum {
             metadata = metadata.with_checksum(checksum);
@@ -356,7 +361,7 @@ impl Storage for S3Storage {
             })?;
 
         let size = response.content_length().unwrap_or(0) as u64;
-        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key));
+        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key)?);
 
         if let Some(ct) = response.content_type() {
             metadata = metadata.with_content_type(ct);
@@ -456,7 +461,7 @@ impl Storage for S3Storage {
 
             let size = object.size().unwrap_or(0) as u64;
             let mut metadata =
-                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key)?);
 
             if let Some(etag) = object.e_tag() {
                 metadata = metadata.with_checksum(etag.trim_matches('"'));
@@ -502,7 +507,7 @@ impl Storage for S3Storage {
     }
 
     async fn url(&self, key: &str) -> Result<Option<String>> {
-        Ok(Some(self.public_url(key)))
+        Ok(Some(self.public_url(key)?))
     }
 
     fn default_url_duration(&self) -> Duration {
@@ -928,6 +933,40 @@ mod tests {
             ["page2.txt"]
         );
         assert_eq!(next, None);
+    }
+
+    /// `url`/`public_url` used to interpolate the raw key into the URL
+    /// string: a key of `../../admin` walked out of the intended path, and one
+    /// containing `?`, `#` or CRLF injected a query, a fragment, or a header
+    /// break.
+    #[tokio::test]
+    async fn url_rejects_traversal_and_percent_encodes_special_characters() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+
+        let err = storage
+            .url("../../admin")
+            .await
+            .expect_err("a traversal key must be rejected");
+        assert!(
+            matches!(err, StorageError::InvalidFileName(_)),
+            "expected InvalidFileName, got {err:?}"
+        );
+
+        let url = storage
+            .url("report?admin=1#frag\r\nX-Injected: 1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !url.contains(['?', '#', '\r', '\n']),
+            "the raw special characters must not survive into the URL: {url}"
+        );
+        assert!(
+            url.ends_with("report%3Fadmin%3D1%23frag%0D%0AX-Injected%3A%201"),
+            "got: {url}"
+        );
     }
 
     #[tokio::test]

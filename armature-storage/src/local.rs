@@ -161,14 +161,26 @@ impl LocalStorage {
     /// [`open_read`]/[`open_write`], which pass `O_NOFOLLOW` on unix, so a
     /// symlink substituted at the last component fails the open outright
     /// rather than being followed. `delete` uses `unlink`, which never follows
-    /// a final symlink either.
+    /// a final symlink either. And whatever the open does return is checked
+    /// again on the descriptor itself -- not the pre-open path -- by
+    /// `assert_opened_file_is_safe`, which rejects it unless it is a regular
+    /// file with, on unix, exactly one link. That closes the leaf race for
+    /// hardlinks and non-regular files (a FIFO or device node substituted at
+    /// the leaf between the check and the open) the same way `O_NOFOLLOW`
+    /// closes it for symlinks: the property is verified on the file the
+    /// operation actually reads or writes, not on a path that may no longer
+    /// describe it.
     ///
     /// What remains on unix is substitution of an *intermediate directory*
     /// component between the check and the open (`root/a/` swapped for a
     /// symlink while `root/a/b` is being written). Closing that needs
     /// `openat2(RESOLVE_BENEATH)` against a long-lived root descriptor, which
     /// this backend does not yet do. On non-unix targets `O_NOFOLLOW` is
-    /// unavailable and the leaf is racy too. `LocalStorage` is a
+    /// unavailable, so a symlink substituted at the leaf is still followed;
+    /// `assert_opened_file_is_safe`'s regular-file check still runs there
+    /// (`Metadata::is_file` needs no unix-specific API) and catches a FIFO or
+    /// other special file, but not a hardlink, since link count has no
+    /// portable equivalent in this code. `LocalStorage` is a
     /// dev/test/single-tenant backend; a root that hostile code can write to
     /// out of band is outside what it defends.
     async fn resolve(&self, key: &str) -> Result<PathBuf> {
@@ -413,19 +425,64 @@ fn nofollow_options() -> fs::OpenOptions {
     options
 }
 
+#[cfg(test)]
+static OPEN_READ_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static OPEN_WRITE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Open `path` for reading without following a final symlink.
 async fn open_read(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(test)]
+    OPEN_READ_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     nofollow_options().read(true).open(path).await
 }
 
 /// Open (or create) `path` for writing without following a final symlink.
 async fn open_write(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(test)]
+    OPEN_WRITE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     nofollow_options()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
         .await
+}
+
+/// Reject an opened file unless it is a regular file with, on unix, exactly
+/// one link.
+///
+/// [`assert_inside_root`](LocalStorage::assert_inside_root) checks the
+/// pre-open *path*; this checks the post-open file *descriptor*
+/// (`tokio::fs::File::metadata` is `fstat`, not `lstat`/`stat` on the path),
+/// so it catches what the path-based check structurally cannot: a FIFO or
+/// device node at the leaf (which the pre-open check never inspected, since
+/// it only ever rejected symlinks and multiply-linked regular files) and a
+/// hardlink or non-regular file substituted at the leaf *after* the check but
+/// *before* the open. A FIFO with no peer or a device node like `/dev/zero`
+/// would otherwise hang or unboundedly grow `read_to_end`/the write call.
+async fn assert_opened_file_is_safe(file: &fs::File, key: &str) -> Result<()> {
+    let metadata = file.metadata().await?;
+
+    if !metadata.is_file() {
+        return Err(StorageError::InvalidFileName(format!(
+            "key {key:?} names a non-regular file"
+        )));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            return Err(StorageError::InvalidFileName(format!(
+                "key {key:?} names a hard link ({} links), which may alias a file \
+                 outside the storage root",
+                metadata.nlink()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Percent-encode one path segment for inclusion in a URL.
@@ -493,6 +550,7 @@ impl Storage for LocalStorage {
             let mut file = open_write(&path)
                 .await
                 .map_err(|e| map_open_error(e, key))?;
+            assert_opened_file_is_safe(&file, key).await?;
             file.write_all(&data).await?;
             file.flush().await?;
         }
@@ -542,6 +600,7 @@ impl Storage for LocalStorage {
         // symlink dropped at the leaf after `resolve` ran.
         use tokio::io::AsyncReadExt;
         let mut file = open_read(&path).await.map_err(|e| map_open_error(e, key))?;
+        assert_opened_file_is_safe(&file, key).await?;
 
         let capacity = file.metadata().await.map(|m| m.len() as usize).unwrap_or(0);
         let mut data = Vec::with_capacity(capacity);
@@ -622,6 +681,18 @@ impl Storage for LocalStorage {
     /// call, so a `put` or `delete` of a lexically earlier key between two
     /// pages shifted every later position and the pagination silently dropped
     /// or repeated objects.
+    ///
+    /// # Ordering
+    ///
+    /// Entries are emitted in the walk's pre-order DFS (component-wise)
+    /// order, not byte-lexicographic order over the full key string -- the
+    /// two disagree whenever a directory and a file share a lexical prefix
+    /// (`a.txt` sorts before `a/b.txt` as bytes, but the walk emits
+    /// `a/b.txt` first, since the directory `a` sorts before the file
+    /// `a.txt`). `Storage::list_page` documents ordering as backend-specific
+    /// for exactly this reason: this does not match the byte-lexicographic
+    /// order S3, GCS and Azure return, and callers must not rely on the two
+    /// agreeing.
     async fn list_page(
         &self,
         prefix: Option<&str>,
@@ -779,9 +850,11 @@ impl Storage for LocalStorage {
         let mut source = open_read(&from_path)
             .await
             .map_err(|e| map_open_error(e, from))?;
+        assert_opened_file_is_safe(&source, from).await?;
         let mut destination = open_write(&to_path)
             .await
             .map_err(|e| map_open_error(e, to))?;
+        assert_opened_file_is_safe(&destination, to).await?;
 
         tokio::io::copy(&mut source, &mut destination).await?;
         {
@@ -1335,6 +1408,126 @@ mod tests {
         open_write(&path)
             .await
             .expect("a real file must open for writing");
+    }
+
+    // --- Post-open fd-level rejection (FIFO/device/hardlink at the leaf) -----
+    //
+    // The pre-open hardlink check in `assert_inside_root` is gated on
+    // `is_file()`, so a FIFO or device node at the leaf skips it entirely, and
+    // it runs on the path before the open rather than on the opened
+    // descriptor, so a hardlink substituted at the leaf *after* the check but
+    // *before* the open is not caught either. `assert_opened_file_is_safe`
+    // closes both gaps by `fstat`ing the already-open file. These drive it
+    // directly, as the leaf-race tests above drive `open_read`/`open_write`
+    // directly, since the substitution race itself cannot be scheduled
+    // deterministically in a test.
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn assert_opened_file_is_safe_rejects_a_hardlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+        let link = temp_dir.path().join("link.txt");
+        std::fs::hard_link(&target, &link).expect("creating a test hard link should succeed");
+
+        let file = open_read(&link)
+            .await
+            .expect("opening a hard link itself must succeed; only its alias is the problem");
+        let err = assert_opened_file_is_safe(&file, "link.txt")
+            .await
+            .expect_err("the fd-level check must reject a multiply-linked file");
+        assert!(
+            matches!(err, StorageError::InvalidFileName(_)),
+            "expected InvalidFileName, got {err:?}"
+        );
+    }
+
+    /// The check is on link count, not on where the link points, so an
+    /// ordinary singly-linked file must still be accepted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn assert_opened_file_is_safe_accepts_a_singly_linked_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("real.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = open_read(&path).await.unwrap();
+        assert_opened_file_is_safe(&file, "real.txt")
+            .await
+            .expect("a singly-linked regular file must be accepted");
+    }
+
+    /// A FIFO at the leaf must be rejected rather than let a later
+    /// `read_to_end`/write call hang. Opened `O_RDWR` rather than through
+    /// `open_read` (`O_RDONLY`): a FIFO opened read-only blocks the open
+    /// itself until a writer connects, which would hang this test rather than
+    /// exercise the check -- `O_RDWR` is the standard way to open a FIFO
+    /// without blocking, and this test only needs an open descriptor to drive
+    /// `assert_opened_file_is_safe` against.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn assert_opened_file_is_safe_rejects_a_fifo() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fifo_path = temp_dir.path().join("fifo");
+        let c_path = std::ffi::CString::new(fifo_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
+            0,
+            "creating a test FIFO should succeed"
+        );
+
+        let file = nofollow_options()
+            .read(true)
+            .write(true)
+            .open(&fifo_path)
+            .await
+            .expect("opening a FIFO O_RDWR must not block");
+
+        let err = assert_opened_file_is_safe(&file, "fifo")
+            .await
+            .expect_err("the fd-level check must reject a non-regular file");
+        assert!(
+            matches!(err, StorageError::InvalidFileName(_)),
+            "expected InvalidFileName, got {err:?}"
+        );
+    }
+
+    // --- `Storage` methods actually route through the `O_NOFOLLOW` openers ---
+    //
+    // Every symlink test above either drives `open_read`/`open_write` directly
+    // or plants the symlink before calling a `Storage` method, so the earlier
+    // lexical check in `assert_inside_root` catches it first -- the open-time
+    // `O_NOFOLLOW` defense is never actually exercised end-to-end through the
+    // trait methods. A regression that swapped `open_write(&path)` back to
+    // `fs::write(&path, data)` inside `put` (or the analogous swap in
+    // `get`/`copy`) would pass every test above. These count calls to prove
+    // the real methods actually reach the openers, independent of winning any
+    // race.
+
+    #[tokio::test]
+    async fn put_and_get_route_through_the_nofollow_openers() {
+        // The counters are process-global and every test in this file runs in
+        // the same process, so a concurrently-running test's own put/get can
+        // bump them between the before/after reads here too. That only ever
+        // adds to the count, never removes from it, so "increased by at least
+        // one" is the race-proof assertion; "increased by exactly one" is not.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::with_path(temp_dir.path()).await.unwrap();
+
+        let writes_before = OPEN_WRITE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        storage.put("k.txt", Bytes::from("x")).await.unwrap();
+        assert!(
+            OPEN_WRITE_CALLS.load(std::sync::atomic::Ordering::SeqCst) > writes_before,
+            "Storage::put must go through open_write, not fs::write"
+        );
+
+        let reads_before = OPEN_READ_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        storage.get("k.txt").await.unwrap();
+        assert!(
+            OPEN_READ_CALLS.load(std::sync::atomic::Ordering::SeqCst) > reads_before,
+            "Storage::get must go through open_read, not fs::read"
+        );
     }
 
     // --- URL generation ------------------------------------------------------

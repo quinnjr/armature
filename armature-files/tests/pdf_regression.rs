@@ -20,9 +20,9 @@ fn first_page_content(pdf_bytes: &[u8]) -> String {
     String::from_utf8_lossy(&content).into_owned()
 }
 
-/// Finding #6: `PdfBuilder::add_horizontal_line` must emit a real stroked
-/// line in the content stream (moveto/lineto/stroke), not just advance the
-/// cursor without drawing anything.
+/// `PdfBuilder::add_horizontal_line` must emit a real stroked line in the
+/// content stream (moveto/lineto/stroke), not just advance the cursor
+/// without drawing anything.
 #[test]
 fn horizontal_line_emits_a_real_stroke() {
     let result = PdfBuilder::new()
@@ -70,8 +70,8 @@ fn first_absolute_td_x(content: &str) -> f32 {
     panic!("no absolute Td line found in content stream:\n{content}");
 }
 
-/// Finding #8: `TextAlign` must actually change where text is placed instead
-/// of being an exported-but-unused enum (all text always left-aligned).
+/// `TextAlign` must actually change where text is placed instead of being
+/// an exported-but-unused enum (all text always left-aligned).
 #[test]
 fn text_align_changes_text_x_position() {
     let build = |align: TextAlign| {
@@ -126,7 +126,7 @@ fn first_page_media_box(pdf_bytes: &[u8]) -> [f32; 4] {
     out
 }
 
-/// Finding #10: `orientation()` must re-derive the text cursor.
+/// `orientation()` must re-derive the text cursor.
 ///
 /// `page_size()` and `margins()` both recompute `cursor_y` when they change
 /// the layout; `orientation()` only set the field. On A4 that left the cursor
@@ -176,8 +176,8 @@ fn cursor_tracks_every_layout_setter() {
     );
 }
 
-/// Finding #13: non-ASCII text must be transcoded to WinAnsiEncoding, and the
-/// font dictionary must declare that encoding.
+/// Non-ASCII text must be transcoded to WinAnsiEncoding, and the font
+/// dictionary must declare that encoding.
 ///
 /// Emitting raw UTF-8 into a StandardEncoding string renders each byte of a
 /// multi-byte sequence as its own wrong glyph — the crate's own `"© 2025"`
@@ -229,8 +229,8 @@ fn unrepresentable_characters_error_rather_than_render_wrong() {
     );
 }
 
-/// Finding #12: text metrics must count glyphs (with real Helvetica advance
-/// widths), not UTF-8 bytes.
+/// Text metrics must count glyphs (with real Helvetica advance widths),
+/// not UTF-8 bytes.
 ///
 /// `"Café"` is 5 bytes but 4 glyphs, and CJK is 3 bytes per glyph. Measuring
 /// bytes made right-aligned non-ASCII overestimate its own width until

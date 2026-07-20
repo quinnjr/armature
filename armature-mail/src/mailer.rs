@@ -375,7 +375,7 @@ mod tests {
         );
     }
 
-    /// WF6 audit finding 13: the convenience builders interpolated caller values
+    /// The convenience builders interpolated caller values
     /// into HTML with `format!`, bypassing the crate's own escaping template
     /// path, so markup in a name hijacked the rendered body.
     #[test]
@@ -459,7 +459,7 @@ mod tests {
             .collect()
     }
 
-    /// WF6 audit finding 12: `send_bulk` was fully sequential, so one slow
+    /// `send_bulk` was fully sequential, so one slow
     /// recipient stalled the whole batch and `pool_size` was never exercised.
     #[tokio::test]
     async fn send_bulk_runs_concurrently_up_to_the_configured_bound() {

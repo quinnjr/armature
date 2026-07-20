@@ -72,9 +72,10 @@ impl StripeProvider {
     /// # Errors
     ///
     /// Returns [`PaymentError::Config`] if the HTTP client cannot be built. It
-    /// is fallible so the timeouts are guaranteed: the previous fallback to an
-    /// untimed `reqwest::Client::new()` could hang a charge indefinitely inside
-    /// the processor's retry loop. See [`ProviderClient::new`].
+    /// is fallible so the timeouts are guaranteed: falling back to an untimed
+    /// `reqwest::Client::new()` could hang a charge indefinitely inside the
+    /// processor's retry loop, so a build failure is surfaced instead of
+    /// silently degrading to that fallback. See [`ProviderClient::new`].
     pub fn new(api_key: impl Into<String>) -> PaymentResult<Self> {
         let api_key = api_key.into();
         Ok(Self {
@@ -209,7 +210,7 @@ async fn stripe_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> PaymentResult<T> {
     let status = response.status();
-    let retry_after = retry_after_secs(&response);
+    let retry_after = retry_after_secs(response.headers()).and_then(|s| u32::try_from(s).ok());
     let body = response.text().await?;
     if !status.is_success() {
         return Err(stripe_error(status, &body, retry_after));
@@ -266,7 +267,7 @@ async fn stripe_unit_as(response: reqwest::Response, not_found: PaymentError) ->
 /// Check a Stripe response that carries no useful body.
 async fn stripe_unit(response: reqwest::Response) -> PaymentResult<()> {
     let status = response.status();
-    let retry_after = retry_after_secs(&response);
+    let retry_after = retry_after_secs(response.headers()).and_then(|s| u32::try_from(s).ok());
     if !status.is_success() {
         // A body that could not be read is not the same thing as an empty body:
         // `unwrap_or_default()` made a truncated response indistinguishable from
@@ -593,10 +594,10 @@ impl PaymentProvider for StripeProvider {
     /// List a customer's card payment methods, following Stripe's pagination.
     ///
     /// Stripe's list endpoints default to `limit: 10` and report `has_more`
-    /// alongside a cursor. The previous implementation issued one unpaginated
-    /// GET and read neither field, so a customer with 11 or more saved cards
-    /// silently lost every card past the tenth — a wallet UI would render an
-    /// incomplete list with no error to say so.
+    /// alongside a cursor. A customer can have far more than ten saved cards,
+    /// so an unpaginated GET that ignores both fields would silently lose
+    /// every card past the tenth — a wallet UI would render an incomplete
+    /// list with no error to say so.
     ///
     /// Pages are requested at Stripe's maximum `limit` of 100 and walked via
     /// `starting_after`, bounded by [`MAX_LIST_PAGES`] so a gateway that keeps

@@ -259,7 +259,7 @@ impl GcsStorage {
     fn map_list_page(
         &self,
         page: &google_cloud_storage::model::ListObjectsResponse,
-    ) -> (Vec<StorageMetadata>, Option<String>) {
+    ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
         // Hoisted out of the per-object loop: this was reallocated for every
         // object in the bucket.
         let strip = self
@@ -284,7 +284,7 @@ impl GcsStorage {
 
             let size = object.size as u64;
             let mut metadata =
-                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key)?);
 
             if !object.content_type.is_empty() {
                 metadata = metadata.with_content_type(&object.content_type);
@@ -301,16 +301,21 @@ impl GcsStorage {
 
         let next = Some(page.next_page_token.clone()).filter(|t| !t.is_empty());
 
-        (results, next)
+        Ok((results, next))
     }
 
     /// Get the public URL for a key.
-    pub fn public_url(&self, key: &str) -> String {
-        let full_key = self.full_key(key);
-        format!(
+    ///
+    /// `key` is validated (rejecting `..` traversal segments) and
+    /// percent-encoded before being interpolated into the URL, so it cannot
+    /// escape the intended path or inject a query, a fragment, or a header
+    /// break.
+    pub fn public_url(&self, key: &str) -> Result<String> {
+        let full_key = crate::storage::encode_key_for_url(&self.full_key(key))?;
+        Ok(format!(
             "https://storage.googleapis.com/{}/{}",
             self.config.bucket, full_key
-        )
+        ))
     }
 }
 
@@ -371,7 +376,7 @@ impl StorageTrait for GcsStorage {
         // Build metadata
         let mut metadata = StorageMetadata::new(key, size)
             .with_content_type(content_type)
-            .with_url(self.public_url(key));
+            .with_url(self.public_url(key)?);
 
         if let Some(checksum) = checksum {
             metadata = metadata.with_checksum(checksum);
@@ -438,7 +443,7 @@ impl StorageTrait for GcsStorage {
             .map_err(|e| map_object_error(e, key))?;
 
         let size = object.size as u64;
-        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key));
+        let mut metadata = StorageMetadata::new(key, size).with_url(self.public_url(key)?);
 
         if !object.content_type.is_empty() {
             metadata = metadata.with_content_type(&object.content_type);
@@ -520,7 +525,7 @@ impl StorageTrait for GcsStorage {
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        Ok(self.map_list_page(&page))
+        self.map_list_page(&page)
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata> {
@@ -543,7 +548,7 @@ impl StorageTrait for GcsStorage {
     }
 
     async fn url(&self, key: &str) -> Result<Option<String>> {
-        Ok(Some(self.public_url(key)))
+        Ok(Some(self.public_url(key)?))
     }
 
     fn default_url_duration(&self) -> Duration {
@@ -872,7 +877,9 @@ mod tests {
             ])
             .set_next_page_token("TOKEN-2");
 
-        let (results, next) = storage.map_list_page(&page);
+        let (results, next) = storage
+            .map_list_page(&page)
+            .expect("mapping a page of ordinary keys should succeed");
 
         assert_eq!(
             results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
@@ -902,7 +909,9 @@ mod tests {
             "",
         )]);
 
-        let (results, next) = storage.map_list_page(&page);
+        let (results, next) = storage
+            .map_list_page(&page)
+            .expect("mapping a page of ordinary keys should succeed");
 
         assert_eq!(
             results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
@@ -928,7 +937,9 @@ mod tests {
             .set_objects([object("only.txt", 3, "")])
             .set_next_page_token("");
 
-        let (results, next) = storage.map_list_page(&page);
+        let (results, next) = storage
+            .map_list_page(&page)
+            .expect("mapping a page of ordinary keys should succeed");
 
         assert_eq!(
             results.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
@@ -943,7 +954,7 @@ mod tests {
         // this ever came back as `Some("")`, `list` would never terminate and
         // never accumulate, so it would hang rather than fail.
         let empty = google_cloud_storage::model::ListObjectsResponse::new().set_next_page_token("");
-        assert_eq!(storage.map_list_page(&empty).1, None);
+        assert_eq!(storage.map_list_page(&empty).unwrap().1, None);
     }
 
     /// The `list()` draining loop itself must terminate when `list_page`
@@ -1014,6 +1025,58 @@ mod tests {
             1,
             "one page, one call -- a terminated listing must not be re-requested"
         );
+    }
+
+    /// `url`/`public_url` used to interpolate the raw key into the URL
+    /// string: a key of `../../admin` walked out of the intended path, and one
+    /// containing `?`, `#` or CRLF injected a query, a fragment, or a header
+    /// break.
+    #[tokio::test]
+    async fn url_rejects_traversal_and_percent_encodes_special_characters() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        let err = storage
+            .url("../../admin")
+            .await
+            .expect_err("a traversal key must be rejected");
+        assert!(
+            matches!(err, StorageError::InvalidFileName(_)),
+            "expected InvalidFileName, got {err:?}"
+        );
+
+        let url = storage
+            .url("report?admin=1#frag\r\nX-Injected: 1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !url.contains(['?', '#', '\r', '\n']),
+            "the raw special characters must not survive into the URL: {url}"
+        );
+        assert!(
+            url.ends_with("report%3Fadmin%3D1%23frag%0D%0AX-Injected%3A%201"),
+            "got: {url}"
+        );
+    }
+
+    /// The same protection applies to keys surfaced through listing, which
+    /// route through the same `public_url` as `url`/`put`/`head`.
+    #[tokio::test]
+    async fn map_list_page_rejects_a_traversal_key() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        let page = google_cloud_storage::model::ListObjectsResponse::new().set_objects([object(
+            "../../admin",
+            3,
+            "text/plain",
+        )]);
+
+        let err = storage
+            .map_list_page(&page)
+            .expect_err("a listed key containing a traversal segment must be rejected");
+        assert!(matches!(err, StorageError::InvalidFileName(_)));
     }
 
     #[tokio::test]

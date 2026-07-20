@@ -161,6 +161,17 @@ pub trait Storage: Send + Sync {
     /// Prefer this over [`Self::list`] whenever `prefix` is derived from a
     /// request: a caller-controlled prefix over a large bucket is otherwise an
     /// unbounded allocation.
+    ///
+    /// # Ordering
+    ///
+    /// Entry order within and across pages is backend-specific: S3, GCS and
+    /// Azure each return their native byte-lexicographic-by-key order, while
+    /// the local filesystem backend walks the directory tree and can emit a
+    /// different order for key shapes where a directory and a file share a
+    /// lexical prefix (e.g. `a.txt` versus `a/b.txt`). Do not rely on a
+    /// specific cross-backend order -- only on the pagination contract itself
+    /// (every object reported exactly once across a full walk of pages),
+    /// which every backend upholds.
     async fn list_page(
         &self,
         prefix: Option<&str>,
@@ -297,6 +308,55 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect::<String>()
         .trim_start_matches('.')
         .to_string()
+}
+
+/// Percent-encode one path segment of an object key for inclusion in a URL.
+///
+/// Everything outside the RFC 3986 unreserved set is escaped, so a segment
+/// containing `?`, `#`, `%`, or a CR/LF cannot terminate the path and inject a
+/// query, a fragment, or a header break.
+///
+/// Used only by the cloud backends (the local backend has its own copy); dead
+/// code without at least one of them enabled.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(crate) fn encode_url_segment(segment: &str, out: &mut String) {
+    for byte in segment.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+}
+
+/// Validate and percent-encode a cloud object key for inclusion in a public
+/// URL.
+///
+/// Cloud keys are flat strings, not filesystem paths -- there is no root to
+/// walk out of -- but a `..` segment surviving unescaped into a URL can still
+/// be collapsed by an intermediary (a reverse proxy or CDN normalizing dot
+/// segments per RFC 3986 5.2.4) and end up addressing something outside the
+/// intended prefix, and an unescaped `?`/`#`/CR/LF can inject a query, a
+/// fragment, or a header break. This rejects the former outright and escapes
+/// the rest, shared by the S3/GCS/Azure backends so their `url`s and
+/// `public_url`s cannot disagree.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(crate) fn encode_key_for_url(key: &str) -> Result<String> {
+    if key.split('/').any(|segment| segment == "..") {
+        return Err(crate::StorageError::InvalidFileName(format!(
+            "key {key:?} must not contain path traversal components"
+        )));
+    }
+
+    let mut encoded = String::new();
+    for (i, segment) in key.split('/').enumerate() {
+        if i > 0 {
+            encoded.push('/');
+        }
+        encode_url_segment(segment, &mut encoded);
+    }
+    Ok(encoded)
 }
 
 #[cfg(test)]

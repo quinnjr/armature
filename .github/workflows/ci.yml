@@ -186,6 +186,11 @@ jobs:
           # `#[ignore = "requires Docker"]`, so the row is pointless without
           # --include-ignored: a plain `cargo test` would filter them out and
           # report a green pass having run no container at all.
+          #
+          # `extra` is only threaded into the --all-features "Run tests" step
+          # below, not the minimal-features step: the `containers` feature
+          # that gates every ignored test is off under `--no-default-features`,
+          # so `--include-ignored` would be a no-op there.
           - crate: armature-testkit
             minimal: "--no-default-features"
             extra: "-- --include-ignored"
@@ -226,12 +231,17 @@ jobs:
         run: cargo test -p ${{ matrix.crate }} --all-features --doc
       # Separate step so a minimal-feature failure is attributable rather than
       # buried in the --all-features run. Skipped for feature-less crates,
-      # where it would be a byte-for-byte re-run of the step above.
+      # where it would be a byte-for-byte re-run of the step above. Does not
+      # thread `matrix.extra` through: today only `armature-testkit` sets it,
+      # and `--include-ignored` would be a no-op there under
+      # `--no-default-features` (see that row's comment) — if a future row
+      # needs an extra flag applied to this step too, give it its own matrix
+      # key rather than reusing `extra`.
       - name: Run tests (minimal features)
         if: matrix.minimal != ''
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
-        run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose ${{ matrix.extra }}
+        run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
 
   # ============================================================================
   # TEST (armature-payments single-provider feature combinations)

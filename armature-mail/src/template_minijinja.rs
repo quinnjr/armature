@@ -247,4 +247,22 @@ mod tests {
             Err(MailError::TemplateNotFound(_))
         ));
     }
+
+    /// `environment_mut` must expose the real, live `minijinja::Environment` —
+    /// a filter registered through it must actually run when a template using
+    /// it is rendered, not just compile.
+    #[test]
+    fn environment_mut_allows_registering_a_custom_filter() {
+        let mut engine = MiniJinjaEngine::new();
+        engine
+            .environment_mut()
+            .add_filter("shout", |v: String| v.to_uppercase());
+        engine
+            .register_raw("greet/text", "{{ name|shout }}")
+            .unwrap();
+
+        let result = engine.render("greet", &json!({"name": "world"})).unwrap();
+
+        assert_eq!(result.text.as_deref(), Some("WORLD"));
+    }
 }

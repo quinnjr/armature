@@ -182,7 +182,20 @@ impl ApnsConfig {
 
 /// Reject a JWT-bearing endpoint that is neither https nor an opted-in
 /// loopback http URL.
-fn validate_endpoint(raw: &str, allow_insecure_loopback: bool) -> Result<()> {
+///
+/// This checks the *scheme* (plus, for loopback, the opt-in flag) only. It is
+/// **not** an SSRF guard: it does not resolve the host, and does not vet
+/// resolved addresses against internal/link-local ranges. `web_push`'s
+/// `validate_endpoint` is the function that does that fuller, DNS-rebinding-
+/// aware check; this one is named for exactly what it guarantees so the two
+/// are not mistaken for each other.
+///
+/// The gap is acceptable here: unlike a Web Push subscription endpoint, which
+/// is attacker-influenced input arriving on every send, the value checked
+/// here is `ApnsConfig::environment` — set once by the application developer
+/// at provider construction. `Custom` exists as a test seam for pointing at a
+/// local stub server, not a per-notification input from an untrusted party.
+fn require_https_or_loopback(raw: &str, allow_insecure_loopback: bool) -> Result<()> {
     let url = url::Url::parse(raw)
         .map_err(|e| PushError::Config(format!("invalid APNS endpoint URL: {e}")))?;
 
@@ -238,7 +251,7 @@ impl ApnsProvider {
         // understands without any negotiation — that broke interop with
         // plain HTTP/1.1 test servers and offered no benefit against the
         // real, TLS-only APNS hosts.
-        validate_endpoint(
+        require_https_or_loopback(
             config.environment.endpoint(),
             config.allow_insecure_loopback,
         )?;
@@ -246,11 +259,7 @@ impl ApnsProvider {
         // A connect timeout is new here: previously only an overall timeout was
         // set, so a TCP connect that hung (a black-holed route rather than a
         // refused connection) consumed the entire 30s budget before failing.
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .connect_timeout(config.connect_timeout)
-            .build()
-            .map_err(|e| PushError::Config(e.to_string()))?;
+        let client = crate::host_guard::build_push_client(config.timeout, config.connect_timeout)?;
 
         Ok(Self {
             config,
@@ -872,19 +881,19 @@ mod tests {
     #[test]
     fn custom_endpoint_must_be_https_or_opted_in_loopback() {
         assert!(
-            validate_endpoint("http://push.example.com", false).is_err(),
+            require_https_or_loopback("http://push.example.com", false).is_err(),
             "plain http to a public host must be refused"
         );
         assert!(
-            validate_endpoint("http://127.0.0.1:8080", false).is_err(),
+            require_https_or_loopback("http://127.0.0.1:8080", false).is_err(),
             "loopback http must be refused unless opted in"
         );
-        assert!(validate_endpoint("http://127.0.0.1:8080", true).is_ok());
+        assert!(require_https_or_loopback("http://127.0.0.1:8080", true).is_ok());
         assert!(
-            validate_endpoint("http://169.254.169.254", true).is_err(),
+            require_https_or_loopback("http://169.254.169.254", true).is_err(),
             "opt-in must not permit http to a non-loopback host"
         );
-        assert!(validate_endpoint("https://api.push.apple.com", false).is_ok());
+        assert!(require_https_or_loopback("https://api.push.apple.com", false).is_ok());
     }
 
     #[test]
