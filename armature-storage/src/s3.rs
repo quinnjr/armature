@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use aws_sdk_s3::{
     Client,
+    config::Region,
     primitives::ByteStream,
-    types::{ObjectCannedAcl, ServerSideEncryption},
+    types::{ObjectCannedAcl, ServerSideEncryption, StorageClass},
 };
 use bytes::Bytes;
 use std::time::Duration;
@@ -118,18 +119,35 @@ impl S3Storage {
     pub async fn new(config: S3Config) -> Result<Self> {
         let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 
-        let mut s3_config = aws_sdk_s3::config::Builder::from(&aws_config);
+        let s3_config = Self::build_client_config(&aws_config, &config);
+        let client = Client::from_conf(s3_config);
+
+        info!(bucket = %config.bucket, "Initialized S3 storage");
+
+        Ok(Self { client, config })
+    }
+
+    /// Build the `aws_sdk_s3::Config` for `config`, layered on top of an
+    /// ambient `SdkConfig` (from the default provider chain, or an
+    /// explicitly-constructed one in tests). Applies the configured region
+    /// and custom endpoint, both of which are otherwise silently ignored by
+    /// the SDK.
+    fn build_client_config(
+        aws_config: &aws_config::SdkConfig,
+        config: &S3Config,
+    ) -> aws_sdk_s3::Config {
+        let mut s3_config = aws_sdk_s3::config::Builder::from(aws_config);
+
+        if let Some(region) = &config.region {
+            s3_config = s3_config.region(Region::new(region.clone()));
+        }
 
         if let Some(endpoint) = &config.endpoint {
             s3_config = s3_config.endpoint_url(endpoint);
             s3_config = s3_config.force_path_style(true);
         }
 
-        let client = Client::from_conf(s3_config.build());
-
-        info!(bucket = %config.bucket, "Initialized S3 storage");
-
-        Ok(Self { client, config })
+        s3_config.build()
     }
 
     /// Create from an existing AWS SDK client.
@@ -155,6 +173,14 @@ impl S3Storage {
                 .map(String::from)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         }
+    }
+
+    /// Get a temporary/presigned URL using the configured
+    /// [`S3Config::presigned_url_duration`] as the expiration when the caller
+    /// doesn't need to override it.
+    pub async fn temporary_url_default(&self, key: &str) -> Result<Option<String>> {
+        let duration = self.config.presigned_url_duration;
+        Storage::temporary_url(self, key, duration).await
     }
 
     /// Get the public URL for a key (if bucket is public).
@@ -227,6 +253,11 @@ impl Storage for S3Storage {
         if let Some(encryption) = &self.config.server_side_encryption {
             request =
                 request.server_side_encryption(ServerSideEncryption::from(encryption.as_str()));
+        }
+
+        // Set storage class if configured
+        if let Some(storage_class) = &self.config.storage_class {
+            request = request.storage_class(StorageClass::from(storage_class.as_str()));
         }
 
         // Execute upload
@@ -437,5 +468,124 @@ impl Storage for S3Storage {
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
         Ok(Some(presigned.uri().to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use armature_testkit::http_stub::{StubResponse, StubServer};
+    use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
+
+    /// `S3Config::region` was documented but never applied to the client in
+    /// `new()` (it was only used for `public_url` string formatting), so the
+    /// SDK silently talked to the ambient region while URLs claimed a
+    /// different one. Regression test for `S3Storage::build_client_config`,
+    /// the helper `new()` now uses.
+    #[test]
+    fn region_is_applied_to_built_client_config() {
+        let ambient = aws_config::SdkConfig::builder().build();
+        let config = S3Config::new("test-bucket").region("eu-west-3");
+
+        let built = S3Storage::build_client_config(&ambient, &config);
+
+        assert_eq!(built.region().map(|r| r.as_ref()), Some("eu-west-3"));
+    }
+
+    /// A stub S3-compatible server, wired up with a client built the same
+    /// way `S3Storage::new` builds one (region + endpoint override applied),
+    /// so we can assert on the real signed request that goes out.
+    async fn stub_s3_storage(server: &StubServer, config: S3Config) -> S3Storage {
+        let ambient = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(SharedCredentialsProvider::new(Credentials::for_tests()))
+            .build();
+        let config = config.endpoint(server.url());
+        let s3_config = S3Storage::build_client_config(&ambient, &config);
+        let client = Client::from_conf(s3_config);
+        S3Storage::from_client(client, config)
+    }
+
+    #[tokio::test]
+    async fn region_is_reflected_in_the_signed_request() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("sa-east-1")).await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("put should succeed against the stub server");
+
+        let rec = server.assert_received("PUT", "/test-bucket/key.txt");
+        let auth = rec
+            .header("authorization")
+            .expect("SigV4 request must carry an Authorization header");
+        assert!(
+            auth.contains("sa-east-1/s3/aws4_request"),
+            "expected the configured region in the SigV4 credential scope, got: {auth}"
+        );
+    }
+
+    /// `S3Config::storage_class` was documented but never read by
+    /// `put_with_content_type`, so objects always used the bucket default.
+    #[tokio::test]
+    async fn storage_class_is_sent_on_put() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+        let mut config = storage.config.clone();
+        config.storage_class = Some("GLACIER".to_string());
+        let storage = S3Storage::from_client(storage.client, config);
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("put should succeed against the stub server");
+
+        let rec = server.assert_received("PUT", "/test-bucket/key.txt");
+        assert_eq!(rec.header("x-amz-storage-class"), Some("GLACIER"));
+    }
+
+    /// `S3Config::presigned_url_duration` was documented as the default
+    /// presigned-URL lifetime but was read nowhere; `temporary_url` only
+    /// ever used the caller-supplied `expires_in`. `temporary_url_default`
+    /// wires the configured duration in as the default.
+    #[tokio::test]
+    async fn temporary_url_default_uses_configured_duration() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage = stub_s3_storage(
+            &server,
+            S3Config::new("test-bucket")
+                .region("us-east-1")
+                .presigned_duration(Duration::from_secs(120)),
+        )
+        .await;
+
+        let url = storage
+            .temporary_url_default("key.txt")
+            .await
+            .unwrap()
+            .expect("presigned url should be produced");
+
+        assert!(
+            url.contains("X-Amz-Expires=120"),
+            "expected the configured 120s duration in the presigned URL, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_without_storage_class_omits_the_header() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("put should succeed against the stub server");
+
+        let rec = server.assert_received("PUT", "/test-bucket/key.txt");
+        assert_eq!(rec.header("x-amz-storage-class"), None);
     }
 }

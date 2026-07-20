@@ -483,7 +483,38 @@ impl Storage for AzureBlobStorage {
     async fn temporary_url(&self, _key: &str, _expires_in: Duration) -> Result<Option<String>> {
         // Azure SAS token generation requires an account key or a user-delegation
         // key. The new azure_storage_blob 1.0 SDK does not yet expose SAS
-        // generation, so we return the (non-signed) public URL.
-        Ok(Some(self.public_url(_key)))
+        // generation. Returning the plain public URL here would be misleading
+        // (it grants no access to a private container and never expires), so
+        // report this as unsupported per the `Storage::temporary_url` contract
+        // until real SAS signing is implemented.
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `temporary_url` used to return `Some(public_url)` regardless of
+    /// `expires_in`, which is a permanent, unsigned URL masquerading as a
+    /// temporary/signed one -- misleading for a private container and never
+    /// expiring. It must report "unsupported" (`None`) per the
+    /// `Storage::temporary_url` contract until real SAS signing exists.
+    #[tokio::test]
+    async fn temporary_url_reports_unsupported() {
+        let storage =
+            AzureBlobStorage::new(AzureBlobConfig::new("account", "container").emulator())
+                .await
+                .expect("emulator config should build without network access");
+
+        let result = storage
+            .temporary_url("key.txt", Duration::from_secs(60))
+            .await
+            .expect("temporary_url should not error");
+
+        assert!(
+            result.is_none(),
+            "expected None (unsupported) for Azure temporary_url, got {result:?}"
+        );
     }
 }

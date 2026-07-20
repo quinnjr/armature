@@ -177,6 +177,21 @@ impl EmailQueueConfig {
         self
     }
 
+    /// Set the maximum retry delay.
+    pub fn max_retry_delay(mut self, delay: Duration) -> Self {
+        self.max_retry_delay = delay;
+        self
+    }
+
+    /// Set the per-job send timeout.
+    ///
+    /// A send that exceeds this is abandoned and treated as a retryable failure,
+    /// so a hung transport cannot occupy a worker slot indefinitely.
+    pub fn job_timeout(mut self, timeout: Duration) -> Self {
+        self.job_timeout = timeout;
+        self
+    }
+
     /// Enable/disable dead letter queue.
     pub fn dead_letter_queue(mut self, enabled: bool) -> Self {
         self.dead_letter_queue = enabled;
@@ -189,6 +204,18 @@ impl EmailQueueConfig {
 pub trait EmailQueueBackend: Send + Sync {
     /// Push a job to the queue.
     async fn push(&self, job: EmailJob) -> Result<()>;
+
+    /// Push several jobs at once.
+    ///
+    /// The default implementation pushes them one at a time; backends that can
+    /// batch (e.g. Redis pipelining) should override this to avoid paying the
+    /// per-job round-trip cost N times.
+    async fn push_batch(&self, jobs: Vec<EmailJob>) -> Result<()> {
+        for job in jobs {
+            self.push(job).await?;
+        }
+        Ok(())
+    }
 
     /// Pop jobs from the queue.
     async fn pop(&self, count: usize) -> Result<Vec<EmailJob>>;
@@ -386,6 +413,38 @@ impl EmailQueueBackend for RedisBackend {
         Ok(())
     }
 
+    /// Enqueue every job in one pipelined round-trip (one connection acquire,
+    /// one SET+ZADD batch) instead of N sequential `push` calls.
+    async fn push_batch(&self, jobs: Vec<EmailJob>) -> Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self
+            .redis
+            .get()
+            .await
+            .map_err(|e| MailError::Queue(e.to_string()))?;
+
+        let mut pipe = redis::pipe();
+        for job in &jobs {
+            let job_json = serde_json::to_string(job)?;
+            let score = job.priority as f64 * 1_000_000_000.0 + job.created_at as f64;
+            pipe.cmd("SET").arg(self.job_key(&job.id)).arg(job_json);
+            pipe.cmd("ZADD")
+                .arg(self.pending_key())
+                .arg(score)
+                .arg(&job.id);
+        }
+
+        pipe.query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| MailError::Queue(e.to_string()))?;
+
+        debug!(count = jobs.len(), "Email jobs enqueued (pipelined)");
+        Ok(())
+    }
+
     async fn pop(&self, count: usize) -> Result<Vec<EmailJob>> {
         let mut conn = self
             .redis
@@ -424,20 +483,27 @@ impl EmailQueueBackend for RedisBackend {
                 .map_err(|e| MailError::Queue(e.to_string()))?;
         }
 
-        let mut jobs = Vec::new();
+        let ids: Vec<String> = job_ids.into_iter().chain(retry_ids).collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        for id in job_ids.into_iter().chain(retry_ids.into_iter()) {
-            let job_json: Option<String> = redis::cmd("GET")
-                .arg(self.job_key(&id))
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| MailError::Queue(e.to_string()))?;
+        // Fetch every job body in a single MGET rather than one GET per id: this
+        // runs on the worker's hot path, and N round-trips per poll dominates the
+        // poll cost once batch_size grows.
+        let keys: Vec<String> = ids.iter().map(|id| self.job_key(id)).collect();
+        let payloads: Vec<Option<String>> = redis::cmd("MGET")
+            .arg(&keys)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| MailError::Queue(e.to_string()))?;
 
-            if let Some(json) = job_json {
-                match serde_json::from_str(&json) {
-                    Ok(job) => jobs.push(job),
-                    Err(e) => error!(job_id = %id, error = %e, "Failed to deserialize job"),
-                }
+        let mut jobs = Vec::with_capacity(ids.len());
+        for (id, payload) in ids.iter().zip(payloads) {
+            let Some(json) = payload else { continue };
+            match serde_json::from_str(&json) {
+                Ok(job) => jobs.push(job),
+                Err(e) => error!(job_id = %id, error = %e, "Failed to deserialize job"),
             }
         }
 
@@ -628,12 +694,13 @@ impl EmailQueue {
     }
 
     /// Enqueue multiple emails.
+    ///
+    /// Dispatches through [`EmailQueueBackend::push_batch`], so backends that can
+    /// pipeline (Redis) pay one round-trip rather than one per email.
     pub async fn enqueue_batch(&self, emails: Vec<Email>) -> Result<Vec<String>> {
-        let mut job_ids = Vec::with_capacity(emails.len());
-        for email in emails {
-            let id = self.enqueue(email).await?;
-            job_ids.push(id);
-        }
+        let jobs: Vec<EmailJob> = emails.into_iter().map(EmailJob::new).collect();
+        let job_ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
+        self.backend.push_batch(jobs).await?;
         Ok(job_ids)
     }
 
@@ -739,7 +806,28 @@ impl EmailQueueWorker {
         while let Ok(mut job) = rx.recv().await {
             debug!(worker = worker_id, job_id = %job.id, "Processing email job");
 
-            match mailer.send(job.email.clone()).await {
+            // Bound every send by `job_timeout`: without this a transport that
+            // hangs (dead SMTP socket, provider that never responds) holds this
+            // worker slot forever. An elapsed timeout is a retryable failure.
+            let outcome = match tokio::time::timeout(
+                config.job_timeout,
+                mailer.send(job.email.clone()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        worker = worker_id,
+                        job_id = %job.id,
+                        timeout = ?config.job_timeout,
+                        "Email job timed out"
+                    );
+                    Err(MailError::Timeout)
+                }
+            };
+
+            match outcome {
                 Ok(()) => {
                     if let Err(e) = queue.complete(&job.id).await {
                         error!(job_id = %job.id, error = %e, "Failed to mark job complete");
@@ -777,7 +865,12 @@ impl EmailQueueWorker {
 
 /// Extension trait for Mailer to add queue support.
 pub trait MailerQueueExt {
-    /// Create an email queue using this mailer's transport.
+    /// Create an in-memory email queue.
+    ///
+    /// The queue itself is transport-agnostic — the transport is bound later,
+    /// when a worker is created with [`EmailQueue::worker`], not by this call.
+    /// The mailer is therefore not consulted here; this method exists purely as
+    /// a discoverable entry point from a `Mailer`.
     fn queue(&self, config: EmailQueueConfig) -> EmailQueue;
 
     /// Create a Redis-backed email queue.

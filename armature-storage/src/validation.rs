@@ -233,15 +233,21 @@ struct AllowedTypesRule(HashSet<String>);
 
 impl ValidationRule for AllowedTypesRule {
     fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
-        if let Some(mime) = file.content_type() {
-            let mime_str = mime.to_string();
-            if !self.0.contains(&mime_str) && !self.0.contains(&format!("{}/*", mime.type_())) {
-                return Err(ValidationError::TypeNotAllowed {
-                    mime_type: mime_str,
-                });
+        match file.content_type() {
+            Some(mime) => {
+                let mime_str = mime.to_string();
+                if !self.0.contains(&mime_str) && !self.0.contains(&format!("{}/*", mime.type_())) {
+                    return Err(ValidationError::TypeNotAllowed {
+                        mime_type: mime_str,
+                    });
+                }
+                Ok(())
             }
+            // No detected content type: fail closed when an allowlist is configured.
+            None => Err(ValidationError::TypeNotAllowed {
+                mime_type: "unknown".to_string(),
+            }),
         }
-        Ok(())
     }
 
     fn description(&self) -> &str {
@@ -253,15 +259,21 @@ struct AllowedExtensionsRule(HashSet<String>);
 
 impl ValidationRule for AllowedExtensionsRule {
     fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
-        if let Some(ext) = file.extension() {
-            let ext_lower = ext.to_lowercase();
-            if !self.0.contains(&ext_lower) {
-                return Err(ValidationError::ExtensionNotAllowed {
-                    extension: ext.to_string(),
-                });
+        match file.extension() {
+            Some(ext) => {
+                let ext_lower = ext.to_lowercase();
+                if !self.0.contains(&ext_lower) {
+                    return Err(ValidationError::ExtensionNotAllowed {
+                        extension: ext.to_string(),
+                    });
+                }
+                Ok(())
             }
+            // No extension: fail closed when an allowlist is configured.
+            None => Err(ValidationError::ExtensionNotAllowed {
+                extension: "(none)".to_string(),
+            }),
         }
-        Ok(())
     }
 
     fn description(&self) -> &str {
@@ -363,5 +375,45 @@ mod tests {
 
         let jpeg_file = UploadedFile::from_bytes(Bytes::from("data"), "test.jpg");
         assert!(validator.validate(&jpeg_file).is_ok());
+    }
+
+    /// An allowlist that only checks *present* MIME types let untyped
+    /// uploads through unconditionally. It must fail closed instead: no
+    /// detected content type + a configured allowlist => reject.
+    #[test]
+    fn allowed_types_rejects_untyped_files() {
+        let validator = FileValidator::new().allowed_types(&["image/jpeg", "image/png"]);
+
+        // No file name at all => no MIME type can be inferred.
+        let untyped_file = UploadedFile::new(Bytes::from("data"));
+        assert!(untyped_file.content_type().is_none());
+
+        let err = validator
+            .validate(&untyped_file)
+            .expect_err("untyped file must be rejected when an allowlist is configured");
+        assert!(matches!(err, ValidationError::TypeNotAllowed { .. }));
+    }
+
+    /// Same fail-closed requirement for extensions: a file with no extension
+    /// must be rejected when an extension allowlist is configured.
+    #[test]
+    fn allowed_extensions_rejects_extensionless_files() {
+        let validator = FileValidator::new().allowed_extensions(&["jpg", "png"]);
+
+        let mut extensionless_file = UploadedFile::new(Bytes::from("data"));
+        extensionless_file.info.name = Some("no-extension-here".to_string());
+        assert!(extensionless_file.extension().is_none());
+
+        let err = validator
+            .validate(&extensionless_file)
+            .expect_err("extensionless file must be rejected when an allowlist is configured");
+        assert!(matches!(err, ValidationError::ExtensionNotAllowed { .. }));
+    }
+
+    #[test]
+    fn allowed_extensions_still_accepts_matching_extension() {
+        let validator = FileValidator::new().allowed_extensions(&["jpg", "png"]);
+        let file = UploadedFile::from_bytes(Bytes::from("data"), "photo.jpg");
+        assert!(validator.validate(&file).is_ok());
     }
 }

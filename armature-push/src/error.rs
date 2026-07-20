@@ -122,10 +122,14 @@ impl From<web_push::WebPushError> for PushError {
         } else if err_string.contains("rate") || err_string.contains("429") {
             Self::RateLimited(60)
         } else if err_string.contains("payload") || err_string.contains("too large") {
-            Self::PayloadTooLarge {
-                size: 0,
-                limit: crate::web_push::WEB_PUSH_MAX_PAYLOAD,
-            }
+            // `web_push::WebPushError` doesn't carry the offending payload's
+            // size, so we can't report a real number here (the reqwest-based
+            // send path in `web_push.rs` does have the real size and uses it
+            // directly rather than going through this `From` impl). Report
+            // via `Provider` instead of fabricating a `PayloadTooLarge { size:
+            // 0, .. }`, which would read as "0 bytes exceeds the limit" — a
+            // contradiction in the error message itself.
+            Self::Provider(err_string)
         } else {
             Self::Provider(err_string)
         }

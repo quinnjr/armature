@@ -10,13 +10,15 @@ use tracing::debug;
 use crate::{Notification, Platform, Priority, PushError, PushProvider, Result};
 
 /// APNS environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ApnsEnvironment {
     /// Development/sandbox environment.
     Development,
     /// Production environment.
     #[default]
     Production,
+    /// A custom base URL, e.g. an in-process stub server for tests.
+    Custom(String),
 }
 
 impl ApnsEnvironment {
@@ -24,6 +26,7 @@ impl ApnsEnvironment {
         match self {
             Self::Development => "https://api.sandbox.push.apple.com",
             Self::Production => "https://api.push.apple.com",
+            Self::Custom(url) => url,
         }
     }
 }
@@ -103,8 +106,13 @@ struct AccessToken {
 impl ApnsProvider {
     /// Create a new APNS provider.
     pub async fn new(config: ApnsConfig) -> Result<Self> {
+        // Apple's real APNS endpoints are HTTPS and negotiate HTTP/2 via ALPN,
+        // so we don't need (and previously shouldn't have forced) HTTP/2
+        // prior knowledge, which assumes a cleartext h2 preface the peer
+        // understands without any negotiation — that broke interop with
+        // plain HTTP/1.1 test servers and offered no benefit against the
+        // real, TLS-only APNS hosts.
         let client = Client::builder()
-            .http2_prior_knowledge()
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| PushError::Config(e.to_string()))?;
@@ -232,7 +240,13 @@ impl PushProvider for ApnsProvider {
             .client
             .post(&url)
             .header("authorization", format!("bearer {}", jwt))
-            .header("apns-topic", &self.config.bundle_id)
+            .header(
+                "apns-topic",
+                notification
+                    .topic
+                    .as_deref()
+                    .unwrap_or(&self.config.bundle_id),
+            )
             .header(
                 "apns-push-type",
                 if notification.silent {

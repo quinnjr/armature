@@ -98,6 +98,20 @@ impl From<serde_json::Error> for PaymentError {
     }
 }
 
+impl PaymentError {
+    /// Whether retrying the same operation could plausibly succeed.
+    ///
+    /// Only transport-level and throttling failures are retryable; a declined
+    /// card, a validation failure, or an authentication error will fail
+    /// identically on every attempt and must surface immediately.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            PaymentError::Network(_) | PaymentError::RateLimited(_)
+        )
+    }
+}
+
 /// Result type for payment operations
 pub type PaymentResult<T> = Result<T, PaymentError>;
 

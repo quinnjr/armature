@@ -195,6 +195,12 @@ pub mod prelude {
     #[cfg(feature = "handlebars")]
     pub use crate::HandlebarsEngine;
 
+    #[cfg(feature = "tera")]
+    pub use crate::TeraEngine;
+
+    #[cfg(feature = "minijinja")]
+    pub use crate::MiniJinjaEngine;
+
     #[cfg(feature = "sendgrid")]
     pub use crate::sendgrid::{SendGridConfig, SendGridTransport};
 

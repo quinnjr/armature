@@ -89,7 +89,7 @@ mod azure;
 pub use error::{Result, StorageError};
 pub use file::{FileInfo, UploadedFile};
 pub use local::{LocalStorage, LocalStorageConfig};
-pub use multipart::{Multipart, MultipartField, MultipartStream};
+pub use multipart::{Multipart, MultipartConstraints, MultipartField, MultipartStream};
 pub use storage::{
     Storage, StorageConfig, StorageMetadata, calculate_checksum, generate_unique_key,
     sanitize_filename,
@@ -118,7 +118,7 @@ pub mod prelude {
     pub use crate::error::{Result, StorageError};
     pub use crate::file::{FileInfo, UploadedFile};
     pub use crate::local::{LocalStorage, LocalStorageConfig};
-    pub use crate::multipart::{Multipart, MultipartField, MultipartStream};
+    pub use crate::multipart::{Multipart, MultipartConstraints, MultipartField, MultipartStream};
     pub use crate::storage::{Storage, StorageConfig, StorageMetadata};
     pub use crate::validation::{FileValidator, ValidationError, ValidationRule};
 

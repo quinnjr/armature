@@ -143,10 +143,20 @@ struct TextOp {
     font_size: f32,
 }
 
+/// A straight line (used for e.g. horizontal rules) to draw on a page.
+#[derive(Debug, Clone, Copy)]
+struct LineOp {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
 /// Page content
 #[derive(Debug, Clone, Default)]
 struct PageContent {
     texts: Vec<TextOp>,
+    lines: Vec<LineOp>,
 }
 
 /// PDF document builder
@@ -252,15 +262,44 @@ impl PdfBuilder {
         self.add_page()
     }
 
+    /// Estimate rendered text width in points (approximate, monospace-ish
+    /// heuristic consistent with the word-wrapping in `add_text_styled`).
+    fn estimate_text_width(text: &str, font_size: f32) -> f32 {
+        text.len() as f32 * font_size * 0.6
+    }
+
+    /// Compute the x position for a line of `text` at `font_size` given
+    /// `align`, clamped to not go left of the margin.
+    fn aligned_x(&self, text: &str, font_size: f32, align: TextAlign) -> f32 {
+        let content_width = self.content_width();
+        match align {
+            TextAlign::Left => self.margins.left,
+            TextAlign::Center => {
+                let text_width = Self::estimate_text_width(text, font_size);
+                self.margins.left + ((content_width - text_width) / 2.0).max(0.0)
+            }
+            TextAlign::Right => {
+                let text_width = Self::estimate_text_width(text, font_size);
+                self.margins.left + (content_width - text_width).max(0.0)
+            }
+        }
+    }
+
     /// Add a heading
-    pub fn add_heading(mut self, text: &str, size: FontSize) -> Self {
+    pub fn add_heading(self, text: &str, size: FontSize) -> Self {
+        self.add_heading_aligned(text, size, TextAlign::Left)
+    }
+
+    /// Add a heading with explicit text alignment
+    pub fn add_heading_aligned(mut self, text: &str, size: FontSize, align: TextAlign) -> Self {
         let line_height = size.line_height();
         self.ensure_space(line_height);
 
+        let x = self.aligned_x(text, size.points(), align);
         if let Some(page) = self.pages.last_mut() {
             page.texts.push(TextOp {
                 text: text.to_string(),
-                x: self.margins.left,
+                x,
                 y: self.cursor_y,
                 font_size: size.points(),
             });
@@ -276,7 +315,12 @@ impl PdfBuilder {
     }
 
     /// Add text with custom font size
-    pub fn add_text_styled(mut self, text: &str, size: FontSize) -> Self {
+    pub fn add_text_styled(self, text: &str, size: FontSize) -> Self {
+        self.add_text_aligned(text, size, TextAlign::Left)
+    }
+
+    /// Add text with custom font size and explicit alignment
+    pub fn add_text_aligned(mut self, text: &str, size: FontSize, align: TextAlign) -> Self {
         let line_height = size.line_height();
 
         // Simple word wrapping (approximate)
@@ -295,10 +339,11 @@ impl PdfBuilder {
 
                 if test_line.len() > chars_per_line && !current_line.is_empty() {
                     self.ensure_space(line_height);
+                    let x = self.aligned_x(&current_line, size.points(), align);
                     if let Some(page) = self.pages.last_mut() {
                         page.texts.push(TextOp {
                             text: current_line.clone(),
-                            x: self.margins.left,
+                            x,
                             y: self.cursor_y,
                             font_size: size.points(),
                         });
@@ -313,10 +358,11 @@ impl PdfBuilder {
             // Write remaining text
             if !current_line.is_empty() {
                 self.ensure_space(line_height);
+                let x = self.aligned_x(&current_line, size.points(), align);
                 if let Some(page) = self.pages.last_mut() {
                     page.texts.push(TextOp {
                         text: current_line,
-                        x: self.margins.left,
+                        x,
                         y: self.cursor_y,
                         font_size: size.points(),
                     });
@@ -334,11 +380,22 @@ impl PdfBuilder {
         self
     }
 
-    /// Add a horizontal line
+    /// Add a horizontal line (a real stroked line across the content width)
     pub fn add_horizontal_line(mut self) -> Self {
         self.ensure_space(10.0);
-        // Lines are not directly supported in this simplified version
-        // We'll skip the line but add space
+
+        let y = self.cursor_y;
+        let x1 = self.margins.left;
+        let x2 = x1 + self.content_width();
+        if let Some(page) = self.pages.last_mut() {
+            page.lines.push(LineOp {
+                x1,
+                y1: y,
+                x2,
+                y2: y,
+            });
+        }
+
         self.cursor_y -= 10.0;
         self
     }
@@ -404,6 +461,16 @@ impl PdfBuilder {
 
             // Build content stream
             let mut content = String::new();
+
+            // Path-painting operators (e.g. horizontal rules) must live
+            // outside the BT/ET text object.
+            for line_op in &page_content.lines {
+                content.push_str("1 w\n"); // 1pt line width
+                content.push_str(&format!("{} {} m\n", line_op.x1, line_op.y1));
+                content.push_str(&format!("{} {} l\n", line_op.x2, line_op.y2));
+                content.push_str("S\n"); // stroke
+            }
+
             content.push_str("BT\n"); // Begin text
             content.push_str("/F1 12 Tf\n"); // Default font
 

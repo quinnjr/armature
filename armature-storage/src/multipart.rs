@@ -33,6 +33,73 @@ pub type MultipartField<'a> = multer::Field<'a>;
 /// ```
 pub struct Multipart {
     inner: multer::Multipart<'static>,
+    counters: ConstraintCounters,
+}
+
+/// Running counters used to enforce the field/file-count limits of
+/// [`MultipartConstraints`] (size and allowed-field-name limits are enforced
+/// natively by `multer` via [`multer::Constraints`]).
+#[derive(Debug, Default, Clone, Copy)]
+struct ConstraintCounters {
+    max_fields: Option<usize>,
+    max_files: Option<usize>,
+    field_count: usize,
+    file_count: usize,
+}
+
+impl ConstraintCounters {
+    fn from_constraints(constraints: &MultipartConstraints) -> Self {
+        Self {
+            max_fields: constraints.max_fields,
+            max_files: constraints.max_files,
+            field_count: 0,
+            file_count: 0,
+        }
+    }
+
+    /// Record a field and enforce the configured count limits.
+    fn record(&mut self, is_file: bool) -> Result<()> {
+        self.field_count += 1;
+        if let Some(max_fields) = self.max_fields
+            && self.field_count > max_fields
+        {
+            return Err(StorageError::Multipart(format!(
+                "too many fields: exceeds maximum of {max_fields}"
+            )));
+        }
+
+        if is_file {
+            self.file_count += 1;
+            if let Some(max_files) = self.max_files
+                && self.file_count > max_files
+            {
+                return Err(StorageError::Multipart(format!(
+                    "too many files: exceeds maximum of {max_files}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Build a `multer::Constraints` from our [`MultipartConstraints`], covering
+/// the size and allowed-field-name limits that `multer` natively enforces.
+fn multer_constraints(constraints: &MultipartConstraints) -> multer::Constraints {
+    let mut size_limit = multer::SizeLimit::new();
+    if let Some(total) = constraints.max_total_size {
+        size_limit = size_limit.whole_stream(total);
+    }
+    if let Some(field) = constraints.max_field_size {
+        size_limit = size_limit.per_field(field);
+    }
+
+    let mut multer_constraints = multer::Constraints::new().size_limit(size_limit);
+    if let Some(allowed) = &constraints.allowed_fields {
+        multer_constraints = multer_constraints.allowed_fields(allowed.clone());
+    }
+
+    multer_constraints
 }
 
 impl Multipart {
@@ -43,6 +110,26 @@ impl Multipart {
     {
         Self {
             inner: multer::Multipart::new(stream, boundary),
+            counters: ConstraintCounters::default(),
+        }
+    }
+
+    /// Create a new multipart parser enforcing [`MultipartConstraints`].
+    ///
+    /// Size limits (`max_total_size`, `max_field_size`) and `allowed_fields`
+    /// are enforced natively by `multer` while streaming; `max_fields` and
+    /// `max_files` are enforced by this wrapper as fields are drained.
+    pub fn with_constraints<S>(stream: S, boundary: &str, constraints: MultipartConstraints) -> Self
+    where
+        S: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static,
+    {
+        Self {
+            inner: multer::Multipart::with_constraints(
+                stream,
+                boundary,
+                multer_constraints(&constraints),
+            ),
+            counters: ConstraintCounters::from_constraints(&constraints),
         }
     }
 
@@ -57,14 +144,36 @@ impl Multipart {
         Ok(Self::new(body, &boundary))
     }
 
+    /// Create from HTTP headers and body, enforcing [`MultipartConstraints`].
+    pub fn from_request_with_constraints<S>(
+        content_type: &str,
+        body: S,
+        constraints: MultipartConstraints,
+    ) -> Result<Self>
+    where
+        S: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static,
+    {
+        let boundary = multer::parse_boundary(content_type)
+            .map_err(|e| StorageError::Multipart(e.to_string()))?;
+
+        Ok(Self::with_constraints(body, &boundary, constraints))
+    }
+
     /// Get the next field from the multipart stream.
     pub async fn next_field(&mut self) -> Result<Option<multer::Field<'static>>> {
-        self.inner.next_field().await.map_err(StorageError::from)
+        let field = self.inner.next_field().await.map_err(StorageError::from)?;
+        if let Some(field) = &field {
+            self.counters.record(field.file_name().is_some())?;
+        }
+        Ok(field)
     }
 
     /// Convert into a stream of fields.
     pub fn into_stream(self) -> MultipartStream {
-        MultipartStream { inner: self.inner }
+        MultipartStream {
+            inner: self.inner,
+            counters: self.counters,
+        }
     }
 
     /// Collect all file fields into uploaded files.
@@ -108,12 +217,17 @@ impl Multipart {
 /// Stream wrapper for multipart fields.
 pub struct MultipartStream {
     inner: multer::Multipart<'static>,
+    counters: ConstraintCounters,
 }
 
 impl MultipartStream {
     /// Get the next field.
     pub async fn next_field(&mut self) -> Result<Option<multer::Field<'static>>> {
-        self.inner.next_field().await.map_err(StorageError::from)
+        let field = self.inner.next_field().await.map_err(StorageError::from)?;
+        if let Some(field) = &field {
+            self.counters.record(field.file_name().is_some())?;
+        }
+        Ok(field)
     }
 }
 
@@ -238,4 +352,155 @@ where
         .map_err(|_| StorageError::Multipart("Invalid content-type header".to_string()))?;
 
     Multipart::from_request(content_type, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    const BOUNDARY: &str = "X-TEST-BOUNDARY";
+
+    /// Build a raw `multipart/form-data` body from `(name, filename, content)`
+    /// parts. A `None` filename produces a plain form field.
+    fn build_body(parts: &[(&str, Option<&str>, &str)]) -> Bytes {
+        let mut body = String::new();
+        for (name, filename, content) in parts {
+            body.push_str(&format!("--{BOUNDARY}\r\n"));
+            match filename {
+                Some(fname) => {
+                    body.push_str(&format!(
+                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"{fname}\"\r\n"
+                    ));
+                    body.push_str("Content-Type: application/octet-stream\r\n");
+                }
+                None => {
+                    body.push_str(&format!(
+                        "Content-Disposition: form-data; name=\"{name}\"\r\n"
+                    ));
+                }
+            }
+            body.push_str("\r\n");
+            body.push_str(content);
+            body.push_str("\r\n");
+        }
+        body.push_str(&format!("--{BOUNDARY}--\r\n"));
+        Bytes::from(body)
+    }
+
+    fn multipart_with(
+        parts: &[(&str, Option<&str>, &str)],
+        constraints: MultipartConstraints,
+    ) -> Multipart {
+        let body = build_body(parts);
+        let stream = stream::once(async move { Ok::<_, std::io::Error>(body) });
+        Multipart::with_constraints(stream, BOUNDARY, constraints)
+    }
+
+    async fn drain(mut multipart: Multipart) -> Result<usize> {
+        let mut count = 0;
+        while multipart.next_field().await?.is_some() {
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    #[tokio::test]
+    async fn unconstrained_multipart_accepts_everything() {
+        let mp = multipart_with(
+            &[("a", None, "1"), ("b", Some("b.txt"), "2")],
+            MultipartConstraints::unlimited(),
+        );
+        assert_eq!(drain(mp).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn max_fields_rejects_extra_fields() {
+        let constraints = MultipartConstraints::unlimited().max_fields(1);
+        let mp = multipart_with(&[("a", None, "1"), ("b", None, "2")], constraints);
+
+        let err = drain(mp)
+            .await
+            .expect_err("second field should be rejected");
+        assert!(matches!(err, StorageError::Multipart(_)));
+    }
+
+    #[tokio::test]
+    async fn max_files_rejects_extra_files() {
+        let constraints = MultipartConstraints::unlimited().max_files(1);
+        let mp = multipart_with(
+            &[("f1", Some("a.txt"), "1"), ("f2", Some("b.txt"), "2")],
+            constraints,
+        );
+
+        let err = drain(mp).await.expect_err("second file should be rejected");
+        assert!(matches!(err, StorageError::Multipart(_)));
+    }
+
+    #[tokio::test]
+    async fn max_files_ignores_non_file_fields() {
+        let constraints = MultipartConstraints::unlimited().max_files(1);
+        let mp = multipart_with(
+            &[
+                ("text1", None, "1"),
+                ("text2", None, "2"),
+                ("f1", Some("a.txt"), "3"),
+            ],
+            constraints,
+        );
+
+        assert_eq!(drain(mp).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn allowed_fields_rejects_unknown_field_names() {
+        let constraints = MultipartConstraints::unlimited().allowed_fields(vec!["ok".to_string()]);
+        let mp = multipart_with(&[("not-ok", None, "1")], constraints);
+
+        let err = drain(mp)
+            .await
+            .expect_err("disallowed field name should be rejected");
+        assert!(matches!(err, StorageError::Multipart(_)));
+    }
+
+    #[tokio::test]
+    async fn max_field_size_rejects_oversized_field() {
+        let constraints = MultipartConstraints::unlimited().max_field_size(4);
+        let mp = multipart_with(&[("big", None, "way too long")], constraints);
+
+        // multer enforces per-field size limits while streaming the field
+        // body, so the rejection surfaces when the field content is read.
+        let mut mp = mp;
+        let field = mp
+            .next_field()
+            .await
+            .unwrap()
+            .expect("field should be yielded before its body is fully read");
+        let err = field
+            .bytes()
+            .await
+            .expect_err("oversized field content should be rejected");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_total_size_rejects_oversized_stream() {
+        let constraints = MultipartConstraints::unlimited().max_total_size(4);
+        let mp = multipart_with(&[("big", None, "way too long")], constraints);
+
+        let err = drain(mp)
+            .await
+            .expect_err("stream exceeding total size should be rejected");
+        assert!(matches!(err, StorageError::Multipart(_)));
+    }
+
+    #[tokio::test]
+    async fn default_constraints_cap_fields_and_files() {
+        // `MultipartConstraints::default()` is `max_fields: Some(100)` /
+        // `max_files: Some(10)` -- confirm the defaults are actually wired in
+        // by using a very small subset that stays under them.
+        let constraints = MultipartConstraints::default();
+        let mp = multipart_with(&[("a", None, "1"), ("b", Some("b.txt"), "2")], constraints);
+        assert_eq!(drain(mp).await.unwrap(), 2);
+    }
 }

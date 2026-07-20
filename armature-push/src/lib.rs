@@ -70,7 +70,7 @@ pub use subscription::{DeviceToken, Platform, Subscription};
 pub use web_push::{WebPushConfig, WebPushProvider, WebPushSubscription};
 
 #[cfg(feature = "fcm")]
-pub use fcm::{FcmConfig, FcmProvider};
+pub use fcm::{FcmConfig, FcmCredentials, FcmProvider};
 
 #[cfg(feature = "apns")]
 pub use apns::{ApnsConfig, ApnsEnvironment, ApnsProvider};
@@ -90,7 +90,7 @@ pub mod prelude {
     pub use crate::web_push::{WebPushConfig, WebPushProvider, WebPushSubscription};
 
     #[cfg(feature = "fcm")]
-    pub use crate::fcm::{FcmConfig, FcmProvider};
+    pub use crate::fcm::{FcmConfig, FcmCredentials, FcmProvider};
 
     #[cfg(feature = "apns")]
     pub use crate::apns::{ApnsConfig, ApnsEnvironment, ApnsProvider};

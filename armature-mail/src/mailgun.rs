@@ -120,6 +120,12 @@ impl Transport for MailgunTransport {
             form = form.text("h:Reply-To", reply_to.to_string());
         }
 
+        // Custom headers and the headers implied by `priority` are passed through
+        // Mailgun's `h:<name>` convention.
+        for (name, value) in email.wire_headers() {
+            form = form.text(format!("h:{}", name), value);
+        }
+
         // Add attachments
         for attachment in &email.attachments {
             let part = reqwest::multipart::Part::bytes(attachment.data.clone())

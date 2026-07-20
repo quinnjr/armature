@@ -16,7 +16,7 @@
 //!     .load("input.jpg")
 //!     .image(ImageOp::Resize { width: 800, height: 600 })
 //!     .image(ImageOp::Watermark { text: "© 2025".into(), position: Position::BottomRight })
-//!     .convert(OutputFormat::WebP { quality: 80 })
+//!     .convert(OutputFormat::WebP)
 //!     .save("output.webp")
 //!     .await?;
 //!
@@ -153,14 +153,24 @@ impl FileMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputFormat {
     // Image formats
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
     Png,
-    WebP { quality: u8 },
+    /// Lossless WebP (the `image` crate does not currently support lossy/
+    /// quality-controlled WebP encoding; see `encode_image_format`).
+    WebP,
     Gif,
     Bmp,
     Ico,
     Tiff,
-    Avif { quality: u8 },
+    /// AVIF output is not currently implemented; encoding always fails with
+    /// `FileError::UnsupportedFormat`. Kept as a variant for API stability
+    /// (e.g. round-tripping formats detected from input) but should not be
+    /// relied on for actual encoding.
+    Avif {
+        quality: u8,
+    },
 
     // Document formats
     Pdf,
@@ -178,7 +188,7 @@ impl OutputFormat {
         match self {
             Self::Jpeg { .. } => "jpg",
             Self::Png => "png",
-            Self::WebP { .. } => "webp",
+            Self::WebP => "webp",
             Self::Gif => "gif",
             Self::Bmp => "bmp",
             Self::Ico => "ico",
@@ -195,7 +205,7 @@ impl OutputFormat {
         match self {
             Self::Jpeg { .. } => "image/jpeg",
             Self::Png => "image/png",
-            Self::WebP { .. } => "image/webp",
+            Self::WebP => "image/webp",
             Self::Gif => "image/gif",
             Self::Bmp => "image/bmp",
             Self::Ico => "image/x-icon",

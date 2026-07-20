@@ -5,15 +5,21 @@ use crate::{
     money::{Currency, Money},
     provider::PaymentProvider,
     types::*,
-    webhook::{WebhookData, WebhookEvent, WebhookEventType},
+    webhook::{WebhookData, WebhookEvent, WebhookEventType, WebhookHeaders},
 };
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
+
+/// The field Braintree signs each webhook with. Braintree posts it as a form
+/// parameter alongside `bt_payload`; pass it under this name.
+pub const BRAINTREE_SIGNATURE_HEADER: &str = "bt_signature";
 
 /// Braintree provider
 pub struct BraintreeProvider {
@@ -21,6 +27,7 @@ pub struct BraintreeProvider {
     public_key: String,
     private_key: SecretString,
     sandbox: bool,
+    base_url_override: Option<String>,
     client: Client,
 }
 
@@ -36,6 +43,7 @@ impl BraintreeProvider {
             public_key: public_key.into(),
             private_key: SecretString::new(private_key.into().into()),
             sandbox: true,
+            base_url_override: None,
             client: Client::new(),
         }
     }
@@ -46,9 +54,23 @@ impl BraintreeProvider {
         self
     }
 
+    /// Point the client at an alternate API base URL (a mock or proxy).
+    ///
+    /// The merchant path segment is appended, matching the live gateway layout.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url_override = Some(base_url.into());
+        self
+    }
+
     /// Get API base URL
     fn base_url(&self) -> String {
-        if self.sandbox {
+        if let Some(url) = &self.base_url_override {
+            format!(
+                "{}/merchants/{}",
+                url.trim_end_matches('/'),
+                self.merchant_id
+            )
+        } else if self.sandbox {
             format!(
                 "https://api.sandbox.braintreegateway.com/merchants/{}",
                 self.merchant_id
@@ -145,12 +167,21 @@ impl PaymentProvider for BraintreeProvider {
         })
     }
 
-    async fn capture(&self, charge_id: &str, _amount: Option<Money>) -> PaymentResult<Charge> {
+    async fn capture(&self, charge_id: &str, amount: Option<Money>) -> PaymentResult<Charge> {
+        // Settling for less than the authorization requires sending the amount;
+        // without it Braintree settles the full authorized amount.
+        let body = BraintreeWrapper {
+            transaction: BraintreeSettlementRequest {
+                amount: amount.map(|a| format!("{:.2}", a.to_float())),
+            },
+        };
+
         let response = self
             .request(
                 reqwest::Method::PUT,
                 &format!("/transactions/{}/submit_for_settlement", charge_id),
             )
+            .json(&body)
             .send()
             .await?;
 
@@ -345,9 +376,23 @@ impl PaymentProvider for BraintreeProvider {
         &self,
         request: CreatePaymentMethodRequest,
     ) -> PaymentResult<PaymentMethod> {
+        // Braintree never accepts raw card data over the server API: the card
+        // must be tokenized client-side into a single-use nonce. The previous
+        // code discarded `request.card` and posted the literal sandbox nonce
+        // `"fake-valid-nonce"`, which either vaults a test card or fails in
+        // production — never the caller's actual card.
+        let Some(nonce) = request.payment_method_nonce.clone() else {
+            return Err(PaymentError::Validation(
+                "Braintree requires a client-generated payment method nonce; collect one with the \
+                 Braintree client SDK and set CreatePaymentMethodRequest::payment_method_nonce. \
+                 Raw card details cannot be sent to Braintree's server API."
+                    .into(),
+            ));
+        };
+
         let pm_req = BraintreePaymentMethodRequest {
             customer_id: None,
-            payment_method_nonce: request.card.map(|_| "fake-valid-nonce".to_string()), // In real use, this comes from client
+            payment_method_nonce: Some(nonce),
         };
 
         let wrapper = BraintreePaymentMethodWrapper {
@@ -448,10 +493,60 @@ impl PaymentProvider for BraintreeProvider {
     }
 
     async fn list_payment_methods(&self, customer_id: &str) -> PaymentResult<Vec<PaymentMethod>> {
-        let _customer = self.get_customer(customer_id).await?;
-        // Braintree returns payment methods with customer data
-        // This is simplified
-        Ok(Vec::new())
+        // Braintree embeds the vaulted payment methods in the customer
+        // resource; the previous code fetched it and then threw them away.
+        let response = self
+            .request(reqwest::Method::GET, &format!("/customers/{}", customer_id))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(PaymentError::CustomerNotFound(customer_id.to_string()));
+        }
+
+        let result: BraintreeCustomerResponse = response.json().await?;
+        let cust = result.customer;
+
+        let mut methods: Vec<PaymentMethod> = cust
+            .credit_cards
+            .into_iter()
+            .map(|card| PaymentMethod {
+                id: card.token,
+                method_type: PaymentMethodType::Card,
+                customer_id: Some(customer_id.to_string()),
+                card: Some(CardInfo {
+                    brand: card.card_type.unwrap_or_default(),
+                    last4: card.last_4.unwrap_or_default(),
+                    exp_month: card
+                        .expiration_month
+                        .as_deref()
+                        .and_then(|m| m.parse().ok())
+                        .unwrap_or(0),
+                    exp_year: card
+                        .expiration_year
+                        .as_deref()
+                        .and_then(|y| y.parse().ok())
+                        .unwrap_or(0),
+                    funding: CardFunding::Unknown,
+                }),
+                billing_details: None,
+                created_at: card.created_at.unwrap_or_else(Utc::now),
+            })
+            .collect();
+
+        methods.extend(cust.paypal_accounts.into_iter().map(|acct| PaymentMethod {
+            id: acct.token,
+            method_type: PaymentMethodType::Paypal,
+            customer_id: Some(customer_id.to_string()),
+            card: None,
+            billing_details: acct.email.map(|email| BillingDetails {
+                email: Some(email),
+                ..Default::default()
+            }),
+            created_at: acct.created_at.unwrap_or_else(Utc::now),
+        }));
+
+        Ok(methods)
     }
 
     async fn create_subscription(
@@ -479,27 +574,15 @@ impl PaymentProvider for BraintreeProvider {
         }
 
         let result: BraintreeSubscriptionResponse = response.json().await?;
-        let sub = result.subscription;
 
-        Ok(Subscription {
-            id: sub.id,
-            customer_id: request.customer_id,
-            status: match sub.status.as_str() {
-                "Active" => SubscriptionStatus::Active,
-                "Canceled" => SubscriptionStatus::Canceled,
-                "Past Due" => SubscriptionStatus::PastDue,
-                _ => SubscriptionStatus::Active,
-            },
-            current_period_start: Utc::now(),
-            current_period_end: Utc::now() + chrono::Duration::days(30),
-            trial_end: None,
-            cancel_at_period_end: false,
-            canceled_at: None,
-            price_id: request.price_id,
-            quantity: request.quantity.unwrap_or(1),
-            metadata: request.metadata,
-            created_at: Utc::now(),
-        })
+        let mut subscription = result.subscription.into_subscription();
+        subscription.customer_id = Some(request.customer_id);
+        if subscription.price_id.is_empty() {
+            subscription.price_id = request.price_id;
+        }
+        subscription.quantity = request.quantity.unwrap_or(subscription.quantity);
+        subscription.metadata = request.metadata;
+        Ok(subscription)
     }
 
     async fn get_subscription(&self, id: &str) -> PaymentResult<Subscription> {
@@ -513,27 +596,7 @@ impl PaymentProvider for BraintreeProvider {
         }
 
         let result: BraintreeSubscriptionResponse = response.json().await?;
-        let sub = result.subscription;
-
-        Ok(Subscription {
-            id: sub.id,
-            customer_id: String::new(),
-            status: match sub.status.as_str() {
-                "Active" => SubscriptionStatus::Active,
-                "Canceled" => SubscriptionStatus::Canceled,
-                "Past Due" => SubscriptionStatus::PastDue,
-                _ => SubscriptionStatus::Active,
-            },
-            current_period_start: Utc::now(),
-            current_period_end: Utc::now() + chrono::Duration::days(30),
-            trial_end: None,
-            cancel_at_period_end: false,
-            canceled_at: None,
-            price_id: sub.plan_id.unwrap_or_default(),
-            quantity: 1,
-            metadata: HashMap::new(),
-            created_at: Utc::now(),
-        })
+        Ok(result.subscription.into_subscription())
     }
 
     async fn update_subscription(&self, id: &str, price_id: &str) -> PaymentResult<Subscription> {
@@ -583,11 +646,71 @@ impl PaymentProvider for BraintreeProvider {
         ))
     }
 
-    fn verify_webhook(&self, _payload: &[u8], _signature: &str) -> PaymentResult<()> {
-        // Braintree webhook verification
-        Ok(())
+    /// # Framing (JSON-relay only)
+    ///
+    /// Real Braintree webhooks POST two form fields: `bt_signature` and
+    /// `bt_payload`, where `bt_payload` is the *base64-encoded XML*
+    /// notification and the HMAC is computed over that raw base64 string
+    /// (not the decoded XML). This provider does not decode base64 or parse
+    /// XML: `payload` here must be `bt_payload`'s value exactly as Braintree
+    /// sent it (for the HMAC to check out), but [`Self::parse_webhook`]
+    /// expects that same byte string to be JSON, which real Braintree
+    /// payloads never are. Consequently this implementation only round-trips
+    /// end-to-end against a relay/proxy that re-encodes the decoded XML
+    /// notification as JSON before handing it to `parse_webhook` (verifying
+    /// separately against the original base64 `bt_payload` bytes) — not
+    /// directly against Braintree's gateway. Adding real XML parsing would
+    /// require a new dependency this crate does not currently carry; this is
+    /// the deliberately smaller, documented-scope fix.
+    async fn verify_webhook(&self, payload: &[u8], headers: &WebhookHeaders) -> PaymentResult<()> {
+        // An empty public_key makes `split_once('|')` match a signature pair
+        // with an empty key half (e.g. `bt_signature: "|<hmac>"`); an empty
+        // private_key makes the HMAC key the SHA-1 digest of an empty
+        // string, a public constant. Either turns verification into
+        // something an attacker can forge outright — most realistically
+        // under a missing-secret misconfiguration (e.g.
+        // `env::var(..).unwrap_or_default()`). Reject both up front instead
+        // of accepting a "signature" against a non-secret.
+        if self.public_key.is_empty() || self.private_key.expose_secret().is_empty() {
+            return Err(PaymentError::Config(
+                "Braintree public_key and private_key must not be empty".into(),
+            ));
+        }
+
+        let signature = headers.require(BRAINTREE_SIGNATURE_HEADER)?;
+
+        // `bt_signature` is a comma-separated list of `public_key|hex_hmac`
+        // pairs — one per key on the merchant account. Only the pair matching
+        // our own public key can be verified.
+        let expected_hex = signature
+            .split('&')
+            .flat_map(|group| group.split(','))
+            .filter_map(|pair| pair.trim().split_once('|'))
+            .find(|(key, _)| *key == self.public_key)
+            .map(|(_, sig)| sig)
+            .ok_or(PaymentError::InvalidWebhookSignature)?;
+
+        let expected = hex::decode(expected_hex).map_err(|_| {
+            // A malformed signature is a failed verification, not a pass.
+            PaymentError::InvalidWebhookSignature
+        })?;
+
+        // Braintree derives the HMAC key by SHA-1-hashing the private key
+        // first, then HMAC-SHA1s the payload with that digest.
+        let key = Sha1::digest(self.private_key.expose_secret().as_bytes());
+        let mut mac = Hmac::<Sha1>::new_from_slice(&key)
+            .map_err(|_| PaymentError::InvalidWebhookSignature)?;
+        mac.update(payload);
+
+        // Constant-time comparison: a short-circuiting `==` would let an
+        // attacker recover a valid signature byte by byte.
+        mac.verify_slice(&expected)
+            .map_err(|_| PaymentError::InvalidWebhookSignature)
     }
 
+    /// Expects `payload` to be JSON (see the framing note on
+    /// [`Self::verify_webhook`] — real Braintree `bt_payload` is
+    /// base64-encoded XML, not JSON).
     fn parse_webhook(&self, payload: &[u8]) -> PaymentResult<WebhookEvent> {
         let event: BraintreeWebhookNotification = serde_json::from_slice(payload)?;
 
@@ -675,6 +798,40 @@ struct BraintreeCustomer {
     first_name: Option<String>,
     last_name: Option<String>,
     phone: Option<String>,
+    #[serde(default, alias = "creditCards")]
+    credit_cards: Vec<BraintreeCreditCard>,
+    #[serde(default, alias = "paypalAccounts")]
+    paypal_accounts: Vec<BraintreePayPalAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraintreeCreditCard {
+    token: String,
+    #[serde(default, alias = "cardType")]
+    card_type: Option<String>,
+    #[serde(default, alias = "last4")]
+    last_4: Option<String>,
+    #[serde(default, alias = "expirationMonth")]
+    expiration_month: Option<String>,
+    #[serde(default, alias = "expirationYear")]
+    expiration_year: Option<String>,
+    #[serde(default, alias = "createdAt")]
+    created_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraintreePayPalAccount {
+    token: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, alias = "createdAt")]
+    created_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct BraintreeSettlementRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    amount: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -726,7 +883,54 @@ struct BraintreeSubscriptionResponse {
 struct BraintreeSubscription {
     id: String,
     status: String,
+    #[serde(default, alias = "planId")]
     plan_id: Option<String>,
+    #[serde(default)]
+    quantity: Option<u32>,
+    #[serde(default, alias = "billingPeriodStartDate")]
+    billing_period_start_date: Option<chrono::NaiveDate>,
+    #[serde(default, alias = "billingPeriodEndDate")]
+    billing_period_end_date: Option<chrono::NaiveDate>,
+    #[serde(default, alias = "createdAt")]
+    created_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default, alias = "neverExpires")]
+    #[allow(dead_code)]
+    never_expires: Option<bool>,
+}
+
+impl BraintreeSubscription {
+    /// Project Braintree's subscription resource onto the crate's
+    /// [`Subscription`], leaving unreported fields as `None` instead of
+    /// manufacturing a 30-day window anchored at "now".
+    fn into_subscription(self) -> Subscription {
+        Subscription {
+            id: self.id,
+            customer_id: None,
+            status: match self.status.as_str() {
+                "Active" => SubscriptionStatus::Active,
+                "Canceled" => SubscriptionStatus::Canceled,
+                "Past Due" => SubscriptionStatus::PastDue,
+                "Pending" => SubscriptionStatus::Incomplete,
+                "Expired" => SubscriptionStatus::Canceled,
+                _ => SubscriptionStatus::Active,
+            },
+            current_period_start: self
+                .billing_period_start_date
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|dt| dt.and_utc()),
+            current_period_end: self
+                .billing_period_end_date
+                .and_then(|d| d.and_hms_opt(23, 59, 59))
+                .map(|dt| dt.and_utc()),
+            trial_end: None,
+            cancel_at_period_end: false,
+            canceled_at: None,
+            price_id: self.plan_id.unwrap_or_default(),
+            quantity: self.quantity.unwrap_or(1),
+            metadata: HashMap::new(),
+            created_at: self.created_at,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

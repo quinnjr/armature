@@ -321,9 +321,50 @@ pub struct CreatePaymentMethodRequest {
     /// Type of payment method
     pub method_type: PaymentMethodType,
     /// Card details (for card type)
+    ///
+    /// Only providers that accept raw PAN data server-side (Stripe, with the
+    /// appropriate PCI scope) use this. Providers that require client-side
+    /// tokenization — notably Braintree — reject a request that carries raw
+    /// card data instead of a [`Self::payment_method_nonce`].
     pub card: Option<CardDetails>,
+    /// Client-generated single-use nonce/token representing the payment method.
+    ///
+    /// Braintree requires this: its card data must be tokenized in the browser
+    /// or mobile SDK, and the resulting nonce forwarded here. Never substitute
+    /// a sandbox placeholder.
+    pub payment_method_nonce: Option<String>,
     /// Billing details
     pub billing_details: Option<BillingDetails>,
+}
+
+impl CreatePaymentMethodRequest {
+    /// A card payment method built from raw card details.
+    ///
+    /// Requires a provider that accepts server-side card data.
+    pub fn card(card: CardDetails) -> Self {
+        Self {
+            method_type: PaymentMethodType::Card,
+            card: Some(card),
+            payment_method_nonce: None,
+            billing_details: None,
+        }
+    }
+
+    /// A card payment method built from a client-generated nonce.
+    pub fn nonce(nonce: impl Into<String>) -> Self {
+        Self {
+            method_type: PaymentMethodType::Card,
+            card: None,
+            payment_method_nonce: Some(nonce.into()),
+            billing_details: None,
+        }
+    }
+
+    /// Attach billing details.
+    pub fn billing_details(mut self, details: BillingDetails) -> Self {
+        self.billing_details = Some(details);
+        self
+    }
 }
 
 /// Payment method type
@@ -450,14 +491,18 @@ impl CreateSubscriptionRequest {
 pub struct Subscription {
     /// Subscription ID
     pub id: String,
-    /// Customer ID
-    pub customer_id: String,
+    /// Customer ID, when the provider reports one.
+    ///
+    /// `None` where the provider's subscription resource carries no customer
+    /// reference (PayPal returns only a subscriber profile). Never a
+    /// placeholder empty string.
+    pub customer_id: Option<String>,
     /// Status
     pub status: SubscriptionStatus,
-    /// Current period start
-    pub current_period_start: DateTime<Utc>,
-    /// Current period end
-    pub current_period_end: DateTime<Utc>,
+    /// Current billing period start, when the provider reports one.
+    pub current_period_start: Option<DateTime<Utc>>,
+    /// Current billing period end, when the provider reports one.
+    pub current_period_end: Option<DateTime<Utc>>,
     /// Trial end (if in trial)
     pub trial_end: Option<DateTime<Utc>>,
     /// Cancel at period end
@@ -470,8 +515,8 @@ pub struct Subscription {
     pub quantity: u32,
     /// Metadata
     pub metadata: HashMap<String, String>,
-    /// Created timestamp
-    pub created_at: DateTime<Utc>,
+    /// Created timestamp, when the provider reports one.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// Subscription status

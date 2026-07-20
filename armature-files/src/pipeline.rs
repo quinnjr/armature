@@ -174,8 +174,12 @@ impl Pipeline {
     }
 
     /// Convert to WebP (convenience method)
-    pub fn to_webp(self, quality: u8) -> Self {
-        self.convert(OutputFormat::WebP { quality })
+    ///
+    /// Note: WebP encoding is lossless only (the `image` crate does not
+    /// support quality-controlled/lossy WebP encoding), so there is no
+    /// `quality` parameter here.
+    pub fn to_webp(self) -> Self {
+        self.convert(OutputFormat::WebP)
     }
 
     /// Execute the pipeline and return the result
@@ -213,10 +217,34 @@ impl Pipeline {
                 }
                 PipelineOp::Convert(format) => {
                     operation_names.push(format!("convert:{}", format.extension()));
+
                     #[cfg(feature = "images")]
-                    if metadata.is_image() {
-                        current_data =
-                            crate::image::convert_format(&current_data, *format, &mut metadata)?;
+                    {
+                        if metadata.is_image() {
+                            current_data = crate::image::convert_format(
+                                &current_data,
+                                *format,
+                                &mut metadata,
+                            )?;
+                        } else if !matches!(format, OutputFormat::Original) {
+                            // Non-image input with a real target format: we
+                            // have no encoder for that combination. Fail loudly
+                            // instead of silently returning the input bytes
+                            // mislabeled as converted.
+                            return Err(FileError::UnsupportedFormat(format!(
+                                "cannot convert non-image input (mime: {}) to {:?}",
+                                metadata.mime_type, format
+                            )));
+                        }
+                    }
+                    #[cfg(not(feature = "images"))]
+                    {
+                        if !matches!(format, OutputFormat::Original) {
+                            return Err(FileError::UnsupportedFormat(format!(
+                                "cannot convert to {:?}: the `images` feature is not enabled",
+                                format
+                            )));
+                        }
                     }
                 }
                 PipelineOp::Custom(name) => {
@@ -296,18 +324,40 @@ impl MultiSizeBuilder {
     }
 
     /// Generate all sizes
+    ///
+    /// Decodes the source image once and resizes/encodes each variant from
+    /// that single decode, rather than re-decoding the source per size.
     #[cfg(feature = "images")]
     pub async fn generate(self) -> FileResult<Vec<(String, ProcessingResult)>> {
+        let source_img = crate::image::decode_image(&self.data)?;
+
         let mut results = Vec::new();
-
         for (name, width, height) in self.sizes {
-            let pipeline = Pipeline::new()
-                .load_bytes(self.data.clone(), &self.metadata.filename)
-                .resize_fit(width, height)
-                .convert(self.output_format);
+            let variant_start = Instant::now();
 
-            let result = pipeline.execute().await?;
-            results.push((name, result));
+            let resized = crate::image::resize_fit(&source_img, width, height);
+
+            let mut metadata = self.metadata.clone();
+            let data = crate::image::encode_variant(
+                &resized,
+                &self.data,
+                self.output_format,
+                &mut metadata,
+            )?;
+            metadata.size = data.len() as u64;
+
+            results.push((
+                name,
+                ProcessingResult {
+                    data,
+                    metadata,
+                    operations: vec![
+                        format!("resize_fit:{}x{}", width, height),
+                        format!("convert:{}", self.output_format.extension()),
+                    ],
+                    processing_time_ms: variant_start.elapsed().as_millis() as u64,
+                },
+            ));
         }
 
         Ok(results)

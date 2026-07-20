@@ -11,7 +11,7 @@ use web_push::{
     WebPushMessageBuilder,
 };
 
-use crate::{Notification, Platform, PushError, PushProvider, Result, Subscription};
+use crate::{Notification, Platform, PushError, PushProvider, Result, Subscription, Urgency};
 
 /// Maximum encrypted Web Push payload size (bytes) accepted by push services.
 pub(crate) const WEB_PUSH_MAX_PAYLOAD: usize = 4096;
@@ -39,6 +39,20 @@ fn is_internal_v6(ip: &Ipv6Addr) -> bool {
     let seg0 = ip.segments()[0];
     // fe80::/10 link-local or fc00::/7 unique-local, plus the unspecified address.
     ip.is_unspecified() || (seg0 & 0xffc0) == 0xfe80 || (seg0 & 0xfe00) == 0xfc00
+}
+
+/// Map `Notification::urgency` onto the Web Push `Urgency` request header
+/// value (RFC 8030 section 5.3). Without this header the push service treats
+/// every message as `normal`, so `Urgency::High` ("deliver immediately")
+/// previously had no delivery effect even though it was documented and
+/// serialized into the payload.
+fn urgency_header_value(urgency: Urgency) -> &'static str {
+    match urgency {
+        Urgency::VeryLow => "very-low",
+        Urgency::Low => "low",
+        Urgency::Normal => "normal",
+        Urgency::High => "high",
+    }
 }
 
 /// SSRF guard for the client-supplied subscription endpoint: enforce https and
@@ -88,8 +102,6 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
 pub struct WebPushConfig {
     /// VAPID private key (base64 URL-safe encoded).
     pub private_key: String,
-    /// VAPID public key (base64 URL-safe encoded).
-    pub public_key: Option<String>,
     /// Subject (mailto: or https: URL).
     pub subject: String,
     /// Default TTL in seconds.
@@ -98,19 +110,17 @@ pub struct WebPushConfig {
 
 impl WebPushConfig {
     /// Create a new Web Push configuration.
+    ///
+    /// Only the private key is needed: VAPID signing derives the matching
+    /// public key from it, so there is no separate public-key input to
+    /// configure here (an earlier revision stored one, but nothing in the
+    /// signing path ever read it).
     pub fn new(private_key: impl Into<String>, subject: impl Into<String>) -> Self {
         Self {
             private_key: private_key.into(),
-            public_key: None,
             subject: subject.into(),
             default_ttl: 86400, // 24 hours
         }
-    }
-
-    /// Set the public key.
-    pub fn public_key(mut self, key: impl Into<String>) -> Self {
-        self.public_key = Some(key.into());
-        self
     }
 
     /// Set the default TTL.
@@ -251,7 +261,8 @@ impl WebPushProvider {
         let mut request = self
             .client
             .post(message.endpoint.to_string())
-            .header("TTL", message.ttl.to_string());
+            .header("TTL", message.ttl.to_string())
+            .header("Urgency", urgency_header_value(notification.urgency));
 
         // Encrypted payload length, captured before `body(...)` moves the content,
         // so a 413 can report the real size instead of 0.

@@ -132,3 +132,10 @@ impl From<tera::Error> for MailError {
         Self::Template(err.to_string())
     }
 }
+
+#[cfg(feature = "minijinja")]
+impl From<minijinja::Error> for MailError {
+    fn from(err: minijinja::Error) -> Self {
+        Self::Template(err.to_string())
+    }
+}

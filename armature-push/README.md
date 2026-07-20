@@ -4,67 +4,114 @@ Push notifications for the Armature framework.
 
 ## Features
 
-- **Web Push** - Browser push notifications
-- **FCM** - Firebase Cloud Messaging
-- **APNS** - Apple Push Notification Service
-- **Multi-Platform** - Send to all platforms at once
-- **Topics** - Subscribe to notification topics
+- **Web Push** - Browser push notifications (VAPID)
+- **FCM** - Firebase Cloud Messaging (OAuth2 service account, HTTP v1 API)
+- **APNS** - Apple Push Notification Service (JWT-based provider auth)
+- **Multi-Platform** - Register one provider per platform and send through a single `PushService`
 
 ## Installation
 
 ```toml
 [dependencies]
-armature-push = "0.1"
+armature-push = { version = "0.2", features = ["all"] }
 ```
+
+Enable only the providers you need instead of `all`: `web-push`, `fcm`, `apns`.
 
 ## Quick Start
 
-```rust
-use armature_push::{PushService, Notification};
+```rust,ignore
+use armature_push::{PushService, WebPushConfig, Notification};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let push = PushService::new()
-        .fcm("server-key")
-        .apns("key.p8", "team-id", "key-id")
-        .web_push("vapid-private-key");
+    let config = WebPushConfig::new(
+        "your-vapid-private-key",
+        "mailto:admin@example.com",
+    );
+    let service = PushService::web_push(config)?;
 
-    // Send notification
-    push.send(Notification {
-        title: "Hello!",
-        body: "You have a new message",
-        data: Some(json!({"message_id": 123})),
-    }, &device_token).await?;
+    let notification = Notification::new("Hello!", "You have a new message")
+        .data("message_id", "123");
 
+    // Note the argument order: token first, notification second.
+    service.send("endpoint|p256dh|auth", notification).await?;
     Ok(())
 }
 ```
 
-## Web Push
+## Sending to multiple providers
 
-```rust
-// Register subscription
-let subscription = WebPushSubscription {
-    endpoint: "https://...",
-    keys: PushKeys { p256dh: "...", auth: "..." },
+`PushService::web_push`, `PushService::fcm`, and `PushService::apns` each build a
+service around a single provider. To handle more than one platform, add
+providers to a shared service with `add_provider`:
+
+```rust,ignore
+use armature_push::{
+    PushService, WebPushConfig, WebPushProvider, FcmConfig, FcmProvider,
+    ApnsConfig, ApnsProvider, Notification,
 };
 
-push.web_push().send(&subscription, notification).await?;
+let web_push = WebPushProvider::new(WebPushConfig::new(
+    "your-vapid-private-key",
+    "mailto:admin@example.com",
+))?;
+let fcm = FcmProvider::new(FcmConfig::from_service_account("service-account.json")?).await?;
+let apns = ApnsProvider::new(ApnsConfig::new("team-id", "key-id", "-----BEGIN EC PRIVATE KEY-----...", "com.example.app")).await?;
+
+let service = PushService::new()
+    .add_provider(web_push)
+    .add_provider(fcm)
+    .add_provider(apns);
+
+service.send("device-token", Notification::new("Hi", "there")).await?;
+```
+
+## Web Push
+
+Web Push subscriptions can be sent either as a `Subscription` (endpoint + keys)
+or as a pipe-separated token in the form `endpoint|p256dh|auth`:
+
+```rust,ignore
+use armature_push::{Subscription, Notification};
+
+let subscription = Subscription::new(
+    "https://push.example.com/...",
+    "p256dh-key",
+    "auth-secret",
+);
+
+let notification = Notification::new("Hello!", "You have a new message");
+service.send_to_subscription(&subscription, notification).await?;
 ```
 
 ## FCM
 
-```rust
-push.fcm().send(&fcm_token, notification).await?;
+FCM uses a Google service account (OAuth2), not a legacy server key:
+
+```rust,ignore
+use armature_push::FcmConfig;
+
+let config = FcmConfig::from_service_account("service-account.json")?;
+let service = PushService::fcm(config).await?;
+
+service.send("fcm-device-token", Notification::new("Hi", "there")).await?;
 ```
 
 ## APNS
 
-```rust
-push.apns().send(&device_token, notification).await?;
+```rust,ignore
+use armature_push::ApnsConfig;
+
+let config = ApnsConfig::new("team-id", "key-id", private_key_pem, "com.example.app");
+let service = PushService::apns(config).await?;
+
+service.send("apns-device-token", Notification::new("Hi", "there")).await?;
 ```
+
+A per-notification `Notification::topic(...)` overrides the configured bundle
+ID for that send.
 
 ## License
 
 MIT OR Apache-2.0
-

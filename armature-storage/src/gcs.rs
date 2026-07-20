@@ -25,6 +25,12 @@ pub struct GcsConfig {
     /// GCS bucket name.
     pub bucket: String,
     /// GCP project ID (optional, uses default).
+    ///
+    /// Note: the `google-cloud-storage` 1.x SDK has no client-level hook to
+    /// pin an explicit billing/quota project for data-plane object
+    /// operations (object resource names use the `projects/_/buckets/{bucket}`
+    /// placeholder form regardless of project). This field is accepted for
+    /// forward-compatibility but is currently only informational.
     pub project_id: Option<String>,
     /// Custom endpoint (for emulators).
     pub endpoint: Option<String>,
@@ -104,7 +110,13 @@ impl GcsStorage {
     /// Builds the data-plane [`Storage`] client using Application Default
     /// Credentials. The control-plane client is initialized lazily on first use.
     pub async fn new(config: GcsConfig) -> Result<Self> {
-        let client = Storage::builder()
+        let mut builder = Storage::builder();
+
+        if let Some(endpoint) = &config.endpoint {
+            builder = builder.with_endpoint(endpoint.clone());
+        }
+
+        let client = builder
             .build()
             .await
             .map_err(|e| StorageError::Config(e.to_string()))?;
@@ -146,7 +158,11 @@ impl GcsStorage {
     async fn control(&self) -> Result<&StorageControl> {
         self.control
             .get_or_try_init(|| async {
-                StorageControl::builder()
+                let mut builder = StorageControl::builder();
+                if let Some(endpoint) = &self.config.endpoint {
+                    builder = builder.with_endpoint(endpoint.clone());
+                }
+                builder
                     .build()
                     .await
                     .map_err(|e| StorageError::Config(e.to_string()))
@@ -188,6 +204,13 @@ impl GcsStorage {
             self.config.bucket, full_key
         )
     }
+
+    /// Get a signed URL using the configured [`GcsConfig::signed_url_duration`]
+    /// as the expiration when the caller doesn't need to override it.
+    pub async fn temporary_url_default(&self, key: &str) -> Result<Option<String>> {
+        let duration = self.config.signed_url_duration;
+        StorageTrait::temporary_url(self, key, duration).await
+    }
 }
 
 #[async_trait]
@@ -224,9 +247,16 @@ impl StorageTrait for GcsStorage {
         };
 
         // Upload object (in-memory Bytes are seekable, so an unbuffered upload works).
-        self.client
+        let mut request = self
+            .client
             .write_object(self.bucket_resource(), full_key.clone(), data)
-            .set_content_type(content_type)
+            .set_content_type(content_type);
+
+        if self.config.public_access {
+            request = request.set_predefined_acl("publicRead");
+        }
+
+        request
             .send_unbuffered()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
@@ -452,5 +482,105 @@ fn map_object_error(err: google_cloud_storage::Error, key: &str) -> StorageError
         StorageError::NotFound(key.to_string())
     } else {
         StorageError::Storage(err_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use armature_testkit::http_stub::{StubResponse, StubServer};
+    use google_cloud_auth::credentials::anonymous::Builder as Anonymous;
+
+    /// Build a [`GcsStorage`] whose data-plane client is pointed at `server`
+    /// via [`GcsConfig::endpoint`], exercising the same `with_endpoint(...)`
+    /// wiring that `GcsStorage::new` applies. `endpoint` was documented for
+    /// emulator use but previously ignored, so without the fix this client
+    /// would instead target real GCS.
+    async fn stub_gcs_storage(server: &StubServer, config: GcsConfig) -> GcsStorage {
+        let config = config.endpoint(server.url());
+        let client = Storage::builder()
+            .with_endpoint(config.endpoint.clone().unwrap())
+            .with_credentials(Anonymous::new().build())
+            .build()
+            .await
+            .expect("building a stub-backed GCS client should succeed");
+        GcsStorage::from_client(client, config)
+    }
+
+    #[tokio::test]
+    async fn public_access_sets_a_public_read_predefined_acl() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage =
+            stub_gcs_storage(&server, GcsConfig::new("test-bucket").public_access(true)).await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("write should succeed against the stub server");
+
+        let requests = server.requests();
+        let upload = requests
+            .iter()
+            .find(|r| {
+                r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("name=key.txt"))
+            })
+            .unwrap_or_else(|| panic!("no upload request recorded: {requests:?}"));
+        let query = upload.query.as_deref().unwrap_or_default();
+        assert!(
+            query.contains("predefinedAcl=publicRead"),
+            "expected predefinedAcl=publicRead in query, got: {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn temporary_url_default_uses_configured_duration_probe() {
+        // Probe only: `temporary_url` signs locally via ambient credentials
+        // (`CredentialsBuilder::default().build_signer()`), which requires
+        // Application Default Credentials that are not available in this
+        // sandboxed test environment. If that changes, promote this into a
+        // real assertion on `GcsConfig::signed_url_duration` being honored
+        // by `temporary_url_default`.
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(
+            &server,
+            GcsConfig::new("test-bucket").signed_url_duration(Duration::from_secs(120)),
+        )
+        .await;
+
+        let result = storage.temporary_url_default("key.txt").await;
+        // Whatever the ambient-credential outcome, `temporary_url_default`
+        // must delegate to `temporary_url` (never panic / hang), which we've
+        // confirmed completes quickly here.
+        if let Ok(Some(url)) = result {
+            assert!(url.contains("Expires=120") || url.contains("X-Goog-Expires=120"));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_config_omits_predefined_acl() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("write should succeed against the stub server");
+
+        let requests = server.requests();
+        let upload = requests
+            .iter()
+            .find(|r| {
+                r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("name=key.txt"))
+            })
+            .unwrap_or_else(|| panic!("no upload request recorded: {requests:?}"));
+        let query = upload.query.as_deref().unwrap_or_default();
+        assert!(
+            !query.contains("predefinedAcl"),
+            "expected no predefinedAcl in query, got: {query}"
+        );
     }
 }

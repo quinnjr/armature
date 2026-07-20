@@ -6,7 +6,9 @@
 //! exempts, so these exercise the real signing + request-building code.
 #![cfg(feature = "web-push")]
 
-use armature_push::{Notification, PushError, WebPushConfig, WebPushProvider, WebPushSubscription};
+use armature_push::{
+    Notification, PushError, Urgency, WebPushConfig, WebPushProvider, WebPushSubscription,
+};
 use armature_testkit::{StubResponse, StubServer};
 
 // A valid VAPID private key + subscription keys borrowed from web-push's own
@@ -119,6 +121,45 @@ async fn error_does_not_echo_upstream_response_body() {
     assert!(
         !err.to_string().contains(secret),
         "error must not propagate the upstream body: {err}"
+    );
+}
+
+#[tokio::test]
+async fn urgency_high_sends_high_urgency_header() {
+    let server = StubServer::start_single(StubResponse::new(200, "")).await;
+    let provider = provider();
+    let sub = subscription(server.url());
+    let notification = Notification::new("Hello", "World").urgency(Urgency::High);
+
+    let result = provider.send_to_web_subscription(&sub, &notification).await;
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+    let req = server.assert_received("POST", "/");
+    assert_eq!(
+        req.header("Urgency"),
+        Some("high"),
+        "expected Urgency: high header derived from Notification::urgency, headers: {:?}",
+        req.headers
+    );
+}
+
+#[tokio::test]
+async fn urgency_default_sends_normal_urgency_header() {
+    let server = StubServer::start_single(StubResponse::new(200, "")).await;
+    let provider = provider();
+    let sub = subscription(server.url());
+
+    let result = provider
+        .send_to_web_subscription(&sub, &notification())
+        .await;
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+    let req = server.assert_received("POST", "/");
+    assert_eq!(
+        req.header("Urgency"),
+        Some("normal"),
+        "expected Urgency: normal header for default urgency, headers: {:?}",
+        req.headers
     );
 }
 

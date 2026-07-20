@@ -106,6 +106,11 @@ impl Attachment {
     pub fn size(&self) -> usize {
         self.data.len()
     }
+
+    /// Whether this attachment should be rendered inline in the message body.
+    pub fn is_inline(&self) -> bool {
+        self.disposition == ContentDisposition::Inline
+    }
 }
 
 /// Common attachment builders.

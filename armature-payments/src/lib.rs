@@ -30,23 +30,28 @@
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use armature_payments::{PaymentProcessor, StripeProvider, Money, Currency};
+//! use armature_payments::{
+//!     ChargeRequest, Money, PaymentProcessor, PaymentSource, WebhookHeaders,
+//! };
+//! use armature_payments::providers::StripeProvider;
 //!
 //! // Initialize with Stripe
 //! let processor = PaymentProcessor::new(
-//!     StripeProvider::new("sk_test_...")
+//!     StripeProvider::new("sk_test_...").with_webhook_secret("whsec_..."),
 //! );
 //!
 //! // Create a charge
-//! let charge = processor.charge(ChargeRequest {
-//!     amount: Money::new(2999, Currency::USD),
-//!     source: PaymentSource::Card(card_token),
-//!     description: Some("Order #1234".into()),
-//!     metadata: Default::default(),
-//! }).await?;
+//! let charge = processor
+//!     .charge(
+//!         ChargeRequest::new(Money::usd(2999), PaymentSource::card("tok_visa"))
+//!             .description("Order #1234"),
+//!     )
+//!     .await?;
 //!
-//! // Handle webhooks
-//! processor.handle_webhook(request).await?;
+//! // Handle webhooks. Verification runs before parsing and fails closed, so
+//! // pass the request's real headers — a forged webhook is rejected here.
+//! let headers = WebhookHeaders::single("Stripe-Signature", signature_header);
+//! let event = processor.handle_webhook(&body, &headers).await?;
 //! ```
 
 pub mod error;
@@ -94,14 +99,136 @@ impl<P: PaymentProvider> PaymentProcessor<P> {
         &self.provider
     }
 
-    /// Create a charge
-    pub async fn charge(&self, request: ChargeRequest) -> PaymentResult<Charge> {
-        self.provider.charge(request).await
+    /// The processor's configuration.
+    pub fn config(&self) -> &ProcessorConfig {
+        &self.config
     }
 
-    /// Refund a charge
+    /// Create a charge.
+    ///
+    /// Honors [`ProcessorConfig`]: a retryable failure (network or throttling)
+    /// is retried up to `max_retries` times with `retry_delay_ms` between
+    /// attempts. When `use_idempotency` is set and the request carries no key,
+    /// one is generated and reused across every attempt so a retry after an
+    /// ambiguous timeout cannot double-charge the customer.
+    pub async fn charge(&self, request: ChargeRequest) -> PaymentResult<Charge> {
+        let mut request = request;
+        if self.config.use_idempotency && request.idempotency_key.is_none() {
+            request.idempotency_key = Some(uuid::Uuid::new_v4().to_string());
+        }
+
+        let amount = request.amount;
+        let result = self
+            .with_retries("charge", || {
+                let provider = Arc::clone(&self.provider);
+                let request = request.clone();
+                async move { provider.charge(request).await }
+            })
+            .await;
+
+        if self.config.log_transactions {
+            match &result {
+                Ok(charge) => armature_log::info!(
+                    target: "armature::payments",
+                    "charge {} {} {} via {} -> {:?}",
+                    charge.id,
+                    amount.amount,
+                    amount.currency.code(),
+                    self.provider.name(),
+                    charge.status
+                ),
+                Err(e) => armature_log::warn!(
+                    target: "armature::payments",
+                    "charge of {} {} via {} failed: {}",
+                    amount.amount,
+                    amount.currency.code(),
+                    self.provider.name(),
+                    e
+                ),
+            }
+        }
+
+        result
+    }
+
+    /// Refund a charge.
+    ///
+    /// Retries on transient failures per [`ProcessorConfig`].
     pub async fn refund(&self, request: RefundRequest) -> PaymentResult<Refund> {
-        self.provider.refund(request).await
+        let charge_id = request.charge_id.clone();
+        let result = self
+            .with_retries("refund", || {
+                let provider = Arc::clone(&self.provider);
+                let request = request.clone();
+                async move { provider.refund(request).await }
+            })
+            .await;
+
+        if self.config.log_transactions {
+            match &result {
+                Ok(refund) => armature_log::info!(
+                    target: "armature::payments",
+                    "refund {} of charge {} via {} -> {:?}",
+                    refund.id,
+                    charge_id,
+                    self.provider.name(),
+                    refund.status
+                ),
+                Err(e) => armature_log::warn!(
+                    target: "armature::payments",
+                    "refund of charge {} via {} failed: {}",
+                    charge_id,
+                    self.provider.name(),
+                    e
+                ),
+            }
+        }
+
+        result
+    }
+
+    /// Run `op` under the configured retry policy.
+    ///
+    /// Only [`PaymentError::is_retryable`] failures are retried; a decline or a
+    /// validation error is returned on the first attempt.
+    async fn with_retries<T, F, Fut>(&self, operation: &str, mut op: F) -> PaymentResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = PaymentResult<T>>,
+    {
+        let max_attempts = if self.config.retry_failed {
+            self.config.max_retries.saturating_add(1)
+        } else {
+            1
+        };
+
+        let mut attempt = 1;
+        loop {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(e) if e.is_retryable() && attempt < max_attempts => {
+                    if self.config.log_transactions {
+                        armature_log::warn!(
+                            target: "armature::payments",
+                            "{} attempt {}/{} failed ({}), retrying in {}ms",
+                            operation,
+                            attempt,
+                            max_attempts,
+                            e,
+                            self.config.retry_delay_ms
+                        );
+                    }
+                    if self.config.retry_delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            self.config.retry_delay_ms,
+                        ))
+                        .await;
+                    }
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Create a customer
@@ -159,14 +286,29 @@ impl<P: PaymentProvider> PaymentProcessor<P> {
         self.provider.cancel_subscription(id, immediate).await
     }
 
-    /// Handle a webhook event
+    /// Verify and parse an inbound webhook.
+    ///
+    /// Verification runs before parsing and must succeed: an unsigned or
+    /// mis-signed payload is never handed back to the caller.
     pub async fn handle_webhook(
         &self,
         payload: &[u8],
-        signature: &str,
+        headers: &WebhookHeaders,
     ) -> PaymentResult<WebhookEvent> {
-        self.provider.verify_webhook(payload, signature)?;
-        self.provider.parse_webhook(payload)
+        self.provider.verify_webhook(payload, headers).await?;
+        let event = self.provider.parse_webhook(payload)?;
+
+        if self.config.log_transactions {
+            armature_log::info!(
+                target: "armature::payments",
+                "verified {} webhook {} ({:?})",
+                self.provider.name(),
+                event.id,
+                event.event_type
+            );
+        }
+
+        Ok(event)
     }
 }
 

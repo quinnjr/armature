@@ -16,6 +16,13 @@ pub struct FcmConfig {
     pub project_id: String,
     /// Service account credentials (JSON).
     pub credentials: FcmCredentials,
+    /// Base URL for the FCM HTTP v1 API. Defaults to the real Google
+    /// endpoint; overridable so tests can point it at a stub server.
+    pub api_base: String,
+}
+
+fn default_api_base() -> String {
+    "https://fcm.googleapis.com".to_string()
 }
 
 /// FCM service account credentials.
@@ -62,6 +69,7 @@ impl FcmConfig {
                 private_key: sa.private_key,
                 token_uri: sa.token_uri,
             },
+            api_base: default_api_base(),
         })
     }
 
@@ -78,7 +86,15 @@ impl FcmConfig {
                 private_key: private_key.into(),
                 token_uri: default_token_uri(),
             },
+            api_base: default_api_base(),
         }
+    }
+
+    /// Override the FCM API base URL (default: the real Google endpoint).
+    /// Intended for tests that need to point requests at a stub server.
+    pub fn api_base(mut self, api_base: impl Into<String>) -> Self {
+        self.api_base = api_base.into();
+        self
     }
 }
 
@@ -244,8 +260,8 @@ impl PushProvider for FcmProvider {
         let payload = self.build_payload(token, notification);
 
         let url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.config.project_id
+            "{}/v1/projects/{}/messages:send",
+            self.config.api_base, self.config.project_id
         );
 
         debug!(token = %token, "Sending FCM notification");
@@ -263,7 +279,7 @@ impl PushProvider for FcmProvider {
         if status.is_success() {
             debug!("FCM notification sent successfully");
             Ok(())
-        } else if status.as_u16() == 404 {
+        } else if status.as_u16() == 404 || status.as_u16() == 410 {
             Err(PushError::Unregistered(token.to_string()))
         } else if status.as_u16() == 429 {
             Err(PushError::RateLimited(60))

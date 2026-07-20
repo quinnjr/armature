@@ -106,6 +106,9 @@ struct SendGridPayload {
     content: Vec<Content>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<SendGridAttachment>,
+    /// Custom headers, plus the headers implied by `Email::priority`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,6 +221,56 @@ impl SendGridPayload {
             subject: email.subject.clone().unwrap_or_default(),
             content,
             attachments,
+            headers: email.wire_headers().into_iter().collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Email;
+
+    fn base() -> Email {
+        Email::new()
+            .from("sender@example.com")
+            .to("recipient@example.com")
+            .subject("Test")
+            .text("Hello")
+    }
+
+    /// WF6 findings 4 and 5: custom headers and priority were stored on `Email`
+    /// but never reached the SendGrid payload.
+    #[test]
+    fn payload_carries_custom_headers_and_priority() {
+        let email = base()
+            .header("X-Campaign-Id", "spring-2026")
+            .high_priority();
+        let payload = SendGridPayload::from_email(&email).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+
+        let headers = json.get("headers").expect("headers field emitted");
+        assert_eq!(headers["X-Campaign-Id"], "spring-2026");
+        assert_eq!(headers["X-Priority"], "1 (Highest)");
+        assert_eq!(headers["Importance"], "High");
+    }
+
+    #[test]
+    fn payload_omits_headers_when_there_are_none() {
+        let payload = SendGridPayload::from_email(&base()).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("headers").is_none());
+    }
+
+    #[test]
+    fn payload_marks_inline_attachments() {
+        let email = base().attach(
+            crate::Attachment::png("logo.png", vec![1, 2, 3]).content_id("cid1".to_string()),
+        );
+        let payload = SendGridPayload::from_email(&email).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["attachments"][0]["disposition"], "inline");
+        assert_eq!(json["attachments"][0]["content_id"], "cid1");
     }
 }

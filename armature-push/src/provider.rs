@@ -1,10 +1,16 @@
 //! Push notification provider trait and service.
 
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use tracing::debug;
 
 use crate::{DeviceToken, Notification, Platform, PushError, Result, Subscription};
+
+/// Maximum number of in-flight requests when fanning a batch send out
+/// concurrently. Bounded so a large token slice can't open an unbounded
+/// number of simultaneous connections to the provider.
+const BATCH_CONCURRENCY: usize = 32;
 
 /// Push provider trait.
 #[async_trait]
@@ -13,12 +19,22 @@ pub trait PushProvider: Send + Sync {
     async fn send(&self, token: &str, notification: &Notification) -> Result<()>;
 
     /// Send to multiple tokens.
+    ///
+    /// Requests are issued with bounded concurrency (`BATCH_CONCURRENCY` in
+    /// flight at a time) so independent HTTP round-trips overlap instead of
+    /// serializing one after another, while still returning one `Result` per
+    /// input token in the original order.
     async fn send_batch(&self, tokens: &[String], notification: &Notification) -> Vec<Result<()>> {
-        let mut results = Vec::with_capacity(tokens.len());
-        for token in tokens {
-            results.push(self.send(token, notification).await);
-        }
-        results
+        // Map over indices rather than `&String` items directly: mapping
+        // over borrowed items ties the closure to a for-any-lifetime bound
+        // that `self.send`'s (async-trait-generated) borrowed future can't
+        // satisfy. Indices are `Copy` and lifetime-free, so the closure just
+        // captures `self`/`tokens`/`notification` once at a single lifetime.
+        stream::iter(0..tokens.len())
+            .map(|i| self.send(&tokens[i], notification))
+            .buffered(BATCH_CONCURRENCY)
+            .collect()
+            .await
     }
 
     /// Get the platform this provider handles.
@@ -133,21 +149,26 @@ impl PushService {
     }
 
     /// Send to multiple devices.
+    ///
+    /// Requests are issued with bounded concurrency (see `BATCH_CONCURRENCY`)
+    /// so N devices cost roughly one round-trip instead of N serial ones,
+    /// while results are still returned in the original device order.
     pub async fn send_batch(
         &self,
         devices: &[DeviceToken],
         notification: Notification,
     ) -> Vec<Result<()>> {
-        let mut results = Vec::with_capacity(devices.len());
-
-        for device in devices {
-            results.push(self.send_to_device(device, notification.clone()).await);
-        }
-
-        results
+        stream::iter(0..devices.len())
+            .map(|i| self.send_to_device(&devices[i], notification.clone()))
+            .buffered(BATCH_CONCURRENCY)
+            .collect()
+            .await
     }
 
     /// Send to multiple tokens with a single platform.
+    ///
+    /// Delegates to the platform provider's `send_batch`, which fans requests
+    /// out with bounded concurrency rather than sending them one at a time.
     pub async fn send_to_tokens(
         &self,
         platform: Platform,

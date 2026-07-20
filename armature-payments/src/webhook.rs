@@ -4,6 +4,99 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The request headers that accompany an inbound webhook.
+///
+/// Providers authenticate a webhook from different pieces of the request, so
+/// verification takes the whole header set rather than a single signature
+/// string:
+///
+/// - **Stripe** reads `Stripe-Signature`.
+/// - **PayPal** reads `PayPal-Auth-Algo`, `PayPal-Cert-Url`,
+///   `PayPal-Transmission-Id`, `PayPal-Transmission-Sig` and
+///   `PayPal-Transmission-Time`.
+/// - **Braintree** reads `bt_signature` (Braintree posts it as a form field;
+///   pass it here under that name).
+///
+/// Lookups are case-insensitive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "HashMap<String, String>")]
+pub struct WebhookHeaders {
+    headers: HashMap<String, String>,
+}
+
+impl From<HashMap<String, String>> for WebhookHeaders {
+    /// Route deserialization through [`insert`](Self::insert) (via the
+    /// `FromIterator` impl below) so a wire map with mixed-case keys — e.g.
+    /// after a JSON round-trip through a webhook relay, queue, or replay tool
+    /// — still normalizes to lowercase. A derived `Deserialize` would instead
+    /// populate `headers` directly from the wire, silently breaking the
+    /// documented case-insensitivity invariant and rejecting genuine
+    /// webhooks whose producer sent e.g. `Stripe-Signature`.
+    fn from(map: HashMap<String, String>) -> Self {
+        map.into_iter().collect()
+    }
+}
+
+impl WebhookHeaders {
+    /// An empty header set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A header set containing a single entry.
+    pub fn single(name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self::new().with(name, value)
+    }
+
+    /// Add a header (builder style).
+    pub fn with(mut self, name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        self.insert(name, value);
+        self
+    }
+
+    /// Add a header.
+    pub fn insert(&mut self, name: impl AsRef<str>, value: impl Into<String>) {
+        self.headers
+            .insert(name.as_ref().to_ascii_lowercase(), value.into());
+    }
+
+    /// Case-insensitive lookup.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Look up a header, or fail with [`crate::PaymentError::InvalidWebhookSignature`].
+    ///
+    /// A missing signature header is a verification failure, never a
+    /// fall-through to acceptance.
+    pub fn require(&self, name: &str) -> crate::PaymentResult<&str> {
+        self.get(name)
+            .ok_or(crate::PaymentError::InvalidWebhookSignature)
+    }
+
+    /// Number of headers present.
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
+    /// Whether no headers are present.
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+}
+
+impl<K: AsRef<str>, V: Into<String>> FromIterator<(K, V)> for WebhookHeaders {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut headers = Self::new();
+        for (k, v) in iter {
+            headers.insert(k, v);
+        }
+        headers
+    }
+}
+
 /// Webhook event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
@@ -324,6 +417,25 @@ mod tests {
             WebhookEventType::from_str("unknown.event"),
             WebhookEventType::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn test_webhook_headers_deserialize_lowercases_keys() {
+        // Regression test: WebhookHeaders used to derive Deserialize, which
+        // populated the inner map straight from the wire and bypassed the
+        // lowercasing `insert()` normally enforces. A mixed-case producer
+        // (e.g. a relay re-encoding the original `Stripe-Signature` header)
+        // would then make `get("stripe-signature")` return `None`, rejecting
+        // every genuine webhook after a JSON round-trip.
+        #[derive(Deserialize)]
+        struct Wrapper {
+            headers: WebhookHeaders,
+        }
+
+        let wrapper: Wrapper =
+            serde_json::from_str(r#"{"headers":{"Stripe-Signature":"abc"}}"#).unwrap();
+        assert_eq!(wrapper.headers.get("stripe-signature"), Some("abc"));
+        assert_eq!(wrapper.headers.get("Stripe-Signature"), Some("abc"));
     }
 
     #[test]
