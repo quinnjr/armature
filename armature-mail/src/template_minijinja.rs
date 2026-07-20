@@ -28,7 +28,7 @@
 //! assert_eq!(rendered.html.as_deref(), Some("<h1>Hello, World!</h1>"));
 //! ```
 
-use minijinja::Environment;
+use minijinja::{AutoEscape, Environment};
 use std::path::Path;
 use tracing::debug;
 
@@ -44,10 +44,22 @@ pub struct MiniJinjaEngine {
 
 impl MiniJinjaEngine {
     /// Create a new, empty MiniJinja engine.
+    ///
+    /// HTML parts are autoescaped. Templates are registered under keys of the
+    /// form `"<name>/<part>"` (no file extension), so MiniJinja's default
+    /// extension-based autoescape callback would never match and every part
+    /// would render unescaped. The callback below keys off the `/html` suffix
+    /// instead, matching the Handlebars engine's unconditional escaping.
     pub fn new() -> Self {
-        Self {
-            env: Environment::new(),
-        }
+        let mut env = Environment::new();
+        env.set_auto_escape_callback(|name| {
+            if name.ends_with("/html") {
+                AutoEscape::Html
+            } else {
+                AutoEscape::None
+            }
+        });
+        Self { env }
     }
 
     /// Load templates from a directory.
@@ -187,6 +199,55 @@ mod tests {
         assert_eq!(result.html.as_deref(), Some("<h1>Hello, World!</h1>"));
         assert_eq!(result.text.as_deref(), Some("Hello, World!"));
         assert_eq!(result.subject.as_deref(), Some("Welcome World"));
+    }
+
+    #[test]
+    fn html_part_is_autoescaped() {
+        let mut engine = MiniJinjaEngine::new();
+        engine
+            .register_template("xss", "<p>{{ name }}</p>")
+            .unwrap();
+
+        let result = engine
+            .render("xss", &json!({"name": "<script>alert(1)</script>"}))
+            .unwrap();
+        let html = result.html.unwrap();
+
+        assert!(html.contains("&lt;script&gt;"), "not escaped: {html}");
+        assert!(!html.contains("<script>"), "raw script tag present: {html}");
+    }
+
+    #[test]
+    fn text_and_subject_parts_are_not_escaped() {
+        let mut engine = MiniJinjaEngine::new();
+        engine.register_raw("xss/text", "{{ name }}").unwrap();
+        engine.register_raw("xss/subject", "{{ name }}").unwrap();
+
+        let result = engine
+            .render("xss", &json!({"name": "Bob & Alice <them>"}))
+            .unwrap();
+
+        assert_eq!(result.text.as_deref(), Some("Bob & Alice <them>"));
+        assert_eq!(result.subject.as_deref(), Some("Bob & Alice <them>"));
+    }
+
+    #[test]
+    fn from_directory_loads_all_three_parts() {
+        let dir = std::env::temp_dir().join(format!("armature-mail-mj-{}", uuid::Uuid::new_v4()));
+        let tpl = dir.join("welcome");
+        std::fs::create_dir_all(&tpl).unwrap();
+        std::fs::write(tpl.join("html.jinja"), "<p>{{ name }}</p>").unwrap();
+        std::fs::write(tpl.join("text.jinja"), "Hi {{ name }}").unwrap();
+        std::fs::write(tpl.join("subject.jinja"), "Welcome {{ name }}\n").unwrap();
+
+        let engine = MiniJinjaEngine::from_directory(&dir).unwrap();
+        let result = engine.render("welcome", &json!({"name": "<b>"})).unwrap();
+
+        assert_eq!(result.html.as_deref(), Some("<p>&lt;b&gt;</p>"));
+        assert_eq!(result.text.as_deref(), Some("Hi <b>"));
+        assert_eq!(result.subject.as_deref(), Some("Welcome <b>"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

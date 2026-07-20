@@ -44,8 +44,16 @@ pub struct TeraEngine {
 
 impl TeraEngine {
     /// Create a new, empty Tera engine.
+    ///
+    /// HTML parts are autoescaped. Templates are registered under keys of the
+    /// form `"<name>/<part>"` (no file extension), so Tera's default
+    /// `.html`-suffix autoescape rule would never match and every part would
+    /// render unescaped. The `/html` suffix is registered below so the HTML
+    /// part escapes, matching the Handlebars engine's unconditional escaping.
     pub fn new() -> Self {
-        Self { tera: Tera::new() }
+        let mut tera = Tera::new();
+        tera.autoescape_on(vec!["/html", ".html", ".htm", ".xml"]);
+        Self { tera }
     }
 
     /// Load templates from a directory.
@@ -188,6 +196,55 @@ mod tests {
         assert_eq!(result.html.as_deref(), Some("<h1>Hello, World!</h1>"));
         assert_eq!(result.text.as_deref(), Some("Hello, World!"));
         assert_eq!(result.subject.as_deref(), Some("Welcome World"));
+    }
+
+    #[test]
+    fn html_part_is_autoescaped() {
+        let mut engine = TeraEngine::new();
+        engine
+            .register_template("xss", "<p>{{ name }}</p>")
+            .unwrap();
+
+        let result = engine
+            .render("xss", &json!({"name": "<script>alert(1)</script>"}))
+            .unwrap();
+        let html = result.html.unwrap();
+
+        assert!(html.contains("&lt;script&gt;"), "not escaped: {html}");
+        assert!(!html.contains("<script>"), "raw script tag present: {html}");
+    }
+
+    #[test]
+    fn text_and_subject_parts_are_not_escaped() {
+        let mut engine = TeraEngine::new();
+        engine.register_raw("xss/text", "{{ name }}").unwrap();
+        engine.register_raw("xss/subject", "{{ name }}").unwrap();
+
+        let result = engine
+            .render("xss", &json!({"name": "Bob & Alice <them>"}))
+            .unwrap();
+
+        assert_eq!(result.text.as_deref(), Some("Bob & Alice <them>"));
+        assert_eq!(result.subject.as_deref(), Some("Bob & Alice <them>"));
+    }
+
+    #[test]
+    fn from_directory_loads_all_three_parts() {
+        let dir = std::env::temp_dir().join(format!("armature-mail-tera-{}", uuid::Uuid::new_v4()));
+        let tpl = dir.join("welcome");
+        std::fs::create_dir_all(&tpl).unwrap();
+        std::fs::write(tpl.join("html.tera"), "<p>{{ name }}</p>").unwrap();
+        std::fs::write(tpl.join("text.tera"), "Hi {{ name }}").unwrap();
+        std::fs::write(tpl.join("subject.tera"), "Welcome {{ name }}\n").unwrap();
+
+        let engine = TeraEngine::from_directory(&dir).unwrap();
+        let result = engine.render("welcome", &json!({"name": "<b>"})).unwrap();
+
+        assert_eq!(result.html.as_deref(), Some("<p>&lt;b&gt;</p>"));
+        assert_eq!(result.text.as_deref(), Some("Hi <b>"));
+        assert_eq!(result.subject.as_deref(), Some("Welcome <b>"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

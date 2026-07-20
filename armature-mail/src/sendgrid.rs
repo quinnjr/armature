@@ -14,6 +14,12 @@ pub struct SendGridConfig {
     pub api_key: String,
     /// API endpoint (defaults to production).
     pub endpoint: String,
+    /// Per-request timeout.
+    ///
+    /// Set at the transport level so a hung request tears the connection down
+    /// deterministically. The queue worker's `job_timeout` only drops the
+    /// future, which does not un-send anything — keep this below it.
+    pub timeout: std::time::Duration,
 }
 
 impl SendGridConfig {
@@ -22,12 +28,19 @@ impl SendGridConfig {
         Self {
             api_key: api_key.into(),
             endpoint: "https://api.sendgrid.com/v3/mail/send".to_string(),
+            timeout: std::time::Duration::from_secs(30),
         }
     }
 
     /// Set a custom endpoint (for testing).
     pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
+        self
+    }
+
+    /// Set the per-request timeout.
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 }
@@ -41,10 +54,12 @@ pub struct SendGridTransport {
 impl SendGridTransport {
     /// Create a new SendGrid transport.
     pub fn new(config: SendGridConfig) -> Self {
-        Self {
-            client: Client::new(),
-            config,
-        }
+        let client = Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { client, config }
     }
 }
 
@@ -87,10 +102,12 @@ impl Transport for SendGridTransport {
             Err(MailError::RateLimited(retry_after))
         } else {
             let body = response.text().await.unwrap_or_default();
-            Err(MailError::Provider(format!(
-                "SendGrid error {}: {}",
-                status, body
-            )))
+            // The status is carried on the error so `is_retryable` can tell a
+            // transient 5xx from a permanent 4xx.
+            Err(MailError::provider(
+                status.as_u16(),
+                format!("SendGrid error {}: {}", status, body),
+            ))
         }
     }
 }
@@ -106,9 +123,78 @@ struct SendGridPayload {
     content: Vec<Content>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<SendGridAttachment>,
-    /// Custom headers, plus the headers implied by `Email::priority`.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    headers: std::collections::BTreeMap<String, String>,
+    /// Custom headers, the headers implied by `Email::priority`, and the
+    /// threading headers. Kept as an ordered list and serialized as a JSON
+    /// object so emission order matches `Email::wire_headers`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_headers_as_map"
+    )]
+    headers: Vec<(String, String)>,
+}
+
+/// Serialize an ordered header list as SendGrid's single-valued `headers` object.
+fn serialize_headers_as_map<S>(
+    headers: &[(String, String)],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(headers.len()))?;
+    for (name, value) in headers {
+        map.serialize_entry(name, value)?;
+    }
+    map.end()
+}
+
+/// Build SendGrid's `headers` list for a message.
+///
+/// SendGrid's `headers` is a genuinely single-valued JSON object, so duplicate
+/// names must be *combined*, not dropped: collecting into a map silently kept
+/// only the last value, and alphabetised the emission order. RFC 5322 §3.2.2
+/// allows folding repeated field values into one comma-separated list, which is
+/// what a duplicate name becomes here.
+///
+/// The threading headers live on dedicated `Email` fields rather than in
+/// `headers`, and SendGrid has no structured field for them, so they are
+/// appended here — otherwise `.in_reply_to(..)` was silently dropped.
+fn build_headers(email: &Email) -> Vec<(String, String)> {
+    let mut ordered: Vec<(String, String)> = Vec::new();
+
+    let mut push = |name: String, value: String| match ordered
+        .iter_mut()
+        .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+    {
+        Some((_, existing)) => {
+            existing.push_str(", ");
+            existing.push_str(&value);
+        }
+        None => ordered.push((name, value)),
+    };
+
+    for (name, value) in email.wire_headers() {
+        push(name, value);
+    }
+
+    if let Some(id) = &email.message_id {
+        push("Message-ID".to_string(), crate::email::angle_wrapped(id));
+    }
+    if let Some(id) = &email.in_reply_to {
+        push("In-Reply-To".to_string(), crate::email::angle_wrapped(id));
+    }
+    if !email.references.is_empty() {
+        let refs = email
+            .references
+            .iter()
+            .map(|r| crate::email::angle_wrapped(r))
+            .collect::<Vec<_>>()
+            .join(" ");
+        push("References".to_string(), refs);
+    }
+
+    ordered
 }
 
 #[derive(Debug, Serialize)]
@@ -221,7 +307,7 @@ impl SendGridPayload {
             subject: email.subject.clone().unwrap_or_default(),
             content,
             attachments,
-            headers: email.wire_headers().into_iter().collect(),
+            headers: build_headers(email),
         })
     }
 }
@@ -253,6 +339,77 @@ mod tests {
         assert_eq!(headers["X-Campaign-Id"], "spring-2026");
         assert_eq!(headers["X-Priority"], "1 (Highest)");
         assert_eq!(headers["Importance"], "High");
+    }
+
+    /// WF6 audit finding 9: collecting into a `BTreeMap` meant
+    /// `.header("X-Tag","a").header("X-Tag","b")` reached SendGrid as a single
+    /// `X-Tag: b` — the first value silently dropped — and alphabetised the
+    /// emission order. SendGrid's `headers` really is single-valued, so
+    /// duplicates are folded per RFC 5322 §3.2.2 instead of discarded.
+    #[test]
+    fn duplicate_header_names_are_joined_not_dropped() {
+        let email = base().header("X-Tag", "a").header("X-Tag", "b");
+        let payload = SendGridPayload::from_email(&email).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["headers"]["X-Tag"], "a, b");
+    }
+
+    #[test]
+    fn header_emission_order_follows_wire_headers() {
+        let email = base()
+            .header("Z-Last", "z")
+            .header("A-First", "a")
+            .high_priority();
+        let names: Vec<String> = build_headers(&email).into_iter().map(|(n, _)| n).collect();
+
+        assert_eq!(
+            names,
+            [
+                "Z-Last",
+                "A-First",
+                "X-Priority",
+                "X-MSMail-Priority",
+                "Importance"
+            ]
+        );
+    }
+
+    /// WF6 audit finding 7: SendGrid never read `message_id`/`in_reply_to`/
+    /// `references`, so threading was silently lost.
+    #[test]
+    fn threading_headers_are_emitted() {
+        let email = base()
+            .message_id("abc123@armature")
+            .in_reply_to("<parent@example.com>")
+            .reference("<root@example.com>")
+            .reference("<mid@example.com>");
+        let payload = SendGridPayload::from_email(&email).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["headers"]["Message-ID"], "<abc123@armature>");
+        assert_eq!(json["headers"]["In-Reply-To"], "<parent@example.com>");
+        assert_eq!(
+            json["headers"]["References"],
+            "<root@example.com> <mid@example.com>"
+        );
+    }
+
+    /// WF6 audit finding 8: SendGrid writes header values into raw JSON, so a
+    /// CRLF in a value would inject a header. `send` calls `validate` first;
+    /// this asserts nothing poisoned can reach the payload regardless.
+    #[test]
+    fn crlf_injection_never_reaches_the_payload() {
+        let email = base().header("X-Tag", "ok\r\nBcc: evil@example.com");
+
+        assert!(email.validate().is_err(), "CRLF header value was accepted");
+
+        let payload = SendGridPayload::from_email(&email).unwrap();
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !json.contains("Bcc"),
+            "injected header leaked into the SendGrid payload: {json}"
+        );
     }
 
     #[test]

@@ -1,73 +1,37 @@
-//! # Armature Storage
+#![doc = include_str!("../README.md")]
 //!
-//! Multipart file upload handling and storage backends for Armature applications.
+//! ## Handling an upload
 //!
-//! ## Features
+//! A request handler typically parses the multipart body, validates each file,
+//! and writes the ones it accepts to storage. This is the whole flow, free of
+//! any particular web framework:
 //!
-//! - **Multipart Upload**: Parse multipart/form-data requests
-//! - **File Validation**: Type, size, extension, and content validation
-//! - **Local Storage**: Filesystem-based storage
-//! - **S3 Storage**: AWS S3 compatible storage (optional)
-//! - **GCS Storage**: Google Cloud Storage (optional)
-//! - **Azure Blob**: Azure Blob Storage (optional)
-//! - **Streaming**: Memory-efficient streaming uploads
+//! ```rust,no_run
+//! # async fn example(multipart: armature_storage::Multipart) -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_storage::{
+//!     FileValidator, LocalStorage, Storage, StorageMetadata, UploadedFile,
+//! };
 //!
-//! ## Quick Start
+//! let storage = LocalStorage::with_path("./uploads").await?;
 //!
-//! ```rust,ignore
-//! use armature::prelude::*;
-//! use armature_storage::{Multipart, UploadedFile, FileValidator, LocalStorage, Storage};
+//! let validator = FileValidator::new()
+//!     .max_size(10 * 1024 * 1024) // 10 MB
+//!     // Checks the file's magic bytes, not the client-declared type.
+//!     .allowed_types_detected(&["image/jpeg", "image/png"])
+//!     .allowed_extensions(&["jpg", "jpeg", "png"]);
 //!
-//! #[controller("/files")]
-//! struct FileController;
+//! let mut stored: Vec<StorageMetadata> = Vec::new();
+//! let mut stream = multipart.into_stream();
 //!
-//! #[controller_impl]
-//! impl FileController {
-//!     #[post("/upload")]
-//!     async fn upload(
-//!         &self,
-//!         multipart: Multipart,
-//!         #[inject] storage: LocalStorage,
-//!     ) -> Result<Json<UploadResponse>, HttpError> {
-//!         let validator = FileValidator::new()
-//!             .max_size(10 * 1024 * 1024) // 10 MB
-//!             .allowed_types(&["image/jpeg", "image/png"])
-//!             .allowed_extensions(&["jpg", "jpeg", "png"]);
-//!
-//!         let mut files = Vec::new();
-//!         let mut stream = multipart.into_stream();
-//!
-//!         while let Some(field) = stream.next_field().await? {
-//!             if field.name() == Some("file") {
-//!                 let file = UploadedFile::from_field(field).await?;
-//!                 validator.validate(&file)?;
-//!
-//!                 let metadata = storage.put_file(&file).await?;
-//!                 files.push(metadata);
-//!             }
-//!         }
-//!
-//!         Ok(Json(UploadResponse { files }))
+//! while let Some(field) = stream.next_field().await? {
+//!     if field.name() == Some("file") {
+//!         let file = UploadedFile::from_field(field).await?;
+//!         validator.validate(&file)?;
+//!         stored.push(storage.put_file(&file).await?);
 //!     }
 //! }
-//! ```
-//!
-//! ## With S3 Storage
-//!
-//! ```rust,ignore
-//! use armature_storage::{S3Storage, S3Config};
-//!
-//! #[module_impl]
-//! impl StorageModule {
-//!     #[provider]
-//!     async fn s3_storage() -> S3Storage {
-//!         S3Storage::new(S3Config {
-//!             bucket: "my-bucket".to_string(),
-//!             region: "us-east-1".to_string(),
-//!             ..Default::default()
-//!         }).await.unwrap()
-//!     }
-//! }
+//! # Ok(())
+//! # }
 //! ```
 
 mod error;
@@ -89,12 +53,17 @@ mod azure;
 pub use error::{Result, StorageError};
 pub use file::{FileInfo, UploadedFile};
 pub use local::{LocalStorage, LocalStorageConfig};
-pub use multipart::{Multipart, MultipartConstraints, MultipartField, MultipartStream};
-pub use storage::{
-    Storage, StorageConfig, StorageMetadata, calculate_checksum, generate_unique_key,
-    sanitize_filename,
+pub use multipart::{
+    Multipart, MultipartConstraints, MultipartData, MultipartField, MultipartStream,
+    parse_multipart,
 };
-pub use validation::{FileValidator, ValidationError, ValidationRule};
+pub use storage::{
+    DEFAULT_URL_DURATION, Storage, StorageConfig, StorageMetadata, calculate_checksum,
+    generate_unique_key, sanitize_filename,
+};
+pub use validation::{
+    FileValidator, FileValidatorFn, ValidationError, ValidationRule, size, sniff_content_type,
+};
 
 #[cfg(feature = "s3")]
 pub use s3::{S3Config, S3Storage};
@@ -109,6 +78,10 @@ pub use azure::{AzureBlobConfig, AzureBlobStorage};
 pub use bytes::Bytes;
 pub use mime::Mime;
 
+/// Re-exported so callers can name the types in [`parse_multipart`]'s
+/// signature without taking their own `http` dependency.
+pub use http;
+
 /// Prelude for common imports.
 ///
 /// ```
@@ -118,7 +91,10 @@ pub mod prelude {
     pub use crate::error::{Result, StorageError};
     pub use crate::file::{FileInfo, UploadedFile};
     pub use crate::local::{LocalStorage, LocalStorageConfig};
-    pub use crate::multipart::{Multipart, MultipartConstraints, MultipartField, MultipartStream};
+    pub use crate::multipart::{
+        Multipart, MultipartConstraints, MultipartData, MultipartField, MultipartStream,
+        parse_multipart,
+    };
     pub use crate::storage::{Storage, StorageConfig, StorageMetadata};
     pub use crate::validation::{FileValidator, ValidationError, ValidationRule};
 

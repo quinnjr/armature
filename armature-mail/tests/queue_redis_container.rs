@@ -17,11 +17,23 @@ use armature_testkit::containers::RedisContainer;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Skip the calling test when Docker is unavailable — unless
+/// `ARMATURE_REQUIRE_DOCKER=1`, in which case fail loudly.
+///
+/// The skip notice goes through libtest, which swallows output without
+/// `--nocapture`, so a skipped test is reported as a plain green pass. That made
+/// the whole container suite invisible on any machine without Docker. CI sets
+/// `ARMATURE_REQUIRE_DOCKER=1` to turn "silently skipped" into a hard failure.
 macro_rules! require_docker {
     () => {
         if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
+            if std::env::var("ARMATURE_REQUIRE_DOCKER").as_deref() == Ok("1") {
+                panic!(
+                    "ARMATURE_REQUIRE_DOCKER=1 but no Docker daemon is reachable: \
+                     this container test cannot be skipped"
+                );
+            }
+            armature_testkit::skip_if_no_docker!();
         }
     };
 }
@@ -144,6 +156,195 @@ async fn enqueue_batch_pipelines_and_enqueues_everything() {
     assert_eq!(jobs.len(), 20);
     let unique: std::collections::HashSet<_> = jobs.iter().map(|j| j.id.clone()).collect();
     assert_eq!(unique.len(), 20);
+}
+
+/// WF6 audit finding 4: `ZPOPMIN key <count>` returns a flat
+/// `member,score,member,score…` array, so deserializing into `Vec<String>` gave
+/// `2 * count` entries — every other one a score, which became a bogus
+/// `…:job:<score>` key in the MGET. The nils were swallowed, so it "worked" at
+/// 2x MGET width. The MGET must request exactly one key per job.
+#[tokio::test]
+async fn pop_does_not_treat_zpopmin_scores_as_job_ids() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let backend = RedisBackend::new(
+        redis,
+        EmailQueueConfig::default().queue_name("armature:test:zpopmin"),
+    );
+
+    for i in 0..4 {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+
+    reset_stats(&url).await;
+    let jobs = backend.pop(4).await.unwrap();
+    assert_eq!(jobs.len(), 4);
+
+    // One MGET, and its key count must equal the job count — not double it.
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let info: String = redis::cmd("INFO")
+        .arg("commandstats")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    // `usec_per_call` aside, `calls=1` proves a single MGET was issued.
+    assert!(
+        info.contains("cmdstat_mget:calls=1"),
+        "expected exactly one MGET:\n{info}"
+    );
+
+    // The decisive assertion: every id popped resolved to a real job body. With
+    // scores mixed into the id list, half the MGET keys are nils and the
+    // returned job count would still be 4 while 8 keys were requested — so
+    // assert on the parsed ids instead.
+    let ids: std::collections::HashSet<_> = jobs.iter().map(|j| j.id.clone()).collect();
+    assert_eq!(ids.len(), 4, "duplicate or bogus job ids returned");
+    for job in &jobs {
+        assert!(
+            uuid::Uuid::parse_str(&job.id).is_ok(),
+            "job id is not a uuid, a score leaked into the id list: {}",
+            job.id
+        );
+    }
+}
+
+/// WF6 audit finding 5: `count` was applied independently to the pending set and
+/// the retry set and the results concatenated, so `pop(n)` could return `2 * n`.
+/// `InMemoryBackend::pop` honors `count` exactly; the two must agree.
+#[tokio::test]
+async fn pop_never_returns_more_than_count() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:pop-count");
+    let backend = RedisBackend::new(redis, config);
+
+    // 3 pending jobs.
+    for i in 0..3 {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+
+    // 3 retry jobs, all already due. `fail` both stores the body and adds the id
+    // to the retry set, so these must not also be `push`ed into pending.
+    for i in 3..6 {
+        let mut job = EmailJob::new(test_email(i));
+        job.next_retry_at = Some(0);
+        backend.fail(job, "boom").await.unwrap();
+    }
+
+    let jobs = backend.pop(2).await.unwrap();
+    assert_eq!(jobs.len(), 2, "pop must honor `count` exactly");
+
+    // The remainder is still queued, not dropped.
+    let rest = backend.pop(10).await.unwrap();
+    assert_eq!(rest.len(), 4, "remaining jobs must still be poppable");
+}
+
+/// WF6 audit finding 19: `QueueStats::processing` was hardcoded to 0, so a job
+/// lost between `pop` and `complete` was invisible.
+#[tokio::test]
+async fn processing_is_tracked_between_pop_and_complete() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:processing");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config);
+
+    for i in 0..3 {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+    assert_eq!(queue.stats().await.unwrap().processing, 0);
+
+    let jobs = backend.pop(3).await.unwrap();
+    assert_eq!(
+        queue.stats().await.unwrap().processing,
+        3,
+        "popped jobs must be counted as processing"
+    );
+
+    backend.complete(&jobs[0].id).await.unwrap();
+    backend.fail(jobs[1].clone(), "boom").await.unwrap();
+    backend.dead_letter(jobs[2].clone()).await.unwrap();
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(
+        stats.processing, 0,
+        "complete/fail/dead_letter must all release the claim: {stats:?}"
+    );
+}
+
+/// WF6 audit finding 10: the ids are already off the pending/retry sets by the
+/// time the body is fetched, so a missing body dropped the email permanently
+/// with no log and no dead-letter entry.
+#[tokio::test]
+async fn a_job_with_a_missing_body_is_dead_lettered_not_dropped() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:lost-body");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config.clone());
+
+    let job = EmailJob::new(test_email(0));
+    let job_id = job.id.clone();
+    backend.push(job).await.unwrap();
+
+    // Simulate an expired/evicted body.
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    redis::cmd("DEL")
+        .arg(format!("{}:job:{}", config.queue_name, job_id))
+        .query_async::<()>(&mut conn)
+        .await
+        .unwrap();
+
+    let jobs = backend.pop(10).await.unwrap();
+    assert!(jobs.is_empty(), "a body-less job must not be returned");
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(
+        stats.dead_letter, 1,
+        "lost job must be dead-lettered, not silently dropped: {stats:?}"
+    );
+    assert_eq!(stats.processing, 0, "claim must be released: {stats:?}");
+}
+
+/// A corrupt (undeserializable) body takes the same path as a missing one.
+#[tokio::test]
+async fn a_job_with_a_corrupt_body_is_dead_lettered() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:corrupt-body");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config.clone());
+
+    let job = EmailJob::new(test_email(0));
+    let job_id = job.id.clone();
+    backend.push(job).await.unwrap();
+
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    redis::cmd("SET")
+        .arg(format!("{}:job:{}", config.queue_name, job_id))
+        .arg("{not valid json")
+        .query_async::<()>(&mut conn)
+        .await
+        .unwrap();
+
+    assert!(backend.pop(10).await.unwrap().is_empty());
+    assert_eq!(queue.stats().await.unwrap().dead_letter, 1);
 }
 
 struct HangingTransport;

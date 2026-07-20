@@ -19,9 +19,21 @@ use std::collections::HashMap;
 ///
 /// Lookups are case-insensitive.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(from = "HashMap<String, String>")]
+#[serde(from = "HashMap<String, String>", into = "HashMap<String, String>")]
 pub struct WebhookHeaders {
     headers: HashMap<String, String>,
+}
+
+impl From<WebhookHeaders> for HashMap<String, String> {
+    /// Serialize as a bare map, mirroring the `from` shape.
+    ///
+    /// Without this the derived `Serialize` emitted the struct wrapper
+    /// (`{"headers":{..}}`) while `Deserialize` expected a bare map, so
+    /// `from_str(&to_string(&h))` failed — breaking any path that persists or
+    /// forwards headers, such as queuing a webhook for retry.
+    fn from(value: WebhookHeaders) -> Self {
+        value.headers
+    }
 }
 
 impl From<HashMap<String, String>> for WebhookHeaders {
@@ -274,6 +286,84 @@ pub enum WebhookData {
     Generic(serde_json::Value),
 }
 
+impl WebhookData {
+    /// Interpret a raw webhook object according to its event type.
+    ///
+    /// Providers should call this instead of always emitting
+    /// [`WebhookData::Generic`], so consumers can match on a typed payload
+    /// rather than re-parsing `serde_json::Value` themselves.
+    ///
+    /// This is deliberately lossless and total: the typed shapes are modeled on
+    /// Stripe's objects and other gateways differ, so any payload that does not
+    /// deserialize cleanly falls back to `Generic(raw.clone())`. A handler
+    /// therefore never loses data, and adding a provider whose payload does not
+    /// match cannot turn into a parse failure at the webhook boundary.
+    ///
+    /// Note the enum is `#[serde(untagged)]`, so matching on the variant is the
+    /// only reliable way to tell a typed payload from a generic one.
+    pub fn from_event_type(event_type: &WebhookEventType, raw: &serde_json::Value) -> WebhookData {
+        use WebhookEventType as E;
+
+        fn typed<T, F>(raw: &serde_json::Value, wrap: F) -> WebhookData
+        where
+            T: for<'de> Deserialize<'de>,
+            F: FnOnce(T) -> WebhookData,
+        {
+            match serde_json::from_value::<T>(raw.clone()) {
+                Ok(v) => wrap(v),
+                Err(_) => WebhookData::Generic(raw.clone()),
+            }
+        }
+
+        match event_type {
+            E::ChargeSucceeded
+            | E::ChargeFailed
+            | E::ChargeRefunded
+            | E::ChargeDisputed
+            | E::ChargeCaptured
+            | E::PaymentIntentSucceeded
+            | E::PaymentIntentFailed
+            | E::PaymentIntentCanceled
+            | E::PaymentIntentProcessing
+            | E::PaymentIntentRequiresAction => {
+                typed::<ChargeWebhookData, _>(raw, WebhookData::Charge)
+            }
+
+            E::CustomerCreated | E::CustomerUpdated | E::CustomerDeleted => {
+                typed::<CustomerWebhookData, _>(raw, WebhookData::Customer)
+            }
+
+            E::SubscriptionCreated
+            | E::SubscriptionUpdated
+            | E::SubscriptionCanceled
+            | E::SubscriptionTrialEnding
+            | E::SubscriptionPastDue => {
+                typed::<SubscriptionWebhookData, _>(raw, WebhookData::Subscription)
+            }
+
+            E::InvoiceCreated
+            | E::InvoicePaid
+            | E::InvoicePaymentFailed
+            | E::InvoiceUpcoming
+            | E::InvoiceFinalized => typed::<InvoiceWebhookData, _>(raw, WebhookData::Invoice),
+
+            E::PaymentMethodAttached | E::PaymentMethodDetached | E::PaymentMethodUpdated => {
+                typed::<PaymentMethodWebhookData, _>(raw, WebhookData::PaymentMethod)
+            }
+
+            // Payouts and disputes have no typed shape modeled yet, and an
+            // unknown event type by definition has none.
+            E::PayoutCreated
+            | E::PayoutPaid
+            | E::PayoutFailed
+            | E::DisputeCreated
+            | E::DisputeUpdated
+            | E::DisputeClosed
+            | E::Unknown(_) => WebhookData::Generic(raw.clone()),
+        }
+    }
+}
+
 /// Charge webhook data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChargeWebhookData {
@@ -281,10 +371,15 @@ pub struct ChargeWebhookData {
     pub amount: i64,
     pub currency: String,
     pub status: String,
+    #[serde(default)]
     pub customer: Option<String>,
+    #[serde(default)]
     pub payment_method: Option<String>,
+    #[serde(default)]
     pub failure_code: Option<String>,
+    #[serde(default)]
     pub failure_message: Option<String>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -292,8 +387,11 @@ pub struct ChargeWebhookData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomerWebhookData {
     pub id: String,
+    #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -303,10 +401,15 @@ pub struct SubscriptionWebhookData {
     pub id: String,
     pub customer: String,
     pub status: String,
+    #[serde(default)]
     pub current_period_start: i64,
+    #[serde(default)]
     pub current_period_end: i64,
+    #[serde(default)]
     pub cancel_at_period_end: bool,
+    #[serde(default)]
     pub trial_end: Option<i64>,
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -315,12 +418,17 @@ pub struct SubscriptionWebhookData {
 pub struct InvoiceWebhookData {
     pub id: String,
     pub customer: String,
+    #[serde(default)]
     pub subscription: Option<String>,
     pub status: String,
+    #[serde(default)]
     pub amount_due: i64,
+    #[serde(default)]
     pub amount_paid: i64,
     pub currency: String,
+    #[serde(default)]
     pub hosted_invoice_url: Option<String>,
+    #[serde(default)]
     pub pdf: Option<String>,
 }
 
@@ -328,6 +436,7 @@ pub struct InvoiceWebhookData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentMethodWebhookData {
     pub id: String,
+    #[serde(default)]
     pub customer: Option<String>,
     #[serde(rename = "type")]
     pub method_type: String,
@@ -436,6 +545,102 @@ mod tests {
             serde_json::from_str(r#"{"headers":{"Stripe-Signature":"abc"}}"#).unwrap();
         assert_eq!(wrapper.headers.get("stripe-signature"), Some("abc"));
         assert_eq!(wrapper.headers.get("Stripe-Signature"), Some("abc"));
+    }
+
+    #[test]
+    fn test_webhook_headers_serde_round_trip() {
+        // Regression: `from = "HashMap<..>"` with a *derived* Serialize emitted
+        // {"headers":{..}} while deserialization expected a bare map, so a
+        // round-trip through JSON failed outright.
+        let headers = WebhookHeaders::new()
+            .with("Stripe-Signature", "t=1,v1=abc")
+            .with("Content-Type", "application/json");
+
+        let json = serde_json::to_string(&headers).unwrap();
+        let back: WebhookHeaders = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.get("stripe-signature"), Some("t=1,v1=abc"));
+        assert_eq!(back.get("Stripe-Signature"), Some("t=1,v1=abc"));
+        assert_eq!(back.get("content-type"), Some("application/json"));
+        assert_eq!(back.len(), headers.len());
+    }
+
+    #[test]
+    fn test_webhook_headers_serialize_as_bare_map() {
+        let headers = WebhookHeaders::single("A-Header", "v");
+        let value: serde_json::Value = serde_json::to_value(&headers).unwrap();
+        // A bare map, not a struct wrapper.
+        assert!(value.is_object());
+        assert_eq!(value.get("a-header").and_then(|v| v.as_str()), Some("v"));
+        assert!(value.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_webhook_data_typed_charge() {
+        let raw = serde_json::json!({
+            "id": "ch_123",
+            "amount": 2999,
+            "currency": "usd",
+            "status": "succeeded",
+            "customer": "cus_1"
+        });
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, &raw);
+        match data {
+            WebhookData::Charge(c) => {
+                assert_eq!(c.id, "ch_123");
+                assert_eq!(c.amount, 2999);
+                assert_eq!(c.customer.as_deref(), Some("cus_1"));
+                // Absent metadata defaults rather than failing the parse.
+                assert!(c.metadata.is_empty());
+            }
+            other => panic!("expected Charge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_data_typed_subscription_and_invoice() {
+        let sub = serde_json::json!({
+            "id": "sub_1", "customer": "cus_1", "status": "active"
+        });
+        assert!(matches!(
+            WebhookData::from_event_type(&WebhookEventType::SubscriptionCreated, &sub),
+            WebhookData::Subscription(_)
+        ));
+
+        let inv = serde_json::json!({
+            "id": "in_1", "customer": "cus_1", "status": "paid", "currency": "usd"
+        });
+        assert!(matches!(
+            WebhookData::from_event_type(&WebhookEventType::InvoicePaid, &inv),
+            WebhookData::Invoice(_)
+        ));
+    }
+
+    #[test]
+    fn test_webhook_data_falls_back_to_generic_on_mismatch() {
+        // A payload that does not fit the typed shape must not be lost or
+        // error — it degrades to Generic with the original body intact.
+        let raw = serde_json::json!({"unexpected": "shape"});
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, &raw);
+        match data {
+            WebhookData::Generic(v) => assert_eq!(v, raw),
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_data_unmodeled_event_types_are_generic() {
+        let raw = serde_json::json!({"id": "po_1"});
+        for et in [
+            WebhookEventType::PayoutCreated,
+            WebhookEventType::DisputeCreated,
+            WebhookEventType::Unknown("something.else".into()),
+        ] {
+            assert!(matches!(
+                WebhookData::from_event_type(&et, &raw),
+                WebhookData::Generic(_)
+            ));
+        }
     }
 
     #[test]

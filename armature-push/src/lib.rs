@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! # Armature Push
 //!
 //! Push notifications for web and mobile applications.
@@ -11,31 +13,36 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use armature_push::{PushService, WebPushConfig, Notification};
+//! ```rust,no_run
+//! # #[cfg(feature = "web-push")]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_push::{Notification, PushService, WebPushConfig};
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure Web Push
-//!     let config = WebPushConfig::new(
-//!         "your-vapid-private-key",
-//!         "mailto:admin@example.com",
-//!     );
+//! // Configure Web Push. `WebPushConfig` is `#[non_exhaustive]`, so build it
+//! // with `new` plus the builder methods rather than a struct literal.
+//! let config = WebPushConfig::new("your-vapid-private-key", "mailto:admin@example.com");
 //!
-//!     let service = PushService::web_push(config)?;
+//! let service = PushService::web_push(config)?;
 //!
-//!     // Send a notification
-//!     let notification = Notification::new("Hello!", "This is a push notification");
+//! // Send a notification. Note the argument order: token first.
+//! let notification = Notification::new("Hello!", "This is a push notification");
 //!
-//!     service.send("subscription-endpoint", notification).await?;
-//!     Ok(())
-//! }
+//! service
+//!     .send("endpoint|p256dh|auth", notification)
+//!     .await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## With Firebase Cloud Messaging
 //!
-//! ```rust,ignore
-//! use armature_push::{PushService, FcmConfig, Notification};
+//! Note that `PushService::fcm` performs an OAuth2 token exchange over the
+//! network, so it fails if Google's token endpoint is unreachable.
+//!
+//! ```rust,no_run
+//! # #[cfg(feature = "fcm")]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_push::{FcmConfig, Notification, PushService};
 //!
 //! let config = FcmConfig::from_service_account("path/to/service-account.json")?;
 //! let service = PushService::fcm(config).await?;
@@ -45,12 +52,46 @@
 //!     .badge(1);
 //!
 //! service.send("device-token", notification).await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! ## Routing to the right provider
+//!
+//! With more than one provider configured, prefer
+//! [`PushService::send_to_device`] with a platform-tagged [`DeviceToken`]:
+//! it dispatches on the platform, so a token only ever reaches the provider
+//! that issued it.
+//!
+//! ```rust,no_run
+//! # async fn example(service: armature_push::PushService) -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_push::{DeviceToken, Notification};
+//!
+//! let notification = Notification::new("Hello!", "Routed by platform");
+//!
+//! service
+//!     .send_to_device(&DeviceToken::ios("apns-token"), notification.clone())
+//!     .await?;
+//! service
+//!     .send_to_device(&DeviceToken::android("fcm-token"), notification.clone())
+//!     .await?;
+//! service
+//!     .send_to_device(&DeviceToken::web("endpoint|p256dh|auth"), notification)
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`PushService::send`] has no platform information, so it tries every
+//! provider in turn — see its documentation for when that is appropriate.
 
 mod error;
 mod notification;
 mod provider;
 mod subscription;
+
+#[cfg(any(feature = "web-push", feature = "fcm", feature = "apns"))]
+mod host_guard;
 
 #[cfg(feature = "web-push")]
 mod web_push;
@@ -62,7 +103,9 @@ mod fcm;
 mod apns;
 
 pub use error::{PushError, Result};
-pub use notification::{Notification, NotificationBuilder, Priority, Urgency};
+#[allow(deprecated)]
+pub use notification::NotificationBuilder;
+pub use notification::{Notification, NotificationAction, Priority, Urgency};
 pub use provider::{PushProvider, PushService};
 pub use subscription::{DeviceToken, Platform, Subscription};
 
@@ -82,7 +125,9 @@ pub use apns::{ApnsConfig, ApnsEnvironment, ApnsProvider};
 /// ```
 pub mod prelude {
     pub use crate::error::{PushError, Result};
-    pub use crate::notification::{Notification, NotificationBuilder, Priority, Urgency};
+    // `NotificationBuilder` is deliberately absent: it is deprecated in favour
+    // of `Notification::new(..)`'s chaining methods, which cover every field.
+    pub use crate::notification::{Notification, NotificationAction, Priority, Urgency};
     pub use crate::provider::{PushProvider, PushService};
     pub use crate::subscription::{DeviceToken, Platform, Subscription};
 

@@ -26,39 +26,18 @@ use crate::{
 };
 
 /// Azure Blob Storage configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AzureBlobConfig {
     /// Storage account name.
     pub account: String,
     /// Container name.
     pub container: String,
-    /// Access key (if not using default credentials).
-    pub access_key: Option<String>,
-    /// Connection string (alternative to account/key).
-    pub connection_string: Option<String>,
     /// Custom endpoint (for Azurite emulator).
     pub endpoint: Option<String>,
     /// Use Azurite emulator.
     pub use_emulator: bool,
     /// Common storage configuration.
     pub storage: StorageConfig,
-    /// SAS token duration.
-    pub sas_duration: Duration,
-}
-
-impl Default for AzureBlobConfig {
-    fn default() -> Self {
-        Self {
-            account: String::new(),
-            container: String::new(),
-            access_key: None,
-            connection_string: None,
-            endpoint: None,
-            use_emulator: false,
-            storage: StorageConfig::default(),
-            sas_duration: Duration::from_secs(3600), // 1 hour
-        }
-    }
 }
 
 impl AzureBlobConfig {
@@ -69,18 +48,6 @@ impl AzureBlobConfig {
             container: container.into(),
             ..Default::default()
         }
-    }
-
-    /// Set the access key.
-    pub fn access_key(mut self, key: impl Into<String>) -> Self {
-        self.access_key = Some(key.into());
-        self
-    }
-
-    /// Set the connection string.
-    pub fn connection_string(mut self, conn_str: impl Into<String>) -> Self {
-        self.connection_string = Some(conn_str.into());
-        self
     }
 
     /// Set a custom endpoint.
@@ -100,12 +67,6 @@ impl AzureBlobConfig {
         self.storage.path_prefix = Some(prefix.into());
         self
     }
-
-    /// Set SAS token duration.
-    pub fn sas_duration(mut self, duration: Duration) -> Self {
-        self.sas_duration = duration;
-        self
-    }
 }
 
 /// Azure Blob Storage backend.
@@ -117,9 +78,11 @@ pub struct AzureBlobStorage {
 impl AzureBlobStorage {
     /// Create a new Azure Blob storage backend.
     ///
-    /// The new Azure SDK authenticates with AAD (Entra ID) token credentials.
-    /// Connection-string and shared-key (account key) authentication are no
-    /// longer supported by the SDK and will return a configuration error.
+    /// The new Azure SDK authenticates with AAD (Entra ID) token credentials
+    /// only; connection-string and shared-key (account key) authentication are
+    /// not supported by the SDK, so this config exposes no way to request
+    /// them. Use the ambient Azure credential chain (Azure CLI, environment,
+    /// managed identity) or [`AzureBlobConfig::emulator`].
     pub async fn new(config: AzureBlobConfig) -> Result<Self> {
         let blob_service = if config.use_emulator {
             // Azurite emulator: HTTP endpoint, unauthenticated pipeline.
@@ -131,20 +94,6 @@ impl AzureBlobStorage {
                 Url::parse(&endpoint).map_err(|e| StorageError::Config(e.to_string()))?;
             BlobServiceClient::new(service_url, None, None)
                 .map_err(|e| StorageError::Config(e.to_string()))?
-        } else if config.connection_string.is_some() {
-            return Err(StorageError::Config(
-                "azure_storage_blob 1.0 requires AAD (Entra ID) token credentials; \
-                 connection-string authentication is no longer supported by the new \
-                 Azure SDK. Use default Azure credentials instead."
-                    .to_string(),
-            ));
-        } else if config.access_key.is_some() {
-            return Err(StorageError::Config(
-                "azure_storage_blob 1.0 requires AAD (Entra ID) token credentials; \
-                 shared-key (storage account key) authentication is no longer supported \
-                 by the new Azure SDK. Use default Azure credentials instead."
-                    .to_string(),
-            ));
         } else {
             let endpoint = config
                 .endpoint
@@ -515,6 +464,59 @@ mod tests {
         assert!(
             result.is_none(),
             "expected None (unsupported) for Azure temporary_url, got {result:?}"
+        );
+    }
+
+    /// `sas_duration` was read nowhere -- its only possible consumer,
+    /// `temporary_url`, returns `Ok(None)` and ignores its `expires_in`. The
+    /// knob is gone; `default_url_duration` falls back to the trait default,
+    /// and `temporary_url_default` is still honestly unsupported.
+    #[tokio::test]
+    async fn temporary_url_default_is_also_unsupported() {
+        let storage =
+            AzureBlobStorage::new(AzureBlobConfig::new("account", "container").emulator())
+                .await
+                .expect("emulator config should build without network access");
+
+        assert_eq!(storage.default_url_duration(), crate::DEFAULT_URL_DURATION);
+        assert!(
+            storage
+                .temporary_url_default("key.txt")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The `access_key` / `connection_string` builders read as supported auth
+    /// modes but guaranteed `new()` would fail -- deferring the failure from
+    /// the infallible builder to the constructor. They are gone, so the only
+    /// configurations that reach `new()` are the supported ones plus genuinely
+    /// malformed input, which must still be rejected.
+    #[tokio::test]
+    async fn constructor_rejects_a_malformed_endpoint() {
+        let config = AzureBlobConfig::new("account", "container").endpoint("not a url");
+
+        match AzureBlobStorage::new(config).await {
+            Err(StorageError::Config(_)) => {}
+            Err(other) => panic!("expected a Config error, got {other:?}"),
+            Ok(_) => panic!("a malformed endpoint must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emulator_config_uses_the_default_azurite_endpoint() {
+        let storage =
+            AzureBlobStorage::new(AzureBlobConfig::new("devstoreaccount1", "container").emulator())
+                .await
+                .expect("emulator config should build");
+
+        assert!(
+            storage
+                .public_url("k.txt")
+                .starts_with("http://127.0.0.1:10000/"),
+            "got: {}",
+            storage.public_url("k.txt")
         );
     }
 }

@@ -8,7 +8,8 @@
 
 use armature_payments::providers::paypal::PayPalProvider;
 use armature_payments::{
-    CreateCustomerRequest, Money, PaymentError, PaymentProvider, SubscriptionStatus,
+    ChargeRequest, ChargeStatus, CreateCustomerRequest, Currency, Money, PaymentError,
+    PaymentProvider, PaymentSource, SubscriptionStatus,
 };
 use armature_testkit::http_stub::{StubResponse, StubServer};
 
@@ -27,51 +28,84 @@ fn token_route() -> StubResponse {
 }
 
 fn provider(server: &StubServer) -> PayPalProvider {
-    PayPalProvider::new("client-id", "client-secret").with_base_url(server.url())
+    PayPalProvider::new("client-id", "client-secret")
+        .with_base_url(server.url())
+        .unwrap()
 }
 
-/// A partial capture must send the amount; without it PayPal captures the whole
-/// authorization.
+const CAPTURE_PATH: &str = "/v2/checkout/orders/ORDER1/capture";
+
+/// A stub whose capture endpoint returns an order in `status`.
+async fn capture_stub(status: &str) -> StubServer {
+    StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            CAPTURE_PATH,
+            StubResponse::json(
+                200,
+                format!(
+                    r#"{{"id":"ORDER1","status":"{status}",
+                        "purchase_units":[{{"amount":{{"currency_code":"USD","value":"99.00"}}}}]}}"#
+                ),
+            ),
+        )
+        .start()
+        .await
+}
+
+/// PayPal's orders-capture endpoint has no amount field at all, so a partial
+/// capture cannot be expressed there. The original code accepted the amount and
+/// dropped it, capturing the *full* authorization while reporting the partial
+/// figure back to the caller — an overcharge the caller could not see.
+///
+/// Refusing the call is the only safe answer; the error must name the
+/// alternative (an AUTHORIZE-intent order captured via
+/// `/v2/payments/authorizations/{id}/capture`) rather than just failing.
 #[tokio::test]
-async fn partial_capture_sends_the_amount() {
+async fn partial_capture_is_refused_rather_than_silently_capturing_everything() {
     let server = StubServer::builder()
         .route("POST", "/v1/oauth2/token", token_route())
         .route(
             "POST",
-            "/v2/checkout/orders/ORDER1/capture",
+            CAPTURE_PATH,
             StubResponse::json(
                 200,
                 r#"{"id":"ORDER1","status":"COMPLETED",
-                    "purchase_units":[{"amount":{"currency_code":"USD","value":"12.50"}}]}"#,
+                    "purchase_units":[{"amount":{"currency_code":"USD","value":"99.00"}}]}"#,
             ),
         )
         .start()
         .await;
 
-    let charge = provider(&server)
+    let err = provider(&server)
         .capture("ORDER1", Some(Money::usd(1250)))
         .await
-        .unwrap();
-    assert_eq!(charge.amount.amount, 1250);
+        .expect_err("a partial capture PayPal cannot perform must not report success");
 
-    let sent = server.assert_received("POST", "/v2/checkout/orders/ORDER1/capture");
-    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
-    assert_eq!(
-        body["amount"]["value"],
-        "12.50",
-        "a partial capture must carry the amount: {}",
-        sent.body_string()
+    match err {
+        PaymentError::Unsupported(msg) => assert!(
+            msg.contains("authorization"),
+            "the error must point at the endpoint that can do this: {msg}"
+        ),
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+
+    assert!(
+        !server.requests().iter().any(|r| r.path == CAPTURE_PATH),
+        "a capture that cannot honor the requested amount must not be sent at \
+         all — sending it captures the full authorization"
     );
-    assert_eq!(body["amount"]["currency_code"], "USD");
 }
 
+/// A full capture takes no body whatsoever on this endpoint.
 #[tokio::test]
-async fn full_capture_omits_the_amount() {
+async fn full_capture_sends_no_amount() {
     let server = StubServer::builder()
         .route("POST", "/v1/oauth2/token", token_route())
         .route(
             "POST",
-            "/v2/checkout/orders/ORDER1/capture",
+            CAPTURE_PATH,
             StubResponse::json(
                 200,
                 r#"{"id":"ORDER1","status":"COMPLETED",
@@ -83,12 +117,11 @@ async fn full_capture_omits_the_amount() {
 
     provider(&server).capture("ORDER1", None).await.unwrap();
 
-    let sent = server.assert_received("POST", "/v2/checkout/orders/ORDER1/capture");
-    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+    let sent = server.assert_received("POST", CAPTURE_PATH);
+    let body = sent.body_string();
     assert!(
-        body.get("amount").is_none_or(|a| a.is_null()),
-        "a full capture must not pin an amount: {}",
-        sent.body_string()
+        !body.contains("amount"),
+        "a full capture must not pin an amount: {body}"
     );
 }
 
@@ -106,12 +139,14 @@ async fn create_customer_returns_an_explicit_unsupported_error() {
         .await
         .expect_err("PayPal cannot create a customer; it must say so");
 
+    // Either explicit-refusal variant is acceptable here; what must not happen
+    // is a locally minted ID or a bare `Ok`.
     match err {
-        PaymentError::Provider(msg) => assert!(
+        PaymentError::Unsupported(msg) | PaymentError::Provider(msg) => assert!(
             msg.contains("customer"),
             "the error must explain why: {msg}"
         ),
-        other => panic!("expected an explicit Provider error, got {other:?}"),
+        other => panic!("expected an explicit refusal, got {other:?}"),
     }
 }
 
@@ -168,7 +203,43 @@ async fn update_subscription_surfaces_a_revise_failure() {
         .update_subscription("I-SUB1", "P-PLAN2")
         .await
         .expect_err("a rejected plan change must not report success");
-    assert!(matches!(err, PaymentError::Provider(m) if m == "nope"));
+
+    // The shared classifier keeps the status in the message so an operator can
+    // tell a rejected plan change from a missing subscription.
+    match err {
+        PaymentError::Provider(msg) => {
+            assert!(msg.contains("422"), "the status must survive: {msg}");
+            assert!(
+                msg.contains("PLAN_CHANGE_NOT_ALLOWED"),
+                "PayPal's reason must survive: {msg}"
+            );
+        }
+        other => panic!("expected Provider, got {other:?}"),
+    }
+}
+
+/// A 404 on revise means the subscription is gone, which is a different
+/// operator response from "that plan change is not allowed".
+#[tokio::test]
+async fn update_subscription_reports_a_missing_subscription() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            "/v1/billing/subscriptions/I-GONE/revise",
+            StubResponse::json(404, r#"{"name":"RESOURCE_NOT_FOUND"}"#),
+        )
+        .start()
+        .await;
+
+    let err = provider(&server)
+        .update_subscription("I-GONE", "P-PLAN2")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PaymentError::SubscriptionNotFound(ref id) if id == "I-GONE"),
+        "a 404 must name the missing subscription, got {err:?}"
+    );
 }
 
 /// The billing period was fabricated as `now .. now + 30d` on every read.
@@ -227,4 +298,226 @@ async fn subscription_leaves_unreported_fields_none() {
     assert!(sub.current_period_end.is_none());
     assert!(sub.created_at.is_none());
     assert!(sub.customer_id.is_none());
+}
+
+// --------------------------------------------- response mapping (item 7) ---
+
+/// `capture` hardcoded `status: ChargeStatus::Succeeded` and `captured: true`,
+/// ignoring the order status PayPal actually returned. A PENDING capture — funds
+/// authorized but under review — was reported as money in hand.
+#[tokio::test]
+async fn a_pending_capture_is_not_reported_as_completed() {
+    let server = capture_stub("PENDING").await;
+
+    let charge = provider(&server).capture("ORDER1", None).await.unwrap();
+
+    assert_ne!(
+        charge.status,
+        ChargeStatus::Succeeded,
+        "a PENDING capture has not succeeded"
+    );
+    assert!(
+        !charge.captured,
+        "a PENDING capture has captured nothing yet"
+    );
+}
+
+/// A declined capture must not come back as a successful charge.
+#[tokio::test]
+async fn a_declined_capture_is_an_error_or_a_declined_status() {
+    let server = capture_stub("DECLINED").await;
+
+    match provider(&server).capture("ORDER1", None).await {
+        Err(_) => {}
+        Ok(charge) => {
+            assert_ne!(
+                charge.status,
+                ChargeStatus::Succeeded,
+                "a DECLINED capture is not a successful charge"
+            );
+            assert!(!charge.captured, "a DECLINED capture captured nothing");
+        }
+    }
+}
+
+/// Amounts were formatted with `format!("{:.2}", to_float())` regardless of
+/// currency. PayPal rejects `"1000.00"` for JPY outright (`DECIMALS_NOT_SUPPORTED`),
+/// so every yen transaction failed — and any gateway that accepted it would read
+/// the value as a hundredfold overcharge.
+#[tokio::test]
+async fn a_jpy_charge_is_serialized_without_decimals() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            "/v2/checkout/orders",
+            StubResponse::json(
+                200,
+                r#"{"id":"ORDER1","status":"COMPLETED",
+                    "purchase_units":[{"amount":{"currency_code":"JPY","value":"1000"}}]}"#,
+            ),
+        )
+        .start()
+        .await;
+
+    provider(&server)
+        .charge(ChargeRequest::new(
+            Money::new(1000, Currency::JPY),
+            PaymentSource::card("tok_1"),
+        ))
+        .await
+        .unwrap();
+
+    let sent = server.assert_received("POST", "/v2/checkout/orders");
+    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+    let amount = &body["purchase_units"][0]["amount"];
+    assert_eq!(amount["currency_code"], "JPY");
+    assert_eq!(
+        amount["value"],
+        "1000",
+        "a zero-decimal currency must not be padded: {}",
+        sent.body_string()
+    );
+}
+
+/// A USD amount must still carry its two decimal places.
+#[tokio::test]
+async fn a_usd_charge_keeps_two_decimal_places() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            "/v2/checkout/orders",
+            StubResponse::json(
+                200,
+                r#"{"id":"ORDER1","status":"COMPLETED",
+                    "purchase_units":[{"amount":{"currency_code":"USD","value":"29.99"}}]}"#,
+            ),
+        )
+        .start()
+        .await;
+
+    provider(&server)
+        .charge(ChargeRequest::new(
+            Money::usd(2999),
+            PaymentSource::card("tok_1"),
+        ))
+        .await
+        .unwrap();
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.assert_received("POST", "/v2/checkout/orders").body)
+            .unwrap();
+    assert_eq!(body["purchase_units"][0]["amount"]["value"], "29.99");
+}
+
+/// `delete_customer` returned `Ok(())` without doing anything. PayPal has no
+/// customer resource, so a caller deleting a customer for a GDPR erasure request
+/// got a success response for an erasure that never happened.
+#[tokio::test]
+async fn delete_customer_reports_that_paypal_has_no_customer_api() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .start()
+        .await;
+
+    let err = provider(&server)
+        .delete_customer("cus_1")
+        .await
+        .expect_err("a no-op must not be reported as a successful deletion");
+
+    assert!(
+        matches!(err, PaymentError::Unsupported(_)),
+        "expected Unsupported, got {err:?}"
+    );
+}
+
+/// `list_payment_methods` returned `Ok(vec![])`, which reads as "this customer
+/// has no saved payment methods" rather than "this provider cannot answer that".
+/// A UI showing "no cards on file" for a customer who has several is a support
+/// ticket at best and a duplicate-entry prompt at worst.
+#[tokio::test]
+async fn list_payment_methods_reports_unsupported_rather_than_an_empty_list() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .start()
+        .await;
+
+    let err = provider(&server)
+        .list_payment_methods("cus_1")
+        .await
+        .expect_err("an empty vec claims knowledge PayPal never supplied");
+
+    assert!(
+        matches!(err, PaymentError::Unsupported(_)),
+        "expected Unsupported, got {err:?}"
+    );
+}
+
+/// `cancel_subscription` bound its `immediate` argument to `_immediate` and
+/// dropped it, so "cancel at the end of the billing period" cancelled the
+/// subscription on the spot and cut off access the customer had already paid for.
+#[tokio::test]
+async fn cancel_subscription_does_not_silently_ignore_end_of_period() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            "/v1/billing/subscriptions/I-SUB1/cancel",
+            StubResponse::json(204, ""),
+        )
+        .route(
+            "GET",
+            "/v1/billing/subscriptions/I-SUB1",
+            StubResponse::json(200, r#"{"id":"I-SUB1","status":"CANCELLED"}"#),
+        )
+        .start()
+        .await;
+
+    match provider(&server).cancel_subscription("I-SUB1", false).await {
+        // PayPal's /cancel is unconditional; saying so is the honest outcome.
+        Err(PaymentError::Unsupported(_)) => {
+            assert!(
+                !server
+                    .requests()
+                    .iter()
+                    .any(|r| r.path == "/v1/billing/subscriptions/I-SUB1/cancel"),
+                "an unsupported cancellation must not cancel the subscription anyway"
+            );
+        }
+        Ok(sub) => assert_ne!(
+            sub.status,
+            SubscriptionStatus::Canceled,
+            "cancel_subscription(_, false) must not cancel immediately"
+        ),
+        Err(other) => {
+            panic!("expected Unsupported or genuine end-of-period handling, got {other:?}")
+        }
+    }
+}
+
+/// The immediate path must still work.
+#[tokio::test]
+async fn cancel_subscription_immediate_still_cancels() {
+    let server = StubServer::builder()
+        .route("POST", "/v1/oauth2/token", token_route())
+        .route(
+            "POST",
+            "/v1/billing/subscriptions/I-SUB1/cancel",
+            StubResponse::json(204, ""),
+        )
+        .route(
+            "GET",
+            "/v1/billing/subscriptions/I-SUB1",
+            StubResponse::json(200, r#"{"id":"I-SUB1","status":"CANCELLED"}"#),
+        )
+        .start()
+        .await;
+
+    let sub = provider(&server)
+        .cancel_subscription("I-SUB1", true)
+        .await
+        .expect("an immediate cancellation is supported");
+    assert_eq!(sub.status, SubscriptionStatus::Canceled);
+    server.assert_received("POST", "/v1/billing/subscriptions/I-SUB1/cancel");
 }

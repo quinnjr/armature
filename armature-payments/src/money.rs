@@ -197,6 +197,31 @@ impl Money {
         )
     }
 
+    /// Render the amount the way a payment gateway expects it on the wire.
+    ///
+    /// Unlike [`format`](Self::format) this carries no currency symbol and no
+    /// thousands separator — just the decimal amount.
+    ///
+    /// The decimal places come from [`Currency::decimals`], **not** a hardcoded
+    /// `2`. Zero-decimal currencies are already expressed in whole units, so
+    /// `format!("{:.2}", ..)` inflates them by a factor of 100 in meaning and
+    /// PayPal rejects the request outright with `DECIMALS_NOT_SUPPORTED`:
+    /// `Money::new(1000, Currency::JPY)` is ¥1000 and must serialize as
+    /// `"1000"`, never `"1000.00"`.
+    ///
+    /// ```
+    /// # use armature_payments::{Money, Currency};
+    /// assert_eq!(Money::usd(2999).to_gateway_string(), "29.99");
+    /// assert_eq!(Money::new(1000, Currency::JPY).to_gateway_string(), "1000");
+    /// ```
+    pub fn to_gateway_string(&self) -> String {
+        format!(
+            "{:.prec$}",
+            self.to_decimal(),
+            prec = self.currency.decimals() as usize
+        )
+    }
+
     /// Check if zero
     pub fn is_zero(&self) -> bool {
         self.amount == 0
@@ -350,6 +375,70 @@ mod tests {
         assert_eq!(Currency::EUR.symbol(), "€");
         assert_eq!(Currency::JPY.decimals(), 0);
         assert!(Currency::JPY.is_zero_decimal());
+    }
+
+    #[test]
+    fn gateway_string_uses_two_decimals_for_minor_unit_currencies() {
+        assert_eq!(Money::usd(2999).to_gateway_string(), "29.99");
+        assert_eq!(Money::usd(0).to_gateway_string(), "0.00");
+        assert_eq!(Money::usd(5).to_gateway_string(), "0.05");
+        assert_eq!(Money::usd(100).to_gateway_string(), "1.00");
+        assert_eq!(Money::eur(123456).to_gateway_string(), "1234.56");
+        assert_eq!(Money::gbp(1).to_gateway_string(), "0.01");
+    }
+
+    #[test]
+    fn gateway_string_emits_no_decimals_for_zero_decimal_currencies() {
+        // Regression: format!("{:.2}", ..) produced "1000.00" here, which
+        // PayPal rejects with DECIMALS_NOT_SUPPORTED.
+        assert_eq!(Money::new(1000, Currency::JPY).to_gateway_string(), "1000");
+        assert_eq!(Money::new(0, Currency::JPY).to_gateway_string(), "0");
+        assert_eq!(Money::new(1, Currency::JPY).to_gateway_string(), "1");
+        assert_eq!(
+            Money::new(50000, Currency::KRW).to_gateway_string(),
+            "50000"
+        );
+    }
+
+    #[test]
+    fn gateway_string_matches_currency_decimals_for_every_variant() {
+        // Guards against a new currency being added with decimals() != 2 while
+        // to_gateway_string keeps assuming 2.
+        for currency in [
+            Currency::USD,
+            Currency::EUR,
+            Currency::GBP,
+            Currency::JPY,
+            Currency::KRW,
+            Currency::CHF,
+            Currency::INR,
+        ] {
+            let rendered = Money::new(12345, currency).to_gateway_string();
+            let fractional = rendered.split_once('.').map_or(0, |(_, f)| f.len());
+            assert_eq!(
+                fractional,
+                currency.decimals() as usize,
+                "{} rendered as {rendered}",
+                currency.code()
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_string_carries_no_symbol_or_separator() {
+        let s = Money::usd(123456789).to_gateway_string();
+        assert_eq!(s, "1234567.89");
+        assert!(!s.contains('$'));
+        assert!(!s.contains(','));
+    }
+
+    #[test]
+    fn gateway_string_handles_negative_amounts() {
+        assert_eq!(Money::usd(-2999).to_gateway_string(), "-29.99");
+        assert_eq!(
+            Money::new(-1000, Currency::JPY).to_gateway_string(),
+            "-1000"
+        );
     }
 
     #[test]

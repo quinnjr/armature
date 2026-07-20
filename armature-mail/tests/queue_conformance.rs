@@ -169,3 +169,192 @@ async fn enqueue_batch_of_nothing_is_a_no_op() {
     assert!(queue.enqueue_batch(Vec::new()).await.unwrap().is_empty());
     assert_eq!(queue.stats().await.unwrap().pending, 0);
 }
+
+/// A transport that always fails permanently, recording each attempt's Message-ID.
+struct RecordingTransport {
+    seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl Transport for RecordingTransport {
+    async fn send(&self, email: &Email) -> Result<()> {
+        self.seen.lock().unwrap().push(email.message_id.clone());
+        if self.fail {
+            // Retryable, so the job goes back to the queue and is retried.
+            Err(armature_mail::MailError::Network("boom".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// WF6 audit finding 6: `Email::message_id` defaulted to `None`, so `to_lettre`
+/// let lettre mint a *new* Message-ID per attempt. A send abandoned by
+/// `job_timeout` but actually delivered was then redelivered under a different
+/// identity, which nothing downstream could deduplicate. The id must be stamped
+/// once at enqueue time and reused by every retry.
+#[tokio::test]
+async fn every_retry_reuses_the_same_message_id() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mailer = Arc::new(
+        Mailer::new(RecordingTransport {
+            seen: seen.clone(),
+            fail: true,
+        })
+        .with_config(MailerConfig::default().retries(0)),
+    );
+
+    let config = EmailQueueConfig::default()
+        .queue_name("armature:test:message-id")
+        .concurrency(1)
+        .batch_size(1)
+        .poll_interval(Duration::from_millis(10))
+        .retry_delay(Duration::from_millis(10))
+        .job_timeout(Duration::from_secs(5));
+
+    let queue = EmailQueue::in_memory(config);
+    queue
+        .enqueue_job(EmailJob::new(test_email()).max_retries(3))
+        .await
+        .unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let handle = tokio::spawn(queue.worker(mailer).with_shutdown(shutdown_rx).run());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if seen.lock().unwrap().len() >= 3 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "job was never retried");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let _ = shutdown_tx.send(());
+    handle.abort();
+
+    let ids = seen.lock().unwrap().clone();
+    let first = ids[0]
+        .clone()
+        .expect("a Message-ID must be stamped at enqueue");
+    assert!(first.ends_with("@armature"), "unexpected id: {first}");
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            id.as_ref(),
+            Some(&first),
+            "attempt {i} used a different Message-ID: {id:?}"
+        );
+    }
+}
+
+/// A caller-supplied Message-ID is never overwritten by the queue.
+#[tokio::test]
+async fn an_explicit_message_id_is_preserved() {
+    let job = EmailJob::new(test_email().message_id("mine@example.com"));
+    assert_eq!(job.email.message_id.as_deref(), Some("mine@example.com"));
+}
+
+/// WF6 audit finding 11: with the DLQ disabled the `else if` had no `else`, so a
+/// permanently failing email vanished — no log, no metric, no `complete`.
+#[tokio::test]
+async fn permanent_failure_with_the_dlq_disabled_is_not_silently_lost() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mailer = Arc::new(
+        Mailer::new(RecordingTransport {
+            seen: seen.clone(),
+            fail: true,
+        })
+        .with_config(MailerConfig::default().retries(0)),
+    );
+
+    let config = EmailQueueConfig::default()
+        .queue_name("armature:test:no-dlq")
+        .concurrency(1)
+        .batch_size(1)
+        .poll_interval(Duration::from_millis(10))
+        .dead_letter_queue(false);
+
+    let queue = EmailQueue::in_memory(config);
+    queue
+        // No retries left, so the first failure is permanent.
+        .enqueue_job(EmailJob::new(test_email()).max_retries(0))
+        .await
+        .unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let handle = tokio::spawn(queue.worker(mailer).with_shutdown(shutdown_rx).run());
+
+    // The job must leave the "processing" state rather than being abandoned
+    // there: the worker now accounts for it via `complete` and logs an error.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stats = queue.stats().await.unwrap();
+        if stats.processed == 1 {
+            assert_eq!(stats.dead_letter, 0, "DLQ is disabled");
+            assert_eq!(stats.processing, 0, "job left in flight: {stats:?}");
+            assert_eq!(stats.pending, 0);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "permanently failed job was silently dropped (stats: {stats:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "send should be attempted once"
+    );
+
+    let _ = shutdown_tx.send(());
+    handle.abort();
+}
+
+/// WF6 audit finding 19: `QueueStats::processing` was hardcoded to 0 in both
+/// backends, so a job lost between `pop` and `complete` was invisible.
+#[tokio::test]
+async fn in_memory_processing_is_tracked_between_pop_and_complete() {
+    use armature_mail::{EmailQueueBackend, InMemoryBackend};
+
+    let backend = InMemoryBackend::new();
+    for _ in 0..3 {
+        backend.push(EmailJob::new(test_email())).await.unwrap();
+    }
+    assert_eq!(backend.stats().await.unwrap().processing, 0);
+
+    let jobs = backend.pop(3).await.unwrap();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(
+        backend.stats().await.unwrap().processing,
+        3,
+        "popped jobs must be counted as processing"
+    );
+
+    backend.complete(&jobs[0].id).await.unwrap();
+    backend.fail(jobs[1].clone(), "boom").await.unwrap();
+    backend.dead_letter(jobs[2].clone()).await.unwrap();
+
+    let stats = backend.stats().await.unwrap();
+    assert_eq!(
+        stats.processing, 0,
+        "complete/fail/dead_letter must all release the claim: {stats:?}"
+    );
+}
+
+/// `pop(count)` must honor `count` exactly — the contract `RedisBackend::pop`
+/// now shares.
+#[tokio::test]
+async fn in_memory_pop_honors_count_exactly() {
+    use armature_mail::{EmailQueueBackend, InMemoryBackend};
+
+    let backend = InMemoryBackend::new();
+    for _ in 0..6 {
+        backend.push(EmailJob::new(test_email())).await.unwrap();
+    }
+
+    assert_eq!(backend.pop(2).await.unwrap().len(), 2);
+    assert_eq!(backend.pop(10).await.unwrap().len(), 4);
+}

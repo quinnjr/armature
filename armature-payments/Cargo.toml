@@ -12,7 +12,7 @@ keywords = ["payments", "stripe", "paypal", "braintree", "ecommerce"]
 categories = ["web-programming", "api-bindings"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.2.3" }
 armature-log = { path = "../armature-log", version = "0.1.0" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -25,26 +25,29 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 url = "2.5"
 hmac = "0.13"
 sha2 = "0.11"
-sha1 = "0.11"
+sha1 = { version = "0.11", optional = true }
 hex = "0.4"
 base64 = "0.22"
 rust_decimal = { version = "1.42", features = ["serde"] }
 secrecy = { version = "0.10", features = ["serde"] }
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 
 [features]
-# All three providers are on by default: they add no dependencies (the feature
-# gates only select modules), and with `default = ["stripe"]` the PayPal and
-# Braintree webhook-verification regression tests were silently skipped by a
-# plain `cargo test`.
+# All three providers are on by default because with `default = ["stripe"]` the
+# PayPal and Braintree webhook-verification regression tests were silently
+# skipped by a plain `cargo test` — a signature-verification bug in either
+# provider would have shipped unnoticed. The providers are not dependency-free:
+# Braintree pulls in `sha1` and `quick-xml`, and PayPal relies on serde_json's
+# `raw_value`. Turning them off trades those dependencies for untested
+# verification paths, so leave them on unless you run the full matrix.
 default = ["stripe", "paypal", "braintree"]
 stripe = []
 paypal = []
-braintree = []
+braintree = ["dep:quick-xml", "dep:sha1"]
 full = ["stripe", "paypal", "braintree"]
 
 [dev-dependencies]
 armature-testkit = { path = "../armature-testkit" }
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-test = "0.4"
-wiremock = "0.6"
-
+# `test-util` provides the paused-clock runtime (`#[tokio::test(start_paused)]`)
+# the retry/backoff tests use to assert on delays without actually sleeping.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

@@ -3,12 +3,39 @@
 use async_trait::async_trait;
 use aws_sdk_sesv2::{
     Client,
+    config::http::HttpResponse,
+    error::SdkError,
     primitives::Blob,
     types::{Body, Content, Destination, EmailContent, Message, RawMessage},
 };
 use tracing::debug;
 
 use crate::{Email, MailError, Result, Transport};
+
+/// Map an AWS SDK error onto the closest [`MailError`] variant.
+///
+/// Collapsing everything into [`MailError::Provider`] made transport-level
+/// failures indistinguishable from message rejections: a dispatch failure or a
+/// timeout is transient and must retry, and a service error carries an HTTP
+/// status that decides retryability. `Provider` without a status is the
+/// conservative fallback and does *not* retry.
+fn map_sdk_error<E>(err: SdkError<E, HttpResponse>) -> MailError
+where
+    SdkError<E, HttpResponse>: std::fmt::Display,
+{
+    match &err {
+        // "An HTTP response was not received. The request MAY have been sent."
+        SdkError::DispatchFailure(_) => MailError::Network(err.to_string()),
+        SdkError::TimeoutError(_) => MailError::Timeout,
+        SdkError::ResponseError(_) => MailError::Network(err.to_string()),
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            MailError::provider(status, err.to_string())
+        }
+        // Construction failures are our own bug, never transient.
+        _ => MailError::provider(None, err.to_string()),
+    }
+}
 
 /// AWS SES configuration.
 #[derive(Debug, Clone, Default)]
@@ -36,6 +63,78 @@ impl SesConfig {
         self.configuration_set = Some(name.into());
         self
     }
+}
+
+/// Whether a message must be sent as raw MIME rather than SES's structured
+/// `simple` content.
+///
+/// `EmailContent::simple` can only carry subject/text/html. It has no
+/// representation for attachments, custom headers, *or* the threading headers
+/// (`Message-ID`, `In-Reply-To`, `References`) — an email with only
+/// `.in_reply_to(..)` set used to take the simple path and lose its threading
+/// silently.
+fn needs_raw_mime(email: &Email) -> bool {
+    !email.attachments.is_empty()
+        || !email.wire_headers().is_empty()
+        || email.message_id.is_some()
+        || email.in_reply_to.is_some()
+        || !email.references.is_empty()
+}
+
+/// Build the SES content for a message, choosing the simple or raw-MIME path.
+///
+/// Extracted as a seam so the choice — not a restatement of the condition — can
+/// be asserted on directly.
+fn ses_content(email: &Email) -> Result<EmailContent> {
+    if needs_raw_mime(email) {
+        let mime = email.to_lettre()?.formatted();
+        let raw = RawMessage::builder()
+            .data(Blob::new(mime))
+            .build()
+            .map_err(|e| MailError::Smtp(e.to_string()))?;
+
+        debug!(
+            attachments = email.attachments.len(),
+            "Sending raw MIME message via AWS SES"
+        );
+
+        return Ok(EmailContent::builder().raw(raw).build());
+    }
+
+    let mut body = Body::builder();
+
+    if let Some(text) = &email.text {
+        body = body.text(
+            Content::builder()
+                .data(text)
+                .charset("UTF-8")
+                .build()
+                .map_err(|e| MailError::Smtp(e.to_string()))?,
+        );
+    }
+
+    if let Some(html) = &email.html {
+        body = body.html(
+            Content::builder()
+                .data(html)
+                .charset("UTF-8")
+                .build()
+                .map_err(|e| MailError::Smtp(e.to_string()))?,
+        );
+    }
+
+    let message = Message::builder()
+        .subject(
+            Content::builder()
+                .data(email.subject.as_deref().unwrap_or_default())
+                .charset("UTF-8")
+                .build()
+                .map_err(|e| MailError::Smtp(e.to_string()))?,
+        )
+        .body(body.build())
+        .build();
+
+    Ok(EmailContent::builder().simple(message).build())
 }
 
 /// AWS SES transport.
@@ -101,61 +200,7 @@ impl Transport for SesTransport {
             destination = destination.bcc_addresses(addr);
         }
 
-        // `EmailContent::simple` can only carry subject/text/html — it has no
-        // representation for attachments or custom headers. Whenever the message
-        // needs either, assemble the full MIME document locally and send it as
-        // raw content so nothing is silently dropped.
-        let email_content = if email.attachments.is_empty() && email.wire_headers().is_empty() {
-            // Build body
-            let mut body = Body::builder();
-
-            if let Some(text) = &email.text {
-                body = body.text(
-                    Content::builder()
-                        .data(text)
-                        .charset("UTF-8")
-                        .build()
-                        .map_err(|e| MailError::Smtp(e.to_string()))?,
-                );
-            }
-
-            if let Some(html) = &email.html {
-                body = body.html(
-                    Content::builder()
-                        .data(html)
-                        .charset("UTF-8")
-                        .build()
-                        .map_err(|e| MailError::Smtp(e.to_string()))?,
-                );
-            }
-
-            // Build message
-            let message = Message::builder()
-                .subject(
-                    Content::builder()
-                        .data(email.subject.as_deref().unwrap_or_default())
-                        .charset("UTF-8")
-                        .build()
-                        .map_err(|e| MailError::Smtp(e.to_string()))?,
-                )
-                .body(body.build())
-                .build();
-
-            EmailContent::builder().simple(message).build()
-        } else {
-            let mime = email.to_lettre()?.formatted();
-            let raw = RawMessage::builder()
-                .data(Blob::new(mime))
-                .build()
-                .map_err(|e| MailError::Smtp(e.to_string()))?;
-
-            debug!(
-                attachments = email.attachments.len(),
-                "Sending raw MIME message via AWS SES"
-            );
-
-            EmailContent::builder().raw(raw).build()
-        };
+        let email_content = ses_content(email)?;
 
         // Build request
         let mut request = self
@@ -174,10 +219,7 @@ impl Transport for SesTransport {
         }
 
         // Send
-        request
-            .send()
-            .await
-            .map_err(|e| MailError::Provider(e.to_string()))?;
+        request.send().await.map_err(map_sdk_error)?;
 
         debug!("Email sent successfully via AWS SES");
         Ok(())
@@ -191,6 +233,7 @@ impl Transport for SesTransport {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{Attachment, Email};
 
     fn base() -> Email {
@@ -201,11 +244,16 @@ mod tests {
             .text("Hello")
     }
 
+    /// Bytes SES would receive on the raw path.
+    fn raw_bytes(content: &EmailContent) -> String {
+        let raw = content.raw().expect("raw content");
+        String::from_utf8_lossy(raw.data().as_ref()).into_owned()
+    }
+
     /// WF6 finding 3: `SesTransport::send` built `EmailContent::simple` from
     /// subject/text/html only and never read `email.attachments`, so attachments
-    /// vanished with no error. It now switches to raw MIME whenever the message
-    /// carries attachments or custom headers — this asserts on the exact bytes
-    /// that path hands to `RawMessage`.
+    /// vanished with no error. Assert on the content `send` actually builds, not
+    /// on a restatement of the branch condition.
     #[test]
     fn raw_mime_path_carries_attachments_and_headers() {
         let email = base()
@@ -213,10 +261,13 @@ mod tests {
             .header("X-Campaign-Id", "spring-2026")
             .high_priority();
 
-        // The condition `send` uses to choose raw over simple content.
-        assert!(!email.attachments.is_empty() || !email.wire_headers().is_empty());
+        let content = ses_content(&email).unwrap();
+        assert!(
+            content.raw().is_some(),
+            "attachments must force the raw MIME path"
+        );
 
-        let mime = String::from_utf8_lossy(&email.to_lettre().unwrap().formatted()).into_owned();
+        let mime = raw_bytes(&content);
         assert!(
             mime.contains(r#"Content-Disposition: attachment; filename="report.csv""#),
             "attachment missing from raw SES payload:\n{mime}"
@@ -229,7 +280,45 @@ mod tests {
     /// cheaper `EmailContent::simple` path.
     #[test]
     fn plain_message_takes_the_simple_path() {
-        let email = base();
-        assert!(email.attachments.is_empty() && email.wire_headers().is_empty());
+        let content = ses_content(&base()).unwrap();
+        assert!(
+            content.simple().is_some(),
+            "plain message should not go raw"
+        );
+        assert!(content.raw().is_none());
+
+        let simple = content.simple().unwrap();
+        assert_eq!(simple.subject().unwrap().data(), "Test");
+        assert_eq!(simple.body().unwrap().text().unwrap().data(), "Hello");
+    }
+
+    /// WF6 audit finding 7: an email carrying only threading headers took the
+    /// simple path, which has no representation for them, so `In-Reply-To` /
+    /// `References` / `Message-ID` were dropped with no error.
+    #[test]
+    fn threading_headers_force_the_raw_path_and_survive() {
+        let email = base()
+            .message_id("abc123@armature")
+            .in_reply_to("<parent@example.com>")
+            .reference("<root@example.com>");
+
+        let content = ses_content(&email).unwrap();
+        assert!(
+            content.raw().is_some(),
+            "threading headers must force the raw MIME path"
+        );
+
+        let mime = raw_bytes(&content);
+        assert!(mime.contains("Message-ID: <abc123@armature>"), "{mime}");
+        assert!(mime.contains("In-Reply-To: <parent@example.com>"), "{mime}");
+        assert!(mime.contains("References: <root@example.com>"), "{mime}");
+    }
+
+    #[test]
+    fn each_threading_header_alone_forces_raw() {
+        assert!(needs_raw_mime(&base().in_reply_to("<x@y>")));
+        assert!(needs_raw_mime(&base().reference("<x@y>")));
+        assert!(needs_raw_mime(&base().message_id("x@y")));
+        assert!(!needs_raw_mime(&base()));
     }
 }

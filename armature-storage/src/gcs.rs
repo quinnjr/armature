@@ -24,13 +24,13 @@ use crate::{
 pub struct GcsConfig {
     /// GCS bucket name.
     pub bucket: String,
-    /// GCP project ID (optional, uses default).
+    /// GCP project ID used as the billing/quota project.
     ///
-    /// Note: the `google-cloud-storage` 1.x SDK has no client-level hook to
-    /// pin an explicit billing/quota project for data-plane object
-    /// operations (object resource names use the `projects/_/buckets/{bucket}`
-    /// placeholder form regardless of project). This field is accepted for
-    /// forward-compatibility but is currently only informational.
+    /// Object resource names use the `projects/_/buckets/{bucket}` placeholder
+    /// form regardless of project, so this is applied per request as the quota
+    /// project (the `x-goog-user-project` header), which is what bills
+    /// requester-pays buckets and attributes quota. Leave unset to use the
+    /// project associated with the ambient credentials.
     pub project_id: Option<String>,
     /// Custom endpoint (for emulators).
     pub endpoint: Option<String>,
@@ -64,7 +64,10 @@ impl GcsConfig {
         }
     }
 
-    /// Set the project ID.
+    /// Set the billing/quota project ID.
+    ///
+    /// Sent as `x-goog-user-project` on every request; required for
+    /// requester-pays buckets.
     pub fn project_id(mut self, project_id: impl Into<String>) -> Self {
         self.project_id = Some(project_id.into());
         self
@@ -176,6 +179,18 @@ impl GcsStorage {
         format!("projects/_/buckets/{}", self.config.bucket)
     }
 
+    /// Apply [`GcsConfig::project_id`] to a control-plane request builder as
+    /// the quota/billing project (`x-goog-user-project`).
+    fn with_quota<B>(&self, builder: B) -> B
+    where
+        B: google_cloud_gax::options::RequestOptionsBuilder,
+    {
+        match &self.config.project_id {
+            Some(project) => builder.with_quota_project(project.clone()),
+            None => builder,
+        }
+    }
+
     /// Get the full GCS object name for a path.
     fn full_key(&self, key: &str) -> String {
         if let Some(prefix) = &self.config.storage.path_prefix {
@@ -196,6 +211,31 @@ impl GcsStorage {
         }
     }
 
+    /// Sign a V4 URL for `key` with an explicit signer.
+    ///
+    /// Split out of [`StorageTrait::temporary_url`] so tests can sign with a
+    /// deterministic service-account key instead of Application Default
+    /// Credentials, which are not available in CI.
+    async fn sign_url_with(
+        &self,
+        key: &str,
+        expires_in: Duration,
+        signer: &google_cloud_auth::signer::Signer,
+    ) -> Result<Option<String>> {
+        use google_cloud_storage::builder::storage::SignedUrlBuilder;
+
+        let full_key = self.full_key(key);
+
+        let url = SignedUrlBuilder::for_object(self.bucket_resource(), full_key)
+            .with_method(http::Method::GET)
+            .with_expiration(expires_in)
+            .sign_with(signer)
+            .await
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
+
+        Ok(Some(url))
+    }
+
     /// Get the public URL for a key.
     pub fn public_url(&self, key: &str) -> String {
         let full_key = self.full_key(key);
@@ -203,13 +243,6 @@ impl GcsStorage {
             "https://storage.googleapis.com/{}/{}",
             self.config.bucket, full_key
         )
-    }
-
-    /// Get a signed URL using the configured [`GcsConfig::signed_url_duration`]
-    /// as the expiration when the caller doesn't need to override it.
-    pub async fn temporary_url_default(&self, key: &str) -> Result<Option<String>> {
-        let duration = self.config.signed_url_duration;
-        StorageTrait::temporary_url(self, key, duration).await
     }
 }
 
@@ -251,6 +284,10 @@ impl StorageTrait for GcsStorage {
             .client
             .write_object(self.bucket_resource(), full_key.clone(), data)
             .set_content_type(content_type);
+
+        if let Some(project) = &self.config.project_id {
+            request = request.with_quota_project(project.clone());
+        }
 
         if self.config.public_access {
             request = request.set_predefined_acl("publicRead");
@@ -295,12 +332,15 @@ impl StorageTrait for GcsStorage {
     async fn get(&self, key: &str) -> Result<Bytes> {
         let full_key = self.full_key(key);
 
-        let mut response = self
+        let mut request = self
             .client
-            .read_object(self.bucket_resource(), full_key.clone())
-            .send()
-            .await
-            .map_err(|e| map_object_error(e, key))?;
+            .read_object(self.bucket_resource(), full_key.clone());
+
+        if let Some(project) = &self.config.project_id {
+            request = request.with_quota_project(project.clone());
+        }
+
+        let mut response = request.send().await.map_err(|e| map_object_error(e, key))?;
 
         let mut contents = Vec::new();
         while let Some(chunk) = response.next().await.transpose().map_err(|e| {
@@ -321,9 +361,7 @@ impl StorageTrait for GcsStorage {
         let full_key = self.full_key(key);
 
         let object = self
-            .control()
-            .await?
-            .get_object()
+            .with_quota(self.control().await?.get_object())
             .set_bucket(self.bucket_resource())
             .set_object(full_key.clone())
             .send()
@@ -349,9 +387,7 @@ impl StorageTrait for GcsStorage {
     async fn delete(&self, key: &str) -> Result<()> {
         let full_key = self.full_key(key);
 
-        self.control()
-            .await?
-            .delete_object()
+        self.with_quota(self.control().await?.delete_object())
             .set_bucket(self.bucket_resource())
             .set_object(full_key.clone())
             .send()
@@ -383,9 +419,7 @@ impl StorageTrait for GcsStorage {
         }
 
         let mut items = self
-            .control()
-            .await?
-            .list_objects()
+            .with_quota(self.control().await?.list_objects())
             .set_parent(self.bucket_resource())
             .set_prefix(full_prefix)
             .by_item();
@@ -434,9 +468,7 @@ impl StorageTrait for GcsStorage {
         let to_key = self.full_key(to);
 
         // Server-side copy is performed via the rewrite operation in the new SDK.
-        self.control()
-            .await?
-            .rewrite_object()
+        self.with_quota(self.control().await?.rewrite_object())
             .set_source_bucket(self.bucket_resource())
             .set_source_object(from_key)
             .set_destination_bucket(self.bucket_resource())
@@ -452,11 +484,12 @@ impl StorageTrait for GcsStorage {
         Ok(Some(self.public_url(key)))
     }
 
+    fn default_url_duration(&self) -> Duration {
+        self.config.signed_url_duration
+    }
+
     async fn temporary_url(&self, key: &str, expires_in: Duration) -> Result<Option<String>> {
         use google_cloud_auth::credentials::Builder as CredentialsBuilder;
-        use google_cloud_storage::builder::storage::SignedUrlBuilder;
-
-        let full_key = self.full_key(key);
 
         // The new SDK signs V4 URLs locally using a `Signer` derived from the
         // ambient credentials (Application Default Credentials).
@@ -464,14 +497,7 @@ impl StorageTrait for GcsStorage {
             .build_signer()
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        let url = SignedUrlBuilder::for_object(self.bucket_resource(), full_key)
-            .with_method(http::Method::GET)
-            .with_expiration(expires_in)
-            .sign_with(&signer)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        Ok(Some(url))
+        self.sign_url_with(key, expires_in, &signer).await
     }
 }
 
@@ -534,14 +560,57 @@ mod tests {
         );
     }
 
+    /// A throwaway RSA key used purely to build a deterministic signer, so the
+    /// signed-URL assertions below do not depend on Application Default
+    /// Credentials being present. It signs nothing real.
+    const TEST_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDiKQN8zuLbaZN5\nMTPXXDvl/GsAknmPwNtgr6F1EzH/HntrdtZ+lvYzjFtvZ/+tjmjr2w/lcptxZKKk\n21VEZm8pN9YPCQqDuZVEzlhy8JnQ9C3eyNrTOCue1qWz31xCkwn4rDHtVasEIajm\noTThz9xMB7Gf2IgPgDMbhCkFBd35EBbzlGUhXQG/Ke1C0juKV6JT32AwAxVyr3rL\nRJ55zMBLaoJAKbQBmnfWJqiHWsMb+WYffwDTDs4xR2niMJrwaNhDutRTts9k6GnY\nlDl6ra9ZV0spHfnLXvWpskTFSnCFGMJ7fBI+sM4jPO/WvayzW6eaC7j+foJpKE4M\n4xQrTrkFAgMBAAECggEAT82kHubL8xtyf+nGPsCbnEBxK38EKR8m6hufT/YJhtnl\nOBrzfjDbyH3HB+09MatWR5+BoPfLdPxLTfvdPykcIYHD5YNNtASI8QIVAN34kNyQ\n0ROz76Na9Q4N44Y2AoHrG1X7uiEoGumbtWH+DI5x0FxIp7xa6olUv2lnpg+Xb5o9\ngBQrcnMDc8cyC4ObV3dz/KOQ7z1Hr0KT3GVzQmH+IGubhI1Q5R6NC6esEDvlG8l5\n8bgK5MXRi5peIsNodT2ZZAI1VzjAd+AiMme+lGz9xMrhm0F2V0NvF8EpSo4uas5M\nUUJrFa9BMBSK60MPPgEPpli70doxOm9pNOc+zHugwwKBgQD0+wJdbZTn0bUtHoOv\nYdpClGLbSolKA1l7a9CU/BpMCGTfS8yPXM4ohzRDNixdvJlLlF4FIOztKLiIWJ3D\nYFrPwfN1I6qea3EsIf/mK9qmB+Z8KpPZBUEzw//YphJvjq/LbTFz5aoEkJgiLpGV\n9F8aW98myVZPkbVmmL1DW6i22wKBgQDsVUkci7sP1uvfH+CL00OLcL04/zM8MZyw\nfl+7oFJEPEWxp146hNKphAq21n4XRBTQWCxzU39x6GUmXpDoakntGhWwPNld34Q5\ntJZidf1FnnVv3Mq0N/rC13awHgHENdmYgYzO2CxSXfV8viE+5uErFf8o9sK61HmZ\nk/2+1h6lnwKBgQDLVMc6umg8HM+umkQcPjCE0FpYvr3Cg5MyoGLoNXKyJslqmKQ5\nXYLzGn0jSAR87Lujgoqi4RglI4Y+DKcs8X2OMOGcGTVU9cJiKfoWldGNusLvzfsW\nxoi+qXBh5j0pAJoiUwgXtMhvr3/F5zcI6mJBI33M2JFdy4dvl1iHXr1ivwKBgDLh\n0dHhi67HWRU66b9xBtPYvASvfTpyfAfLzZS52bxzNZYgMLtsqWZx1VS0LYWY1Npe\ngYN68K93l3+BULWZXL09pnnBQBNj8jXyWYZtXNBGY4ZoBQR0IPseJKGadEroRSb+\njXBjPnelXxsyXDoMv2HlZIBPUHGlGWElabZSp1qFAoGBANdzGUXT1ozW48YcP4Iq\nCXpr8pOpxGOup3Ts8OcmLFgbXcT3SkmiwlD02TmrDYQIWtT7ZQoAx38Xk6f29cUn\niGeE9ycRZfgR8BJneYielQ/y5d/A9KmpORr1BuQCf0JMnJB8veC/NDIoNDFpVPIq\nr1cMH1jgia8+TqcycOHM1e43\n-----END PRIVATE KEY-----\n";
+
+    fn test_signer() -> google_cloud_auth::signer::Signer {
+        use google_cloud_auth::credentials::service_account::Builder as ServiceAccountBuilder;
+
+        let key = serde_json::json!({
+            "type": "service_account",
+            "project_id": "test-project",
+            "private_key_id": "test-key-id",
+            "private_key": TEST_PRIVATE_KEY,
+            "client_email": "test@test-project.iam.gserviceaccount.com",
+            "client_id": "1234567890",
+            "universe_domain": "googleapis.com",
+        });
+
+        ServiceAccountBuilder::new(key)
+            .build_signer()
+            .expect("building a signer from the test service-account key should succeed")
+    }
+
+    /// `GcsConfig::signed_url_duration` must actually reach the signed URL.
+    ///
+    /// The previous version of this test put its only assertion inside
+    /// `if let Ok(Some(url)) = result`, and in CI (no ADC) `result` is `Err`,
+    /// so it passed unconditionally -- including against code that ignored
+    /// `signed_url_duration` entirely. Signing with a fixed test key makes the
+    /// expiry observable without live credentials.
     #[tokio::test]
-    async fn temporary_url_default_uses_configured_duration_probe() {
-        // Probe only: `temporary_url` signs locally via ambient credentials
-        // (`CredentialsBuilder::default().build_signer()`), which requires
-        // Application Default Credentials that are not available in this
-        // sandboxed test environment. If that changes, promote this into a
-        // real assertion on `GcsConfig::signed_url_duration` being honored
-        // by `temporary_url_default`.
+    async fn signed_url_carries_the_requested_expiration() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        let url = storage
+            .sign_url_with("key.txt", Duration::from_secs(120), &test_signer())
+            .await
+            .expect("signing with the test key should succeed")
+            .expect("a signed url should be produced");
+
+        assert!(
+            url.contains("X-Goog-Expires=120"),
+            "expected X-Goog-Expires=120 in the signed URL, got: {url}"
+        );
+    }
+
+    /// `default_url_duration` exposes the configured duration on the `Storage`
+    /// trait, and the provided `temporary_url_default` forwards it.
+    #[tokio::test]
+    async fn default_url_duration_reports_the_configured_duration() {
         let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
         let storage = stub_gcs_storage(
             &server,
@@ -549,13 +618,92 @@ mod tests {
         )
         .await;
 
-        let result = storage.temporary_url_default("key.txt").await;
-        // Whatever the ambient-credential outcome, `temporary_url_default`
-        // must delegate to `temporary_url` (never panic / hang), which we've
-        // confirmed completes quickly here.
-        if let Ok(Some(url)) = result {
-            assert!(url.contains("Expires=120") || url.contains("X-Goog-Expires=120"));
-        }
+        assert_eq!(
+            StorageTrait::default_url_duration(&storage),
+            Duration::from_secs(120)
+        );
+
+        // And that duration is what `temporary_url_default` would sign with.
+        let url = storage
+            .sign_url_with(
+                "key.txt",
+                StorageTrait::default_url_duration(&storage),
+                &test_signer(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(url.contains("X-Goog-Expires=120"), "got: {url}");
+    }
+
+    /// The default is one hour when nothing is configured -- a distinct value
+    /// from the 120s above, so this cannot pass by accident.
+    #[tokio::test]
+    async fn default_url_duration_defaults_to_one_hour() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        assert_eq!(
+            StorageTrait::default_url_duration(&storage),
+            Duration::from_secs(3600)
+        );
+    }
+
+    /// `GcsConfig::project_id` was documented as "currently only
+    /// informational" -- a deferral. It is now applied per request as the
+    /// quota/billing project, which the SDK sends as `x-goog-user-project`.
+    #[tokio::test]
+    async fn project_id_is_sent_as_the_quota_project() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(
+            &server,
+            GcsConfig::new("test-bucket").project_id("my-billing-project"),
+        )
+        .await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("write should succeed against the stub server");
+
+        let requests = server.requests();
+        let upload = requests
+            .iter()
+            .find(|r| {
+                r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("name=key.txt"))
+            })
+            .unwrap_or_else(|| panic!("no upload request recorded: {requests:?}"));
+
+        assert_eq!(
+            upload.header("x-goog-user-project"),
+            Some("my-billing-project"),
+            "expected the configured project as the quota project"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_project_id_sends_no_quota_project_header() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+
+        storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect("write should succeed against the stub server");
+
+        let requests = server.requests();
+        let upload = requests
+            .iter()
+            .find(|r| {
+                r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("name=key.txt"))
+            })
+            .unwrap_or_else(|| panic!("no upload request recorded: {requests:?}"));
+
+        assert_eq!(upload.header("x-goog-user-project"), None);
     }
 
     #[tokio::test]

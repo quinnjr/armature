@@ -25,9 +25,13 @@ pub const STRIPE_SIGNATURE_HEADER: &str = "stripe-signature";
 /// a CPU-amplification vector.
 const MAX_V1_CANDIDATES: usize = 8;
 
+/// Maximum accepted length of a `Stripe-Signature` header, in bytes. Stripe's
+/// own header is well under 200 bytes even during a rotation; anything larger
+/// is a malformed or hostile header and is rejected before it is parsed.
+const MAX_SIGNATURE_HEADER_LEN: usize = 1024;
+
 /// Stripe provider
 pub struct StripeProvider {
-    #[allow(dead_code)]
     api_key: SecretString,
     webhook_secret: Option<SecretString>,
     webhook_tolerance: Option<chrono::Duration>,
@@ -47,9 +51,21 @@ impl StripeProvider {
     }
 
     /// Point the client at an alternate API base URL (a mock or proxy).
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+    ///
+    /// The URL must be `https`, or `http` addressed to a loopback host
+    /// (`localhost`, `127.0.0.1`, `[::1]`) for local testing. A cleartext
+    /// `http` URL to any other host is rejected: every request carries the
+    /// secret API key in an `Authorization` header, so an unencrypted base URL
+    /// leaks `sk_live_…` to anyone on the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if `base_url` is unparseable or uses a
+    /// scheme/host combination that would transmit credentials in cleartext.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> PaymentResult<Self> {
+        let base_url = crate::provider::validate_base_url(&base_url.into())?;
         self.client = ProviderClient::new(base_url, self.api_key.expose_secret());
-        self
+        Ok(self)
     }
 
     /// Set webhook secret
@@ -59,9 +75,31 @@ impl StripeProvider {
     }
 
     /// Maximum age a signed webhook timestamp may have before it is rejected as
-    /// a replay. Defaults to five minutes; `None` disables the check.
-    pub fn with_webhook_tolerance(mut self, tolerance: Option<chrono::Duration>) -> Self {
-        self.webhook_tolerance = tolerance;
+    /// a replay. Defaults to five minutes.
+    ///
+    /// To turn the check off entirely you must say so explicitly with
+    /// [`without_webhook_tolerance`](Self::without_webhook_tolerance); this
+    /// method can no longer disable replay protection by accident.
+    pub fn with_webhook_tolerance(mut self, tolerance: chrono::Duration) -> Self {
+        self.webhook_tolerance = Some(tolerance);
+        self
+    }
+
+    /// Disable webhook replay protection.
+    ///
+    /// # Security
+    ///
+    /// With no tolerance window, any webhook this endpoint ever received can be
+    /// replayed verbatim forever — its signature stays valid indefinitely, so
+    /// an attacker who captures one `charge.succeeded` can resubmit it without
+    /// limit. Only use this where an external layer already enforces
+    /// freshness/deduplication. Turning it off emits a warning.
+    pub fn without_webhook_tolerance(mut self) -> Self {
+        armature_log::warn!(
+            "Stripe webhook replay protection disabled: signed payloads will be accepted \
+             regardless of age. Captured webhooks can be replayed indefinitely."
+        );
+        self.webhook_tolerance = None;
         self
     }
 
@@ -136,26 +174,91 @@ async fn stripe_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> PaymentResult<T> {
     let status = response.status();
+    let retry_after = retry_after_secs(&response);
     let body = response.text().await?;
     if !status.is_success() {
-        return Err(stripe_error(status, &body));
+        return Err(stripe_error(status, &body, retry_after));
     }
-    serde_json::from_str(&body)
-        .map_err(|e| PaymentError::Serialization(format!("{e} (body: {body})")))
+    serde_json::from_str(&body).map_err(|e| {
+        // This arm fires on a *2xx* whose shape we failed to decode, so `body`
+        // is a full Stripe resource — a Customer carries email, name, address;
+        // a PaymentMethod carries card brand and last4. The error string ends
+        // up in caller logs, so it gets only the redacted form; the full body
+        // stays at debug level for operators who have opted into it.
+        armature_log::debug!(
+            "Stripe response failed to deserialize: {} (body: {})",
+            e,
+            body
+        );
+        PaymentError::Serialization(format!(
+            "{e} (body: {})",
+            crate::provider::sanitize_body(&body)
+        ))
+    })
+}
+
+/// As [`stripe_json`], but reporting a 404 as the resource-specific not-found
+/// error.
+///
+/// Stripe's error envelope types a missing resource only as
+/// `invalid_request_error`, which is indistinguishable from a malformed
+/// request; the call site is the only place that knows *what* was missing.
+async fn stripe_json_as<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    not_found: PaymentError,
+) -> PaymentResult<T> {
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(not_found);
+    }
+    stripe_json(response).await
+}
+
+/// Check a Stripe response that carries no useful body, refining a 404 into a
+/// resource-specific error.
+///
+/// Same rationale as [`stripe_json_as`]: Stripe reports a missing resource as a
+/// generic `invalid_request_error`, so only the call site knows which resource
+/// was absent. Without this, a delete of a missing customer surfaces as an
+/// untyped `Provider` error while a *read* of the same customer surfaces as
+/// `CustomerNotFound` — a divergence callers cannot reasonably code against.
+async fn stripe_unit_as(response: reqwest::Response, not_found: PaymentError) -> PaymentResult<()> {
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(not_found);
+    }
+    stripe_unit(response).await
 }
 
 /// Check a Stripe response that carries no useful body.
 async fn stripe_unit(response: reqwest::Response) -> PaymentResult<()> {
     let status = response.status();
+    let retry_after = retry_after_secs(&response);
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(stripe_error(status, &body));
+        return Err(stripe_error(status, &body, retry_after));
     }
     Ok(())
 }
 
+/// Read the `Retry-After` header as a whole number of seconds.
+///
+/// Stripe sends this on 429s. Without it every throttle collapsed to a
+/// hardcoded one-second backoff, which ignores the wait the gateway actually
+/// asked for.
+fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Map a Stripe error body + HTTP status onto a typed [`PaymentError`].
-fn stripe_error(status: reqwest::StatusCode, body: &str) -> PaymentError {
+fn stripe_error(status: reqwest::StatusCode, body: &str, retry_after: Option<u32>) -> PaymentError {
+    // Fall back to one second only when Stripe sent no `Retry-After`.
+    let backoff = retry_after.unwrap_or(1);
     let detail = serde_json::from_str::<StripeError>(body)
         .ok()
         .map(|e| e.error);
@@ -174,8 +277,10 @@ fn stripe_error(status: reqwest::StatusCode, body: &str) -> PaymentError {
             Some("invalid_request_error") if status == reqwest::StatusCode::NOT_FOUND => {
                 PaymentError::Provider(detail.message)
             }
-            Some("rate_limit_error") => PaymentError::RateLimited(1),
-            _ if status == reqwest::StatusCode::TOO_MANY_REQUESTS => PaymentError::RateLimited(1),
+            Some("rate_limit_error") => PaymentError::RateLimited(backoff),
+            _ if status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                PaymentError::RateLimited(backoff)
+            }
             _ if status == reqwest::StatusCode::UNAUTHORIZED => {
                 PaymentError::Authentication(detail.message)
             }
@@ -183,12 +288,17 @@ fn stripe_error(status: reqwest::StatusCode, body: &str) -> PaymentError {
         };
     }
 
+    // No parseable Stripe error envelope, so the raw body is all we have. It
+    // may still be an unexpected resource dump or a proxy error page, so it is
+    // redacted before being embedded in an error that callers will log.
+    armature_log::debug!("Stripe returned {}: {}", status, body);
+    let redacted = crate::provider::sanitize_body(body);
     match status {
-        reqwest::StatusCode::TOO_MANY_REQUESTS => PaymentError::RateLimited(1),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => PaymentError::RateLimited(backoff),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            PaymentError::Authentication(format!("Stripe returned {status}: {body}"))
+            PaymentError::Authentication(format!("Stripe returned {status}: {redacted}"))
         }
-        _ => PaymentError::Provider(format!("Stripe returned {status}: {body}")),
+        _ => PaymentError::Provider(format!("Stripe returned {status}: {redacted}")),
     }
 }
 
@@ -196,6 +306,13 @@ fn stripe_error(status: reqwest::StatusCode, body: &str) -> PaymentError {
 impl PaymentProvider for StripeProvider {
     fn name(&self) -> &'static str {
         "stripe"
+    }
+
+    /// Stripe honours `Idempotency-Key` on every mutating endpoint this
+    /// provider calls, so a retried charge or refund collapses onto the
+    /// original result instead of moving money twice.
+    fn supports_idempotency(&self) -> bool {
+        true
     }
 
     async fn charge(&self, request: ChargeRequest) -> PaymentResult<Charge> {
@@ -240,7 +357,14 @@ impl PaymentProvider for StripeProvider {
             PaymentSource::Customer { customer_id } => {
                 params.insert("customer".into(), customer_id.clone());
             }
-            PaymentSource::PaymentMethod { .. } => unreachable!("handled above"),
+            // Routed to PaymentIntents at the top of this function. Reaching
+            // here would mean that guard was edited away; return an error
+            // rather than panicking inside a payment path.
+            PaymentSource::PaymentMethod { .. } => {
+                return Err(PaymentError::Validation(
+                    "PaymentMethod sources must be routed through create_payment_intent".into(),
+                ));
+            }
         }
 
         params.insert("capture".into(), request.capture.to_string());
@@ -265,7 +389,11 @@ impl PaymentProvider for StripeProvider {
             .post_form(&format!("/charges/{}/capture", charge_id), &params)
             .await?;
 
-        let stripe_charge: StripeCharge = stripe_json(response).await?;
+        let stripe_charge: StripeCharge = stripe_json_as(
+            response,
+            PaymentError::ChargeNotFound(charge_id.to_string()),
+        )
+        .await?;
         Ok(stripe_charge.into())
     }
 
@@ -289,8 +417,15 @@ impl PaymentProvider for StripeProvider {
             );
         }
 
-        let response = self.client.post_form("/refunds", &params).await?;
-        let stripe_refund: StripeRefund = stripe_json(response).await?;
+        // A refund moves money, so a retry that reaches Stripe twice must
+        // collapse onto one refund rather than returning the customer's money
+        // twice.
+        let response = self
+            .client
+            .post_form_idempotent("/refunds", &params, request.idempotency_key.as_deref())
+            .await?;
+        let stripe_refund: StripeRefund =
+            stripe_json_as(response, PaymentError::ChargeNotFound(request.charge_id)).await?;
         Ok(stripe_refund.into())
     }
 
@@ -317,7 +452,8 @@ impl PaymentProvider for StripeProvider {
 
     async fn get_customer(&self, id: &str) -> PaymentResult<Customer> {
         let response = self.client.get(&format!("/customers/{}", id)).await?;
-        let stripe_customer: StripeCustomer = stripe_json(response).await?;
+        let stripe_customer: StripeCustomer =
+            stripe_json_as(response, PaymentError::CustomerNotFound(id.to_string())).await?;
         Ok(stripe_customer.into())
     }
 
@@ -342,13 +478,14 @@ impl PaymentProvider for StripeProvider {
             .client
             .post_form(&format!("/customers/{}", id), &params)
             .await?;
-        let stripe_customer: StripeCustomer = stripe_json(response).await?;
+        let stripe_customer: StripeCustomer =
+            stripe_json_as(response, PaymentError::CustomerNotFound(id.to_string())).await?;
         Ok(stripe_customer.into())
     }
 
     async fn delete_customer(&self, id: &str) -> PaymentResult<()> {
         let response = self.client.delete(&format!("/customers/{}", id)).await?;
-        stripe_unit(response).await
+        stripe_unit_as(response, PaymentError::CustomerNotFound(id.to_string())).await
     }
 
     async fn create_payment_method(
@@ -382,7 +519,11 @@ impl PaymentProvider for StripeProvider {
             .client
             .post_form(&format!("/payment_methods/{}/attach", method_id), &params)
             .await?;
-        let stripe_pm: StripePaymentMethod = stripe_json(response).await?;
+        let stripe_pm: StripePaymentMethod = stripe_json_as(
+            response,
+            PaymentError::PaymentMethodNotFound(method_id.to_string()),
+        )
+        .await?;
         Ok(stripe_pm.into())
     }
 
@@ -394,7 +535,11 @@ impl PaymentProvider for StripeProvider {
                 &HashMap::<String, String>::new(),
             )
             .await?;
-        let stripe_pm: StripePaymentMethod = stripe_json(response).await?;
+        let stripe_pm: StripePaymentMethod = stripe_json_as(
+            response,
+            PaymentError::PaymentMethodNotFound(method_id.to_string()),
+        )
+        .await?;
         Ok(stripe_pm.into())
     }
 
@@ -437,7 +582,8 @@ impl PaymentProvider for StripeProvider {
 
     async fn get_subscription(&self, id: &str) -> PaymentResult<Subscription> {
         let response = self.client.get(&format!("/subscriptions/{}", id)).await?;
-        let stripe_sub: StripeSubscription = stripe_json(response).await?;
+        let stripe_sub: StripeSubscription =
+            stripe_json_as(response, PaymentError::SubscriptionNotFound(id.to_string())).await?;
         Ok(stripe_sub.into())
     }
 
@@ -503,6 +649,13 @@ impl PaymentProvider for StripeProvider {
 
         let signature = headers.require(STRIPE_SIGNATURE_HEADER)?;
 
+        // Bound the header before parsing it. A 10 MB header is not a Stripe
+        // signature under any rotation, and rejecting it up front keeps the
+        // allocation below proportional to a legitimate header.
+        if signature.len() > MAX_SIGNATURE_HEADER_LEN {
+            return Err(PaymentError::InvalidWebhookSignature);
+        }
+
         // Parse the Stripe-Signature header: `t=<unix>,v1=<hex>[,v1=<hex>...]`.
         // Stripe may send several v1 signatures during a secret rotation, so
         // every candidate is checked.
@@ -511,16 +664,21 @@ impl PaymentProvider for StripeProvider {
         for part in signature.split(',') {
             match part.trim().split_once('=') {
                 Some(("t", v)) => timestamp = Some(v),
-                Some(("v1", v)) => candidates.push(v),
+                Some(("v1", v)) => {
+                    // Enforce the cap *inside* the loop. Checking it only after
+                    // collecting let a header full of `v1=` pairs build the
+                    // entire Vec before it was rejected.
+                    if candidates.len() == MAX_V1_CANDIDATES {
+                        return Err(PaymentError::InvalidWebhookSignature);
+                    }
+                    candidates.push(v);
+                }
                 _ => {}
             }
         }
 
         let timestamp = timestamp.ok_or(PaymentError::InvalidWebhookSignature)?;
         if candidates.is_empty() {
-            return Err(PaymentError::InvalidWebhookSignature);
-        }
-        if candidates.len() > MAX_V1_CANDIDATES {
             return Err(PaymentError::InvalidWebhookSignature);
         }
 
@@ -912,4 +1070,248 @@ struct StripeWebhookEvent {
 #[derive(Debug, Deserialize)]
 struct StripeWebhookData {
     object: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> StripeProvider {
+        StripeProvider::new("sk_test_123")
+    }
+
+    // ---- finding 1: base URL validation ----
+
+    #[test]
+    fn with_base_url_rejects_cleartext_http() {
+        // Every request carries sk_live_… as a bearer token.
+        assert!(provider().with_base_url("http://evil.example.com").is_err());
+        assert!(provider().with_base_url("ftp://example.com").is_err());
+        assert!(provider().with_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn with_base_url_accepts_https_and_loopback() {
+        assert!(
+            provider()
+                .with_base_url("https://api.stripe.com/v1")
+                .is_ok()
+        );
+        assert!(provider().with_base_url("http://127.0.0.1:8080").is_ok());
+        assert!(provider().with_base_url("http://localhost:8080").is_ok());
+    }
+
+    #[test]
+    fn with_base_url_accepts_a_trailing_slash() {
+        // `validate_base_url` normalizes it away so request paths join cleanly.
+        assert!(provider().with_base_url("http://localhost:8080/").is_ok());
+    }
+
+    // ---- finding 2: idempotency ----
+
+    #[test]
+    fn advertises_idempotency_support() {
+        assert!(provider().supports_idempotency());
+    }
+
+    // ---- finding 7: Retry-After drives the backoff ----
+
+    #[test]
+    fn rate_limit_uses_the_retry_after_header() {
+        let body = r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#;
+        let err = stripe_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, Some(30));
+        assert!(matches!(err, PaymentError::RateLimited(30)), "got {err:?}");
+    }
+
+    #[test]
+    fn rate_limit_falls_back_to_one_second_without_the_header() {
+        let body = r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#;
+        let err = stripe_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None);
+        assert!(matches!(err, PaymentError::RateLimited(1)), "got {err:?}");
+    }
+
+    #[test]
+    fn bare_429_without_an_error_envelope_still_uses_retry_after() {
+        let err = stripe_error(reqwest::StatusCode::TOO_MANY_REQUESTS, "<html/>", Some(12));
+        assert!(matches!(err, PaymentError::RateLimited(12)), "got {err:?}");
+    }
+
+    // ---- finding 13: bodies are redacted before entering errors/logs ----
+
+    #[test]
+    fn unparseable_error_bodies_are_sanitized() {
+        // A card-number-shaped digit run must not survive into the error text.
+        let body = r#"{"customer":"alice@example.com","card":"4242424242424242"}"#;
+        let err = stripe_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body, None);
+        let text = err.to_string();
+        assert!(!text.contains("4242424242424242"), "leaked PAN: {text}");
+        assert!(text.contains("[redacted]"), "got {text}");
+    }
+
+    #[test]
+    fn auth_failures_are_sanitized_too() {
+        let body = r#"{"token":"4111111111111111"}"#;
+        let err = stripe_error(reqwest::StatusCode::UNAUTHORIZED, body, None);
+        assert!(
+            matches!(err, PaymentError::Authentication(_)),
+            "got {err:?}"
+        );
+        assert!(!err.to_string().contains("4111111111111111"));
+    }
+
+    #[test]
+    fn typed_stripe_errors_are_still_classified() {
+        let expired =
+            r#"{"error":{"type":"card_error","decline_code":"expired_card","message":"expired"}}"#;
+        assert!(matches!(
+            stripe_error(reqwest::StatusCode::PAYMENT_REQUIRED, expired, None),
+            PaymentError::CardExpired
+        ));
+
+        let funds =
+            r#"{"error":{"type":"card_error","decline_code":"insufficient_funds","message":"no"}}"#;
+        assert!(matches!(
+            stripe_error(reqwest::StatusCode::PAYMENT_REQUIRED, funds, None),
+            PaymentError::InsufficientFunds
+        ));
+
+        let auth = r#"{"error":{"type":"authentication_error","message":"bad key"}}"#;
+        assert!(matches!(
+            stripe_error(reqwest::StatusCode::UNAUTHORIZED, auth, None),
+            PaymentError::Authentication(_)
+        ));
+    }
+
+    // ---- finding 17: signature parsing is bounded ----
+
+    #[tokio::test]
+    async fn oversized_signature_header_is_rejected() {
+        let provider = provider().with_webhook_secret("whsec_test");
+        // A 10 MB header must not build a million-entry Vec before being
+        // rejected; it must be refused on length alone.
+        let huge = format!("t=1,{}", "v1=aa,".repeat(200_000));
+        assert!(huge.len() > MAX_SIGNATURE_HEADER_LEN);
+
+        let headers = WebhookHeaders::single(STRIPE_SIGNATURE_HEADER, huge);
+        let err = provider.verify_webhook(b"{}", &headers).await.unwrap_err();
+        assert!(
+            matches!(err, PaymentError::InvalidWebhookSignature),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn too_many_v1_candidates_are_rejected() {
+        let provider = provider().with_webhook_secret("whsec_test");
+        // Within the length cap, but more v1 candidates than allowed.
+        let sig = format!("t=1,{}", "v1=aa,".repeat(MAX_V1_CANDIDATES + 5));
+        assert!(sig.len() <= MAX_SIGNATURE_HEADER_LEN);
+
+        let headers = WebhookHeaders::single(STRIPE_SIGNATURE_HEADER, sig);
+        let err = provider.verify_webhook(b"{}", &headers).await.unwrap_err();
+        assert!(
+            matches!(err, PaymentError::InvalidWebhookSignature),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_signature_still_verifies() {
+        use hmac::Mac;
+
+        let secret = "whsec_test";
+        let provider = provider().with_webhook_secret(secret);
+        let payload = br#"{"id":"evt_1"}"#;
+        let timestamp = Utc::now().timestamp();
+
+        let mut signed = Vec::new();
+        signed.extend_from_slice(timestamp.to_string().as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(payload);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&signed);
+        let sig = hex::encode(mac.finalize().into_bytes());
+
+        let headers =
+            WebhookHeaders::single(STRIPE_SIGNATURE_HEADER, format!("t={timestamp},v1={sig}"));
+        provider.verify_webhook(payload, &headers).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_signatures_are_rejected_by_default() {
+        use hmac::Mac;
+
+        let secret = "whsec_test";
+        let provider = provider().with_webhook_secret(secret);
+        // Well outside the default five-minute tolerance.
+        let timestamp = Utc::now().timestamp() - 3600;
+
+        let payload = br#"{"id":"evt_1"}"#;
+        let mut signed = Vec::new();
+        signed.extend_from_slice(timestamp.to_string().as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(payload);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&signed);
+        let sig = hex::encode(mac.finalize().into_bytes());
+
+        let headers =
+            WebhookHeaders::single(STRIPE_SIGNATURE_HEADER, format!("t={timestamp},v1={sig}"));
+        let err = provider
+            .verify_webhook(payload, &headers)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PaymentError::InvalidWebhookSignature),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_protection_can_be_disabled_explicitly() {
+        use hmac::Mac;
+
+        let secret = "whsec_test";
+        // Only the explicit opt-out disables the check; with_webhook_tolerance
+        // can no longer do it by accident.
+        let provider = provider()
+            .with_webhook_secret(secret)
+            .without_webhook_tolerance();
+        let timestamp = Utc::now().timestamp() - 86_400;
+
+        let payload = br#"{"id":"evt_1"}"#;
+        let mut signed = Vec::new();
+        signed.extend_from_slice(timestamp.to_string().as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(payload);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&signed);
+        let sig = hex::encode(mac.finalize().into_bytes());
+
+        let headers =
+            WebhookHeaders::single(STRIPE_SIGNATURE_HEADER, format!("t={timestamp},v1={sig}"));
+        provider.verify_webhook(payload, &headers).await.unwrap();
+    }
+
+    #[test]
+    fn with_webhook_tolerance_takes_a_duration() {
+        let p = provider().with_webhook_tolerance(chrono::Duration::minutes(1));
+        assert_eq!(p.webhook_tolerance, Some(chrono::Duration::minutes(1)));
+    }
+
+    // ---- finding 17: no panic in the payment path ----
+
+    #[tokio::test]
+    async fn payment_method_source_never_panics_in_charge() {
+        // Routed to PaymentIntents; the old code had an unreachable!() here.
+        // Point at a loopback port nothing is listening on so the call fails as
+        // a network error rather than panicking.
+        let provider = provider().with_base_url("http://127.0.0.1:1").unwrap();
+        let request = ChargeRequest::new(Money::usd(1000), PaymentSource::payment_method("pm_123"));
+        let err = provider.charge(request).await.unwrap_err();
+        assert!(matches!(err, PaymentError::Network(_)), "got {err:?}");
+    }
 }

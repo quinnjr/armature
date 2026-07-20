@@ -30,6 +30,9 @@ bytes = "1.12"
 http = "1.4"
 mime = "0.3"
 mime_guess = "2.0"
+# Magic-byte content sniffing, so type allowlists check the payload and not
+# just the client-declared Content-Type.
+infer = "0.22"
 
 # Error handling
 thiserror = "2.0"

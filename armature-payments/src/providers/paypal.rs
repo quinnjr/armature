@@ -38,6 +38,15 @@ pub const PAYPAL_TRANSMISSION_SIG_HEADER: &str = "paypal-transmission-sig";
 /// Timestamp of the transmission.
 pub const PAYPAL_TRANSMISSION_TIME_HEADER: &str = "paypal-transmission-time";
 
+/// Largest webhook body this provider will attempt to verify.
+///
+/// [`PayPalProvider::verify_webhook`] authenticates by POSTing the body back to
+/// PayPal, so it is a network round-trip driven entirely by *unauthenticated*
+/// input. Without a cap, anyone who can reach the webhook endpoint can make
+/// this process issue arbitrarily large outbound requests. PayPal's own
+/// notifications are a few kilobytes; 256 KiB is generous headroom.
+const MAX_WEBHOOK_BODY: usize = 256 * 1024;
+
 #[derive(Debug, Clone)]
 struct PayPalToken {
     token: String,
@@ -53,7 +62,9 @@ impl PayPalProvider {
             webhook_id: None,
             sandbox: true,
             base_url_override: None,
-            client: Client::new(),
+            // Carries the shared connect/request timeouts; an untimed client
+            // inside the processor's retry loop can hang a charge indefinitely.
+            client: crate::provider::build_http_client().unwrap_or_else(|_| Client::new()),
             access_token: tokio::sync::RwLock::new(None),
         }
     }
@@ -65,9 +76,25 @@ impl PayPalProvider {
     }
 
     /// Point the client at an alternate API base URL (a mock or proxy).
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url_override = Some(base_url.into());
-        self
+    ///
+    /// The URL must be `https`, or `http` addressed to a loopback host
+    /// (`localhost`, `127.0.0.1`, `[::1]`) for local testing. Cleartext `http`
+    /// to any other host is rejected for two independent reasons: the OAuth
+    /// exchange sends the client secret as HTTP Basic credentials, and
+    /// [`verify_webhook`](Self::verify_webhook) asks *this* host whether a
+    /// webhook is authentic — so an attacker-controlled base URL can simply
+    /// answer `{"verification_status":"SUCCESS"}` and every forged webhook is
+    /// accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if `base_url` is unparseable or uses a
+    /// scheme/host combination that would transmit credentials in cleartext.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> PaymentResult<Self> {
+        // The validated form has any trailing slash stripped, so joining
+        // leading-slash request paths onto it stays correct.
+        self.base_url_override = Some(crate::provider::validate_base_url(&base_url.into())?);
+        Ok(self)
     }
 
     /// Set webhook ID for verification
@@ -89,7 +116,7 @@ impl PayPalProvider {
 
     /// Get or refresh access token
     async fn get_token(&self) -> PaymentResult<String> {
-        // Check if we have a valid token
+        // Fast path: a valid token only needs a shared read lock.
         {
             let token = self.access_token.read().await;
             if let Some(ref t) = *token
@@ -99,7 +126,21 @@ impl PayPalProvider {
             }
         }
 
-        // Get new token
+        // Slow path: take the write lock *before* the network call, not after.
+        // Releasing the read lock and fetching unguarded let N concurrent
+        // charges on a cold or expired token each issue their own OAuth
+        // round-trip; holding the write lock across the fetch serialises them
+        // onto one.
+        let mut token = self.access_token.write().await;
+
+        // Double-check under the write lock: while we waited for it, another
+        // task may have completed the refresh we were about to duplicate.
+        if let Some(ref t) = *token
+            && t.expires_at > Utc::now()
+        {
+            return Ok(t.token.clone());
+        }
+
         let credentials = STANDARD.encode(format!(
             "{}:{}",
             self.client_id,
@@ -115,20 +156,23 @@ impl PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(PaymentError::Authentication(
-                "Failed to get PayPal token".into(),
+            let status = response.status();
+            let retry_after = retry_after_secs(&response);
+            let body = response.text().await.unwrap_or_default();
+            return Err(crate::provider::classify_status(
+                "paypal",
+                status,
+                &body,
+                retry_after,
             ));
         }
 
         let token_response: PayPalTokenResponse = response.json().await?;
-        let new_token = PayPalToken {
+        *token = Some(PayPalToken {
             token: token_response.access_token.clone(),
             expires_at: Utc::now()
                 + chrono::Duration::seconds(token_response.expires_in as i64 - 60),
-        };
-
-        let mut token = self.access_token.write().await;
-        *token = Some(new_token);
+        });
 
         Ok(token_response.access_token)
     }
@@ -147,40 +191,145 @@ impl PayPalProvider {
     }
 }
 
+/// Read the `Retry-After` header as a whole number of seconds.
+fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Map a PayPal order/capture `status` onto the crate's [`ChargeStatus`].
+///
+/// Shared by `charge` and `capture` so the two cannot drift apart — `capture`
+/// previously hardcoded `Succeeded`, reporting a `DECLINED` capture as a
+/// successful payment.
+fn order_charge_status(status: &str) -> ChargeStatus {
+    match status {
+        "COMPLETED" | "CAPTURED" => ChargeStatus::Succeeded,
+        "VOIDED" => ChargeStatus::Canceled,
+        "DECLINED" | "FAILED" => ChargeStatus::Failed,
+        // CREATED, SAVED, APPROVED, PAYER_ACTION_REQUIRED, PENDING
+        _ => ChargeStatus::Pending,
+    }
+}
+
+/// Turn a non-2xx PayPal response into a typed [`PaymentError`].
+///
+/// Previously every failure — 401, 404, 429 alike — collapsed into
+/// `Provider(..)`, so expired credentials were indistinguishable from a bad
+/// request and a throttle never triggered backoff.
+async fn paypal_error(response: reqwest::Response) -> PaymentError {
+    let status = response.status();
+    let retry_after = retry_after_secs(&response);
+    let body = response.text().await.unwrap_or_default();
+    crate::provider::classify_status("paypal", status, &body, retry_after)
+}
+
+/// As [`paypal_error`], but reporting a 404 as `not_found` — the resource-specific
+/// meaning the generic classifier cannot know at the call site.
+async fn paypal_error_not_found(
+    response: reqwest::Response,
+    not_found: PaymentError,
+) -> PaymentError {
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return not_found;
+    }
+    paypal_error(response).await
+}
+
 #[async_trait]
 impl PaymentProvider for PayPalProvider {
     fn name(&self) -> &'static str {
         "paypal"
     }
 
+    /// PayPal deduplicates a retried request by its `PayPal-Request-Id` header,
+    /// which this provider sends on order creation and refunds whenever the
+    /// request carries an idempotency key.
+    fn supports_idempotency(&self) -> bool {
+        true
+    }
+
+    /// Create a PayPal order.
+    ///
+    /// # This does not move money
+    ///
+    /// Unlike every other provider's `charge`, this call **only creates an
+    /// order awaiting buyer approval**. PayPal's checkout flow requires the
+    /// buyer to approve the order in their browser, after which the merchant
+    /// calls [`capture`](Self::capture) to actually collect funds. The returned
+    /// [`Charge`] is therefore `ChargeStatus::Pending` with `captured: false`,
+    /// and its `id` is an *order* id — pass it to `capture` once approval has
+    /// happened. Treating a successful return here as a completed payment will
+    /// ship goods that were never paid for.
+    ///
+    /// `request.capture` selects PayPal's order intent: `true` (the default)
+    /// creates a `CAPTURE` order, and [`ChargeRequest::auth_only`] creates an
+    /// `AUTHORIZE` order whose funds are captured through the authorization
+    /// endpoint instead.
     async fn charge(&self, request: ChargeRequest) -> PaymentResult<Charge> {
-        // PayPal uses Orders API for charges
+        // PayPal caps custom_id at 127 characters. Failing loudly beats
+        // silently dropping the caller's metadata on the floor.
+        let custom_id = if request.metadata.is_empty() {
+            None
+        } else {
+            let encoded = serde_json::to_string(&request.metadata)?;
+            if encoded.len() > 127 {
+                return Err(PaymentError::Validation(format!(
+                    "PayPal custom_id is limited to 127 characters; the encoded metadata is {} \
+                     characters. Store the detail against the returned order id instead.",
+                    encoded.len()
+                )));
+            }
+            Some(encoded)
+        };
+
         let order_request = PayPalOrderRequest {
-            intent: "CAPTURE".to_string(),
+            // `request.capture` was previously ignored entirely, so `auth_only()`
+            // and the default produced byte-identical requests.
+            intent: if request.capture {
+                "CAPTURE".to_string()
+            } else {
+                "AUTHORIZE".to_string()
+            },
             purchase_units: vec![PayPalPurchaseUnit {
                 amount: PayPalAmount {
                     currency_code: request.amount.currency.code().to_string(),
-                    value: format!("{:.2}", request.amount.to_float()),
+                    // Zero-decimal currencies (JPY, KRW) must not be sent with
+                    // two decimal places; `{:.2}` turned ¥1000 into "1000.00",
+                    // which PayPal reads as a different amount.
+                    value: request.amount.to_gateway_string(),
                 },
                 description: request.description.clone(),
+                soft_descriptor: request.statement_descriptor.clone(),
+                custom_id,
             }],
         };
 
-        let response = self
+        let mut builder = self
             .request(reqwest::Method::POST, "/v2/checkout/orders")
             .await?
-            .json(&order_request)
-            .send()
-            .await?;
+            .json(&order_request);
+
+        // PayPal's documented idempotency mechanism. Without it a retried
+        // order-create produces a second order for the same purchase.
+        if let Some(key) = request.idempotency_key.as_deref() {
+            builder = builder.header("PayPal-Request-Id", key);
+        }
+
+        let response = builder.send().await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error(response).await);
         }
 
         let order: PayPalOrder = response.json().await?;
 
-        // For captured orders, return as charge
         let amount = order
             .purchase_units
             .first()
@@ -195,17 +344,16 @@ impl PaymentProvider for PayPalProvider {
         Ok(Charge {
             id: order.id,
             amount,
-            amount_refunded: Money::new(0, request.amount.currency),
-            status: match order.status.as_str() {
-                "COMPLETED" | "CAPTURED" => ChargeStatus::Succeeded,
-                "VOIDED" => ChargeStatus::Canceled,
-                _ => ChargeStatus::Pending,
-            },
-            customer_id: None,
+            amount_refunded: Money::new(0, amount.currency),
+            status: order_charge_status(&order.status),
+            // PayPal has no customer resource, so the caller's own identifier
+            // is the only meaningful one; echo it rather than dropping it.
+            customer_id: request.customer_id,
             payment_method: None,
             description: request.description,
             receipt_url: None,
             failure_reason: None,
+            // Now genuinely sent to PayPal as purchase_units[0].custom_id.
             metadata: request.metadata,
             created_at: Utc::now(),
             captured: order.status == "COMPLETED",
@@ -214,33 +362,57 @@ impl PaymentProvider for PayPalProvider {
         })
     }
 
+    /// Capture an approved PayPal order in full.
+    ///
+    /// `charge_id` is the order id returned by [`charge`](Self::charge), and
+    /// the buyer must have approved it first.
+    ///
+    /// # Partial capture is not supported here
+    ///
+    /// `/v2/checkout/orders/{id}/capture` has no `amount` field in its schema —
+    /// PayPal captures the full order. Partial capture lives on
+    /// `/v2/payments/authorizations/{authorization_id}/capture` and needs an
+    /// *authorization* id, which is a different identifier than the order id
+    /// this method receives. Passing `Some(amount)` therefore returns
+    /// [`PaymentError::Unsupported`] rather than sending an `amount` the
+    /// endpoint silently ignores while capturing the full sum.
     async fn capture(&self, charge_id: &str, amount: Option<Money>) -> PaymentResult<Charge> {
-        // A partial capture must actually send the amount; omitting it captures
-        // the full authorization.
-        let body = PayPalCaptureRequest {
-            amount: amount.map(|a| PayPalAmount {
-                currency_code: a.currency.code().to_string(),
-                value: format!("{:.2}", a.to_float()),
-            }),
-        };
+        if let Some(amount) = amount {
+            return Err(PaymentError::Unsupported(format!(
+                "PayPal cannot partially capture order {charge_id}: the orders capture endpoint \
+                 has no amount field, and partial capture ({}) requires the authorization id from \
+                 an AUTHORIZE-intent order via /v2/payments/authorizations/{{id}}/capture. Capture \
+                 the full order, or drive the authorization endpoint directly.",
+                amount.format()
+            )));
+        }
 
+        // Full capture. The endpoint takes no meaningful fields, so send an
+        // empty JSON object rather than an absent body — PayPal expects a JSON
+        // content type here, and this pins no amount.
         let response = self
             .request(
                 reqwest::Method::POST,
                 &format!("/v2/checkout/orders/{}/capture", charge_id),
             )
             .await?
-            .json(&body)
+            .json(&serde_json::json!({}))
             .send()
             .await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::ChargeNotFound(charge_id.to_string()),
+            )
+            .await);
         }
 
         let order: PayPalOrder = response.json().await?;
 
+        // Derive the currency from what PayPal actually reported. Hardcoding
+        // USD turned a €120 capture into Money { 12000, USD }, which then
+        // passes `Money::add`'s currency assertion and corrupts a ledger.
         let amount = order
             .purchase_units
             .first()
@@ -252,11 +424,13 @@ impl PaymentProvider for PayPalProvider {
             })
             .unwrap_or(Money::usd(0));
 
+        let status = order_charge_status(&order.status);
+
         Ok(Charge {
             id: order.id,
             amount,
-            amount_refunded: Money::new(0, Currency::USD),
-            status: ChargeStatus::Succeeded,
+            amount_refunded: Money::new(0, amount.currency),
+            status,
             customer_id: None,
             payment_method: None,
             description: None,
@@ -264,7 +438,9 @@ impl PaymentProvider for PayPalProvider {
             failure_reason: None,
             metadata: HashMap::new(),
             created_at: Utc::now(),
-            captured: true,
+            // Only a COMPLETED capture actually took the money; PENDING and
+            // DECLINED were both reported as captured before.
+            captured: status == ChargeStatus::Succeeded,
             refunded: false,
             disputed: false,
         })
@@ -275,24 +451,32 @@ impl PaymentProvider for PayPalProvider {
         let refund_request = PayPalRefundRequest {
             amount: request.amount.map(|a| PayPalAmount {
                 currency_code: a.currency.code().to_string(),
-                value: format!("{:.2}", a.to_float()),
+                value: a.to_gateway_string(),
             }),
             note_to_payer: None,
         };
 
-        let response = self
+        let mut builder = self
             .request(
                 reqwest::Method::POST,
                 &format!("/v2/payments/captures/{}/refund", request.charge_id),
             )
             .await?
-            .json(&refund_request)
-            .send()
-            .await?;
+            .json(&refund_request);
+
+        // A retried refund must not return the customer's money twice.
+        if let Some(key) = request.idempotency_key.as_deref() {
+            builder = builder.header("PayPal-Request-Id", key);
+        }
+
+        let response = builder.send().await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::ChargeNotFound(request.charge_id.clone()),
+            )
+            .await);
         }
 
         let paypal_refund: PayPalRefund = response.json().await?;
@@ -344,7 +528,16 @@ impl PaymentProvider for PayPalProvider {
     }
 
     async fn delete_customer(&self, _id: &str) -> PaymentResult<()> {
-        Ok(()) // No-op for PayPal
+        // Returning `Ok(())` here was actively dangerous: a caller performing a
+        // GDPR/CCPA erasure would record a successful deletion for data PayPal
+        // still holds. PayPal has no customer resource to delete, so the only
+        // truthful answer is that the operation does not exist.
+        Err(PaymentError::Unsupported(
+            "PayPal has no customer API, so there is no customer record to delete. Erase your own \
+             customer record; payer data held by PayPal is deleted through PayPal's own account \
+             and data-retention processes, not this API."
+                .into(),
+        ))
     }
 
     async fn create_payment_method(
@@ -373,7 +566,14 @@ impl PaymentProvider for PayPalProvider {
     }
 
     async fn list_payment_methods(&self, _customer_id: &str) -> PaymentResult<Vec<PaymentMethod>> {
-        Ok(Vec::new())
+        // An empty Vec is indistinguishable from "this customer has no vaulted
+        // payment methods", so a caller rendering a wallet would silently show
+        // nothing rather than surfacing that the query is not supported.
+        Err(PaymentError::Unsupported(
+            "PayPal does not expose vaulted payment methods through this API; payment methods are \
+             selected by the buyer during the checkout approval flow."
+                .into(),
+        ))
     }
 
     async fn create_subscription(
@@ -393,8 +593,7 @@ impl PaymentProvider for PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error(response).await);
         }
 
         let paypal_sub: PayPalSubscription = response.json().await?;
@@ -422,7 +621,11 @@ impl PaymentProvider for PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(PaymentError::SubscriptionNotFound(id.to_string()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::SubscriptionNotFound(id.to_string()),
+            )
+            .await);
         }
 
         let paypal_sub: PayPalSubscription = response.json().await?;
@@ -444,14 +647,33 @@ impl PaymentProvider for PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::SubscriptionNotFound(id.to_string()),
+            )
+            .await);
         }
 
         self.get_subscription(id).await
     }
 
-    async fn cancel_subscription(&self, id: &str, _immediate: bool) -> PaymentResult<Subscription> {
+    /// Cancel a PayPal subscription.
+    ///
+    /// Only immediate cancellation is supported: PayPal's
+    /// `/v1/billing/subscriptions/{id}/cancel` terminates the subscription at
+    /// once and the Subscriptions API exposes no "cancel at period end" flag.
+    /// `immediate: false` therefore returns [`PaymentError::Unsupported`]
+    /// rather than silently cancelling immediately and forfeiting the
+    /// remaining paid term.
+    async fn cancel_subscription(&self, id: &str, immediate: bool) -> PaymentResult<Subscription> {
+        if !immediate {
+            return Err(PaymentError::Unsupported(format!(
+                "PayPal cannot schedule subscription {id} to cancel at period end; its cancel \
+                 endpoint terminates immediately. Suspend the subscription and cancel it once the \
+                 paid term expires, or call this with immediate = true if that is what you want."
+            )));
+        }
+
         let response = self
             .request(
                 reqwest::Method::POST,
@@ -463,8 +685,11 @@ impl PaymentProvider for PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::SubscriptionNotFound(id.to_string()),
+            )
+            .await);
         }
 
         self.get_subscription(id).await
@@ -481,8 +706,11 @@ impl PaymentProvider for PayPalProvider {
             .await?;
 
         if !response.status().is_success() {
-            let error: PayPalError = response.json().await?;
-            return Err(PaymentError::Provider(error.message.unwrap_or_default()));
+            return Err(paypal_error_not_found(
+                response,
+                PaymentError::SubscriptionNotFound(id.to_string()),
+            )
+            .await);
         }
 
         self.get_subscription(id).await
@@ -497,6 +725,14 @@ impl PaymentProvider for PayPalProvider {
                 "PayPal webhook_id not configured; call PayPalProvider::with_webhook_id".into(),
             )
         })?;
+
+        // Bound the body before spending a network round-trip on it. This
+        // method is reached with fully unauthenticated input, so an unbounded
+        // body lets anyone who can reach the webhook endpoint drive arbitrarily
+        // large outbound POSTs to PayPal from this process.
+        if payload.len() > MAX_WEBHOOK_BODY {
+            return Err(PaymentError::InvalidWebhookSignature);
+        }
 
         // The body must be forwarded byte-for-byte as PayPal signed it: PayPal
         // reconstructs `transmission_id|transmission_time|webhook_id|crc32(body)`
@@ -586,6 +822,14 @@ struct PayPalPurchaseUnit {
     amount: PayPalAmount,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// PayPal's per-purchase-unit statement descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    soft_descriptor: Option<String>,
+    /// Merchant-defined passthrough field; this crate encodes
+    /// [`ChargeRequest::metadata`] into it so the metadata reaches PayPal
+    /// instead of only being echoed back to the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -599,13 +843,6 @@ struct PayPalOrder {
     id: String,
     status: String,
     purchase_units: Vec<PayPalPurchaseUnit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PayPalError {
-    #[allow(dead_code)]
-    name: Option<String>,
-    message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -628,12 +865,6 @@ struct PayPalSubscriptionRequest {
     plan_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     quantity: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct PayPalCaptureRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    amount: Option<PayPalAmount>,
 }
 
 #[derive(Debug, Serialize)]
@@ -740,4 +971,194 @@ struct PayPalWebhookEvent {
     id: String,
     event_type: String,
     resource: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> PayPalProvider {
+        PayPalProvider::new("client_id", "client_secret")
+    }
+
+    // ---- finding 1: base URL validation ----
+    //
+    // This is the branch's headline fix: verify_webhook POSTs the body back to
+    // the base URL and trusts the answer, so an attacker-controlled override
+    // can reply SUCCESS to every forged webhook.
+
+    #[test]
+    fn with_base_url_rejects_cleartext_http() {
+        assert!(provider().with_base_url("http://evil.example.com").is_err());
+        assert!(provider().with_base_url("ftp://example.com").is_err());
+        assert!(provider().with_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn with_base_url_accepts_https_and_loopback() {
+        assert!(provider().with_base_url("https://api-m.paypal.com").is_ok());
+        assert!(provider().with_base_url("http://127.0.0.1:8080").is_ok());
+        assert!(provider().with_base_url("http://localhost:8080").is_ok());
+    }
+
+    #[test]
+    fn with_base_url_strips_trailing_slash() {
+        let p = provider().with_base_url("http://localhost:8080/").unwrap();
+        assert_eq!(p.base_url(), "http://localhost:8080");
+    }
+
+    // ---- finding 2: idempotency ----
+
+    #[test]
+    fn advertises_idempotency_support() {
+        assert!(provider().supports_idempotency());
+    }
+
+    // ---- finding 5: intent follows request.capture ----
+
+    #[test]
+    fn order_intent_follows_capture_flag() {
+        // auth_only() and the default previously produced byte-identical bodies.
+        let capture = ChargeRequest::new(Money::usd(1000), PaymentSource::card("tok"));
+        assert!(capture.capture);
+
+        let auth = ChargeRequest::new(Money::usd(1000), PaymentSource::card("tok")).auth_only();
+        assert!(!auth.capture);
+
+        let intent_for = |c: bool| if c { "CAPTURE" } else { "AUTHORIZE" };
+        assert_eq!(intent_for(capture.capture), "CAPTURE");
+        assert_eq!(intent_for(auth.capture), "AUTHORIZE");
+    }
+
+    #[test]
+    fn purchase_unit_carries_descriptor_and_metadata() {
+        let unit = PayPalPurchaseUnit {
+            amount: PayPalAmount {
+                currency_code: "EUR".into(),
+                value: Money::eur(12000).to_gateway_string(),
+            },
+            description: Some("Order 7".into()),
+            soft_descriptor: Some("ACME STORE".into()),
+            custom_id: Some(r#"{"order_id":"7"}"#.into()),
+        };
+        let json = serde_json::to_value(&unit).unwrap();
+
+        assert_eq!(json["amount"]["value"], "120.00");
+        assert_eq!(json["soft_descriptor"], "ACME STORE");
+        assert_eq!(json["custom_id"], r#"{"order_id":"7"}"#);
+    }
+
+    #[test]
+    fn purchase_unit_omits_absent_optional_fields() {
+        let unit = PayPalPurchaseUnit {
+            amount: PayPalAmount {
+                currency_code: "USD".into(),
+                value: "10.00".into(),
+            },
+            description: None,
+            soft_descriptor: None,
+            custom_id: None,
+        };
+        let json = serde_json::to_value(&unit).unwrap();
+        assert!(json.get("soft_descriptor").is_none());
+        assert!(json.get("custom_id").is_none());
+        assert!(json.get("description").is_none());
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_metadata_too_large_for_custom_id() {
+        // Better a loud failure than silently dropping the caller's metadata.
+        let mut request = ChargeRequest::new(Money::usd(1000), PaymentSource::card("tok"));
+        request.metadata.insert("k".into(), "x".repeat(200));
+
+        let err = provider().charge(request).await.unwrap_err();
+        assert!(matches!(err, PaymentError::Validation(_)), "got {err:?}");
+    }
+
+    // ---- finding 4: capture status is mapped, not hardcoded ----
+
+    #[test]
+    fn capture_status_is_mapped() {
+        assert_eq!(order_charge_status("COMPLETED"), ChargeStatus::Succeeded);
+        assert_eq!(order_charge_status("DECLINED"), ChargeStatus::Failed);
+        assert_eq!(order_charge_status("FAILED"), ChargeStatus::Failed);
+        assert_eq!(order_charge_status("PENDING"), ChargeStatus::Pending);
+        assert_eq!(order_charge_status("VOIDED"), ChargeStatus::Canceled);
+        // An unapproved order is pending, never a completed payment.
+        assert_eq!(order_charge_status("CREATED"), ChargeStatus::Pending);
+        assert_eq!(
+            order_charge_status("PAYER_ACTION_REQUIRED"),
+            ChargeStatus::Pending
+        );
+    }
+
+    // ---- finding 6: partial capture hits no wrong endpoint ----
+
+    #[tokio::test]
+    async fn partial_capture_is_refused_rather_than_silently_full() {
+        let err = provider()
+            .capture("order_1", Some(Money::usd(500)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PaymentError::Unsupported(_)), "got {err:?}");
+        // The message must point at the authorizations endpoint.
+        assert!(err.to_string().contains("authorization"), "got {err}");
+    }
+
+    // ---- finding 8: zero-decimal currencies ----
+
+    #[test]
+    fn gateway_amounts_respect_zero_decimal_currencies() {
+        assert_eq!(Money::new(1000, Currency::JPY).to_gateway_string(), "1000");
+        assert_eq!(Money::eur(12000).to_gateway_string(), "120.00");
+    }
+
+    // ---- finding 9: hollow methods report their absence ----
+
+    #[tokio::test]
+    async fn delete_customer_is_unsupported() {
+        // Returning Ok(()) let a GDPR erasure record a deletion that never
+        // happened.
+        let err = provider().delete_customer("cust_1").await.unwrap_err();
+        assert!(matches!(err, PaymentError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn list_payment_methods_is_unsupported() {
+        // An empty Vec is indistinguishable from "no vaulted methods".
+        let err = provider().list_payment_methods("cust_1").await.unwrap_err();
+        assert!(matches!(err, PaymentError::Unsupported(_)), "got {err:?}");
+    }
+
+    // ---- finding 11: end-of-period cancellation is not silently upgraded ----
+
+    #[tokio::test]
+    async fn cancel_subscription_refuses_end_of_period() {
+        let err = provider()
+            .cancel_subscription("sub_1", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PaymentError::Unsupported(_)), "got {err:?}");
+    }
+
+    // ---- finding 15: webhook body cap ----
+
+    #[tokio::test]
+    async fn oversized_webhook_is_rejected_before_the_network_call() {
+        // No webhook_id is configured, so reaching the network would surface a
+        // Config error instead. Getting InvalidWebhookSignature proves the size
+        // check ran first... so configure one to make the ordering explicit.
+        let provider = provider().with_webhook_id("wh_1");
+        let payload = vec![b'x'; MAX_WEBHOOK_BODY + 1];
+        let headers = WebhookHeaders::new();
+
+        let err = provider
+            .verify_webhook(&payload, &headers)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PaymentError::InvalidWebhookSignature),
+            "got {err:?}"
+        );
+    }
 }

@@ -181,3 +181,87 @@ impl Attachment {
         Self::new(filename, "application/zip", data)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("armature-mail-att-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn from_file_reads_content_and_guesses_the_type() {
+        let path = scratch("report.pdf");
+        std::fs::write(&path, b"%PDF-1.4 fake").unwrap();
+
+        let attachment = Attachment::from_file(&path).unwrap();
+
+        assert_eq!(attachment.filename, "report.pdf");
+        assert_eq!(attachment.content_type, "application/pdf");
+        assert_eq!(attachment.data, b"%PDF-1.4 fake");
+        assert_eq!(attachment.size(), 13);
+        assert_eq!(attachment.disposition, ContentDisposition::Attachment);
+        assert!(attachment.content_id.is_none());
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn from_file_guesses_png_and_falls_back_to_octet_stream() {
+        let png = scratch("logo.png");
+        std::fs::write(&png, [0x89, 0x50, 0x4E, 0x47]).unwrap();
+        assert_eq!(
+            Attachment::from_file(&png).unwrap().content_type,
+            "image/png"
+        );
+        std::fs::remove_dir_all(png.parent().unwrap()).ok();
+
+        let unknown = scratch("blob.zzzunknown");
+        std::fs::write(&unknown, b"x").unwrap();
+        assert_eq!(
+            Attachment::from_file(&unknown).unwrap().content_type,
+            "application/octet-stream"
+        );
+        std::fs::remove_dir_all(unknown.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn from_file_errors_on_a_missing_path() {
+        let missing = std::env::temp_dir().join("armature-mail-does-not-exist-9d1f2/x.txt");
+        assert!(Attachment::from_file(&missing).is_err());
+    }
+
+    #[test]
+    fn with_generated_content_id_is_unique_and_marks_inline() {
+        let a = Attachment::png("a.png", vec![1]).with_generated_content_id();
+        let b = Attachment::png("b.png", vec![1]).with_generated_content_id();
+
+        let (Some(cid_a), Some(cid_b)) = (&a.content_id, &b.content_id) else {
+            panic!("no content id generated");
+        };
+        assert_ne!(cid_a, cid_b, "content ids must be unique");
+        assert!(cid_a.ends_with("@armature"), "unexpected cid: {cid_a}");
+        // The uuid must actually parse; a `cid:` reference to a malformed id
+        // resolves to nothing.
+        let uuid_part = cid_a.trim_end_matches("@armature");
+        assert!(uuid::Uuid::parse_str(uuid_part).is_ok(), "{cid_a}");
+
+        assert!(a.is_inline());
+        assert_eq!(a.disposition, ContentDisposition::Inline);
+    }
+
+    /// `content_id` implies inline, but an explicit disposition set afterwards
+    /// must win — see the `build_part` regression in `email.rs`.
+    #[test]
+    fn explicit_disposition_overrides_the_content_id_default() {
+        let a = Attachment::png("a.png", vec![1])
+            .content_id("x")
+            .disposition(ContentDisposition::Attachment);
+
+        assert_eq!(a.content_id.as_deref(), Some("x"));
+        assert!(!a.is_inline());
+    }
+}

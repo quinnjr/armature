@@ -189,4 +189,41 @@ mod tests {
         assert_eq!(result.text.as_deref(), Some("Hello, World!"));
         assert_eq!(result.subject.as_deref(), Some("Welcome World"));
     }
+
+    /// The on-disk `<name>/{subject,html,text}.hbs` layout is the documented way
+    /// to ship templates, so the loader is load-bearing and was untested.
+    #[test]
+    fn from_directory_loads_all_three_parts() {
+        let dir = std::env::temp_dir().join(format!("armature-mail-hbs-{}", uuid::Uuid::new_v4()));
+        let tpl = dir.join("welcome");
+        std::fs::create_dir_all(&tpl).unwrap();
+        std::fs::write(tpl.join("html.hbs"), "<p>{{name}}</p>").unwrap();
+        std::fs::write(tpl.join("text.hbs"), "Hi {{name}}").unwrap();
+        std::fs::write(tpl.join("subject.hbs"), "Welcome {{name}}\n").unwrap();
+        // A stray file at the top level must be ignored, not treated as a template.
+        std::fs::write(dir.join("README.md"), "ignore me").unwrap();
+
+        let engine = HandlebarsEngine::from_directory(&dir).unwrap();
+
+        assert!(engine.has_template("welcome"));
+        assert!(!engine.has_template("missing"));
+
+        let result = engine.render("welcome", &json!({"name": "<b>"})).unwrap();
+        // Handlebars escapes unconditionally — the behavior the Tera and
+        // MiniJinja engines now match.
+        assert_eq!(result.html.as_deref(), Some("<p>&lt;b&gt;</p>"));
+        assert_eq!(result.text.as_deref(), Some("Hi &lt;b&gt;"));
+        assert_eq!(result.subject.as_deref(), Some("Welcome &lt;b&gt;"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn from_directory_errors_when_the_path_is_missing() {
+        let missing = std::env::temp_dir().join("armature-mail-hbs-does-not-exist-4f2a");
+        assert!(matches!(
+            HandlebarsEngine::from_directory(&missing),
+            Err(MailError::Config(_))
+        ));
+    }
 }

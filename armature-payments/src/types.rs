@@ -160,6 +160,12 @@ pub struct RefundRequest {
     pub reason: Option<RefundReason>,
     /// Metadata
     pub metadata: HashMap<String, String>,
+    /// Idempotency key
+    ///
+    /// Lets the gateway collapse a retried refund into the single refund it
+    /// already performed. Without it, a retry after an ambiguous timeout issues
+    /// a second real refund and the merchant pays out twice.
+    pub idempotency_key: Option<String>,
 }
 
 impl RefundRequest {
@@ -170,7 +176,20 @@ impl RefundRequest {
             amount: None,
             reason: None,
             metadata: HashMap::new(),
+            idempotency_key: None,
         }
+    }
+
+    /// With an explicit idempotency key
+    ///
+    /// Usually unnecessary: [`PaymentProcessor::refund`](crate::PaymentProcessor::refund)
+    /// generates one when `ProcessorConfig::use_idempotency` is set. Set it
+    /// yourself when the caller owns the deduplication window — e.g. keying off
+    /// a business-level refund request ID so a retry from a *different* process
+    /// still collapses to one refund.
+    pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
     }
 
     /// Partial refund

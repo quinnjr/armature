@@ -1,7 +1,5 @@
 //! File validation utilities.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -38,6 +36,19 @@ pub enum ValidationError {
         mime_type: String,
     },
 
+    /// The declared MIME type disagrees with the file's actual content.
+    #[error("Declared content type {declared} does not match the detected content type {detected}")]
+    ContentMismatch {
+        /// The client-declared MIME type.
+        declared: String,
+        /// The MIME type sniffed from the file's magic bytes.
+        detected: String,
+    },
+
+    /// The file's content type could not be determined from its bytes.
+    #[error("Could not determine the content type from the file's contents")]
+    ContentUndetectable,
+
     /// File extension not allowed.
     #[error("File extension not allowed: {extension}")]
     ExtensionNotAllowed {
@@ -60,12 +71,63 @@ pub enum ValidationError {
     /// Multiple validation errors.
     #[error("Multiple validation errors")]
     Multiple(Vec<ValidationError>),
+
+    /// A failure attributed to the named rule that produced it.
+    ///
+    /// [`FileValidator::validate`] wraps every rule failure in this variant so
+    /// the rule's [`ValidationRule::description`] -- including the
+    /// caller-supplied name given to [`FileValidator::custom`] -- reaches the
+    /// caller. Use [`ValidationError::kind`] to match on the underlying cause.
+    #[error("{rule}: {source}")]
+    Rule {
+        /// The failing rule's description.
+        rule: String,
+        /// The underlying failure.
+        #[source]
+        source: Box<ValidationError>,
+    },
 }
 
 impl ValidationError {
     /// Create a custom validation error.
     pub fn custom(message: impl Into<String>) -> Self {
         Self::Custom(message.into())
+    }
+
+    /// Attribute this error to the named rule.
+    pub fn with_rule(self, rule: impl Into<String>) -> Self {
+        Self::Rule {
+            rule: rule.into(),
+            source: Box::new(self),
+        }
+    }
+
+    /// The underlying failure, with any [`ValidationError::Rule`] attribution
+    /// stripped. Use this to match on the cause:
+    ///
+    /// ```
+    /// use armature_storage::{FileValidator, UploadedFile, ValidationError, Bytes};
+    ///
+    /// let validator = FileValidator::new().max_size(1);
+    /// let err = validator
+    ///     .validate(&UploadedFile::new(Bytes::from("too big")))
+    ///     .unwrap_err();
+    ///
+    /// assert!(matches!(err.kind(), ValidationError::TooLarge { .. }));
+    /// ```
+    pub fn kind(&self) -> &ValidationError {
+        match self {
+            Self::Rule { source, .. } => source.kind(),
+            other => other,
+        }
+    }
+
+    /// The description of the rule that produced this error, if attributed.
+    pub fn rule(&self) -> Option<&str> {
+        match self {
+            Self::Rule { rule, .. } => Some(rule),
+            _ => None,
+        }
     }
 }
 
@@ -107,10 +169,29 @@ impl FileValidator {
     }
 
     /// Set allowed MIME types.
+    ///
+    /// Both the client-declared `Content-Type` and the type sniffed from the
+    /// file's magic bytes must be on the allowlist, and the two must agree, so
+    /// an upload cannot pass by lying about its type. Content whose type
+    /// cannot be sniffed at all (plain text, CSV -- neither has magic bytes)
+    /// is accepted on the strength of its declared type; use
+    /// [`Self::allowed_types_detected`] to reject it instead.
     pub fn allowed_types(self, types: &[&str]) -> Self {
-        self.rule(AllowedTypesRule(
-            types.iter().map(|s| s.to_string()).collect(),
-        ))
+        self.allowed_types_inner(types, false)
+    }
+
+    /// Like [`Self::allowed_types`], but additionally require that the type be
+    /// determinable from the file's content, rejecting payloads whose bytes
+    /// match no known format.
+    pub fn allowed_types_detected(self, types: &[&str]) -> Self {
+        self.allowed_types_inner(types, true)
+    }
+
+    fn allowed_types_inner(self, types: &[&str], require_detection: bool) -> Self {
+        self.rule(AllowedTypesRule {
+            allowed: types.iter().map(|s| s.to_string()).collect(),
+            require_detection,
+        })
     }
 
     /// Set allowed file extensions.
@@ -131,8 +212,12 @@ impl FileValidator {
     }
 
     /// Only allow images.
+    ///
+    /// Every accepted image format is recognizable from its content, so this
+    /// requires the payload to actually *be* one of them -- a text file
+    /// uploaded as `Content-Type: image/png` is rejected.
     pub fn images_only(self) -> Self {
-        self.allowed_types(&[
+        self.allowed_types_detected(&[
             "image/jpeg",
             "image/png",
             "image/gif",
@@ -142,6 +227,11 @@ impl FileValidator {
     }
 
     /// Only allow documents.
+    ///
+    /// The declared type must be on the allowlist and must agree with the
+    /// file's content whenever the content is recognizable. `text/plain` and
+    /// `text/csv` have no magic bytes, so they are accepted on their declared
+    /// type alone.
     pub fn documents_only(self) -> Self {
         self.allowed_types(&[
             "application/pdf",
@@ -166,12 +256,16 @@ impl FileValidator {
     }
 
     /// Validate a file.
+    ///
+    /// Each failure is attributed to the rule that produced it via
+    /// [`ValidationError::Rule`]; match on [`ValidationError::kind`] to reach
+    /// the underlying cause.
     pub fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
         let mut errors = Vec::new();
 
         for rule in &self.rules {
             if let Err(e) = rule.validate(file) {
-                errors.push(e);
+                errors.push(e.with_rule(rule.description()));
             }
         }
 
@@ -229,29 +323,146 @@ impl ValidationRule for MinSizeRule {
     }
 }
 
-struct AllowedTypesRule(HashSet<String>);
+/// Sniff a file's MIME type from its leading magic bytes.
+///
+/// Returns `None` when the format is not one this can recognize -- notably
+/// plain-text formats such as `text/plain` and `text/csv`, which have no magic
+/// bytes at all. A `Some` result reflects the *actual* bytes, unlike the
+/// client-declared `Content-Type` carried on a multipart part header.
+pub fn sniff_content_type(data: &[u8]) -> Option<String> {
+    if let Some(kind) = infer::get(data) {
+        return Some(kind.mime_type().to_string());
+    }
+
+    // `infer` is magic-byte based and so cannot see SVG, which is XML text.
+    // Recognize it explicitly since `images_only()` allows it.
+    let head = &data[..data.len().min(1024)];
+    let head = String::from_utf8_lossy(head);
+    let trimmed = head.trim_start();
+    if trimmed.starts_with("<svg") || (trimmed.starts_with("<?xml") && head.contains("<svg")) {
+        return Some("image/svg+xml".to_string());
+    }
+
+    None
+}
+
+/// Whether a client-declared MIME type is consistent with one sniffed from the
+/// file's content.
+///
+/// Tolerates the well-known aliases and container generalizations that make an
+/// exact string comparison too strict (a `.docx` is a ZIP; a legacy `.doc` is a
+/// CFB compound file).
+fn types_compatible(declared: &str, detected: &str) -> bool {
+    fn normalize(t: &str) -> &str {
+        match t {
+            "image/jpg" => "image/jpeg",
+            "image/svg" => "image/svg+xml",
+            "text/xml" => "application/xml",
+            other => other,
+        }
+    }
+
+    let declared = normalize(declared);
+    let detected = normalize(detected);
+
+    if declared == detected {
+        return true;
+    }
+
+    // OOXML documents are ZIP containers; older Office documents are CFB
+    // compound files. Sniffing may legitimately report the container.
+    let zip_backed = declared.starts_with("application/vnd.openxmlformats-officedocument.")
+        || declared == "application/vnd.oasis.opendocument.text";
+    if zip_backed && matches!(detected, "application/zip" | "application/x-zip-compressed") {
+        return true;
+    }
+
+    let cfb_backed = declared == "application/msword"
+        || declared == "application/vnd.ms-excel"
+        || declared.starts_with("application/vnd.ms-");
+    if cfb_backed
+        && matches!(
+            detected,
+            "application/x-cfb" | "application/vnd.ms-office" | "application/x-ole-storage"
+        )
+    {
+        return true;
+    }
+
+    false
+}
+
+/// MIME-type allowlist.
+///
+/// Checks both the client-declared `Content-Type` **and** the type sniffed
+/// from the file's magic bytes, so an upload cannot pass by simply lying about
+/// its type. When `require_detection` is set, content whose type cannot be
+/// determined from its bytes is rejected outright.
+struct AllowedTypesRule {
+    allowed: HashSet<String>,
+    require_detection: bool,
+}
+
+impl AllowedTypesRule {
+    fn permits(&self, mime_type: &str) -> bool {
+        if self.allowed.contains(mime_type) {
+            return true;
+        }
+        // Wildcard form, e.g. "image/*".
+        match mime_type.split_once('/') {
+            Some((top, _)) => self.allowed.contains(&format!("{top}/*")),
+            None => false,
+        }
+    }
+}
 
 impl ValidationRule for AllowedTypesRule {
     fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
-        match file.content_type() {
+        // 1. The declared type must be present and allowed. Fail closed when
+        //    the client declared nothing.
+        let declared = match file.content_type() {
             Some(mime) => {
-                let mime_str = mime.to_string();
-                if !self.0.contains(&mime_str) && !self.0.contains(&format!("{}/*", mime.type_())) {
+                let declared = mime.to_string();
+                if !self.permits(&declared) {
                     return Err(ValidationError::TypeNotAllowed {
-                        mime_type: mime_str,
+                        mime_type: declared,
                     });
+                }
+                declared
+            }
+            None => {
+                return Err(ValidationError::TypeNotAllowed {
+                    mime_type: "unknown".to_string(),
+                });
+            }
+        };
+
+        // 2. The declared type is only a claim. Check the bytes.
+        match sniff_content_type(file.data()) {
+            Some(detected) => {
+                if !self.permits(&detected) {
+                    return Err(ValidationError::TypeNotAllowed {
+                        mime_type: detected,
+                    });
+                }
+                if !types_compatible(&declared, &detected) {
+                    return Err(ValidationError::ContentMismatch { declared, detected });
                 }
                 Ok(())
             }
-            // No detected content type: fail closed when an allowlist is configured.
-            None => Err(ValidationError::TypeNotAllowed {
-                mime_type: "unknown".to_string(),
-            }),
+            // Undetectable content: plain text and CSV have no magic bytes, so
+            // this is only fatal for allowlists that promised otherwise.
+            None if self.require_detection => Err(ValidationError::ContentUndetectable),
+            None => Ok(()),
         }
     }
 
     fn description(&self) -> &str {
-        "Allowed MIME types"
+        if self.require_detection {
+            "Allowed MIME types (declared and detected)"
+        } else {
+            "Allowed MIME types"
+        }
     }
 }
 
@@ -358,6 +569,18 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
+    /// Minimal but genuine magic-byte payloads, so type checks see real
+    /// content rather than the string "data".
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+    const JPEG: &[u8] = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00";
+    const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,";
+    const PDF: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n";
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+
+    fn file(bytes: &'static [u8], name: &str) -> UploadedFile {
+        UploadedFile::from_bytes(Bytes::from_static(bytes), name)
+    }
+
     #[test]
     fn test_max_size_validation() {
         let validator = FileValidator::new().max_size(1024);
@@ -369,12 +592,157 @@ mod tests {
         assert!(validator.validate(&large_file).is_err());
     }
 
+    /// This test used to pass `from_bytes(Bytes::from("data"), "test.jpg")` --
+    /// i.e. it asserted that a payload which is not remotely a JPEG passes a
+    /// JPEG allowlist, documenting the divergence rather than catching it.
     #[test]
     fn test_allowed_types_validation() {
         let validator = FileValidator::new().allowed_types(&["image/jpeg", "image/png"]);
 
-        let jpeg_file = UploadedFile::from_bytes(Bytes::from("data"), "test.jpg");
-        assert!(validator.validate(&jpeg_file).is_ok());
+        assert!(validator.validate(&file(JPEG, "test.jpg")).is_ok());
+        assert!(validator.validate(&file(PNG, "test.png")).is_ok());
+        assert!(validator.validate(&file(GIF, "test.gif")).is_err());
+    }
+
+    /// The core of the finding: the MIME compared against the allowlist was
+    /// whatever the client declared, so an arbitrary payload announcing
+    /// `image/png` sailed through `images_only()`.
+    #[test]
+    fn images_only_rejects_a_payload_lying_about_its_type() {
+        let validator = FileValidator::new().images_only();
+
+        // Declared image/png (inferred from the .png name), actual content a
+        // PDF. Must be rejected as a mismatch.
+        let liar = UploadedFile::from_bytes(Bytes::from_static(PDF), "totally-an-image.png");
+        assert_eq!(
+            liar.content_type().map(|m| m.to_string()).as_deref(),
+            Some("image/png"),
+            "test precondition: the declared type is image/png"
+        );
+
+        let err = validator
+            .validate(&liar)
+            .expect_err("content that is not an image must be rejected");
+        assert!(
+            matches!(
+                err.kind(),
+                ValidationError::ContentMismatch { .. } | ValidationError::TypeNotAllowed { .. }
+            ),
+            "expected a content mismatch, got {err:?}"
+        );
+    }
+
+    /// A payload with no recognizable format at all must not slip through
+    /// `images_only()` either.
+    #[test]
+    fn images_only_rejects_undetectable_content() {
+        let validator = FileValidator::new().images_only();
+        let bogus = UploadedFile::from_bytes(Bytes::from_static(b"just some text"), "x.png");
+
+        let err = validator
+            .validate(&bogus)
+            .expect_err("undetectable content must be rejected by images_only");
+        assert!(matches!(err.kind(), ValidationError::ContentUndetectable));
+    }
+
+    #[test]
+    fn images_only_accepts_real_images() {
+        let validator = FileValidator::new().images_only();
+
+        for (bytes, name) in [(PNG, "a.png"), (JPEG, "a.jpg"), (GIF, "a.gif")] {
+            validator
+                .validate(&file(bytes, name))
+                .unwrap_or_else(|e| panic!("{name} should validate, got {e:?}"));
+        }
+
+        // SVG has no magic bytes; it is recognized structurally.
+        validator
+            .validate(&file(SVG, "a.svg"))
+            .expect("svg should validate");
+    }
+
+    #[test]
+    fn documents_only_rejects_a_payload_lying_about_its_type() {
+        let validator = FileValidator::new().documents_only();
+        let liar = UploadedFile::from_bytes(Bytes::from_static(PNG), "invoice.pdf");
+
+        let err = validator
+            .validate(&liar)
+            .expect_err("a PNG declared as a PDF must be rejected");
+        assert!(matches!(
+            err.kind(),
+            ValidationError::ContentMismatch { .. } | ValidationError::TypeNotAllowed { .. }
+        ));
+    }
+
+    /// `text/plain` and `text/csv` have no magic bytes, so `documents_only`
+    /// must still accept them on their declared type.
+    #[test]
+    fn documents_only_accepts_real_documents_and_plain_text() {
+        let validator = FileValidator::new().documents_only();
+
+        validator
+            .validate(&file(PDF, "doc.pdf"))
+            .expect("a real pdf should validate");
+        validator
+            .validate(&UploadedFile::from_bytes(
+                Bytes::from_static(b"hello, world"),
+                "notes.txt",
+            ))
+            .expect("plain text should validate");
+        validator
+            .validate(&UploadedFile::from_bytes(
+                Bytes::from_static(b"a,b\n1,2\n"),
+                "rows.csv",
+            ))
+            .expect("csv should validate");
+    }
+
+    #[test]
+    fn sniff_content_type_reads_magic_bytes() {
+        assert_eq!(sniff_content_type(PNG).as_deref(), Some("image/png"));
+        assert_eq!(sniff_content_type(JPEG).as_deref(), Some("image/jpeg"));
+        assert_eq!(sniff_content_type(PDF).as_deref(), Some("application/pdf"));
+        assert_eq!(sniff_content_type(SVG).as_deref(), Some("image/svg+xml"));
+        assert_eq!(sniff_content_type(b"plain text"), None);
+    }
+
+    /// `ValidationRule::description` was required, implemented six times, and
+    /// never called -- so the name given to `FileValidator::custom` was
+    /// unreachable and failures reported as a bare `Custom(msg)`.
+    #[test]
+    fn custom_rule_name_appears_in_the_failure() {
+        let validator = FileValidator::new().custom("no-empty-uploads", |file| {
+            if file.is_empty() {
+                Err("file body was empty".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        let err = validator
+            .validate(&UploadedFile::new(Bytes::new()))
+            .expect_err("the custom rule should fail");
+
+        assert_eq!(err.rule(), Some("no-empty-uploads"));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("no-empty-uploads") && rendered.contains("file body was empty"),
+            "expected the rule name and message in {rendered:?}"
+        );
+        assert!(matches!(err.kind(), ValidationError::Custom(_)));
+    }
+
+    /// Built-in rules are attributed too, and `kind()` still reaches the cause.
+    #[test]
+    fn builtin_rule_failures_are_attributed() {
+        let validator = FileValidator::new().max_size(1);
+        let err = validator
+            .validate(&UploadedFile::new(Bytes::from("too big")))
+            .unwrap_err();
+
+        assert_eq!(err.rule(), Some("Maximum file size"));
+        assert!(matches!(err.kind(), ValidationError::TooLarge { .. }));
     }
 
     /// An allowlist that only checks *present* MIME types let untyped
@@ -391,7 +759,7 @@ mod tests {
         let err = validator
             .validate(&untyped_file)
             .expect_err("untyped file must be rejected when an allowlist is configured");
-        assert!(matches!(err, ValidationError::TypeNotAllowed { .. }));
+        assert!(matches!(err.kind(), ValidationError::TypeNotAllowed { .. }));
     }
 
     /// Same fail-closed requirement for extensions: a file with no extension
@@ -407,7 +775,10 @@ mod tests {
         let err = validator
             .validate(&extensionless_file)
             .expect_err("extensionless file must be rejected when an allowlist is configured");
-        assert!(matches!(err, ValidationError::ExtensionNotAllowed { .. }));
+        assert!(matches!(
+            err.kind(),
+            ValidationError::ExtensionNotAllowed { .. }
+        ));
     }
 
     #[test]

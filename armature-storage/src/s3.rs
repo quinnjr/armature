@@ -175,14 +175,6 @@ impl S3Storage {
         }
     }
 
-    /// Get a temporary/presigned URL using the configured
-    /// [`S3Config::presigned_url_duration`] as the expiration when the caller
-    /// doesn't need to override it.
-    pub async fn temporary_url_default(&self, key: &str) -> Result<Option<String>> {
-        let duration = self.config.presigned_url_duration;
-        Storage::temporary_url(self, key, duration).await
-    }
-
     /// Get the public URL for a key (if bucket is public).
     pub fn public_url(&self, key: &str) -> String {
         let full_key = self.full_key(key);
@@ -244,20 +236,34 @@ impl Storage for S3Storage {
             .body(ByteStream::from(data))
             .content_type(content_type);
 
-        // Set ACL if configured
+        // Set ACL if configured. `From<&str>` silently yields an `Unknown`
+        // variant for typos and forwards them to S3 verbatim, so parse
+        // strictly and surface a configuration error instead.
         if let Some(acl) = &self.config.default_acl {
-            request = request.acl(ObjectCannedAcl::from(acl.as_str()));
+            request = request.acl(
+                ObjectCannedAcl::try_parse(acl.as_str())
+                    .map_err(|_| StorageError::Config(format!("unknown S3 ACL: {acl:?}")))?,
+            );
         }
 
         // Set encryption if configured
         if let Some(encryption) = &self.config.server_side_encryption {
-            request =
-                request.server_side_encryption(ServerSideEncryption::from(encryption.as_str()));
+            request = request.server_side_encryption(
+                ServerSideEncryption::try_parse(encryption.as_str()).map_err(|_| {
+                    StorageError::Config(format!(
+                        "unknown S3 server-side encryption: {encryption:?}"
+                    ))
+                })?,
+            );
         }
 
         // Set storage class if configured
         if let Some(storage_class) = &self.config.storage_class {
-            request = request.storage_class(StorageClass::from(storage_class.as_str()));
+            request = request.storage_class(
+                StorageClass::try_parse(storage_class.as_str()).map_err(|_| {
+                    StorageError::Config(format!("unknown S3 storage class: {storage_class:?}"))
+                })?,
+            );
         }
 
         // Execute upload
@@ -397,33 +403,37 @@ impl Storage for S3Storage {
             request = request.prefix(&full_prefix);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
+        // S3 caps a single `list_objects_v2` response at 1000 keys and signals
+        // more via `IsTruncated`/`NextContinuationToken`. Drain the paginator
+        // so this matches the Azure and GCS implementations of `list`, which
+        // both return every object.
+        let mut pages = request.into_paginator().send();
         let mut results = Vec::new();
 
-        for object in response.contents() {
-            if let Some(key) = object.key() {
-                // Remove prefix to get the relative key
-                let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                    key.strip_prefix(&format!("{}/", p))
-                        .unwrap_or(key)
-                        .to_string()
-                } else {
-                    key.to_string()
-                };
+        while let Some(page) = pages.next().await {
+            let page = page.map_err(|e| StorageError::Storage(e.to_string()))?;
 
-                let size = object.size().unwrap_or(0) as u64;
-                let mut metadata = StorageMetadata::new(&relative_key, size)
-                    .with_url(self.public_url(&relative_key));
+            for object in page.contents() {
+                if let Some(key) = object.key() {
+                    // Remove prefix to get the relative key
+                    let relative_key = if let Some(p) = &self.config.storage.path_prefix {
+                        key.strip_prefix(&format!("{}/", p))
+                            .unwrap_or(key)
+                            .to_string()
+                    } else {
+                        key.to_string()
+                    };
 
-                if let Some(etag) = object.e_tag() {
-                    metadata = metadata.with_checksum(etag.trim_matches('"'));
+                    let size = object.size().unwrap_or(0) as u64;
+                    let mut metadata = StorageMetadata::new(&relative_key, size)
+                        .with_url(self.public_url(&relative_key));
+
+                    if let Some(etag) = object.e_tag() {
+                        metadata = metadata.with_checksum(etag.trim_matches('"'));
+                    }
+
+                    results.push(metadata);
                 }
-
-                results.push(metadata);
             }
         }
 
@@ -448,6 +458,10 @@ impl Storage for S3Storage {
 
     async fn url(&self, key: &str) -> Result<Option<String>> {
         Ok(Some(self.public_url(key)))
+    }
+
+    fn default_url_duration(&self) -> Duration {
+        self.config.presigned_url_duration
     }
 
     async fn temporary_url(&self, key: &str, expires_in: Duration) -> Result<Option<String>> {
@@ -476,6 +490,7 @@ mod tests {
     use super::*;
     use armature_testkit::http_stub::{StubResponse, StubServer};
     use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
+    use std::sync::{Arc, Mutex};
 
     /// `S3Config::region` was documented but never applied to the client in
     /// `new()` (it was only used for `public_url` string formatting), so the
@@ -571,6 +586,209 @@ mod tests {
         assert!(
             url.contains("X-Amz-Expires=120"),
             "expected the configured 120s duration in the presigned URL, got: {url}"
+        );
+    }
+
+    /// `StorageClass::from(&str)` maps anything at all to an `Unknown` variant
+    /// which is then forwarded to S3 verbatim; a typo silently became a
+    /// server-side error (or worse, was accepted). Configuration is now parsed
+    /// strictly.
+    #[tokio::test]
+    async fn unknown_storage_class_is_rejected_as_a_config_error() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+        let mut config = storage.config.clone();
+        config.storage_class = Some("NOT_A_CLASS".to_string());
+        let storage = S3Storage::from_client(storage.client, config);
+
+        let err = storage
+            .put_with_content_type("key.txt", Bytes::from("hi"), "text/plain")
+            .await
+            .expect_err("an unknown storage class must be rejected");
+
+        assert!(
+            matches!(&err, StorageError::Config(m) if m.contains("NOT_A_CLASS")),
+            "expected a Config error naming the bad value, got: {err:?}"
+        );
+        assert!(
+            server.requests().is_empty(),
+            "the request must not be sent at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_acl_and_encryption_are_rejected_as_config_errors() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let base = stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+
+        let mut config = base.config.clone();
+        config.default_acl = Some("not-an-acl".to_string());
+        let storage = S3Storage::from_client(base.client.clone(), config);
+        assert!(matches!(
+            storage
+                .put_with_content_type("k", Bytes::from("hi"), "text/plain")
+                .await,
+            Err(StorageError::Config(_))
+        ));
+
+        let mut config = base.config.clone();
+        config.server_side_encryption = Some("ROT13".to_string());
+        let storage = S3Storage::from_client(base.client, config);
+        assert!(matches!(
+            storage
+                .put_with_content_type("k", Bytes::from("hi"), "text/plain")
+                .await,
+            Err(StorageError::Config(_))
+        ));
+    }
+
+    /// A minimal raw-TCP S3 stub that can script *different* responses for
+    /// successive `ListObjectsV2` calls. The shared `StubServer` routes only on
+    /// (method, path), and both pagination requests are `GET /test-bucket`
+    /// differing solely in the `continuation-token` query parameter.
+    struct ListStub {
+        base_url: String,
+        request_queries: Arc<Mutex<Vec<String>>>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for ListStub {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
+    fn list_page(keys: &[&str], next_token: Option<&str>) -> String {
+        let contents: String = keys
+            .iter()
+            .map(|k| {
+                format!(
+                    "<Contents><Key>{k}</Key><Size>3</Size><ETag>&quot;{k}-etag&quot;</ETag>\
+                     <LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents>"
+                )
+            })
+            .collect();
+        let truncation = match next_token {
+            Some(t) => format!(
+                "<IsTruncated>true</IsTruncated><NextContinuationToken>{t}</NextContinuationToken>"
+            ),
+            None => "<IsTruncated>false</IsTruncated>".to_string(),
+        };
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>test-bucket</Name><Prefix></Prefix><MaxKeys>1</MaxKeys>
+<KeyCount>{}</KeyCount>{truncation}{contents}
+</ListBucketResult>"#,
+            keys.len()
+        )
+    }
+
+    /// Serve a truncated first page, then the final page once the client sends
+    /// the continuation token back.
+    async fn start_list_stub() -> ListStub {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let request_queries = Arc::new(Mutex::new(Vec::new()));
+        let queries = request_queries.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let queries = queries.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Read just the request head; these are bodiless GETs.
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let target = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string();
+                    queries.lock().unwrap().push(target.clone());
+
+                    let body = if target.contains("continuation-token") {
+                        list_page(&["page2.txt"], None)
+                    } else {
+                        list_page(&["page1.txt"], Some("TOKEN-2"))
+                    };
+
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/xml\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+
+        ListStub {
+            base_url,
+            request_queries,
+            handle,
+        }
+    }
+
+    /// `list` issued a single `list_objects_v2` call and never read
+    /// `IsTruncated`, so any bucket with more than 1000 objects was silently
+    /// truncated -- while the Azure and GCS backends behind the same `Storage`
+    /// trait returned everything.
+    #[tokio::test]
+    async fn list_follows_the_continuation_token_across_pages() {
+        let stub = start_list_stub().await;
+
+        let ambient = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(SharedCredentialsProvider::new(Credentials::for_tests()))
+            .build();
+        let config = S3Config::new("test-bucket")
+            .region("us-east-1")
+            .endpoint(stub.base_url.clone());
+        let client = Client::from_conf(S3Storage::build_client_config(&ambient, &config));
+        let storage = S3Storage::from_client(client, config);
+
+        let keys: Vec<String> = storage
+            .list(None)
+            .await
+            .expect("list should succeed against the paginating stub")
+            .into_iter()
+            .map(|m| m.key)
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec!["page1.txt".to_string(), "page2.txt".to_string()],
+            "both pages must be returned"
+        );
+
+        let queries = stub.request_queries.lock().unwrap().clone();
+        assert_eq!(
+            queries.len(),
+            2,
+            "expected two list calls, got: {queries:?}"
+        );
+        assert!(
+            queries[1].contains("continuation-token"),
+            "the second call must carry the continuation token, got: {}",
+            queries[1]
         );
     }
 

@@ -126,6 +126,42 @@ jobs:
       - name: Run doc tests with SAML
         run: cargo test --doc --features full-with-saml
 
+  # ============================================================================
+  # TEST (per-member crates not reachable from the root `full` feature)
+  #
+  # The root package's `full` feature does not depend on the delivery-provider
+  # crates, so `cargo test --features full` never compiles them and the
+  # coverage job (`--workspace`) builds each member with only its *default*
+  # features. Both leave whole test suites — mail queue/Redis, files PDF, push
+  # APNS/Web-Push, storage S3/GCS/Azure — silently unexecuted. Test them
+  # explicitly with every feature enabled.
+  # ============================================================================
+
+  test-members:
+    name: Test member crates (all features)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - armature-payments
+          - armature-mail
+          - armature-files
+          - armature-push
+          - armature-storage
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        # Docker is present on ubuntu-latest, so container-gated suites must
+        # actually run here rather than self-skipping into a green pass.
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} --all-features --verbose
+      - name: Run doc tests
+        run: cargo test -p ${{ matrix.crate }} --all-features --doc
+
   doc-tests:
     name: Documentation Tests
     runs-on: ubuntu-latest

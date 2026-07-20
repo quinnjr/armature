@@ -16,7 +16,9 @@ use armature_testkit::http_stub::{StubResponse, StubServer};
 const CARD_DECLINED: &str = r#"{"error":{"type":"card_error","code":"card_declined","decline_code":"generic_decline","message":"Your card was declined."}}"#;
 
 fn provider(server: &StubServer) -> StripeProvider {
-    StripeProvider::new("sk_test").with_base_url(server.url())
+    StripeProvider::new("sk_test")
+        .with_base_url(server.url())
+        .expect("a loopback stub URL is a valid base URL")
 }
 
 async fn erroring_server(status: u16, body: &'static str) -> StubServer {
@@ -78,22 +80,53 @@ async fn non_2xx_surfaces_the_real_provider_error_not_serialization() {
 
 /// `delete_customer` discarded the response entirely, so a 404/403/500 was
 /// reported to the caller as a successful deletion.
+///
+/// This previously asserted only the negative — "not `Serialization`" — which
+/// every one of `CustomerNotFound`, `Authentication`, `Provider` *and* a
+/// wrong-but-plausible mapping satisfies. Pinning the exact variant is what
+/// makes the test able to catch a regression: a deletion that failed because the
+/// API key was revoked must not be reported as "that customer is already gone",
+/// because the caller's correct response to those two differs.
 #[tokio::test]
 async fn delete_customer_checks_the_response_status() {
-    for status in [403u16, 404, 500] {
-        let server = StubServer::start_single(StubResponse::json(
-            status,
+    type Check = fn(&PaymentError) -> bool;
+    let cases: Vec<(u16, &'static str, Check, &'static str)> = vec![
+        (
+            // Refined at the call site: Stripe reports a missing resource as a
+            // generic `invalid_request_error`, so only `delete_customer` knows
+            // the 404 means "customer". Matches the other `/customers/{id}`
+            // methods and the PayPal/Braintree providers.
+            404,
             r#"{"error":{"type":"invalid_request_error","message":"No such customer"}}"#,
-        ))
-        .await;
+            |e| matches!(e, PaymentError::CustomerNotFound(id) if id == "cus_missing"),
+            "CustomerNotFound naming the customer",
+        ),
+        (
+            401,
+            r#"{"error":{"type":"invalid_request_error","message":"Invalid API key"}}"#,
+            |e| matches!(e, PaymentError::Authentication(_)),
+            "Authentication",
+        ),
+        (
+            // A 5xx from Stripe carries no usable error envelope, so the status
+            // itself must survive into the message.
+            500,
+            "upstream exploded",
+            |e| matches!(e, PaymentError::Provider(m) if m.contains("500")),
+            "Provider containing \"500\"",
+        ),
+    ];
+
+    for (status, body, check, expected) in cases {
+        let server = StubServer::start_single(StubResponse::json(status, body)).await;
 
         let err = provider(&server)
             .delete_customer("cus_missing")
             .await
             .unwrap_err();
         assert!(
-            !matches!(err, PaymentError::Serialization(_)),
-            "HTTP {status} must not be reported as success or as Serialization"
+            check(&err),
+            "HTTP {status} on delete_customer must map to {expected}, got {err:?}"
         );
     }
 
@@ -103,6 +136,40 @@ async fn delete_customer_checks_the_response_status() {
         .delete_customer("cus_1")
         .await
         .expect("a 200 deletes");
+}
+
+/// A 404 on `/customers/{id}` means that customer is gone, and the caller's
+/// correct response to that differs from a generic upstream failure: deleting an
+/// already-deleted customer is usually success, whereas a `Provider` error is
+/// something to alert on.
+///
+/// Stripe's shared error classifier cannot know this on its own — it sees only a
+/// status and a generic `invalid_request_error` envelope. The resource-specific
+/// mapping therefore has to be applied at the call site, the same pattern
+/// `BraintreeProvider::list_payment_methods` and `paypal_error_not_found` use:
+/// pass a `CustomerNotFound(id)` for the 404 case and let the classifier handle
+/// every other status.
+///
+/// Done via `stripe_unit_as`, the unit-response counterpart to `stripe_json_as`,
+/// so `delete_customer` refines its 404 the same way the other seven
+/// `/customers/{id}` call sites already did.
+#[tokio::test]
+async fn delete_customer_reports_a_missing_customer_as_customer_not_found() {
+    let server = StubServer::start_single(StubResponse::json(
+        404,
+        r#"{"error":{"type":"invalid_request_error","message":"No such customer: cus_missing"}}"#,
+    ))
+    .await;
+
+    let err = provider(&server)
+        .delete_customer("cus_missing")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, PaymentError::CustomerNotFound(ref id) if id == "cus_missing"),
+        "a 404 on a customer endpoint must name the missing customer, got {err:?}"
+    );
 }
 
 #[tokio::test]

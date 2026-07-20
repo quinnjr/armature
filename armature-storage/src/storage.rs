@@ -157,7 +157,23 @@ pub trait Storage: Send + Sync {
     ) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// The backend's configured default lifetime for [`Self::temporary_url`].
+    ///
+    /// Backends that expose a configurable signed-URL duration override this
+    /// so `Arc<dyn Storage>` holders can reach it; the default is one hour.
+    fn default_url_duration(&self) -> std::time::Duration {
+        DEFAULT_URL_DURATION
+    }
+
+    /// Get a temporary/signed URL using [`Self::default_url_duration`].
+    async fn temporary_url_default(&self, key: &str) -> Result<Option<String>> {
+        self.temporary_url(key, self.default_url_duration()).await
+    }
 }
+
+/// Fallback lifetime for [`Storage::default_url_duration`]: one hour.
+pub const DEFAULT_URL_DURATION: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Generate a unique file key.
 pub fn generate_unique_key(original_name: Option<&str>, preserve_extension: bool) -> String {

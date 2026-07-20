@@ -44,6 +44,13 @@ pub struct Email {
     /// than it asked for without a signal.
     #[serde(default)]
     pub invalid_addresses: Vec<String>,
+    /// Headers rejected by [`Email::header`], recorded for [`Email::validate`].
+    ///
+    /// Same rationale as [`Email::invalid_addresses`]: the fluent setter cannot
+    /// return a `Result`, and a header carrying a CR/LF must never reach a
+    /// transport that writes header values verbatim.
+    #[serde(default)]
+    pub invalid_headers: Vec<String>,
 }
 
 impl Email {
@@ -65,6 +72,7 @@ impl Email {
             in_reply_to: None,
             priority: None,
             invalid_addresses: Vec::new(),
+            invalid_headers: Vec::new(),
         }
     }
 
@@ -181,8 +189,20 @@ impl Email {
     }
 
     /// Add a custom header.
+    ///
+    /// The name and the value are both validated. A CR or LF in either is a
+    /// header-injection primitive on every transport that writes headers by hand
+    /// (Mailgun's form body, SendGrid's JSON); only the SMTP path is
+    /// independently protected by lettre's encoder. An invalid header is
+    /// recorded and surfaced by [`Email::validate`] rather than silently
+    /// dropped — this setter cannot return a `Result`.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
+        let name = name.into();
+        let value = value.into();
+        match validate_header(&name, &value) {
+            Ok(()) => self.headers.push((name, value)),
+            Err(e) => self.invalid_headers.push(e.to_string()),
+        }
         self
     }
 
@@ -249,8 +269,18 @@ impl Email {
     ///
     /// Transports should use this rather than reading `headers` directly, so
     /// priority is never dropped.
+    ///
+    /// Headers that fail validation are omitted here; [`Email::validate`] — which
+    /// every transport calls before touching this — has already failed the send,
+    /// so nothing unvalidated can reach the wire even if a caller populated
+    /// [`Email::headers`] directly instead of going through [`Email::header`].
     pub fn wire_headers(&self) -> Vec<(String, String)> {
-        let mut headers = self.headers.clone();
+        let mut headers: Vec<(String, String)> = self
+            .headers
+            .iter()
+            .filter(|(n, v)| validate_header(n, v).is_ok())
+            .cloned()
+            .collect();
         headers.extend(self.priority_headers());
         headers
     }
@@ -259,6 +289,15 @@ impl Email {
     pub fn validate(&self) -> Result<()> {
         if !self.invalid_addresses.is_empty() {
             return Err(MailError::InvalidAddress(self.invalid_addresses.join("; ")));
+        }
+        if !self.invalid_headers.is_empty() {
+            return Err(MailError::Config(self.invalid_headers.join("; ")));
+        }
+        // `headers` is a public field, so a caller can bypass `Email::header`.
+        // Re-check here: this is the single choke point every transport passes
+        // through before serializing header values onto the wire.
+        for (name, value) in &self.headers {
+            validate_header(name, value)?;
         }
         if self.from.is_none() {
             return Err(MailError::MissingField("from"));
@@ -301,9 +340,11 @@ impl Email {
             builder = builder.reply_to(reply_to.to_mailbox()?);
         }
 
-        // Add message ID
+        // Add message ID. RFC 5322 requires the angle brackets; lettre passes the
+        // value through verbatim, so a bare `id@host` would go out malformed and
+        // defeat downstream deduplication.
         if let Some(msg_id) = &self.message_id {
-            builder = builder.message_id(Some(msg_id.clone()));
+            builder = builder.message_id(Some(angle_wrapped(msg_id)));
         }
 
         // Add in-reply-to
@@ -375,6 +416,45 @@ impl Email {
     }
 }
 
+/// Validate a custom header name and value.
+///
+/// Header names must be non-empty RFC 5322 `field-name` tokens: printable ASCII
+/// excluding `:` and space. Header values must contain no CR, LF, NUL, or other
+/// ASCII control character — a `\r\n` in a value lets a caller append arbitrary
+/// headers (`Bcc:`, `Content-Type:`) to the message on any transport that writes
+/// the value verbatim.
+pub fn validate_header(name: &str, value: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(MailError::Config("Header name cannot be empty".to_string()));
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| !c.is_ascii() || c.is_ascii_control() || *c == ':' || *c == ' ')
+    {
+        return Err(MailError::Config(format!(
+            "Invalid character {:?} in header name {:?}",
+            c, name
+        )));
+    }
+    if let Some(c) = value.chars().find(|c| c.is_ascii_control()) {
+        return Err(MailError::Config(format!(
+            "Invalid control character {:?} in value of header {:?}",
+            c, name
+        )));
+    }
+    Ok(())
+}
+
+/// Wrap a message identifier in angle brackets if it is not already.
+pub(crate) fn angle_wrapped(id: &str) -> String {
+    let id = id.trim();
+    if id.starts_with('<') && id.ends_with('>') {
+        id.to_string()
+    } else {
+        format!("<{}>", id)
+    }
+}
+
 /// Build a lettre `SinglePart` for one attachment.
 ///
 /// Attachments carrying a `content_id` (or explicitly marked
@@ -392,7 +472,7 @@ fn build_part(attachment: &Attachment) -> Result<lettre::message::SinglePart> {
         })?;
 
     let part = match (&attachment.content_id, attachment.is_inline()) {
-        (Some(cid), _) => lettre::message::Attachment::new_inline_with_name(
+        (Some(cid), true) => lettre::message::Attachment::new_inline_with_name(
             cid.clone(),
             attachment.filename.clone(),
         ),
@@ -402,7 +482,13 @@ fn build_part(attachment: &Attachment) -> Result<lettre::message::SinglePart> {
             attachment.filename.clone(),
             attachment.filename.clone(),
         ),
-        (None, false) => lettre::message::Attachment::new(attachment.filename.clone()),
+        // An explicit `ContentDisposition::Attachment` wins over the presence of a
+        // Content-ID. Matching `(Some(_), _)` above made any attachment carrying a
+        // content-id inline, so a caller that asked for a downloadable attachment
+        // got one no mail client would offer for download.
+        (Some(_), false) | (None, false) => {
+            lettre::message::Attachment::new(attachment.filename.clone())
+        }
     };
 
     Ok(part.body(attachment.data.clone(), content_type))
@@ -667,6 +753,92 @@ mod tests {
             vec![1, 2],
         ));
         assert!(matches!(email.to_lettre(), Err(MailError::Attachment(_))));
+    }
+
+    /// WF6 audit finding 15: `(Some(cid), _)` made *any* attachment carrying a
+    /// content-id inline, so an explicit `ContentDisposition::Attachment` was
+    /// ignored and no mail client offered the file for download.
+    #[test]
+    fn content_id_does_not_override_an_explicit_attachment_disposition() {
+        let email = base().attach(
+            crate::Attachment::png("chart.png", vec![1, 2, 3])
+                .content_id("chart1")
+                .disposition(crate::ContentDisposition::Attachment),
+        );
+
+        let wire = formatted(&email);
+
+        assert!(
+            wire.contains(r#"Content-Disposition: attachment; filename="chart.png""#),
+            "explicit attachment disposition was overridden by the content-id:\n{wire}"
+        );
+    }
+
+    #[test]
+    fn message_id_is_wrapped_in_angle_brackets() {
+        let wire = formatted(&base().message_id("abc123@armature"));
+        assert!(wire.contains("Message-ID: <abc123@armature>"), "{wire}");
+
+        // An id that already has them is not double-wrapped.
+        let wire = formatted(&base().message_id("<abc123@armature>"));
+        assert!(wire.contains("Message-ID: <abc123@armature>"), "{wire}");
+        assert!(!wire.contains("<<"), "{wire}");
+    }
+
+    /// WF6 audit finding 8: header values were never validated, so a `\r\n` in a
+    /// value let a caller inject arbitrary headers on the Mailgun and SendGrid
+    /// transports, which write the value verbatim.
+    #[test]
+    fn crlf_in_a_header_value_is_rejected() {
+        let email = base().header("X-Tag", "ok\r\nBcc: evil@example.com");
+
+        assert!(
+            matches!(email.validate(), Err(MailError::Config(_))),
+            "CRLF header value was accepted"
+        );
+        assert!(email.headers.is_empty(), "poisoned header was stored");
+        assert!(!email.wire_headers().iter().any(|(_, v)| v.contains('\n')));
+        assert!(email.to_lettre().is_err());
+    }
+
+    #[test]
+    fn invalid_header_names_are_rejected() {
+        for (name, value) in [
+            ("X-Bad: Injected", "v"),
+            ("X-Bad\r\nBcc", "v"),
+            ("", "v"),
+            ("X Bad", "v"),
+            ("X-Bad\u{0}", "v"),
+        ] {
+            let email = base().header(name, value);
+            assert!(
+                email.validate().is_err(),
+                "header name {name:?} was accepted"
+            );
+        }
+    }
+
+    /// A caller can populate the public `headers` field directly, bypassing
+    /// `Email::header`; `validate` is the choke point every transport passes.
+    #[test]
+    fn directly_populated_headers_are_still_validated() {
+        let mut email = base();
+        email
+            .headers
+            .push(("X-Tag".to_string(), "a\r\nBcc: evil@x.com".to_string()));
+
+        assert!(matches!(email.validate(), Err(MailError::Config(_))));
+        assert!(
+            email.wire_headers().is_empty(),
+            "invalid header leaked into wire_headers()"
+        );
+    }
+
+    #[test]
+    fn ordinary_headers_still_pass() {
+        let email = base().header("X-Campaign-Id", "spring-2026");
+        assert!(email.validate().is_ok());
+        assert_eq!(email.wire_headers().len(), 1);
     }
 
     #[test]

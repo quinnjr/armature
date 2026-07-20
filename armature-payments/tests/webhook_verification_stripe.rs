@@ -121,7 +121,7 @@ async fn stripe_rejects_a_replayed_timestamp_outside_tolerance() {
     // ...and is accepted when the tolerance check is explicitly disabled.
     StripeProvider::new("sk_test")
         .with_webhook_secret(STRIPE_SECRET)
-        .with_webhook_tolerance(None)
+        .without_webhook_tolerance()
         .verify_webhook(
             STRIPE_EVENT.as_bytes(),
             &WebhookHeaders::single(
@@ -160,11 +160,18 @@ async fn stripe_rejects_malformed_and_absent_signature_headers() {
     }
 }
 
+/// A signature that is wrong only in its last byte must be rejected exactly like
+/// one that is wrong from the first byte.
+///
+/// This test was previously named `stripe_verification_is_constant_time`, which
+/// it never established: both cases are rejected by a plain `==` too, so it
+/// passed against a naive short-circuiting comparison while its name claimed
+/// otherwise. Timing behavior is not assertable from a test like this — wall
+/// clock deltas here are dominated by scheduling noise — so the name now states
+/// what is actually checked. The constant-time property is a code-review
+/// obligation on the comparison itself, not something this file can verify.
 #[tokio::test]
-async fn stripe_verification_is_constant_time() {
-    // A near-miss signature (correct except for the final byte) must be
-    // rejected exactly like a completely wrong one — the comparison never
-    // short-circuits on the first differing byte.
+async fn stripe_rejects_near_miss_and_far_miss_signatures() {
     let provider = stripe_provider();
     let ts = now();
     let valid = stripe_signature(STRIPE_SECRET, ts, STRIPE_EVENT.as_bytes());

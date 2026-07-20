@@ -37,51 +37,101 @@ pub struct Notification {
     /// Notification body.
     pub body: String,
     /// Icon URL.
+    ///
+    /// Honored by **FCM** (`android.notification.icon`) and **Web Push**.
+    /// APNS has no icon field — iOS uses the app icon.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// Image URL.
+    /// Image URL for a rich notification.
+    ///
+    /// Honored by **FCM** (`notification.image`), **APNS** (delivered as an
+    /// attachment URL alongside `mutable-content`, which the app's
+    /// Notification Service Extension reads), and **Web Push**.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Badge count (iOS).
+    /// Badge count.
+    ///
+    /// Honored by **APNS** (`aps.badge`) and **FCM**
+    /// (`android.notification.notification_count`). Ignored by Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub badge: Option<u32>,
     /// Sound to play.
+    ///
+    /// Honored by **APNS** (`aps.sound`) and **FCM**
+    /// (`android.notification.sound`). Ignored by Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
     /// Click action URL or intent.
+    ///
+    /// Honored by **FCM** (`android.notification.click_action`) and **APNS**
+    /// (mapped to `aps.category`). Ignored by Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub click_action: Option<String>,
     /// Tag for notification grouping.
+    ///
+    /// Honored by **FCM** (`android.notification.tag`) and **APNS** (mapped to
+    /// `aps.thread-id`). Ignored by Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// Custom data payload.
+    ///
+    /// Honored by all three providers. On **APNS** these become top-level
+    /// members of the payload, so the key `aps` is reserved — using it returns
+    /// [`crate::PushError::Config`] rather than emitting a duplicate member.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub data: HashMap<String, String>,
     /// Notification priority.
+    ///
+    /// Honored by **FCM** (`android.priority`) and **APNS**
+    /// (`apns-priority` header). Web Push uses `urgency` instead.
     #[serde(default)]
     pub priority: Priority,
-    /// Web Push urgency.
+    /// Web Push urgency (RFC 8030 `Urgency` header).
+    ///
+    /// **Web Push only.** FCM and APNS use `priority`.
     #[serde(default)]
     pub urgency: Urgency,
     /// Time to live in seconds.
+    ///
+    /// Honored by all three: **FCM** `android.ttl`, **APNS**
+    /// `apns-expiration` header, **Web Push** `TTL` header.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u32>,
-    /// Topic for iOS.
+    /// Topic override.
+    ///
+    /// **APNS only** — overrides the configured bundle ID in the `apns-topic`
+    /// header. Ignored by FCM and Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
-    /// Collapse key for Android.
+    /// Collapse key.
+    ///
+    /// Honored by **FCM** (`android.collapse_key`) and **APNS**
+    /// (`apns-collapse-id` header). Ignored by Web Push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse_key: Option<String>,
     /// Silent notification (data only).
+    ///
+    /// Honored by all three: suppresses the visible alert block and, on APNS,
+    /// switches the `apns-push-type` header to `background`.
     #[serde(default)]
     pub silent: bool,
-    /// Mutable content (iOS).
+    /// Mutable content, allowing a Notification Service Extension to run.
+    ///
+    /// **APNS only** (`aps.mutable-content`). Set implicitly when `image` is
+    /// present, since the extension cannot run without it.
     #[serde(default)]
     pub mutable_content: bool,
-    /// Content available (iOS background).
+    /// Content available (background wake).
+    ///
+    /// **APNS only** (`aps.content-available`).
     #[serde(default)]
     pub content_available: bool,
     /// Action buttons.
+    ///
+    /// **Web Push only** — serialized into the payload the service worker
+    /// receives. FCM and APNS express actions through, respectively, a
+    /// click action and a registered notification category, so neither reads
+    /// this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<NotificationAction>,
 }
@@ -112,6 +162,12 @@ impl Notification {
     }
 
     /// Create a builder.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Notification::new(title, body)` and its chaining methods, which cover every \
+                field; `NotificationBuilder` only covers six"
+    )]
+    #[allow(deprecated)]
     pub fn builder() -> NotificationBuilder {
         NotificationBuilder::new()
     }
@@ -225,7 +281,14 @@ impl Notification {
         self
     }
 
-    /// Get the payload size.
+    /// Serialized JSON size in bytes — **not** the encrypted wire size.
+    ///
+    /// This is the length of this notification's plaintext JSON. It is *not*
+    /// a valid pre-flight check against the Web Push 4096-byte limit, which
+    /// applies to the AES128GCM-encrypted body: ECE adds an 86-byte header,
+    /// padding, and a 16-byte authentication tag on top of this figure. The
+    /// Web Push send path performs its own check against the real encrypted
+    /// length and returns [`crate::PushError::PayloadTooLarge`] locally.
     pub fn payload_size(&self) -> usize {
         serde_json::to_string(self).map(|s| s.len()).unwrap_or(0)
     }
@@ -267,11 +330,26 @@ impl NotificationAction {
 }
 
 /// Builder for notifications.
+///
+/// # Deprecated
+///
+/// This is a strictly weaker duplicate of the chaining methods on
+/// [`Notification`] itself: it exposes 6 of the ~17 fields, omitting `sound`,
+/// `click_action`, `tag`, `urgency`, `ttl`, `topic`, `collapse_key`, `silent`,
+/// `mutable_content`, `actions` and `content_available`. Use
+/// `Notification::new(title, body).icon(..).badge(..)` instead, which reads
+/// the same and can express every field.
+#[deprecated(
+    since = "0.2.0",
+    note = "use `Notification::new(title, body)` and its chaining methods, which cover every \
+            field; `NotificationBuilder` only covers six"
+)]
 #[derive(Default)]
 pub struct NotificationBuilder {
     notification: Notification,
 }
 
+#[allow(deprecated)]
 impl NotificationBuilder {
     /// Create a new builder.
     pub fn new() -> Self {
