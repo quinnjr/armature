@@ -62,6 +62,19 @@ pub struct AcmeConfig {
 
     /// EAB HMAC key
     pub eab_hmac_key: Option<String>,
+
+    /// Additional CA root certificate(s) (PEM) to trust for the ACME endpoint.
+    ///
+    /// Use this to talk to a private or test ACME CA (e.g. Pebble/Boulder)
+    /// whose HTTPS interface is signed by a root not in the system trust store.
+    pub ca_certificate: Option<Vec<u8>>,
+
+    /// Disable TLS certificate verification for the ACME endpoint.
+    ///
+    /// **Dangerous — test only.** Intended for local test CAs (such as Pebble)
+    /// whose management interface uses an ephemeral self-signed certificate.
+    /// Never enable this against a public CA.
+    pub danger_accept_invalid_certs: bool,
 }
 
 impl AcmeConfig {
@@ -94,6 +107,8 @@ impl AcmeConfig {
             accept_tos: false,
             eab_kid: None,
             eab_hmac_key: None,
+            ca_certificate: None,
+            danger_accept_invalid_certs: false,
         }
     }
 
@@ -176,6 +191,24 @@ impl AcmeConfig {
     pub fn with_eab(mut self, kid: String, hmac_key: String) -> Self {
         self.eab_kid = Some(kid);
         self.eab_hmac_key = Some(hmac_key);
+        self
+    }
+
+    /// Trust an additional CA root certificate (PEM) for the ACME endpoint.
+    ///
+    /// Required to talk to a private or test ACME CA whose HTTPS interface is
+    /// signed by a root outside the system trust store.
+    pub fn with_ca_certificate(mut self, pem: Vec<u8>) -> Self {
+        self.ca_certificate = Some(pem);
+        self
+    }
+
+    /// **Dangerous — test only.** Disable TLS verification for the ACME endpoint.
+    ///
+    /// Intended for local test CAs (e.g. Pebble) with ephemeral self-signed
+    /// interface certificates. Never enable against a public CA.
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.danger_accept_invalid_certs = accept;
         self
     }
 }

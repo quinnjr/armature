@@ -1,14 +1,19 @@
 # armature-acme
 
-ACME/Let's Encrypt certificate automation for the Armature framework.
+RFC 8555 ACME client for automatic TLS certificate issuance and renewal
+(Let's Encrypt, ZeroSSL, BuyPass, Google Trust Services, or any ACME CA).
 
 ## Features
 
-- **Auto Certificates** - Automatic TLS certificate provisioning
-- **Let's Encrypt** - Built-in Let's Encrypt support
-- **HTTP-01 Challenge** - Domain validation
-- **Auto Renewal** - Automatic certificate renewal
-- **Multiple Domains** - SAN certificate support
+- **RFC 8555 flow** — account registration, ordering, challenge validation,
+  finalization, and certificate download
+- **ES256 account keys** — ECDSA P-256 (`ring`), persisted as PKCS#8 and reused
+- **Challenges** — HTTP-01 (default) and DNS-01 challenge data; TLS-ALPN-01
+  selection (serving is the caller's responsibility)
+- **External Account Binding (EAB)** — HS256 binding for CAs that require it
+- **Renewal** — `should_renew` parses the leaf certificate's `notAfter`
+- **Private / test CAs** — trust a custom root, or (test only) accept invalid
+  certs for local CAs such as Pebble
 
 ## Installation
 
@@ -17,38 +22,129 @@ ACME/Let's Encrypt certificate automation for the Armature framework.
 armature-acme = "0.1"
 ```
 
-## Quick Start
+## Quick start
+
+```rust,no_run
+use armature_acme::{AcmeClient, AcmeConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Contacts and domains are `Vec<String>`.
+    let config = AcmeConfig::lets_encrypt_staging(
+        vec!["admin@example.com".to_string()],
+        vec!["example.com".to_string(), "www.example.com".to_string()],
+    )
+    .with_accept_tos(true);
+
+    let mut client = AcmeClient::new(config).await?;
+
+    // Obtain a certificate. For HTTP-01 you must be serving each challenge's
+    // key authorization before this call reaches validation (see below).
+    let (cert_pem, key_pem) = client.order_certificate().await?;
+
+    // `save_certificate` refuses to write empty / non-PEM input.
+    let (cert_path, key_path) = client.save_certificate(&cert_pem, &key_pem).await?;
+    println!("wrote {cert_path} and {key_path}");
+    Ok(())
+}
+```
+
+## Challenge validation
+
+`order_certificate` drives the whole flow but does **not** run a challenge web
+server. Validation must be satisfied out of band:
+
+- **HTTP-01** (default): serve each challenge's `key_authorization` at
+  `/.well-known/acme-challenge/<token>` before the notify step.
+- **DNS-01**: publish a `_acme-challenge.<domain>` TXT record with
+  `armature_acme::dns01_txt_value(&key_authorization)`.
+
+To interleave serving with the protocol, drive the steps manually:
+
+```rust,no_run
+use armature_acme::{AcmeClient, AcmeConfig};
+
+# async fn example(mut client: AcmeClient) -> Result<(), Box<dyn std::error::Error>> {
+client.register_account().await?;
+let order_url = client.create_order().await?;
+
+let challenges = client.get_challenges(&order_url).await?;
+for ch in &challenges {
+    // Serve `ch.key_authorization` at `ch.path()` (HTTP-01), then:
+    client.notify_challenge_ready(&ch.url).await?;
+}
+
+let (cert_pem, key_pem) = client.finalize_order(&order_url).await?;
+# let _ = (cert_pem, key_pem);
+# Ok(())
+# }
+```
+
+## Configuration
+
+```rust
+use armature_acme::{AcmeConfig, ChallengeType};
+use std::path::PathBuf;
+
+let config = AcmeConfig::lets_encrypt_production(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+)
+.with_accept_tos(true)
+.with_challenge_type(ChallengeType::Http01)
+.with_cert_dir(PathBuf::from("/etc/ssl/armature"))   // where cert.pem / key.pem are written
+.with_account_dir(PathBuf::from("/var/lib/armature/acme")) // account_key.pem persistence
+.with_renew_before_days(30);
+```
+
+### ZeroSSL / EAB
 
 ```rust
 use armature_acme::AcmeConfig;
 
-let app = Application::new()
-    .with_acme(AcmeConfig {
-        domains: vec!["example.com", "www.example.com"],
-        email: "admin@example.com",
-        staging: false, // Use production Let's Encrypt
-    })
-    .get("/", handler);
-
-app.listen_tls("0.0.0.0:443").await?;
+let config = AcmeConfig::zerossl(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+    "your_eab_kid".to_string(),
+    "your_eab_hmac_key".to_string(), // base64url-encoded MAC key
+);
 ```
 
-## Staging Environment
+### Private or test CAs
 
 ```rust
-// Use Let's Encrypt staging for testing
-let config = AcmeConfig::staging(vec!["example.com"], "admin@example.com");
+use armature_acme::AcmeConfig;
+
+// Trust a private CA's root for the ACME endpoint.
+let root_pem: Vec<u8> = std::fs::read("private-ca-root.pem").unwrap();
+let config = AcmeConfig::new(
+    "https://acme.internal/directory",
+    vec!["admin@example.com".to_string()],
+    vec!["service.internal".to_string()],
+)
+.with_accept_tos(true)
+.with_ca_certificate(root_pem);
+
+// Test only: accept the ephemeral self-signed cert of a local CA (e.g. Pebble).
+let _test_config = AcmeConfig::default().danger_accept_invalid_certs(true);
 ```
 
-## Certificate Storage
+## Renewal
 
-```rust
-let config = AcmeConfig::new(domains, email)
-    .certificate_path("/etc/ssl/certs")
-    .key_path("/etc/ssl/private");
+```rust,no_run
+# use armature_acme::AcmeClient;
+# async fn example(mut client: AcmeClient) -> Result<(), Box<dyn std::error::Error>> {
+if client.should_renew("/etc/ssl/armature/cert.pem").await? {
+    let (cert_pem, key_pem) = client.order_certificate().await?;
+    client.save_certificate(&cert_pem, &key_pem).await?;
+}
+# Ok(())
+# }
 ```
+
+`should_renew` returns `true` when the leaf certificate expires within
+`renew_before_days`, or when the file is missing.
 
 ## License
 
 MIT OR Apache-2.0
-
