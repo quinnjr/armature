@@ -1,6 +1,6 @@
 [package]
 name = "armature-acme"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -28,6 +28,9 @@ rcgen = { version = "0.14", features = ["pem"] }
 ring = "0.17"
 base64 = "0.22"
 
+# X.509 parsing (certificate expiry for renewal checks)
+x509-parser = "0.18"
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -43,3 +46,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Pebble ACME test CA (Docker-gated end-to-end tests)
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
+# Certificate validity offsets in should_renew boundary tests
+time = "0.3"

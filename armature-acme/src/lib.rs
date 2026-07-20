@@ -148,6 +148,7 @@ pub mod client;
 pub mod config;
 pub mod directory;
 pub mod error;
+pub mod jws;
 pub mod order;
 
 pub use account::*;
@@ -156,4 +157,5 @@ pub use client::*;
 pub use config::*;
 pub use directory::*;
 pub use error::*;
+pub use jws::dns01_txt_value;
 pub use order::*;
