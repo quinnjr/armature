@@ -45,11 +45,15 @@ pub struct TeraEngine {
 impl TeraEngine {
     /// Create a new, empty Tera engine.
     ///
-    /// HTML parts are autoescaped. Templates are registered under keys of the
-    /// form `"<name>/<part>"` (no file extension), so Tera's default
-    /// `.html`-suffix autoescape rule would never match and every part would
-    /// render unescaped. The `/html` suffix is registered below so the HTML
-    /// part escapes, matching the Handlebars engine's unconditional escaping.
+    /// HTML parts are autoescaped; the `text` and `subject` parts are not.
+    /// Templates are registered under keys of the form `"<name>/<part>"` (no
+    /// file extension), so Tera's default `.html`-suffix autoescape rule would
+    /// never match and every part would render unescaped. The `/html` suffix is
+    /// registered below so the HTML part escapes.
+    ///
+    /// All three engines agree on this rule: escaping the `text/plain` body or
+    /// the `Subject:` header is a bug (`Bob & Alice` would go out as
+    /// `Bob &amp; Alice`), not a safety measure.
     pub fn new() -> Self {
         let mut tera = Tera::new();
         tera.autoescape_on(vec!["/html", ".html", ".htm", ".xml"]);
@@ -72,40 +76,10 @@ impl TeraEngine {
     /// ```
     pub fn from_directory(path: impl AsRef<Path>) -> Result<Self> {
         let mut engine = Self::new();
-        let path = path.as_ref();
 
-        if !path.exists() {
-            return Err(MailError::Config(format!(
-                "Template directory not found: {}",
-                path.display()
-            )));
-        }
-
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-
-            if !entry_path.is_dir() {
-                continue;
-            }
-
-            let template_name = entry_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| MailError::Config("Invalid template directory name".to_string()))?
-                .to_string();
-
-            for part in ["html", "text", "subject"] {
-                let part_path = entry_path.join(format!("{}.{}", part, EXT));
-                if part_path.exists() {
-                    let content = std::fs::read_to_string(&part_path)?;
-                    engine
-                        .tera
-                        .add_raw_template(&format!("{}/{}", template_name, part), &content)?;
-                }
-            }
-
-            debug!(template = %template_name, "Loaded email template (Tera)");
+        for part in crate::template_dir::scan_template_dir(path.as_ref(), EXT)? {
+            engine.tera.add_raw_template(&part.key, &part.content)?;
+            debug!(template = %part.template, part = %part.key, "Loaded email template (Tera)");
         }
 
         Ok(engine)
@@ -228,24 +202,9 @@ mod tests {
         assert_eq!(result.subject.as_deref(), Some("Bob & Alice <them>"));
     }
 
-    #[test]
-    fn from_directory_loads_all_three_parts() {
-        let dir = std::env::temp_dir().join(format!("armature-mail-tera-{}", uuid::Uuid::new_v4()));
-        let tpl = dir.join("welcome");
-        std::fs::create_dir_all(&tpl).unwrap();
-        std::fs::write(tpl.join("html.tera"), "<p>{{ name }}</p>").unwrap();
-        std::fs::write(tpl.join("text.tera"), "Hi {{ name }}").unwrap();
-        std::fs::write(tpl.join("subject.tera"), "Welcome {{ name }}\n").unwrap();
-
-        let engine = TeraEngine::from_directory(&dir).unwrap();
-        let result = engine.render("welcome", &json!({"name": "<b>"})).unwrap();
-
-        assert_eq!(result.html.as_deref(), Some("<p>&lt;b&gt;</p>"));
-        assert_eq!(result.text.as_deref(), Some("Hi <b>"));
-        assert_eq!(result.subject.as_deref(), Some("Welcome <b>"));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // `from_directory` is covered for all three engines together by
+    // `tests/template_conformance.rs`, which also asserts they agree on which
+    // parts escape.
 
     #[test]
     fn test_tera_has_template_and_missing() {

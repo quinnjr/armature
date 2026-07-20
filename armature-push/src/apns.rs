@@ -1,6 +1,8 @@
 //! Apple Push Notification Service (APNS) provider.
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
 use std::fmt;
@@ -177,6 +179,24 @@ impl ApnsConfig {
     }
 }
 
+/// Seconds since the UNIX epoch, or a `Config` error if the system clock is
+/// set before it.
+///
+/// `SystemTime::duration_since(UNIX_EPOCH).unwrap()` is a real panic on a VM
+/// resumed from a snapshot or a container with an unsynced RTC. That panic
+/// used to fire while the APNS `refresh_lock` was held, poisoning the mutex
+/// and making every later send panic forever.
+fn unix_now_secs() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| {
+            PushError::Config(
+                "system clock is before the UNIX epoch; cannot sign a JWT".to_string(),
+            )
+        })
+}
+
 /// Reject a JWT-bearing endpoint that is neither https nor an opted-in
 /// loopback http URL.
 fn validate_endpoint(raw: &str, allow_insecure_loopback: bool) -> Result<()> {
@@ -249,8 +269,13 @@ impl ApnsProvider {
     }
 
     /// Read the cached JWT if it is still valid.
+    ///
+    /// Poison is recovered rather than propagated: the guarded value is a
+    /// plain `Option<AccessToken>` with no cross-field invariant, so a panic
+    /// elsewhere cannot have left it half-updated. Unwrapping instead meant
+    /// one panic (see [`Self::create_token`]) bricked the provider forever.
     fn cached_token(&self) -> Option<String> {
-        let token = self.access_token.read().unwrap();
+        let token = self.access_token.read().unwrap_or_else(|e| e.into_inner());
         token
             .as_ref()
             .and_then(|t| (t.expires_at > Instant::now()).then(|| t.token.clone()))
@@ -264,7 +289,13 @@ impl ApnsProvider {
 
         // Signing is CPU-only, so a plain std Mutex is right here (no await is
         // held across it). One waiter signs; the rest re-check and reuse.
-        let _guard = self.refresh_lock.lock().unwrap();
+        //
+        // Poison is benign: this mutex guards `()` — it exists only to
+        // serialize signing — so there is no invariant a panicking holder can
+        // have broken. `unwrap()` here turned a single transient panic into a
+        // permanently unusable provider: every later `get_token()` panicked on
+        // the poisoned lock, even after the underlying cause was gone.
+        let _guard = self.refresh_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(token) = self.cached_token() {
             return Ok(token);
@@ -277,10 +308,12 @@ impl ApnsProvider {
     fn create_token(&self) -> Result<String> {
         use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        // A clock before the UNIX epoch is a configuration problem (a VM
+        // resumed from a snapshot, a container with an unsynced RTC), not a
+        // reason to panic — and panicking here happened *inside* the
+        // `refresh_lock` guard, poisoning it and bricking every subsequent
+        // send even after the clock corrected.
+        let now = unix_now_secs()? as i64;
 
         #[derive(Serialize)]
         struct Claims {
@@ -308,7 +341,7 @@ impl ApnsProvider {
             expires_at: Instant::now() + Duration::from_secs(3000),
         };
 
-        *self.access_token.write().unwrap() = Some(access_token);
+        *self.access_token.write().unwrap_or_else(|e| e.into_inner()) = Some(access_token);
 
         Ok(token)
     }
@@ -383,70 +416,101 @@ impl ApnsProvider {
 
         Ok(payload)
     }
-}
 
-#[async_trait]
-impl PushProvider for ApnsProvider {
-    async fn send(&self, token: &str, notification: &Notification) -> Result<()> {
+    /// Build everything about an APNS request that does *not* vary with the
+    /// device token.
+    ///
+    /// The token appears only in the URL (`/3/device/{token}`), so the JWT,
+    /// the serialized JSON body and every header are byte-identical across a
+    /// batch. `send_batch` used to rebuild the payload (cloning the data
+    /// `HashMap`) and re-run `serde_json::to_vec` once per token: for a
+    /// 10k-device campaign, 10k identical serializations of the same body.
+    fn prepare(&self, notification: &Notification) -> Result<PreparedApns> {
+        use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+
         let jwt = self.get_token()?;
         let payload = self.build_payload(notification)?;
 
-        let url = format!("{}/3/device/{}", self.config.environment.endpoint(), token);
+        // Serialize up front so a 413 (APNS enforces a 4 KB limit) can report
+        // the real body size instead of collapsing into an opaque `Provider`.
+        let body = Bytes::from(serde_json::to_vec(&payload)?);
 
-        debug!(token = %token, "Sending APNS notification");
+        // A header value that will not encode is a caller-supplied string
+        // (topic, collapse key) with control characters or non-ASCII in it.
+        // That is a configuration error, not a transport failure.
+        fn header_value(name: &str, raw: &str) -> Result<HeaderValue> {
+            HeaderValue::from_str(raw)
+                .map_err(|_| PushError::Config(format!("{name} is not a valid HTTP header value")))
+        }
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header("authorization", format!("bearer {}", jwt))
-            .header(
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("authorization"),
+            header_value("APNS authorization", &format!("bearer {jwt}"))?,
+        );
+        headers.insert(
+            HeaderName::from_static("apns-topic"),
+            header_value(
                 "apns-topic",
                 notification
                     .topic
                     .as_deref()
                     .unwrap_or(&self.config.bundle_id),
-            )
-            .header(
-                "apns-push-type",
-                if notification.silent {
-                    "background"
-                } else {
-                    "alert"
-                },
-            );
-
-        // Set priority
-        request = request.header(
-            "apns-priority",
-            match notification.priority {
+            )?,
+        );
+        headers.insert(
+            HeaderName::from_static("apns-push-type"),
+            HeaderValue::from_static(if notification.silent {
+                "background"
+            } else {
+                "alert"
+            }),
+        );
+        headers.insert(
+            HeaderName::from_static("apns-priority"),
+            HeaderValue::from_static(match notification.priority {
                 Priority::High => "10",
                 Priority::Normal => "5",
-            },
+            }),
         );
 
-        // Set TTL (expiration)
+        // Set TTL (expiration).
         if let Some(ttl) = notification.ttl {
-            let expiration = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                + ttl as u64;
-            request = request.header("apns-expiration", expiration.to_string());
+            let expiration = unix_now_secs()? + ttl as u64;
+            headers.insert(
+                HeaderName::from_static("apns-expiration"),
+                header_value("apns-expiration", &expiration.to_string())?,
+            );
         }
 
-        // Set collapse ID
+        // Set collapse ID.
         if let Some(collapse_key) = &notification.collapse_key {
-            request = request.header("apns-collapse-id", collapse_key);
+            headers.insert(
+                HeaderName::from_static("apns-collapse-id"),
+                header_value("apns-collapse-id", collapse_key)?,
+            );
         }
 
-        // Serialize up front so a 413 (APNS enforces a 4 KB limit) can report
-        // the real body size instead of collapsing into an opaque `Provider`.
-        let body_bytes = serde_json::to_vec(&payload)?;
-        let payload_size = body_bytes.len();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        let response = request
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body_bytes)
+        Ok(PreparedApns { body, headers })
+    }
+
+    /// Send an already-prepared body/header set to one device token.
+    ///
+    /// `Bytes` is cheap to clone (refcount bump), so a batch shares one
+    /// allocation of the body across every request.
+    async fn send_prepared(&self, token: &str, prepared: &PreparedApns) -> Result<()> {
+        let url = format!("{}/3/device/{}", self.config.environment.endpoint(), token);
+        let payload_size = prepared.body.len();
+
+        debug!(token = %token, "Sending APNS notification");
+
+        let response = self
+            .client
+            .post(&url)
+            .headers(prepared.headers.clone())
+            .body(prepared.body.clone())
             .send()
             .await?;
 
@@ -457,21 +521,35 @@ impl PushProvider for ApnsProvider {
             return Ok(());
         }
 
-        // APNS carries a machine-readable `reason` in the body for 4xx. Two
+        // APNS carries a machine-readable `reason` in the body for 4xx. Three
         // cases need it before falling through to the shared mapper.
-        if status.as_u16() == 400 || status.as_u16() == 410 {
+        if status.as_u16() == 400 || status.as_u16() == 404 || status.as_u16() == 410 {
             let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
 
-            if status.as_u16() == 410 || body.contains("ExpiredToken") {
-                // Apple's documented reason for 410 is `ExpiredToken`; treat
-                // the explicit reason as the more specific error and let a
-                // bare 410 stay `Unregistered`. Both remove the device.
-                return Err(if body.contains("ExpiredToken") {
-                    PushError::TokenExpired(token.to_string())
-                } else {
-                    PushError::Unregistered(token.to_string())
-                });
+            // Apple's documented reason for 410 is `ExpiredToken`; treat the
+            // explicit reason as the more specific error and let a bare 410
+            // stay `Unregistered`. Both remove the device.
+            if body.contains("ExpiredToken") {
+                return Err(PushError::TokenExpired(token.to_string()));
+            }
+            if status.as_u16() == 410 {
+                return Err(PushError::Unregistered(token.to_string()));
+            }
+
+            // 404 on APNs is `BadPath`: *we* built the wrong `:path` — wrong
+            // topic, wrong environment, wrong host. It says nothing about the
+            // device, so it must never reach `should_remove_device()`. The
+            // shared mapper deliberately leaves 404 alone (see
+            // `error::map_status`); mapping it centrally to `Unregistered`
+            // meant one bad deploy reported "this device is gone" for every
+            // send, and a caller honoring that contract deleted its entire
+            // iOS token table.
+            if status.as_u16() == 404 {
+                return Err(PushError::provider(
+                    404u16,
+                    "APNS rejected the request path (BadPath) — check topic/environment/host",
+                ));
             }
 
             if body.contains("BadDeviceToken") || body.contains("DeviceTokenNotForTopic") {
@@ -497,9 +575,59 @@ impl PushProvider for ApnsProvider {
             APNS_MAX_PAYLOAD,
         ))
     }
+}
+
+/// Everything about an APNS request that does not vary with the device token.
+struct PreparedApns {
+    body: Bytes,
+    headers: reqwest::header::HeaderMap,
+}
+
+#[async_trait]
+impl PushProvider for ApnsProvider {
+    async fn send(&self, token: &str, notification: &Notification) -> Result<()> {
+        let prepared = self.prepare(notification)?;
+        self.send_prepared(token, &prepared).await
+    }
+
+    /// Overrides the default fan-out so the JWT lookup, the payload build and
+    /// the JSON serialization happen **once** for the whole batch rather than
+    /// once per token. Concurrency and result ordering match the trait default.
+    async fn send_batch(&self, tokens: &[String], notification: &Notification) -> Vec<Result<()>> {
+        let prepared = match self.prepare(notification) {
+            Ok(prepared) => prepared,
+            // A preparation failure (bad key, reserved `aps` data key, clock
+            // before the epoch) is not token-specific: report it for every
+            // token so the caller still gets one result per input, in order.
+            Err(e) => {
+                return tokens
+                    .iter()
+                    .map(|_| Err(clone_prepare_error(&e)))
+                    .collect();
+            }
+        };
+
+        let prepared = &prepared;
+        futures_util::stream::iter(0..tokens.len())
+            .map(|i| self.send_prepared(&tokens[i], prepared))
+            .buffered(crate::provider::BATCH_CONCURRENCY)
+            .collect()
+            .await
+    }
 
     fn platform(&self) -> Platform {
         Platform::Ios
+    }
+}
+
+/// `PushError` is not `Clone` (it wraps `std::io::Error`), and `prepare` only
+/// ever fails with `Config`/`Serialization`, so reproduce those faithfully and
+/// degrade anything else into `Provider` rather than losing the message.
+fn clone_prepare_error(err: &PushError) -> PushError {
+    match err {
+        PushError::Config(m) => PushError::Config(m.clone()),
+        PushError::Serialization(m) => PushError::Serialization(m.clone()),
+        other => PushError::provider(None, other.to_string()),
     }
 }
 
@@ -722,6 +850,65 @@ mod tests {
             "opt-in must not permit http to a non-loopback host"
         );
         assert!(validate_endpoint("https://api.push.apple.com", false).is_ok());
+    }
+
+    #[test]
+    fn poisoned_locks_do_not_permanently_brick_the_provider() {
+        // `create_token` used to `unwrap()` `SystemTime::duration_since` while
+        // holding `refresh_lock`. On a VM resumed from a snapshot, or a
+        // container with an unsynced RTC, that panic poisoned the mutex — and
+        // because `get_token` did `lock().unwrap()`, every subsequent send
+        // panicked forever, even after the clock corrected. Poison is benign
+        // here (the mutex guards `()`, the RwLock guards a plain
+        // `Option<AccessToken>`), so it must be recovered, not propagated.
+        let provider = provider();
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = provider.refresh_lock.lock().unwrap();
+                    panic!("poison the refresh lock");
+                })
+                .join()
+                .expect_err("the spawned thread should have panicked");
+
+            scope
+                .spawn(|| {
+                    let _guard = provider.access_token.write().unwrap();
+                    panic!("poison the token lock");
+                })
+                .join()
+                .expect_err("the spawned thread should have panicked");
+        });
+
+        assert!(provider.refresh_lock.is_poisoned());
+        assert!(provider.access_token.is_poisoned());
+
+        // Reading through the poisoned RwLock must not panic.
+        assert!(provider.cached_token().is_none());
+
+        // And `get_token` must reach real work rather than panicking on the
+        // poisoned mutex. The fixture key is not a valid EC PEM, so the
+        // expected outcome is a `Config` error from key parsing — proof we got
+        // all the way into `create_token`.
+        match provider.get_token() {
+            Err(PushError::Config(msg)) => {
+                assert!(
+                    msg.contains("Invalid private key"),
+                    "expected to reach key parsing, got {msg}"
+                );
+            }
+            other => panic!("expected a Config error from the fixture key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unix_now_secs_reports_a_plausible_clock() {
+        // Guards the replacement of `duration_since(UNIX_EPOCH).unwrap()`:
+        // the happy path must still yield real epoch seconds, and the error
+        // path is a `Config` error rather than a panic inside a held lock.
+        let now = unix_now_secs().expect("a sane clock is after the epoch");
+        assert!(now > 1_600_000_000, "got {now}");
     }
 
     #[tokio::test]

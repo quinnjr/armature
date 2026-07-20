@@ -3,7 +3,7 @@
 use crate::{
     error::{PaymentError, PaymentResult},
     money::{Currency, Money},
-    provider::PaymentProvider,
+    provider::{PaymentProvider, retry_after_secs},
     types::*,
     webhook::{WebhookData, WebhookEvent, WebhookEventType, WebhookHeaders},
 };
@@ -50,12 +50,20 @@ pub struct BraintreeProvider {
 }
 
 impl BraintreeProvider {
-    /// Create a new Braintree provider
+    /// Create a new Braintree provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if the HTTP client cannot be built.
+    /// Fallible on purpose: the previous `unwrap_or_else(|_| Client::new())`
+    /// fallback produced a client with **no request and no connect timeout**,
+    /// which inside the processor's retry loop can hang a charge indefinitely —
+    /// silently, and with no log line to say the timeouts were lost.
     pub fn new(
         merchant_id: impl Into<String>,
         public_key: impl Into<String>,
         private_key: impl Into<String>,
-    ) -> Self {
+    ) -> PaymentResult<Self> {
         let merchant_id = merchant_id.into();
         let public_key = public_key.into();
         let private_key = SecretString::new(private_key.into().into());
@@ -63,15 +71,15 @@ impl BraintreeProvider {
             "Basic {}",
             STANDARD.encode(format!("{}:{}", public_key, private_key.expose_secret()))
         );
-        Self {
+        Ok(Self {
             base_url: merchant_base_url("https://api.sandbox.braintreegateway.com", &merchant_id),
             public_key,
             private_key,
             auth_header,
             // Carries the shared connect/request timeouts; an untimed client
             // inside the processor's retry loop can hang a charge indefinitely.
-            client: crate::provider::build_http_client().unwrap_or_else(|_| Client::new()),
-        }
+            client: crate::provider::build_http_client()?,
+        })
     }
 
     /// Use production environment
@@ -128,18 +136,6 @@ fn merchant_id_of(base_url: &str) -> String {
         .rsplit_once("/merchants/")
         .map(|(_, id)| id.to_string())
         .unwrap_or_default()
-}
-
-/// Read the `Retry-After` header as a whole number of seconds.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// Turn a non-2xx Braintree response into a typed [`PaymentError`].
@@ -199,6 +195,35 @@ fn transaction_currency(iso_code: Option<&str>) -> Currency {
     iso_code
         .and_then(Currency::from_code)
         .unwrap_or(Currency::USD)
+}
+
+/// The amount Braintree reported on a transaction.
+///
+/// # Why this propagates instead of defaulting
+///
+/// This used to be `Money::from_float(txn.amount.parse().unwrap_or(0.0), ..)`.
+/// Any amount string the `f64` parse rejected produced a [`Charge`] reporting
+/// **$0.00 for money that actually moved** — and it did so on the *success*
+/// path, so no ledger entry, receipt, or reconciliation run had any signal that
+/// the figure was invented. A charge that fails loudly can be retried or
+/// investigated; a charge that succeeds with the wrong amount silently corrupts
+/// the books.
+///
+/// Parsing also goes through [`Decimal`](rust_decimal::Decimal) rather than
+/// `f64`, so `"0.29"` is exactly 29 cents instead of 28.999999999999996 rounded
+/// back into place.
+fn transaction_amount(txn: &BraintreeTransaction) -> PaymentResult<Money> {
+    let currency = transaction_currency(txn.currency_iso_code.as_deref());
+    Money::from_gateway_string(&txn.amount, currency).ok_or_else(|| {
+        PaymentError::Serialization(format!(
+            "Braintree returned an unparseable transaction amount {:?} for transaction {:?} \
+             (currency {}). The transaction may well have been processed — reconcile it against \
+             the gateway rather than assuming it did not happen.",
+            txn.amount,
+            txn.id,
+            currency.code()
+        ))
+    })
 }
 
 #[async_trait]
@@ -265,11 +290,12 @@ impl PaymentProvider for BraintreeProvider {
 
         let result: BraintreeTransactionResponse = response.json().await?;
         let txn = result.transaction;
-        let currency = transaction_currency(txn.currency_iso_code.as_deref());
+        let amount = transaction_amount(&txn)?;
+        let currency = amount.currency;
 
         Ok(Charge {
             id: txn.id,
-            amount: Money::from_float(txn.amount.parse().unwrap_or(0.0), currency),
+            amount,
             amount_refunded: Money::new(0, currency),
             status: transaction_charge_status(&txn.status),
             customer_id: txn.customer_id,
@@ -315,16 +341,17 @@ impl PaymentProvider for BraintreeProvider {
 
         let result: BraintreeTransactionResponse = response.json().await?;
         let txn = result.transaction;
-        // Read the settled currency and status rather than assuming USD and
-        // success: a €120 settlement previously came back as Money { 12000,
+        // Read the settled amount, currency and status rather than assuming USD
+        // and success: a €120 settlement previously came back as Money { 12000,
         // USD }, which satisfies `Money::add`'s currency assertion and silently
         // corrupts a ledger.
-        let currency = transaction_currency(txn.currency_iso_code.as_deref());
+        let amount = transaction_amount(&txn)?;
+        let currency = amount.currency;
         let status = transaction_charge_status(&txn.status);
 
         Ok(Charge {
             id: txn.id,
-            amount: Money::from_float(txn.amount.parse().unwrap_or(0.0), currency),
+            amount,
             amount_refunded: Money::new(0, currency),
             status,
             customer_id: txn.customer_id,
@@ -364,14 +391,14 @@ impl PaymentProvider for BraintreeProvider {
 
         let result: BraintreeTransactionResponse = response.json().await?;
         let txn = result.transaction;
+        // A refund reporting $0.00 for money that went back to the customer is
+        // the same defect as a charge reporting $0.00 — surface it.
+        let amount = transaction_amount(&txn)?;
 
         Ok(Refund {
             id: txn.id.clone(),
             charge_id: request.charge_id,
-            amount: Money::from_float(
-                txn.amount.parse().unwrap_or(0.0),
-                transaction_currency(txn.currency_iso_code.as_deref()),
-            ),
+            amount,
             status: transaction_refund_status(&txn.status),
             reason: request.reason,
             created_at: txn.created_at.unwrap_or_else(Utc::now),
@@ -889,6 +916,7 @@ impl PaymentProvider for BraintreeProvider {
         })?;
 
         let notification = parse_notification_xml(&xml)?;
+        let event_type = WebhookEventType::from_str(&notification.kind);
 
         Ok(WebhookEvent {
             // Braintree's notification document carries no id of its own, so a
@@ -899,10 +927,15 @@ impl PaymentProvider for BraintreeProvider {
             // hashes to the same id and can be deduplicated, while distinct
             // notifications stay distinct.
             id: format!("bt_{}", hex::encode(Sha256::digest(&compact))),
-            event_type: WebhookEventType::from_str(&notification.kind),
             // Braintree's real timestamp, not "now".
             created_at: notification.timestamp.unwrap_or_else(Utc::now),
-            data: WebhookData::Generic(notification.subject),
+            // Interpret the subject according to the event type rather than
+            // always emitting `Generic`. Braintree's XML-derived shapes rarely
+            // match the (Stripe-modeled) typed variants, so in practice this
+            // still yields `Generic` — but losslessly, and through the one code
+            // path every provider now shares.
+            data: WebhookData::from_event_type(&event_type, notification.subject),
+            event_type,
             provider: "braintree".to_string(),
             livemode: true,
         })
@@ -1396,7 +1429,7 @@ mod tests {
     use base64::Engine;
 
     fn provider() -> BraintreeProvider {
-        BraintreeProvider::new("merchant123", "pubkey", "privkey")
+        BraintreeProvider::new("merchant123", "pubkey", "privkey").expect("HTTP client builds")
     }
 
     /// A realistic Braintree notification: base64-encoded XML, which is what
@@ -1536,6 +1569,67 @@ mod tests {
         assert_eq!(
             transaction_charge_status("authorization_expired"),
             ChargeStatus::Pending
+        );
+    }
+
+    #[test]
+    fn a_malformed_transaction_amount_is_an_error_not_zero() {
+        // The defect this replaces: `parse().unwrap_or(0.0)` produced a Charge
+        // reporting $0.00 for money that had moved, on the *success* path, so
+        // no ledger entry or reconciliation run had any signal.
+        let txn = |amount: &str, iso: &str| BraintreeTransaction {
+            id: "tx_1".into(),
+            amount: amount.into(),
+            status: "settled".into(),
+            currency_iso_code: Some(iso.into()),
+            customer_id: None,
+            payment_method_token: None,
+            processor_response_text: None,
+            created_at: None,
+        };
+
+        for bad in ["", "N/A", "12,50", "1.2.3", "$120.00", "abc"] {
+            let err = transaction_amount(&txn(bad, "USD")).unwrap_err();
+            assert!(matches!(err, PaymentError::Serialization(_)), "got {err:?}");
+            assert!(
+                err.to_string().contains("unparseable"),
+                "the message must say what went wrong; got {err}"
+            );
+            assert!(err.to_string().contains("tx_1"), "got {err}");
+        }
+
+        // More precision than the currency has minor units is also refused
+        // rather than silently rounded into the ledger.
+        assert!(transaction_amount(&txn("120.005", "USD")).is_err());
+        assert!(transaction_amount(&txn("1000.50", "JPY")).is_err());
+    }
+
+    #[test]
+    fn a_well_formed_transaction_amount_is_exact() {
+        let txn = |amount: &str, iso: &str| BraintreeTransaction {
+            id: "tx_1".into(),
+            amount: amount.into(),
+            status: "settled".into(),
+            currency_iso_code: Some(iso.into()),
+            customer_id: None,
+            payment_method_token: None,
+            processor_response_text: None,
+            created_at: None,
+        };
+
+        assert_eq!(
+            transaction_amount(&txn("120.00", "EUR")).unwrap(),
+            Money::eur(12000)
+        );
+        // Through f64 this is 28.999999999999996 before rounding.
+        assert_eq!(
+            transaction_amount(&txn("0.29", "USD")).unwrap(),
+            Money::usd(29)
+        );
+        // Zero-decimal currencies keep whole units.
+        assert_eq!(
+            transaction_amount(&txn("1000", "JPY")).unwrap(),
+            Money::new(1000, Currency::JPY)
         );
     }
 

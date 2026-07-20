@@ -66,6 +66,7 @@ fn stripe_rejects_a_cleartext_base_url() {
     use armature_payments::providers::stripe::StripeProvider;
     assert_validates("stripe", |url| {
         StripeProvider::new("sk_live_secret")
+            .expect("HTTP client builds")
             .with_base_url(url)
             .map(|_| ())
     });
@@ -77,6 +78,7 @@ fn paypal_rejects_a_cleartext_base_url() {
     use armature_payments::providers::paypal::PayPalProvider;
     assert_validates("paypal", |url| {
         PayPalProvider::new("client-id", "client-secret")
+            .expect("HTTP client builds")
             .with_base_url(url)
             .map(|_| ())
     });
@@ -88,6 +90,7 @@ fn braintree_rejects_a_cleartext_base_url() {
     use armature_payments::providers::braintree::BraintreeProvider;
     assert_validates("braintree", |url| {
         BraintreeProvider::new("merchant-1", "pub_key", "priv_key")
+            .expect("HTTP client builds")
             .with_base_url(url)
             .map(|_| ())
     });

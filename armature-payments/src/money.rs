@@ -92,32 +92,40 @@ impl Currency {
         self.decimals() == 0
     }
 
-    /// Parse from string
+    /// Parse from string.
+    ///
+    /// Compares case-insensitively without allocating: ISO 4217 codes are three
+    /// ASCII characters, and `to_uppercase()` allocated a `String` on every
+    /// call — twice per `Charge` projection, on the charge and refund paths.
     pub fn from_code(code: &str) -> Option<Self> {
-        match code.to_uppercase().as_str() {
-            "USD" => Some(Self::USD),
-            "EUR" => Some(Self::EUR),
-            "GBP" => Some(Self::GBP),
-            "JPY" => Some(Self::JPY),
-            "CAD" => Some(Self::CAD),
-            "AUD" => Some(Self::AUD),
-            "CHF" => Some(Self::CHF),
-            "CNY" => Some(Self::CNY),
-            "INR" => Some(Self::INR),
-            "MXN" => Some(Self::MXN),
-            "BRL" => Some(Self::BRL),
-            "SGD" => Some(Self::SGD),
-            "HKD" => Some(Self::HKD),
-            "NZD" => Some(Self::NZD),
-            "SEK" => Some(Self::SEK),
-            "NOK" => Some(Self::NOK),
-            "DKK" => Some(Self::DKK),
-            "PLN" => Some(Self::PLN),
-            "ZAR" => Some(Self::ZAR),
-            "KRW" => Some(Self::KRW),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|candidate| code.eq_ignore_ascii_case(candidate.code()))
     }
+
+    /// Every currency this crate models.
+    const ALL: [Self; 20] = [
+        Self::USD,
+        Self::EUR,
+        Self::GBP,
+        Self::JPY,
+        Self::CAD,
+        Self::AUD,
+        Self::CHF,
+        Self::CNY,
+        Self::INR,
+        Self::MXN,
+        Self::BRL,
+        Self::SGD,
+        Self::HKD,
+        Self::NZD,
+        Self::SEK,
+        Self::NOK,
+        Self::DKK,
+        Self::PLN,
+        Self::ZAR,
+        Self::KRW,
+    ];
 }
 
 impl fmt::Display for Currency {
@@ -157,6 +165,38 @@ impl Money {
         let multiplier = 10f64.powi(currency.decimals() as i32);
         let amount = (amount * multiplier).round() as i64;
         Self { amount, currency }
+    }
+
+    /// Parse the decimal amount string a gateway put on the wire.
+    ///
+    /// The inverse of [`to_gateway_string`](Self::to_gateway_string): `"29.99"`
+    /// with [`Currency::USD`] is 2999 cents, `"1000"` with [`Currency::JPY`] is
+    /// ¥1000.
+    ///
+    /// Conversion goes through [`Decimal`], not `f64`. A binary float cannot
+    /// represent most decimal money amounts exactly, so `"0.29"` parsed as `f64`
+    /// and multiplied by 100 is 28.999999999999996 — correct only because the
+    /// rounding happens to go the right way, which is not a property to bet a
+    /// ledger on.
+    ///
+    /// # Returns
+    ///
+    /// `None` if `value` is not a decimal number, or if it carries more
+    /// precision than the currency has minor units (`"29.999"` in USD). Both are
+    /// gateway responses this crate cannot represent faithfully, and a silently
+    /// rounded amount reported as a success is worse than a surfaced failure.
+    pub fn from_gateway_string(value: &str, currency: Currency) -> Option<Self> {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let parsed = Decimal::from_str_exact(value.trim()).ok()?;
+        let scaled = parsed.checked_mul(Decimal::from(10i64.pow(currency.decimals())))?;
+        if !scaled.fract().is_zero() {
+            return None;
+        }
+        Some(Self {
+            amount: scaled.to_i64()?,
+            currency,
+        })
     }
 
     /// Create USD amount from cents
@@ -367,6 +407,85 @@ mod tests {
         assert_eq!((a + b).amount, 1500);
         assert_eq!((a - b).amount, 500);
         assert_eq!((a * 2).amount, 2000);
+    }
+
+    #[test]
+    fn gateway_amounts_round_trip_exactly() {
+        for money in [
+            Money::usd(2999),
+            Money::usd(0),
+            Money::usd(5),
+            Money::usd(-2999),
+            Money::eur(123456),
+            Money::new(1000, Currency::JPY),
+            Money::new(0, Currency::KRW),
+        ] {
+            let rendered = money.to_gateway_string();
+            assert_eq!(
+                Money::from_gateway_string(&rendered, money.currency),
+                Some(money),
+                "{rendered} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_amounts_are_parsed_exactly_not_through_a_float() {
+        // 0.29 * 100.0 in binary floating point is 28.999999999999996.
+        assert_eq!(
+            Money::from_gateway_string("0.29", Currency::USD),
+            Some(Money::usd(29))
+        );
+        assert_eq!(
+            Money::from_gateway_string("1.15", Currency::USD),
+            Some(Money::usd(115))
+        );
+        // Zero-decimal currencies are already whole units.
+        assert_eq!(
+            Money::from_gateway_string("1000", Currency::JPY),
+            Some(Money::new(1000, Currency::JPY))
+        );
+        // Surrounding whitespace is tolerated; anything else is not.
+        assert_eq!(
+            Money::from_gateway_string(" 12.50 ", Currency::USD),
+            Some(Money::usd(1250))
+        );
+    }
+
+    #[test]
+    fn unrepresentable_gateway_amounts_are_rejected_not_zeroed() {
+        // The whole point: a malformed amount must never silently become 0.00
+        // on a path that reports success.
+        for bad in ["", "abc", "12,50", "1.2.3", "NaN", "12 34", "$12.50"] {
+            assert_eq!(
+                Money::from_gateway_string(bad, Currency::USD),
+                None,
+                "{bad:?} should not parse"
+            );
+        }
+        // More precision than the currency has minor units.
+        assert_eq!(Money::from_gateway_string("29.999", Currency::USD), None);
+        assert_eq!(Money::from_gateway_string("1000.50", Currency::JPY), None);
+        // ...but trailing zeros within the currency's precision are fine.
+        assert_eq!(
+            Money::from_gateway_string("29.990", Currency::USD),
+            Some(Money::usd(2999))
+        );
+    }
+
+    #[test]
+    fn from_code_is_case_insensitive_and_total() {
+        // Every variant must round-trip through its own code, in any casing —
+        // the allocation-free comparison must not have dropped an entry.
+        for currency in Currency::ALL {
+            let code = currency.code();
+            assert_eq!(Currency::from_code(code), Some(currency));
+            assert_eq!(Currency::from_code(&code.to_lowercase()), Some(currency));
+        }
+        assert_eq!(Currency::from_code("uSd"), Some(Currency::USD));
+        assert_eq!(Currency::from_code("nonsense"), None);
+        assert_eq!(Currency::from_code(""), None);
+        assert_eq!(Currency::from_code("US"), None);
     }
 
     #[test]

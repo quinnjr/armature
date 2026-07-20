@@ -126,13 +126,80 @@ pub trait Storage: Send + Sync {
     async fn head(&self, key: &str) -> Result<StorageMetadata>;
 
     /// Delete a file.
+    ///
+    /// # Contract
+    ///
+    /// Deletion is **idempotent**: deleting a key that does not exist is
+    /// `Ok(())`, not [`StorageError::NotFound`]. This is the conventional
+    /// object-store semantic (it is what S3's `DeleteObject` does) and every
+    /// backend in this crate -- including the local filesystem one -- conforms
+    /// to it, so `Arc<dyn Storage>` callers get the same behaviour whichever
+    /// backend is underneath.
+    ///
+    /// Errors are still reported for anything else: permission failures, I/O
+    /// errors, and keys rejected by the backend's own validation.
+    ///
+    /// [`StorageError::NotFound`]: crate::StorageError::NotFound
     async fn delete(&self, key: &str) -> Result<()>;
 
     /// Check if a file exists.
     async fn exists(&self, key: &str) -> Result<bool>;
 
-    /// List files with optional prefix.
-    async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>>;
+    /// List one page of objects.
+    ///
+    /// This is the bounded primitive; [`Self::list`] is a convenience wrapper
+    /// over it. `cursor` is an opaque, backend-specific continuation token --
+    /// pass `None` for the first page and then feed back whatever the previous
+    /// call returned. A `None` in the returned tuple's second slot means the
+    /// listing is complete.
+    ///
+    /// `limit` is an upper bound on the number of entries in the returned page;
+    /// backends may return fewer (S3 and Azure additionally cap it at 1000 and
+    /// 5000 respectively). A `limit` of `0` is treated as
+    /// [`DEFAULT_LIST_PAGE_SIZE`].
+    ///
+    /// Prefer this over [`Self::list`] whenever `prefix` is derived from a
+    /// request: a caller-controlled prefix over a large bucket is otherwise an
+    /// unbounded allocation.
+    async fn list_page(
+        &self,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StorageMetadata>, Option<String>)>;
+
+    /// List files with an optional prefix, draining every page.
+    ///
+    /// Convenience wrapper over [`Self::list_page`] for listings known to be
+    /// small. It accumulates at most [`LIST_MAX_ITEMS`] entries and returns
+    /// [`StorageError::Storage`] once that is exceeded rather than growing an
+    /// unbounded `Vec`; use [`Self::list_page`] for anything that might be
+    /// larger, or whose prefix comes from a request.
+    ///
+    /// [`StorageError::Storage`]: crate::StorageError::Storage
+    async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>> {
+        let mut results: Vec<StorageMetadata> = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let (page, next) = self
+                .list_page(prefix, cursor.as_deref(), DEFAULT_LIST_PAGE_SIZE)
+                .await?;
+            results.extend(page);
+
+            if results.len() > LIST_MAX_ITEMS {
+                return Err(crate::StorageError::Storage(format!(
+                    "list exceeded the {LIST_MAX_ITEMS}-object cap for prefix {prefix:?}; \
+                     use Storage::list_page to page through the results instead"
+                )));
+            }
+
+            match next {
+                Some(next) => cursor = Some(next),
+                None => return Ok(results),
+            }
+        }
+    }
 
     /// Copy a file to a new key.
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata>;
@@ -174,6 +241,17 @@ pub trait Storage: Send + Sync {
 
 /// Fallback lifetime for [`Storage::default_url_duration`]: one hour.
 pub const DEFAULT_URL_DURATION: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Page size [`Storage::list`] requests from [`Storage::list_page`], and the
+/// size substituted when `list_page` is called with a `limit` of `0`.
+pub const DEFAULT_LIST_PAGE_SIZE: usize = 1000;
+
+/// Ceiling on the number of entries [`Storage::list`] will accumulate before
+/// giving up with an error.
+///
+/// `list` exists for small listings; a bucket larger than this must be walked
+/// with [`Storage::list_page`] so the caller controls the memory.
+pub const LIST_MAX_ITEMS: usize = 10_000;
 
 /// Generate a unique file key.
 pub fn generate_unique_key(original_name: Option<&str>, preserve_extension: bool) -> String {

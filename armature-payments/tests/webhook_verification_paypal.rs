@@ -52,6 +52,7 @@ async fn paypal_stub(verification_status: &str) -> StubServer {
 
 fn paypal_provider(server: &StubServer) -> PayPalProvider {
     PayPalProvider::new("client-id", "client-secret")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap()
         .with_webhook_id("WEBHOOK-ID-1")
@@ -230,6 +231,7 @@ async fn paypal_rejects_an_unparseable_verification_response() {
 async fn paypal_requires_a_configured_webhook_id() {
     let server = paypal_stub("SUCCESS").await;
     let provider = PayPalProvider::new("client-id", "client-secret")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap();
 

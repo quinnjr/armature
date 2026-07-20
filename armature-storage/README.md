@@ -50,16 +50,73 @@ assert_eq!(meta.size, 5);
 let keys: Vec<String> = storage.list(None).await?.into_iter().map(|m| m.key).collect();
 assert_eq!(keys, ["files/doc.txt"]);
 
-// Copy, then delete
+// Copy, then delete. Deletion is idempotent on every backend: deleting a key
+// that is not there is Ok(()), not NotFound.
 storage.copy("files/doc.txt", "files/copy.txt").await?;
+storage.delete("files/doc.txt").await?;
 storage.delete("files/doc.txt").await?;
 # Ok(())
 # }
 ```
 
-Keys are untrusted input: any key that is absolute or contains a `..`
-component is rejected with `StorageError::InvalidFileName` rather than
-escaping the storage root.
+### Listing large buckets
+
+`list` drains every page into one `Vec` and errors out past an internal cap
+(`LIST_MAX_ITEMS`). It is for listings you know are small. When the prefix is
+request-derived, or the bucket may be large, page explicitly with `list_page`,
+which maps to S3's continuation token, GCS's page token, Azure's marker, and an
+offset on the local filesystem:
+
+```rust
+use armature_storage::{Bytes, LocalStorage, Storage};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let dir = tempfile::tempdir()?;
+# let storage = LocalStorage::with_path(dir.path()).await?;
+# storage.put("a.txt", Bytes::from("x")).await?;
+let mut cursor = None;
+loop {
+    let (page, next) = storage.list_page(None, cursor.as_deref(), 500).await?;
+    for object in page {
+        // ... handle at most 500 objects at a time
+        let _ = object.key;
+    }
+    match next {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+# Ok(())
+# }
+```
+
+## Key safety
+
+Keys are untrusted input, and what a hostile key can *do* differs by backend,
+so the guarantees do too.
+
+**`put_file` — the same on all four backends.** The multipart `filename` header
+is entirely client-controlled, so `put_file` runs it through
+`sanitize_filename` on local, S3, GCS and Azure alike: a `filename` of
+`../../secrets/key` is stored under the key `key`. This is the one place a
+filename crosses into a key, and it behaves identically everywhere.
+
+**`LocalStorage` — keys are filesystem paths, and are validated as such.** A key
+that is absolute or contains a `..` component is rejected with
+`StorageError::InvalidFileName`. Beyond that lexical check, keys are resolved
+*physically*: any key whose path traverses a symbolic link is rejected, and the
+resolved path is canonicalized and re-checked against the storage root. A link
+planted inside the root — say `uploads/reports -> /etc` — is spelled entirely
+with ordinary path components, so nothing lexical can catch it. `list` likewise
+never traverses or reports symlinked entries, so it can neither loop on a
+symlink cycle nor emit a path from outside the root as an object key.
+
+**S3, GCS and Azure — keys are opaque object names.** These stores have no
+directories to escape from; `a/../b` is a literal key containing those
+characters, addressing an object in the same bucket as any other key. Such keys
+are therefore passed through as written rather than rejected. They are ugly, and
+awkward to mirror onto a filesystem later, but they are not a traversal.
 
 ```rust
 use armature_storage::{Bytes, LocalStorage, Storage, StorageError};

@@ -16,7 +16,7 @@ use tracing::{debug, info};
 
 use crate::{
     Result, Storage as StorageTrait, StorageConfig, StorageError, StorageMetadata, UploadedFile,
-    calculate_checksum, generate_unique_key,
+    calculate_checksum, generate_unique_key, sanitize_filename,
 };
 
 /// Google Cloud Storage configuration.
@@ -201,12 +201,17 @@ impl GcsStorage {
     }
 
     /// Generate a key for a file.
+    ///
+    /// `UploadedFile::name` comes straight off the client-controlled multipart
+    /// `filename` header, so it is sanitized before it becomes an object name --
+    /// exactly as the local backend does. Taking it verbatim let a filename of
+    /// `../../secrets/key` become the object name as written.
     fn generate_key(&self, original_name: Option<&str>) -> String {
         if self.config.storage.generate_unique_names {
             generate_unique_key(original_name, self.config.storage.preserve_extension)
         } else {
             original_name
-                .map(String::from)
+                .map(sanitize_filename)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         }
     }
@@ -343,14 +348,15 @@ impl StorageTrait for GcsStorage {
         let mut response = request.send().await.map_err(|e| map_object_error(e, key))?;
 
         let mut contents = Vec::new();
-        while let Some(chunk) = response.next().await.transpose().map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("404") || err_str.contains("not found") {
-                StorageError::NotFound(key.to_string())
-            } else {
-                StorageError::Storage(err_str)
-            }
-        })? {
+        // Use the shared mapper rather than re-inlining a weaker copy of it:
+        // the inlined version was missing the `NOT_FOUND` arm, so a not-found
+        // surfacing mid-stream came back as an opaque `Storage` error.
+        while let Some(chunk) = response
+            .next()
+            .await
+            .transpose()
+            .map_err(|e| map_object_error(e, key))?
+        {
             contents.extend_from_slice(&chunk);
         }
 
@@ -384,15 +390,25 @@ impl StorageTrait for GcsStorage {
         Ok(metadata)
     }
 
+    /// Delete an object, idempotently.
+    ///
+    /// This used to bypass [`map_object_error`] -- the mapper defined in this
+    /// very file and used by `get`/`head` -- and report a missing object as an
+    /// opaque [`StorageError::Storage`]. Per the [`StorageTrait::delete`]
+    /// contract a missing key is now `Ok(())`, as it is on S3.
     async fn delete(&self, key: &str) -> Result<()> {
         let full_key = self.full_key(key);
 
-        self.with_quota(self.control().await?.delete_object())
+        let result = self
+            .with_quota(self.control().await?.delete_object())
             .set_bucket(self.bucket_resource())
             .set_object(full_key.clone())
             .send()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .await;
+
+        if let Err(e) = result {
+            return delete_outcome(e, key);
+        }
 
         debug!(key = %key, bucket = %self.config.bucket, "Deleted from GCS");
         Ok(())
@@ -406,8 +422,17 @@ impl StorageTrait for GcsStorage {
         }
     }
 
-    async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>> {
-        use google_cloud_gax::paginator::ItemPaginator;
+    async fn list_page(
+        &self,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
+        let limit = if limit == 0 {
+            crate::DEFAULT_LIST_PAGE_SIZE
+        } else {
+            limit
+        };
 
         let mut full_prefix = String::new();
         if let Some(p) = &self.config.storage.path_prefix {
@@ -418,29 +443,41 @@ impl StorageTrait for GcsStorage {
             full_prefix.push_str(p);
         }
 
-        let mut items = self
+        let mut request = self
             .with_quota(self.control().await?.list_objects())
             .set_parent(self.bucket_resource())
             .set_prefix(full_prefix)
-            .by_item();
+            .set_page_size(limit.min(i32::MAX as usize) as i32);
 
-        let mut results = Vec::new();
+        if let Some(cursor) = cursor {
+            request = request.set_page_token(cursor);
+        }
 
-        while let Some(object) = items
-            .next()
+        let page = request
+            .send()
             .await
-            .transpose()
-            .map_err(|e| StorageError::Storage(e.to_string()))?
-        {
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
+
+        // Hoisted out of the per-object loop: this was reallocated for every
+        // object in the bucket.
+        let strip = self
+            .config
+            .storage
+            .path_prefix
+            .as_ref()
+            .map(|p| format!("{p}/"));
+
+        let mut results = Vec::with_capacity(page.objects.len());
+
+        for object in &page.objects {
             // Remove prefix to get the relative key
-            let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                object
+            let relative_key = match &strip {
+                Some(strip) => object
                     .name
-                    .strip_prefix(&format!("{}/", p))
+                    .strip_prefix(strip.as_str())
                     .unwrap_or(&object.name)
-                    .to_string()
-            } else {
-                object.name.clone()
+                    .to_string(),
+                None => object.name.clone(),
             };
 
             let size = object.size as u64;
@@ -460,7 +497,9 @@ impl StorageTrait for GcsStorage {
             results.push(metadata);
         }
 
-        Ok(results)
+        let next = Some(page.next_page_token).filter(|t| !t.is_empty());
+
+        Ok((results, next))
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata> {
@@ -468,6 +507,8 @@ impl StorageTrait for GcsStorage {
         let to_key = self.full_key(to);
 
         // Server-side copy is performed via the rewrite operation in the new SDK.
+        // Routed through `map_object_error` so a missing source is `NotFound`
+        // here as it is on every other backend, rather than opaque `Storage`.
         self.with_quota(self.control().await?.rewrite_object())
             .set_source_bucket(self.bucket_resource())
             .set_source_object(from_key)
@@ -475,7 +516,7 @@ impl StorageTrait for GcsStorage {
             .set_destination_name(to_key)
             .send()
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(|e| map_object_error(e, from))?;
 
         self.head(to).await
     }
@@ -502,12 +543,25 @@ impl StorageTrait for GcsStorage {
 }
 
 /// Map a GCS error to a [`StorageError`], translating not-found responses.
-fn map_object_error(err: google_cloud_storage::Error, key: &str) -> StorageError {
+///
+/// Generic over the error type because the data-plane read stream, the
+/// data-plane request and the control-plane client each surface a different
+/// one; every call site must classify not-found the same way.
+fn map_object_error<E: std::fmt::Display>(err: E, key: &str) -> StorageError {
     let err_str = err.to_string();
     if err_str.contains("404") || err_str.contains("not found") || err_str.contains("NOT_FOUND") {
         StorageError::NotFound(key.to_string())
     } else {
         StorageError::Storage(err_str)
+    }
+}
+
+/// Collapse a `delete_object` failure into the idempotent [`StorageTrait::delete`]
+/// contract: a not-found object is a successful delete, anything else is an error.
+fn delete_outcome<E: std::fmt::Display>(err: E, key: &str) -> Result<()> {
+    match map_object_error(err, key) {
+        StorageError::NotFound(_) => Ok(()),
+        other => Err(other),
     }
 }
 
@@ -704,6 +758,72 @@ mod tests {
             .unwrap_or_else(|| panic!("no upload request recorded: {requests:?}"));
 
         assert_eq!(upload.header("x-goog-user-project"), None);
+    }
+
+    /// `put_file` sanitized the client-supplied filename on the local backend
+    /// only; S3/GCS/Azure used it verbatim, so a multipart `filename` of
+    /// `../../secrets/key` became the object name as written -- while the
+    /// README advertised traversal rejection as a trait-level guarantee.
+    #[tokio::test]
+    async fn generate_key_sanitizes_a_path_bearing_filename() {
+        let server = StubServer::start_single(StubResponse::json(200, "{}")).await;
+        let mut storage = stub_gcs_storage(&server, GcsConfig::new("test-bucket")).await;
+        storage.config.storage.generate_unique_names = false;
+
+        assert_eq!(
+            storage.generate_key(Some("../../secrets/key")),
+            "key",
+            "a path-bearing filename must not survive into the object name"
+        );
+        assert_eq!(storage.generate_key(Some("/etc/shadow")), "shadow");
+        assert_eq!(storage.generate_key(Some("ok.txt")), "ok.txt");
+    }
+
+    /// `delete` bypassed `map_object_error` -- defined in this same file and
+    /// used by `get`/`head` -- so a missing object came back as an opaque
+    /// `Storage` error while S3 returned `Ok(())`. The control plane is gRPC
+    /// and cannot be pointed at an HTTP stub, so this exercises the exact
+    /// classifier `delete` runs on the error it gets back.
+    #[test]
+    fn delete_treats_a_missing_object_as_success() {
+        assert!(
+            delete_outcome(
+                "NOT_FOUND: No such object: test-bucket/gone.txt",
+                "gone.txt"
+            )
+            .is_ok(),
+            "deleting a missing object must be Ok(()) per the Storage::delete contract"
+        );
+        assert!(delete_outcome("404 Not Found", "gone.txt").is_ok());
+
+        // Everything else still propagates.
+        match delete_outcome(
+            "PERMISSION_DENIED: caller lacks storage.objects.delete",
+            "k",
+        ) {
+            Err(StorageError::Storage(msg)) => assert!(msg.contains("PERMISSION_DENIED")),
+            other => panic!("a permission failure must not be swallowed, got {other:?}"),
+        }
+    }
+
+    /// `copy` and the body-streaming path in `get` both re-implemented or
+    /// skipped the shared mapper; every not-found path must classify alike.
+    #[test]
+    fn map_object_error_classifies_every_not_found_spelling() {
+        for err in [
+            "NOT_FOUND: No such object",
+            "404 Not Found",
+            "object not found",
+        ] {
+            assert!(
+                matches!(map_object_error(err, "k"), StorageError::NotFound(_)),
+                "{err:?} must classify as NotFound"
+            );
+        }
+        assert!(matches!(
+            map_object_error("UNAVAILABLE: backend overloaded", "k"),
+            StorageError::Storage(_)
+        ));
     }
 
     #[tokio::test]

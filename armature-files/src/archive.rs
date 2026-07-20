@@ -6,7 +6,7 @@ use crate::{FileError, FileMetadata, FileResult, ProcessingResult};
 use bytes::Bytes;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 /// Compression level for archives
@@ -224,6 +224,56 @@ pub const DEFAULT_MAX_UNCOMPRESSED_SIZE: u64 = 256 * 1024 * 1024;
 /// Default cap on the number of entries a single archive may contain.
 pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
+/// Default cap on the size of the archive *container* itself, i.e. the
+/// compressed bytes handed to [`ZipExtractor::new`] (64 MiB).
+///
+/// This is deliberately separate from [`DEFAULT_MAX_UNCOMPRESSED_SIZE`]: it
+/// bounds the work done while merely *opening* the archive. `ZipArchive::new`
+/// parses the whole central directory up front and allocates a record per
+/// member, so the entry-count guard cannot fire until that allocation has
+/// already happened.
+pub const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read the member count out of the End Of Central Directory record without
+/// parsing (and allocating) the central directory itself.
+///
+/// `ZipArchive::new` indexes every record before returning, so an entry-count
+/// limit enforced afterwards is enforced too late: a ~46 MB archive of ~1M
+/// minimal records exhausts memory before the guard can fire. The EOCD sits in
+/// the last 22 + 65535 bytes and states the member count directly, so it can be
+/// checked first, for the cost of a backwards scan.
+///
+/// Returns `None` when the record cannot be located or understood; callers must
+/// treat that as "unknown" and fall back to the post-parse check.
+fn peek_entry_count(data: &[u8]) -> Option<u64> {
+    const EOCD_SIG: [u8; 4] = [b'P', b'K', 0x05, 0x06];
+    const EOCD64_SIG: [u8; 4] = [b'P', b'K', 0x06, 0x06];
+
+    // EOCD: 22 fixed bytes plus a comment of at most u16::MAX bytes.
+    let window = data.len().min(22 + u16::MAX as usize);
+    let tail = &data[data.len() - window..];
+
+    let pos = tail.windows(4).rposition(|w| w == EOCD_SIG)?;
+    let eocd = &tail[pos..];
+    if eocd.len() < 22 {
+        return None;
+    }
+
+    let count = u16::from_le_bytes([eocd[10], eocd[11]]);
+    if count != u16::MAX {
+        return Some(u64::from(count));
+    }
+
+    // The count is saturated, so the real value lives in the Zip64 EOCD record
+    // (which precedes the Zip64 locator, which precedes the EOCD).
+    let pos64 = tail[..pos].windows(4).rposition(|w| w == EOCD64_SIG)?;
+    let eocd64 = &tail[pos64..];
+    if eocd64.len() < 40 {
+        return None;
+    }
+    Some(u64::from_le_bytes(eocd64[32..40].try_into().ok()?))
+}
+
 /// Resolve an archive member name to a path guaranteed to stay under the
 /// extraction root.
 ///
@@ -282,12 +332,17 @@ pub struct ZipExtractor {
     data: Bytes,
     max_uncompressed_size: u64,
     max_entries: usize,
+    max_archive_bytes: u64,
     /// Parsed archive index, built lazily and reused.
     ///
     /// `ZipArchive::new` reads and indexes every entry, so re-parsing per call
     /// made the natural `list_files()` then `extract_file()` per name usage
     /// O(n^2) in entry count over attacker-controlled input.
-    archive: Mutex<Option<ZipArchive<Cursor<Bytes>>>>,
+    ///
+    /// Behind an `Arc` so the blocking-thread entry points (`extract_to`,
+    /// `extract_all_async`) can share the same cache instead of each paying a
+    /// fresh central-directory parse.
+    archive: Arc<Mutex<Option<ZipArchive<Cursor<Bytes>>>>>,
 }
 
 impl ZipExtractor {
@@ -297,7 +352,8 @@ impl ZipExtractor {
             data: data.into(),
             max_uncompressed_size: DEFAULT_MAX_UNCOMPRESSED_SIZE,
             max_entries: DEFAULT_MAX_ENTRIES,
-            archive: Mutex::new(None),
+            max_archive_bytes: DEFAULT_MAX_ARCHIVE_BYTES,
+            archive: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -315,10 +371,64 @@ impl ZipExtractor {
         self
     }
 
-    /// Open a fresh `ZipArchive` over the archive bytes.
-    fn open(&self) -> FileResult<ZipArchive<Cursor<Bytes>>> {
-        ZipArchive::new(Cursor::new(self.data.clone()))
-            .map_err(|e| FileError::Archive(format!("Failed to open archive: {}", e)))
+    /// Set the maximum size of the archive container itself, in compressed
+    /// bytes (default: [`DEFAULT_MAX_ARCHIVE_BYTES`]).
+    ///
+    /// Checked *before* the archive is opened, because opening it is itself
+    /// unbounded work proportional to the member count.
+    pub fn max_archive_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_archive_bytes = max_bytes;
+        self
+    }
+
+    /// Run `f` against the cached (lazily parsed) archive index.
+    ///
+    /// Free function rather than a method so the blocking-thread entry points
+    /// can call it with a cloned `Arc` cache, which a `&self` method cannot
+    /// hand to `spawn_blocking`.
+    fn with_cached_archive<T>(
+        cache: &Mutex<Option<ZipArchive<Cursor<Bytes>>>>,
+        data: &Bytes,
+        max_entries: usize,
+        max_archive_bytes: u64,
+        f: impl FnOnce(&mut ZipArchive<Cursor<Bytes>>) -> FileResult<T>,
+    ) -> FileResult<T> {
+        let mut guard = cache
+            .lock()
+            .map_err(|_| FileError::Archive("archive index lock poisoned".into()))?;
+
+        if guard.is_none() {
+            if data.len() as u64 > max_archive_bytes {
+                return Err(FileError::Archive(format!(
+                    "archive is {} bytes, exceeding the limit of {max_archive_bytes}",
+                    data.len()
+                )));
+            }
+
+            // Cheap pre-parse check: the central-directory index allocated by
+            // `ZipArchive::new` is proportional to the member count, so the
+            // entry limit has to be enforced before that, not after.
+            if let Some(declared) = peek_entry_count(data)
+                && declared > max_entries as u64
+            {
+                return Err(FileError::Archive(format!(
+                    "archive declares {declared} entries, exceeding the limit of {max_entries}"
+                )));
+            }
+
+            let archive = ZipArchive::new(Cursor::new(data.clone()))
+                .map_err(|e| FileError::Archive(format!("Failed to open archive: {}", e)))?;
+            if archive.len() > max_entries {
+                return Err(FileError::Archive(format!(
+                    "archive contains {} entries, exceeding the limit of {}",
+                    archive.len(),
+                    max_entries
+                )));
+            }
+            *guard = Some(archive);
+        }
+
+        f(guard.as_mut().expect("archive was just initialized"))
     }
 
     /// Run `f` against the cached (lazily parsed) archive index.
@@ -326,24 +436,13 @@ impl ZipExtractor {
         &self,
         f: impl FnOnce(&mut ZipArchive<Cursor<Bytes>>) -> FileResult<T>,
     ) -> FileResult<T> {
-        let mut guard = self
-            .archive
-            .lock()
-            .map_err(|_| FileError::Archive("archive index lock poisoned".into()))?;
-
-        if guard.is_none() {
-            let archive = self.open()?;
-            if archive.len() > self.max_entries {
-                return Err(FileError::Archive(format!(
-                    "archive contains {} entries, exceeding the limit of {}",
-                    archive.len(),
-                    self.max_entries
-                )));
-            }
-            *guard = Some(archive);
-        }
-
-        f(guard.as_mut().expect("archive was just initialized"))
+        Self::with_cached_archive(
+            &self.archive,
+            &self.data,
+            self.max_entries,
+            self.max_archive_bytes,
+            f,
+        )
     }
 
     /// List files in the archive
@@ -371,46 +470,64 @@ impl ZipExtractor {
     /// combined uncompressed size is capped. Prefer [`Self::extract_to`] for
     /// large archives: it streams each entry straight to disk instead of
     /// materializing every entry in RAM first.
+    ///
+    /// Prefer [`Self::extract_all_async`] from inside async code: inflating up
+    /// to [`DEFAULT_MAX_UNCOMPRESSED_SIZE`] is CPU-bound work that blocks the
+    /// calling runtime worker for its whole duration.
     pub fn extract_all(&self) -> FileResult<Vec<ArchiveEntry>> {
         let max_entries = self.max_entries;
-        let mut budget = self.max_uncompressed_size;
+        let budget = self.max_uncompressed_size;
 
-        self.with_archive(move |archive| {
-            let mut entries = Vec::new();
+        self.with_archive(move |archive| extract_all_from(archive, max_entries, budget))
+    }
 
-            for i in 0..archive.len() {
-                if entries.len() >= max_entries {
-                    return Err(FileError::Archive(format!(
-                        "archive contains more than {max_entries} entries"
-                    )));
-                }
+    /// Extract all files into memory on a blocking thread.
+    ///
+    /// Prefer this over [`Self::extract_all`] from inside async code.
+    pub async fn extract_all_async(&self) -> FileResult<Vec<ArchiveEntry>> {
+        let cache = Arc::clone(&self.archive);
+        let data = self.data.clone();
+        let max_entries = self.max_entries;
+        let max_archive_bytes = self.max_archive_bytes;
+        let budget = self.max_uncompressed_size;
 
-                let mut file = archive.by_index(i).map_err(|e| {
-                    FileError::Archive(format!("Failed to access file {}: {}", i, e))
-                })?;
-
-                if file.is_dir() {
-                    continue;
-                }
-
-                let safe_path = safe_entry_path(&file)?;
-                let name = safe_path.to_string_lossy().to_string();
-                let data = read_entry_within_budget(&mut file, &name, budget)?;
-                budget -= data.len() as u64;
-
-                entries.push(ArchiveEntry::new(name, data));
-            }
-
-            Ok(entries)
+        tokio::task::spawn_blocking(move || {
+            Self::with_cached_archive(&cache, &data, max_entries, max_archive_bytes, |archive| {
+                extract_all_from(archive, max_entries, budget)
+            })
         })
+        .await
+        .map_err(|e| FileError::Archive(format!("archive extraction task failed: {e}")))?
     }
 
     /// Extract all files to a directory.
     ///
-    /// Each entry is streamed straight to disk under `dir` — the whole archive
-    /// is never materialized in memory — and every resolved path is
-    /// re-verified to live under the canonicalized `dir` before it is written,
-    /// which also catches escapes through pre-existing symlinks.
+    /// Extraction is *staged*: every entry is written into a temporary
+    /// directory created inside `dir`, and the results are only moved into
+    /// place once the whole archive has been extracted successfully. Any
+    /// failure — traversal, bomb budget, IO, a corrupt member — therefore
+    /// leaves `dir` exactly as it was, instead of leaving behind however many
+    /// entries had already been written (which let a crafted archive fill the
+    /// caller's disk with attacker-controlled data and still return `Err`).
+    ///
+    /// Three separate guards keep writes inside the directory:
+    ///
+    /// 1. member names are resolved with [`safe_entry_path`], rejecting
+    ///    absolute and `../` names outright;
+    /// 2. each entry's parent directory is re-verified against the
+    ///    canonicalized staging root after `create_dir_all`, catching escapes
+    ///    through **directory** symlinks;
+    /// 3. entries are created with `O_EXCL`, which refuses to follow a
+    ///    pre-existing **file** symlink at the destination. A canonicalized
+    ///    parent says nothing about the leaf: if `dir/config.yml` were already
+    ///    a symlink to `/etc/app/config.yml`, its parent still canonicalizes
+    ///    inside `dir` and a plain write would follow the link and clobber the
+    ///    target.
+    ///
+    /// As a consequence extraction is **non-clobbering**: an entry whose
+    /// destination name already exists in `dir` (as a file, directory or
+    /// symlink) is an error rather than an overwrite, which is the right
+    /// default for untrusted input.
     pub async fn extract_to(&self, dir: impl AsRef<Path>) -> FileResult<Vec<String>> {
         let dir = dir.as_ref().to_path_buf();
         tokio::fs::create_dir_all(&dir)
@@ -419,66 +536,149 @@ impl ZipExtractor {
 
         let root = tokio::fs::canonicalize(&dir).await.map_err(FileError::Io)?;
 
+        let cache = Arc::clone(&self.archive);
         let data = self.data.clone();
         let max_entries = self.max_entries;
+        let max_archive_bytes = self.max_archive_bytes;
         let max_uncompressed_size = self.max_uncompressed_size;
 
         // Inflating and writing every entry is blocking work; keep it off the
         // async runtime's worker threads.
         tokio::task::spawn_blocking(move || {
-            let mut archive = ZipArchive::new(Cursor::new(data))
-                .map_err(|e| FileError::Archive(format!("Failed to open archive: {}", e)))?;
+            Self::with_cached_archive(&cache, &data, max_entries, max_archive_bytes, |archive| {
+                // Staged inside `root` so the promotion below is a same-
+                // filesystem rename, and so `TempDir`'s `Drop` removes every
+                // partially written entry on any early return.
+                let staging = tempfile::tempdir_in(&root).map_err(FileError::Io)?;
+                let staging_root = staging.path().canonicalize().map_err(FileError::Io)?;
 
-            if archive.len() > max_entries {
-                return Err(FileError::Archive(format!(
-                    "archive contains {} entries, exceeding the limit of {}",
-                    archive.len(),
-                    max_entries
-                )));
-            }
+                let mut budget = max_uncompressed_size;
+                let mut extracted = Vec::new();
 
-            let mut budget = max_uncompressed_size;
-            let mut extracted = Vec::new();
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i).map_err(|e| {
+                        FileError::Archive(format!("Failed to access file {}: {}", i, e))
+                    })?;
 
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i).map_err(|e| {
-                    FileError::Archive(format!("Failed to access file {}: {}", i, e))
-                })?;
-
-                if file.is_dir() {
-                    continue;
-                }
-
-                let safe_path = safe_entry_path(&file)?;
-                let file_path = root.join(&safe_path);
-
-                if let Some(parent) = file_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(FileError::Io)?;
-                    // Belt and braces: re-verify after the directories exist,
-                    // so a symlink planted inside `dir` cannot redirect the
-                    // write outside of it either.
-                    let canonical_parent = parent.canonicalize().map_err(FileError::Io)?;
-                    if !canonical_parent.starts_with(&root) {
-                        return Err(FileError::Archive(format!(
-                            "refusing to write {} outside the extraction directory",
-                            file_path.display()
-                        )));
+                    if file.is_dir() {
+                        continue;
                     }
+
+                    let safe_path = safe_entry_path(&file)?;
+                    let file_path = staging_root.join(&safe_path);
+
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(FileError::Io)?;
+                        let canonical_parent = parent.canonicalize().map_err(FileError::Io)?;
+                        if !canonical_parent.starts_with(&staging_root) {
+                            return Err(FileError::Archive(format!(
+                                "refusing to write {} outside the extraction directory",
+                                file_path.display()
+                            )));
+                        }
+                    }
+
+                    let name = safe_path.to_string_lossy().to_string();
+                    let data = read_entry_within_budget(&mut file, &name, budget)?;
+                    budget -= data.len() as u64;
+
+                    // `create_new(true)` is `O_EXCL`: it fails rather than
+                    // following a symlink that already sits at this path.
+                    let mut handle = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&file_path)
+                        .map_err(FileError::Io)?;
+                    handle.write_all(&data).map_err(FileError::Io)?;
+
+                    extracted.push((name, safe_path));
                 }
 
-                let name = safe_path.to_string_lossy().to_string();
-                let data = read_entry_within_budget(&mut file, &name, budget)?;
-                budget -= data.len() as u64;
+                promote_staged_entries(&staging_root, &root, &extracted)?;
 
-                std::fs::write(&file_path, &data).map_err(FileError::Io)?;
-                extracted.push(name);
-            }
-
-            Ok(extracted)
+                Ok(extracted.into_iter().map(|(name, _)| name).collect())
+            })
         })
         .await
         .map_err(|e| FileError::Archive(format!("archive extraction task failed: {e}")))?
     }
+}
+
+/// Extract every member of an already-opened archive into memory.
+fn extract_all_from(
+    archive: &mut ZipArchive<Cursor<Bytes>>,
+    max_entries: usize,
+    mut budget: u64,
+) -> FileResult<Vec<ArchiveEntry>> {
+    let mut entries = Vec::new();
+
+    for i in 0..archive.len() {
+        if entries.len() >= max_entries {
+            return Err(FileError::Archive(format!(
+                "archive contains more than {max_entries} entries"
+            )));
+        }
+
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| FileError::Archive(format!("Failed to access file {}: {}", i, e)))?;
+
+        if file.is_dir() {
+            continue;
+        }
+
+        let safe_path = safe_entry_path(&file)?;
+        let name = safe_path.to_string_lossy().to_string();
+        let data = read_entry_within_budget(&mut file, &name, budget)?;
+        budget -= data.len() as u64;
+
+        entries.push(ArchiveEntry::new(name, data));
+    }
+
+    Ok(entries)
+}
+
+/// Move fully extracted entries from the staging directory into the real
+/// extraction root.
+///
+/// Every destination is checked with `symlink_metadata` (which does *not*
+/// follow symlinks) first: a pre-existing name is an error, so extraction never
+/// clobbers, and never replaces something a symlink points at. All the checks
+/// run before the first rename, so the usual failure mode (a name already
+/// taken) still leaves the target directory untouched.
+fn promote_staged_entries(
+    staging_root: &Path,
+    root: &Path,
+    entries: &[(String, PathBuf)],
+) -> FileResult<()> {
+    for (name, relative) in entries {
+        let destination = root.join(relative);
+        if destination.symlink_metadata().is_ok() {
+            return Err(FileError::Archive(format!(
+                "refusing to overwrite the existing path {} with archive entry {name}",
+                destination.display()
+            )));
+        }
+    }
+
+    for (_, relative) in entries {
+        let destination = root.join(relative);
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(FileError::Io)?;
+            let canonical_parent = parent.canonicalize().map_err(FileError::Io)?;
+            if !canonical_parent.starts_with(root) {
+                return Err(FileError::Archive(format!(
+                    "refusing to write {} outside the extraction directory",
+                    destination.display()
+                )));
+            }
+        }
+
+        std::fs::rename(staging_root.join(relative), &destination).map_err(FileError::Io)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

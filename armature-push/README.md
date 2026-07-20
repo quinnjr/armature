@@ -38,9 +38,11 @@ service.send("endpoint|p256dh|auth", notification).await?;
 ```
 
 The config types are `#[non_exhaustive]`, so construct them through `new` and
-the builder methods rather than a struct literal. All three reject non-`https`
-base URLs at provider construction; `allow_insecure_loopback(true)` relaxes
-that for a local stub server in tests, and is `false` by default.
+the builder methods rather than a struct literal. APNS and FCM reject a
+non-`https` API base at provider construction; Web Push has no configured base
+URL and instead validates each subscription endpoint at send time (also
+rejecting internal and link-local targets). `allow_insecure_loopback(true)`
+relaxes the scheme check on all three; it is `false` by default.
 
 ## Sending to multiple providers
 

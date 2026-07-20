@@ -22,8 +22,10 @@ include = [
 ]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
-armature-log = { path = "../armature-log", version = "0.1.0" }
+# NB: this crate deliberately does *not* depend on `armature-core`. It is a
+# standalone file-processing library with no request/response, routing or
+# runtime surface, and pulling `armature-core` in for zero call sites cost
+# ~140 extra transitive crates on every build.
 tokio = { version = "1.52", features = ["rt-multi-thread", "fs", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -59,14 +61,17 @@ imageproc = { version = "0.27", optional = true, default-features = false, featu
 ] }
 ab_glyph = { version = "0.2", optional = true }
 
-# PDF generation
-printpdf = { version = "0.9", optional = true }
+# PDF generation.
+#
+# `printpdf` is deliberately absent: `PdfBuilder` assembles content streams and
+# serializes them with `lopdf` directly, and printpdf had zero call sites.
 lopdf = { version = "0.43", optional = true }
 
 # Additional formats
 zip = { version = "8.6", optional = true }
-base64 = { version = "0.22", optional = true }
-sha2 = { version = "0.11", optional = true }
+# `ZipExtractor::extract_to` stages into a temporary directory inside the target
+# so a failed extraction leaves nothing behind.
+tempfile = { version = "3.27", optional = true }
 
 [features]
 default = ["images", "embedded-font"]
@@ -75,9 +80,9 @@ images = ["image", "imageproc", "ab_glyph"]
 # watermarks. Turn this off and supply your own font via
 # `Pipeline::with_font` / `ImageOp::TextWatermark { font, .. }`.
 embedded-font = []
-pdf = ["printpdf", "lopdf"]
-archives = ["zip"]
-full = ["images", "embedded-font", "pdf", "archives", "base64", "sha2"]
+pdf = ["lopdf"]
+archives = ["zip", "tempfile"]
+full = ["images", "embedded-font", "pdf", "archives"]
 
 [dev-dependencies]
 tempfile = "3.27"

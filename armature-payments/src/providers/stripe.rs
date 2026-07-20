@@ -3,7 +3,7 @@
 use crate::{
     error::{DeclineCode, PaymentError, PaymentResult},
     money::{Currency, Money},
-    provider::{PaymentProvider, ProviderClient},
+    provider::{PaymentProvider, ProviderClient, retry_after_secs},
     types::*,
     webhook::{WebhookData, WebhookEvent, WebhookEventType, WebhookHeaders},
 };
@@ -30,6 +30,17 @@ const MAX_V1_CANDIDATES: usize = 8;
 /// is a malformed or hostile header and is rejected before it is parsed.
 const MAX_SIGNATURE_HEADER_LEN: usize = 1024;
 
+/// Objects requested per page when walking a Stripe list endpoint. 100 is
+/// Stripe's documented maximum; its default is 10.
+const LIST_PAGE_SIZE: u32 = 100;
+
+/// Pages a list walk will follow before giving up.
+///
+/// A gateway that always answers `has_more: true` would otherwise loop forever
+/// inside a request handler. At [`LIST_PAGE_SIZE`] per page this still covers
+/// far more payment methods than any real customer has.
+const MAX_LIST_PAGES: usize = 20;
+
 /// Stripe provider
 pub struct StripeProvider {
     api_key: SecretString,
@@ -38,16 +49,40 @@ pub struct StripeProvider {
     client: ProviderClient,
 }
 
+/// How a malformed gateway timestamp is handled.
+///
+/// `chrono`'s `timestamp_opt` returns `LocalResult::None` for a seconds value
+/// outside the representable range, and `.unwrap()` on that **panics** — inside
+/// a payment path, on a value the gateway (or a webhook sender) controls. Every
+/// projection in this file therefore uses `.single()` and falls back to "now".
+///
+/// Falling back rather than propagating is deliberate and matches Braintree,
+/// which treats an absent `created_at` the same way: the timestamp is metadata
+/// on an operation that already succeeded, so failing the whole charge because
+/// its `created` field was unrepresentable would turn a cosmetic problem into a
+/// lost transaction. The amount, currency and status — the fields that decide
+/// what happened to the money — are parsed strictly.
+fn timestamp_or_now(secs: i64) -> chrono::DateTime<Utc> {
+    Utc.timestamp_opt(secs, 0).single().unwrap_or_else(Utc::now)
+}
+
 impl StripeProvider {
-    /// Create a new Stripe provider
-    pub fn new(api_key: impl Into<String>) -> Self {
+    /// Create a new Stripe provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if the HTTP client cannot be built. It
+    /// is fallible so the timeouts are guaranteed: the previous fallback to an
+    /// untimed `reqwest::Client::new()` could hang a charge indefinitely inside
+    /// the processor's retry loop. See [`ProviderClient::new`].
+    pub fn new(api_key: impl Into<String>) -> PaymentResult<Self> {
         let api_key = api_key.into();
-        Self {
-            client: ProviderClient::new("https://api.stripe.com/v1", &api_key),
+        Ok(Self {
+            client: ProviderClient::new("https://api.stripe.com/v1", &api_key)?,
             api_key: SecretString::new(api_key.into()),
             webhook_secret: None,
             webhook_tolerance: Some(chrono::Duration::minutes(5)),
-        }
+        })
     }
 
     /// Point the client at an alternate API base URL (a mock or proxy).
@@ -64,7 +99,7 @@ impl StripeProvider {
     /// scheme/host combination that would transmit credentials in cleartext.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> PaymentResult<Self> {
         let base_url = crate::provider::validate_base_url(&base_url.into())?;
-        self.client = ProviderClient::new(base_url, self.api_key.expose_secret());
+        self.client = ProviderClient::new(base_url, self.api_key.expose_secret())?;
         Ok(self)
     }
 
@@ -233,26 +268,17 @@ async fn stripe_unit(response: reqwest::Response) -> PaymentResult<()> {
     let status = response.status();
     let retry_after = retry_after_secs(&response);
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        // A body that could not be read is not the same thing as an empty body:
+        // `unwrap_or_default()` made a truncated response indistinguishable from
+        // a gateway that legitimately sent nothing, which is exactly the
+        // distinction someone debugging a failed charge needs.
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
         return Err(stripe_error(status, &body, retry_after));
     }
     Ok(())
-}
-
-/// Read the `Retry-After` header as a whole number of seconds.
-///
-/// Stripe sends this on 429s. Without it every throttle collapsed to a
-/// hardcoded one-second backoff, which ignores the wait the gateway actually
-/// asked for.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// Map a Stripe error body + HTTP status onto a typed [`PaymentError`].
@@ -271,35 +297,45 @@ fn stripe_error(status: reqwest::StatusCode, body: &str, retry_after: Option<u32
                 _ => {}
             }
         }
+
+        // Redact once, up front, and use it in *every* arm. The parsed-envelope
+        // path is the common case, and it previously embedded `detail.message`
+        // raw — but Stripe's `message` routinely echoes the parameter that was
+        // submitted ("Invalid value for source: tok_…"), and the processor logs
+        // these verbatim. Redacting only the no-envelope fallthrough scrubbed
+        // the path that almost never fires.
+        let message = crate::provider::sanitize_body(&detail.message);
+
         return match detail.error_type.as_deref() {
-            Some("card_error") => PaymentError::CardDeclined(detail.message),
-            Some("authentication_error") => PaymentError::Authentication(detail.message),
+            Some("card_error") => PaymentError::CardDeclined(message),
+            Some("authentication_error") => PaymentError::Authentication(message),
             Some("invalid_request_error") if status == reqwest::StatusCode::NOT_FOUND => {
-                PaymentError::Provider(detail.message)
+                PaymentError::Provider(message)
             }
             Some("rate_limit_error") => PaymentError::RateLimited(backoff),
             _ if status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 PaymentError::RateLimited(backoff)
             }
-            _ if status == reqwest::StatusCode::UNAUTHORIZED => {
-                PaymentError::Authentication(detail.message)
+            // 403 belongs here too. `classify_status` maps `401 | 403 =>
+            // Authentication`, but this branch handled only 401, so a Stripe 403
+            // landed in `Provider` while the identical status from PayPal or
+            // Braintree came back as `Authentication` — a divergence callers
+            // cannot code against.
+            _ if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN =>
+            {
+                PaymentError::Authentication(message)
             }
-            _ => PaymentError::Provider(detail.message),
+            _ => PaymentError::Provider(message),
         };
     }
 
     // No parseable Stripe error envelope, so the raw body is all we have. It
-    // may still be an unexpected resource dump or a proxy error page, so it is
-    // redacted before being embedded in an error that callers will log.
+    // may still be an unexpected resource dump or a proxy error page, so it goes
+    // through the shared classifier, which redacts it. Hand-rolling the same
+    // match here let the message format drift away from every other provider's.
     armature_log::debug!("Stripe returned {}: {}", status, body);
-    let redacted = crate::provider::sanitize_body(body);
-    match status {
-        reqwest::StatusCode::TOO_MANY_REQUESTS => PaymentError::RateLimited(backoff),
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            PaymentError::Authentication(format!("Stripe returned {status}: {redacted}"))
-        }
-        _ => PaymentError::Provider(format!("Stripe returned {status}: {redacted}")),
-    }
+    crate::provider::classify_status("Stripe", status, body, retry_after)
 }
 
 #[async_trait]
@@ -543,16 +579,49 @@ impl PaymentProvider for StripeProvider {
         Ok(stripe_pm.into())
     }
 
+    /// List a customer's card payment methods, following Stripe's pagination.
+    ///
+    /// Stripe's list endpoints default to `limit: 10` and report `has_more`
+    /// alongside a cursor. The previous implementation issued one unpaginated
+    /// GET and read neither field, so a customer with 11 or more saved cards
+    /// silently lost every card past the tenth — a wallet UI would render an
+    /// incomplete list with no error to say so.
+    ///
+    /// Pages are requested at Stripe's maximum `limit` of 100 and walked via
+    /// `starting_after`, bounded by [`MAX_LIST_PAGES`] so a gateway that keeps
+    /// answering `has_more: true` (or replays the same page, leaving the cursor
+    /// unchanged) cannot spin forever inside a request handler.
     async fn list_payment_methods(&self, customer_id: &str) -> PaymentResult<Vec<PaymentMethod>> {
-        let response = self
-            .client
-            .get(&format!(
-                "/payment_methods?customer={}&type=card",
-                customer_id
-            ))
-            .await?;
-        let list: StripeList<StripePaymentMethod> = stripe_json(response).await?;
-        Ok(list.data.into_iter().map(Into::into).collect())
+        let mut methods: Vec<PaymentMethod> = Vec::new();
+        let mut starting_after: Option<String> = None;
+
+        for _ in 0..MAX_LIST_PAGES {
+            let mut path = format!(
+                "/payment_methods?customer={}&type=card&limit={}",
+                customer_id, LIST_PAGE_SIZE
+            );
+            if let Some(cursor) = &starting_after {
+                path.push_str("&starting_after=");
+                path.push_str(cursor);
+            }
+
+            let response = self.client.get(&path).await?;
+            let list: StripeList<StripePaymentMethod> = stripe_json(response).await?;
+
+            // The cursor is the id of the last object on the page, so it has to
+            // be taken before the page is consumed.
+            let last_id = list.data.last().map(|pm| pm.id.clone());
+            methods.extend(list.data.into_iter().map(Into::into));
+
+            match (list.has_more, last_id) {
+                (true, Some(id)) => starting_after = Some(id),
+                // `has_more` with an empty page would loop with an unchanged
+                // cursor; stop rather than spin.
+                _ => break,
+            }
+        }
+
+        Ok(methods)
     }
 
     async fn create_subscription(
@@ -719,12 +788,19 @@ impl PaymentProvider for StripeProvider {
 
     fn parse_webhook(&self, payload: &[u8]) -> PaymentResult<WebhookEvent> {
         let event: StripeWebhookEvent = serde_json::from_slice(payload)?;
+        let event_type = WebhookEventType::from_str(&event.event_type);
 
         Ok(WebhookEvent {
             id: event.id,
-            event_type: WebhookEventType::from_str(&event.event_type),
-            created_at: Utc.timestamp_opt(event.created, 0).unwrap(),
-            data: WebhookData::Generic(event.data.object),
+            // Interpret the object according to the event type instead of
+            // always emitting `Generic`. `from_event_type` is documented as the
+            // thing providers should call, but no provider called it, so the
+            // five typed `WebhookData` variants were unreachable through the
+            // crate's own webhook path. It falls back to `Generic` losslessly
+            // when the payload does not match the typed shape.
+            data: WebhookData::from_event_type(&event_type, event.data.object),
+            event_type,
+            created_at: timestamp_or_now(event.created),
             provider: "stripe".to_string(),
             livemode: event.livemode,
         })
@@ -751,6 +827,10 @@ struct StripeErrorDetail {
 #[derive(Debug, Deserialize)]
 struct StripeList<T> {
     data: Vec<T>,
+    /// Stripe's pagination flag. Absent on a non-list response, so it defaults
+    /// to "this is everything" rather than failing the parse.
+    #[serde(default)]
+    has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -792,7 +872,7 @@ impl From<StripeCharge> for Charge {
             receipt_url: sc.receipt_url,
             failure_reason: sc.failure_message,
             metadata: sc.metadata,
-            created_at: Utc.timestamp_opt(sc.created, 0).unwrap(),
+            created_at: timestamp_or_now(sc.created),
             captured: sc.captured,
             refunded: sc.refunded,
             disputed: sc.disputed,
@@ -831,7 +911,7 @@ impl From<StripeRefund> for Refund {
                 "requested_by_customer" => Some(RefundReason::RequestedByCustomer),
                 _ => None,
             }),
-            created_at: Utc.timestamp_opt(sr.created, 0).unwrap(),
+            created_at: timestamp_or_now(sr.created),
         }
     }
 }
@@ -860,7 +940,7 @@ impl From<StripeCustomer> for Customer {
             default_payment_method: sc.default_source,
             address: None,
             metadata: sc.metadata,
-            created_at: Utc.timestamp_opt(sc.created, 0).unwrap(),
+            created_at: timestamp_or_now(sc.created),
         }
     }
 }
@@ -904,7 +984,7 @@ impl From<StripePaymentMethod> for PaymentMethod {
                 },
             }),
             billing_details: None,
-            created_at: Utc.timestamp_opt(spm.created, 0).unwrap(),
+            created_at: timestamp_or_now(spm.created),
         }
     }
 }
@@ -1077,7 +1157,7 @@ mod tests {
     use super::*;
 
     fn provider() -> StripeProvider {
-        StripeProvider::new("sk_test_123")
+        StripeProvider::new("sk_test_123").expect("HTTP client builds")
     }
 
     // ---- finding 1: base URL validation ----
@@ -1157,6 +1237,59 @@ mod tests {
             "got {err:?}"
         );
         assert!(!err.to_string().contains("4111111111111111"));
+    }
+
+    #[test]
+    fn parsed_envelope_messages_are_sanitized_too() {
+        // The common case. Stripe's `message` echoes the submitted parameter
+        // back — "Invalid value for source: tok_…" — and the processor logs
+        // these verbatim, so redacting only the no-envelope fallthrough scrubbed
+        // the path that almost never fires.
+        let body = r#"{"error":{"type":"invalid_request_error",
+            "message":"Invalid API key provided: sk_live_abcdefghijklmnop"}}"#;
+        let err = stripe_error(reqwest::StatusCode::BAD_REQUEST, body, None);
+        let text = err.to_string();
+        assert!(
+            !text.contains("sk_live_abcdefghijklmnop"),
+            "key leaked: {text}"
+        );
+        assert!(text.contains("[redacted]"), "got {text}");
+
+        // Every arm, not just the fallthrough one.
+        let declined = r#"{"error":{"type":"card_error",
+            "message":"Your card 4242424242424242 was declined"}}"#;
+        let err = stripe_error(reqwest::StatusCode::PAYMENT_REQUIRED, declined, None);
+        assert!(matches!(err, PaymentError::CardDeclined(_)), "got {err:?}");
+        assert!(
+            !err.to_string().contains("4242424242424242"),
+            "PAN leaked: {err}"
+        );
+
+        let auth = r#"{"error":{"type":"authentication_error",
+            "message":"key sk_live_abcdefghijklmnop is invalid"}}"#;
+        let err = stripe_error(reqwest::StatusCode::UNAUTHORIZED, auth, None);
+        assert!(!err.to_string().contains("sk_live_abcdefghijklmnop"));
+    }
+
+    #[test]
+    fn a_forbidden_response_is_an_authentication_error() {
+        // `classify_status` maps 401 | 403 => Authentication, but the typed
+        // branch handled only 401, so a Stripe 403 landed in `Provider` while
+        // the same status from PayPal or Braintree came back as Authentication.
+        let body = r#"{"error":{"type":"invalid_request_error","message":"no access"}}"#;
+        let err = stripe_error(reqwest::StatusCode::FORBIDDEN, body, None);
+        assert!(
+            matches!(err, PaymentError::Authentication(_)),
+            "a 403 must classify the same way on every provider; got {err:?}"
+        );
+        assert!(!err.is_retryable());
+
+        // And without an envelope, via the shared classifier.
+        let err = stripe_error(reqwest::StatusCode::FORBIDDEN, "<html/>", None);
+        assert!(
+            matches!(err, PaymentError::Authentication(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1300,6 +1433,81 @@ mod tests {
     fn with_webhook_tolerance_takes_a_duration() {
         let p = provider().with_webhook_tolerance(chrono::Duration::minutes(1));
         assert_eq!(p.webhook_tolerance, Some(chrono::Duration::minutes(1)));
+    }
+
+    // ---- out-of-range gateway timestamps must not panic ----
+
+    #[test]
+    fn an_out_of_range_timestamp_does_not_panic() {
+        // `Utc.timestamp_opt(i64::MAX, 0)` is LocalResult::None, and `.unwrap()`
+        // on that panics — which used to take out the caller's task from inside
+        // a payment path, on a value the gateway controls.
+        for secs in [i64::MAX, i64::MIN, 253_402_300_800_000] {
+            let stamped = timestamp_or_now(secs);
+            assert!(stamped.timestamp().abs() < 253_402_300_800);
+        }
+        // A representable timestamp is still reported faithfully.
+        assert_eq!(timestamp_or_now(1_700_000_000).timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn a_charge_with_an_unrepresentable_created_still_projects() {
+        let body = format!(
+            r#"{{"id":"ch_1","amount":2999,"currency":"usd","status":"succeeded",
+                "customer":null,"payment_method":null,"description":null,
+                "receipt_url":null,"failure_message":null,"captured":true,
+                "refunded":false,"disputed":false,"created":{}}}"#,
+            i64::MAX
+        );
+        let stripe_charge: StripeCharge = serde_json::from_str(&body).unwrap();
+        // Previously this panicked rather than returning a Charge.
+        let charge: Charge = stripe_charge.into();
+        assert_eq!(charge.amount, Money::usd(2999));
+        assert_eq!(charge.status, ChargeStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_with_an_unrepresentable_created_does_not_panic() {
+        let payload = format!(
+            r#"{{"id":"evt_1","type":"charge.succeeded","created":{},
+                "livemode":false,"data":{{"object":{{"id":"ch_1"}}}}}}"#,
+            i64::MIN
+        );
+        let event = provider().parse_webhook(payload.as_bytes()).unwrap();
+        assert_eq!(event.id, "evt_1");
+    }
+
+    // ---- webhook data is typed, not always Generic ----
+
+    #[test]
+    fn parse_webhook_emits_typed_data_for_a_modeled_event() {
+        // `WebhookData::from_event_type` was documented as the thing providers
+        // should call, but no provider called it, so the typed variants were
+        // unreachable through the crate's own webhook path.
+        let payload = br#"{"id":"evt_1","type":"charge.succeeded","created":1700000000,
+            "livemode":true,"data":{"object":{"id":"ch_1","amount":2999,
+            "currency":"usd","status":"succeeded"}}}"#;
+        let event = provider().parse_webhook(payload).unwrap();
+
+        assert_eq!(event.event_type, WebhookEventType::ChargeSucceeded);
+        match event.data {
+            WebhookData::Charge(c) => {
+                assert_eq!(c.id, "ch_1");
+                assert_eq!(c.amount, 2999);
+            }
+            other => panic!("expected typed Charge data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_webhook_falls_back_to_generic_on_an_unmodeled_shape() {
+        let payload = br#"{"id":"evt_2","type":"charge.succeeded","created":1700000000,
+            "livemode":false,"data":{"object":{"totally":"different"}}}"#;
+        let event = provider().parse_webhook(payload).unwrap();
+        match event.data {
+            WebhookData::Generic(v) => assert_eq!(v["totally"], "different"),
+            other => panic!("expected Generic, got {other:?}"),
+        }
     }
 
     // ---- finding 17: no panic in the payment path ----

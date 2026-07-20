@@ -1,6 +1,7 @@
 //! Firebase Cloud Messaging (FCM) provider.
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -392,10 +393,14 @@ impl FcmProvider {
         Ok(response.access_token)
     }
 
-    /// Build FCM message payload.
-    fn build_payload(&self, token: &str, notification: &Notification) -> FcmMessage {
-        let mut message = FcmMessage {
-            token: token.to_string(),
+    /// Build the token-invariant body of an FCM message.
+    ///
+    /// The device token is the *only* recipient-dependent field in an FCM v1
+    /// message, yet this used to be rebuilt per token — cloning title, body,
+    /// image and the whole data map once for every device in a batch.
+    /// `send_batch` now builds it once and borrows it into each request.
+    fn build_message_body(&self, notification: &Notification) -> FcmMessageBody {
+        let mut message = FcmMessageBody {
             notification: None,
             data: None,
             android: None,
@@ -441,14 +446,18 @@ impl FcmProvider {
 
         message
     }
-}
 
-#[async_trait]
-impl PushProvider for FcmProvider {
-    async fn send(&self, token: &str, notification: &Notification) -> Result<()> {
-        let access_token = self.get_access_token().await?;
-        let payload = self.build_payload(token, notification);
-
+    /// Send one already-built message body to a single token.
+    ///
+    /// Unlike APNS the token lives *inside* the FCM body, so the JSON is
+    /// serialized per request — but from a borrowed, shared body rather than
+    /// a freshly cloned one.
+    async fn send_prepared(
+        &self,
+        token: &str,
+        access_token: &str,
+        body: &FcmMessageBody,
+    ) -> Result<()> {
         let url = format!(
             "{}/v1/projects/{}/messages:send",
             self.config.api_base, self.config.project_id
@@ -458,15 +467,17 @@ impl PushProvider for FcmProvider {
 
         // Serialize up front so a 413 can report the real body size rather
         // than falling through to an opaque `Provider` error.
-        let body = serde_json::to_vec(&FcmRequest { message: payload })?;
-        let payload_size = body.len();
+        let request_body = serde_json::to_vec(&FcmRequest {
+            message: FcmMessage { token, body },
+        })?;
+        let payload_size = request_body.len();
 
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
+            .body(request_body)
             .send()
             .await?;
 
@@ -475,6 +486,15 @@ impl PushProvider for FcmProvider {
         if status.is_success() {
             debug!("FCM notification sent successfully");
             return Ok(());
+        }
+
+        // On FCM a 404 genuinely is `UNREGISTERED` — the registration token no
+        // longer exists — so it belongs to the device-removal set. It is
+        // mapped here rather than in `error::map_status` because 404 means
+        // something entirely different on APNs (`BadPath`); see that
+        // function's documentation.
+        if status.as_u16() == 404 {
+            return Err(PushError::Unregistered(token.to_string()));
         }
 
         Err(map_status(
@@ -486,6 +506,40 @@ impl PushProvider for FcmProvider {
             FCM_MAX_PAYLOAD,
         ))
     }
+}
+
+#[async_trait]
+impl PushProvider for FcmProvider {
+    async fn send(&self, token: &str, notification: &Notification) -> Result<()> {
+        let access_token = self.get_access_token().await?;
+        let body = self.build_message_body(notification);
+        self.send_prepared(token, &access_token, &body).await
+    }
+
+    /// Overrides the default fan-out so the OAuth2 access token is fetched
+    /// once and the recipient-invariant message body is built once for the
+    /// whole batch. Concurrency and result ordering match the trait default.
+    async fn send_batch(&self, tokens: &[String], notification: &Notification) -> Vec<Result<()>> {
+        let access_token = match self.get_access_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                let message = e.to_string();
+                return tokens
+                    .iter()
+                    .map(|_| Err(PushError::Auth(message.clone())))
+                    .collect();
+            }
+        };
+
+        let body = self.build_message_body(notification);
+        let (access_token, body) = (&access_token, &body);
+
+        futures_util::stream::iter(0..tokens.len())
+            .map(|i| self.send_prepared(&tokens[i], access_token, body))
+            .buffered(crate::provider::BATCH_CONCURRENCY)
+            .collect()
+            .await
+    }
 
     fn platform(&self) -> Platform {
         Platform::Android
@@ -495,13 +549,23 @@ impl PushProvider for FcmProvider {
 // FCM API types
 
 #[derive(Serialize)]
-struct FcmRequest {
-    message: FcmMessage,
+struct FcmRequest<'a> {
+    message: FcmMessage<'a>,
+}
+
+/// The wire message: a borrowed token stamped onto a borrowed, shared body.
+///
+/// Split this way so a batch send serializes one `FcmMessageBody` N times
+/// instead of *building* it N times.
+#[derive(Serialize)]
+struct FcmMessage<'a> {
+    token: &'a str,
+    #[serde(flatten)]
+    body: &'a FcmMessageBody,
 }
 
 #[derive(Serialize)]
-struct FcmMessage {
-    token: String,
+struct FcmMessageBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     notification: Option<FcmNotification>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -635,10 +699,10 @@ mod tests {
 
     /// Golden payload: a fully-populated `Notification` must round-trip every
     /// field FCM can carry. Nothing else in the suite asserts an FCM request
-    /// *body*, so without this a `build_payload` that dropped every field
+    /// *body*, so without this a `build_message_body` that dropped every field
     /// would still pass.
     #[test]
-    fn build_payload_golden() {
+    fn build_message_body_golden() {
         let provider_config = config();
         let notification = Notification::new("Title", "Body")
             .icon("https://example.com/icon.png")
@@ -656,7 +720,7 @@ mod tests {
             .mutable_content()
             .action(NotificationAction::new("view", "View"));
 
-        // `build_payload` needs no network, so construct the provider fields
+        // `build_message_body` needs no network, so construct the provider fields
         // directly rather than going through the token-exchanging `new`.
         let provider = FcmProvider {
             config: provider_config,
@@ -665,8 +729,14 @@ mod tests {
             refresh_lock: tokio::sync::Mutex::new(()),
         };
 
-        let payload = provider.build_payload("device-token", &notification);
-        let json = serde_json::to_value(FcmRequest { message: payload }).unwrap();
+        let body = provider.build_message_body(&notification);
+        let json = serde_json::to_value(FcmRequest {
+            message: FcmMessage {
+                token: "device-token",
+                body: &body,
+            },
+        })
+        .unwrap();
 
         let expected = serde_json::json!({
             "message": {
@@ -699,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_maps_badge_to_notification_count() {
+    fn build_message_body_maps_badge_to_notification_count() {
         let provider = FcmProvider {
             config: config(),
             client: Client::new(),
@@ -707,7 +777,7 @@ mod tests {
             refresh_lock: tokio::sync::Mutex::new(()),
         };
         let notification = Notification::new("Hi", "there").badge(3);
-        let json = serde_json::to_value(provider.build_payload("t", &notification)).unwrap();
+        let json = serde_json::to_value(provider.build_message_body(&notification)).unwrap();
 
         assert_eq!(
             json["android"]["notification"]["notification_count"],
@@ -725,7 +795,7 @@ mod tests {
             refresh_lock: tokio::sync::Mutex::new(()),
         };
         let notification = Notification::data_only().data("k", "v");
-        let json = serde_json::to_value(provider.build_payload("t", &notification)).unwrap();
+        let json = serde_json::to_value(provider.build_message_body(&notification)).unwrap();
 
         assert!(json.get("notification").is_none(), "got {json}");
         assert_eq!(json["data"]["k"], serde_json::json!("v"));

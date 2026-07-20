@@ -265,6 +265,55 @@ fn right_alignment_works_for_non_ascii_text() {
     );
 }
 
+/// The word wrapper carries a running width instead of rebuilding and
+/// re-measuring the whole accumulated line per word. Pin the *behaviour* that
+/// rewrite has to preserve: lines are broken at the content width, no line
+/// overflows it, and no word is dropped or duplicated.
+#[test]
+fn word_wrap_breaks_at_the_content_width_without_losing_words() {
+    let words: Vec<String> = (0..60).map(|i| format!("word{i:02}")).collect();
+    let paragraph = words.join(" ");
+
+    let result = PdfBuilder::new()
+        .add_text(&paragraph)
+        .build()
+        .expect("pdf build should succeed");
+
+    let content = first_page_content(&result.data);
+
+    // Every emitted line, in order, from the literal strings in the stream.
+    let lines: Vec<String> = content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix('(')
+                .and_then(|rest| rest.strip_suffix(") Tj"))
+                .map(str::to_string)
+        })
+        .collect();
+
+    assert!(
+        lines.len() > 1,
+        "a 60-word paragraph should wrap onto several lines, got {lines:?}"
+    );
+
+    // A4 with 1in margins: 595 - 144 = 451 pt of content width.
+    let content_width = 595.0 - 144.0;
+    for line in &lines {
+        let width = PdfBuilder::estimate_text_width(line, 12.0);
+        assert!(
+            width <= content_width,
+            "wrapped line {line:?} measures {width} pt, over the {content_width} pt content width"
+        );
+    }
+
+    let round_tripped: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+    assert_eq!(
+        round_tripped, words,
+        "wrapping must preserve every word, in order, exactly once"
+    );
+}
+
 /// The advance widths must be per-glyph, not a flat constant: a caps-heavy
 /// string is meaningfully wider than an `i`/`l`-heavy one of the same length.
 #[test]

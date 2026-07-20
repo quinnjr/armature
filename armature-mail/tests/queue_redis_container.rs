@@ -20,21 +20,13 @@ use std::time::{Duration, Instant};
 /// Skip the calling test when Docker is unavailable — unless
 /// `ARMATURE_REQUIRE_DOCKER=1`, in which case fail loudly.
 ///
-/// The skip notice goes through libtest, which swallows output without
-/// `--nocapture`, so a skipped test is reported as a plain green pass. That made
-/// the whole container suite invisible on any machine without Docker. CI sets
-/// `ARMATURE_REQUIRE_DOCKER=1` to turn "silently skipped" into a hard failure.
+/// A thin delegate to the testkit, which now owns this logic (and writes its
+/// skip notice straight to stderr, so a skipped test is visible without
+/// `--nocapture` instead of reported as a plain green pass). The local copy that
+/// used to live here duplicated it and would have drifted.
 macro_rules! require_docker {
     () => {
-        if !armature_testkit::docker_available() {
-            if std::env::var("ARMATURE_REQUIRE_DOCKER").as_deref() == Ok("1") {
-                panic!(
-                    "ARMATURE_REQUIRE_DOCKER=1 but no Docker daemon is reachable: \
-                     this container test cannot be skipped"
-                );
-            }
-            armature_testkit::skip_if_no_docker!();
-        }
+        armature_testkit::skip_if_no_docker!()
     };
 }
 
@@ -345,6 +337,221 @@ async fn a_job_with_a_corrupt_body_is_dead_lettered() {
 
     assert!(backend.pop(10).await.unwrap().is_empty());
     assert_eq!(queue.stats().await.unwrap().dead_letter, 1);
+}
+
+/// WF6 audit: the retry claim was `ZRANGEBYSCORE` followed by a *separate*
+/// `ZREM`, which is not a claim at all. Two concurrent `pop`s both saw the same
+/// ids before either `ZREM` landed, both added them to `:processing`, both
+/// `MGET`ed the bodies, and both sent the email. The claim must now decide
+/// ownership: across N concurrent pops, every job is returned exactly once.
+#[tokio::test]
+async fn concurrent_pops_claim_each_retry_job_exactly_once() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:claim-race");
+    let backend = Arc::new(RedisBackend::new(redis, config));
+
+    // 40 jobs, all in the *retry* set and all already due — the path that had
+    // no atomic claim. `fail` both stores the body and adds the id to the retry
+    // set, so they must not also be pushed to pending.
+    const JOBS: usize = 40;
+    for i in 0..JOBS {
+        let mut job = EmailJob::new(test_email(i));
+        job.next_retry_at = Some(0);
+        backend.fail(job, "boom").await.unwrap();
+    }
+
+    // 8 concurrent poppers, each asking for the whole set: without an atomic
+    // claim every one of them gets every id.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let backend = backend.clone();
+        handles.push(tokio::spawn(
+            async move { backend.pop(JOBS).await.unwrap() },
+        ));
+    }
+
+    let mut all_ids = Vec::new();
+    for handle in handles {
+        all_ids.extend(handle.await.unwrap().into_iter().map(|j| j.id));
+    }
+
+    let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+    assert_eq!(
+        all_ids.len(),
+        unique.len(),
+        "a job was claimed by more than one popper — it would have been sent twice \
+         ({} claims, {} distinct jobs)",
+        all_ids.len(),
+        unique.len()
+    );
+    assert_eq!(
+        all_ids.len(),
+        JOBS,
+        "every job must be claimed exactly once across the concurrent pops"
+    );
+}
+
+/// The same guarantee for the pending path, which `ZPOPMIN` already made atomic
+/// — asserted so a future refactor cannot quietly regress it.
+#[tokio::test]
+async fn concurrent_pops_claim_each_pending_job_exactly_once() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:claim-race-pending");
+    let backend = Arc::new(RedisBackend::new(redis, config));
+
+    const JOBS: usize = 40;
+    for i in 0..JOBS {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let backend = backend.clone();
+        handles.push(tokio::spawn(
+            async move { backend.pop(JOBS).await.unwrap() },
+        ));
+    }
+
+    let mut all_ids = Vec::new();
+    for handle in handles {
+        all_ids.extend(handle.await.unwrap().into_iter().map(|j| j.id));
+    }
+
+    let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+    assert_eq!(
+        all_ids.len(),
+        unique.len(),
+        "a pending job was claimed twice"
+    );
+    assert_eq!(all_ids.len(), JOBS);
+}
+
+/// WF6 audit: `:processing` documented a sweeper that recovers jobs whose worker
+/// died between `pop` and `complete`. `grep -rn "sweep\|reclaim"` found only the
+/// comment — the job stayed claimed and its body stayed at `:job:<id>` forever,
+/// after `enqueue` had returned `Ok(job_id)`.
+#[tokio::test]
+async fn a_job_whose_worker_never_reported_back_is_reclaimed_and_redelivered() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:reclaim");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config);
+
+    backend.push(EmailJob::new(test_email(0))).await.unwrap();
+
+    // Claim it and then "die": no complete, no fail, no dead_letter.
+    let claimed = backend.pop(1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(queue.stats().await.unwrap().processing, 1);
+
+    // A live claim is not stolen from a worker that is merely slow.
+    assert_eq!(
+        backend
+            .reclaim_stale(Duration::from_secs(300))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(queue.stats().await.unwrap().processing, 1);
+
+    // Past the visibility timeout it comes back.
+    assert_eq!(backend.reclaim_stale(Duration::ZERO).await.unwrap(), 1);
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(stats.processing, 0, "claim must be released: {stats:?}");
+    assert_eq!(stats.retrying, 1, "job must be re-queued: {stats:?}");
+
+    // And it is genuinely redelivered, as the same job.
+    let again = backend.pop(1).await.unwrap();
+    assert_eq!(again.len(), 1, "reclaimed job was not redelivered");
+    assert_eq!(again[0].id, claimed[0].id);
+}
+
+/// A permanently failed email must not inflate the success counter: `complete`
+/// does `HINCRBY processed 1`, so using it for a failure made
+/// `QueueStats::processed` useless as the denominator of a delivery-rate alert.
+#[tokio::test]
+async fn discard_releases_the_claim_without_counting_a_success() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let redis = service(&container.url()).await;
+
+    let config = EmailQueueConfig::default().queue_name("armature:test:discard");
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config);
+
+    for i in 0..2 {
+        backend.push(EmailJob::new(test_email(i))).await.unwrap();
+    }
+    let jobs = backend.pop(2).await.unwrap();
+
+    backend.complete(&jobs[0].id).await.unwrap();
+    backend.discard(&jobs[1].id).await.unwrap();
+
+    let stats = queue.stats().await.unwrap();
+    assert_eq!(stats.processed, 1, "discard must not count as processed");
+    assert_eq!(stats.processing, 0, "discard must release the claim");
+    assert_eq!(stats.pending, 0);
+}
+
+/// A lost job must leave a forensic trace even with the dead-letter queue
+/// disabled: `discard_lost` used to `DEL` the body and record nothing, so the
+/// last evidence of a job the caller was told had been enqueued was destroyed.
+#[tokio::test]
+async fn a_lost_job_is_recorded_even_with_the_dlq_disabled() {
+    require_docker!();
+    let container = RedisContainer::start().await;
+    let url = container.url();
+    let redis = service(&url).await;
+
+    let config = EmailQueueConfig::default()
+        .queue_name("armature:test:lost-no-dlq")
+        .dead_letter_queue(false);
+    let backend = RedisBackend::new(redis.clone(), config.clone());
+    let queue = EmailQueue::redis(redis, config.clone());
+
+    let job = EmailJob::new(test_email(0));
+    let job_id = job.id.clone();
+    backend.push(job).await.unwrap();
+
+    // Simulate an evicted body.
+    let client = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    redis::cmd("DEL")
+        .arg(format!("{}:job:{}", config.queue_name, job_id))
+        .query_async::<()>(&mut conn)
+        .await
+        .unwrap();
+
+    assert!(backend.pop(10).await.unwrap().is_empty());
+
+    // No DLQ, by configuration...
+    assert_eq!(queue.stats().await.unwrap().dead_letter, 0);
+    assert_eq!(queue.stats().await.unwrap().processing, 0);
+
+    // ...but the `:lost` list still records what happened.
+    let lost: Vec<String> = redis::cmd("LRANGE")
+        .arg(format!("{}:lost", config.queue_name))
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    assert_eq!(lost.len(), 1, "the lost job left no trace at all");
+    assert!(
+        lost[0].contains(&job_id),
+        "stub does not name the job: {lost:?}"
+    );
 }
 
 struct HangingTransport;

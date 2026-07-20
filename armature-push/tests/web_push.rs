@@ -73,11 +73,48 @@ async fn status_200_is_ok_and_carries_ttl_and_content_encoding() {
 
 #[tokio::test]
 async fn status_404_maps_to_unregistered() {
+    // RFC 8030 §7.3: 404 means the subscription expired, so — as on FCM, and
+    // unlike on APNs, where 404 is `BadPath` — this really is a removal
+    // verdict. Mapped per provider, not centrally.
     let (result, _server) = send_against(StubResponse::new(404, "")).await;
     let err = result.expect_err("expected error for 404");
     assert!(
         matches!(err, PushError::Unregistered(_)),
         "expected Unregistered, got {err:?}"
+    );
+    assert!(err.should_remove_device());
+    assert!(
+        !err.to_string().contains("127.0.0.1"),
+        "the endpoint must not be echoed into the error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn transport_failure_does_not_echo_the_endpoint_url() {
+    // `reqwest::Error`'s Display appends ` for url (…)`, so letting `?` run
+    // `From<reqwest::Error>` put the attacker-supplied endpoint — query string
+    // and all — straight into the error text and the caller's logs. The send
+    // path classifies transport failures locally with constant messages.
+    let config = WebPushConfig::new(VAPID_PRIVATE, "mailto:test@example.com")
+        .connect_timeout(Duration::from_millis(200));
+    let provider = WebPushProvider::new(config).expect("build provider");
+
+    // A routable-but-dead address, so this is a connect failure rather than a
+    // validation rejection. TEST-NET-1 (RFC 5737) is reserved and unrouted.
+    let sub = subscription("https://192.0.2.1/push?tok=SECRETMARKER");
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.send_to_web_subscription(&sub, &notification()),
+    )
+    .await
+    .expect("send should not hang")
+    .expect_err("connect to an unrouted address must fail");
+
+    let rendered = err.to_string();
+    assert!(
+        !rendered.contains("192.0.2.1") && !rendered.contains("SECRETMARKER"),
+        "transport error echoed the attacker-supplied endpoint: {rendered}"
     );
 }
 

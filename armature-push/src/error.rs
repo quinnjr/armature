@@ -38,8 +38,21 @@ pub enum PushError {
     },
 
     /// Provider error (FCM, APNS, Web Push).
-    #[error("Provider error: {0}")]
-    Provider(String),
+    ///
+    /// `status` carries the HTTP status the provider replied with, when there
+    /// was one. It is load-bearing: every provider funnels its otherwise
+    /// unclassified failures through this variant, so without the status a
+    /// transient 503 is indistinguishable from a permanent 400 and
+    /// [`PushError::is_retryable`] has to guess — which it previously did,
+    /// answering `false` and permanently dropping a whole notification batch
+    /// across a five-minute FCM outage.
+    #[error("Provider error{}: {message}", .status.map(|s| format!(" ({s})")).unwrap_or_default())]
+    Provider {
+        /// HTTP status returned by the provider, if any.
+        status: Option<u16>,
+        /// Provider-supplied error message.
+        message: String,
+    },
 
     /// Configuration error.
     #[error("Configuration error: {0}")]
@@ -78,11 +91,27 @@ pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u
 /// Map a non-success HTTP status onto a `PushError`, uniformly across every
 /// provider.
 ///
-/// Before this existed each provider mapped statuses ad hoc, so `413` and
-/// `404` produced a structured error on Web Push but an opaque
+/// Before this existed each provider mapped statuses ad hoc, so `413`
+/// produced a structured error on Web Push but an opaque
 /// `PushError::Provider` on FCM and APNS — meaning `should_remove_device()`
 /// and `is_retryable()` answered differently for the same upstream condition
 /// depending on which provider you happened to be talking to.
+///
+/// # Providers may refine a status before delegating here
+///
+/// This mapper only handles statuses that mean the *same thing* on every push
+/// service. A provider is expected to intercept the statuses that don't and
+/// map them itself before falling through.
+///
+/// `404` is the deliberate, load-bearing example and is **not** handled here.
+/// On FCM a 404 genuinely is `UNREGISTERED`, so `fcm.rs` maps it to
+/// [`PushError::Unregistered`] at its call site. On APNs a 404 is `BadPath` —
+/// the client built the wrong `:path` (bad topic, wrong environment, wrong
+/// host) — and has nothing to do with the device, so `apns.rs` maps it to
+/// [`PushError::Provider`]. Mapping it centrally to `Unregistered` meant a
+/// single misconfigured APNs deploy reported `should_remove_device() == true`
+/// for every send, and a caller honoring that contract deleted its entire iOS
+/// token table.
 ///
 /// `subject` is what gets embedded in the device-removal errors. Callers pass
 /// the device token where the token is a provider-issued opaque ID (FCM,
@@ -102,17 +131,29 @@ pub(crate) fn map_status(
         401 | 403 => PushError::Auth(format!(
             "{provider} rejected the request credentials with {status}"
         )),
-        404 | 410 => PushError::Unregistered(subject.to_string()),
+        410 => PushError::Unregistered(subject.to_string()),
         413 => PushError::PayloadTooLarge {
             size: payload_size,
             limit: payload_limit,
         },
         429 => PushError::RateLimited(retry_after_secs(headers).unwrap_or(60)),
-        _ => PushError::Provider(format!("{provider} error {status}")),
+        code => PushError::Provider {
+            status: Some(code),
+            message: format!("{provider} error {status}"),
+        },
     }
 }
 
 impl PushError {
+    /// Build a [`PushError::Provider`] from an optional HTTP status and a
+    /// message.
+    pub fn provider(status: impl Into<Option<u16>>, message: impl Into<String>) -> Self {
+        Self::Provider {
+            status: status.into(),
+            message: message.into(),
+        }
+    }
+
     /// Check if this error indicates the device should be removed.
     pub fn should_remove_device(&self) -> bool {
         matches!(
@@ -122,11 +163,23 @@ impl PushError {
     }
 
     /// Check if this error is retryable.
+    ///
+    /// A `Provider` error is retryable when its status says the failure is
+    /// transient: any 5xx, plus 408 (Request Timeout). 429 arrives as
+    /// [`PushError::RateLimited`] instead, which is already retryable and
+    /// carries a `Retry-After`.
+    ///
+    /// A `Provider` error with no status is *not* retryable: nothing is known
+    /// about it, and retrying a permanent failure forever is worse than
+    /// dropping a transient one.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Network(_) | Self::Timeout | Self::RateLimited(_)
-        )
+        match self {
+            Self::Network(_) | Self::Timeout | Self::RateLimited(_) => true,
+            Self::Provider {
+                status: Some(s), ..
+            } => *s >= 500 || *s == 408,
+            _ => false,
+        }
     }
 
     /// Get retry-after duration if rate limited.
@@ -146,7 +199,10 @@ impl From<reqwest::Error> for PushError {
         } else if err.is_connect() {
             Self::Network(err.to_string())
         } else {
-            Self::Provider(err.to_string())
+            Self::Provider {
+                status: err.status().map(|s| s.as_u16()),
+                message: err.to_string(),
+            }
         }
     }
 }
@@ -171,7 +227,10 @@ impl From<web_push::WebPushError> for PushError {
             Self::Unregistered(err_string)
         } else if err_string.contains("rate") || err_string.contains("429") {
             Self::RateLimited(60)
-        } else if err_string.contains("payload") || err_string.contains("too large") {
+        } else {
+            // This arm also absorbs the payload-size case, which used to have a
+            // branch of its own evaluating to exactly this expression.
+            //
             // `web_push::WebPushError` doesn't carry the offending payload's
             // size, so we can't report a real number here (the reqwest-based
             // send path in `web_push.rs` does have the real size and uses it
@@ -179,9 +238,19 @@ impl From<web_push::WebPushError> for PushError {
             // via `Provider` instead of fabricating a `PayloadTooLarge { size:
             // 0, .. }`, which would read as "0 bytes exceeds the limit" — a
             // contradiction in the error message itself.
-            Self::Provider(err_string)
-        } else {
-            Self::Provider(err_string)
+            //
+            // Do not reintroduce a `PayloadTooLarge` branch here: the remap is
+            // pinned by
+            // `web_push_payload_too_large_string_maps_to_provider_not_payload_too_large`
+            // in this file's test module.
+            //
+            // No status: `WebPushError` is a library-level error, not an HTTP
+            // response, so there is nothing truthful to put in `status` — and
+            // `is_retryable()` correctly declines to guess.
+            Self::Provider {
+                status: None,
+                message: err_string,
+            }
         }
     }
 }
@@ -224,15 +293,51 @@ mod tests {
         }
 
         #[test]
-        fn map_status_404_and_410_are_unregistered() {
-            for status in [StatusCode::NOT_FOUND, StatusCode::GONE] {
-                let err = map_status("test", status, &HeaderMap::new(), "device-token", 0, 4096);
-                assert!(
-                    matches!(&err, PushError::Unregistered(s) if s == "device-token"),
-                    "expected Unregistered for {status}, got {err:?}"
-                );
-                assert!(err.should_remove_device());
-            }
+        fn map_status_410_is_unregistered() {
+            let err = map_status(
+                "test",
+                StatusCode::GONE,
+                &HeaderMap::new(),
+                "device-token",
+                0,
+                4096,
+            );
+            assert!(
+                matches!(&err, PushError::Unregistered(s) if s == "device-token"),
+                "expected Unregistered for 410, got {err:?}"
+            );
+            assert!(err.should_remove_device());
+        }
+
+        #[test]
+        fn map_status_404_is_not_centrally_unregistered() {
+            // 404 does not mean the same thing on every push service: it is
+            // `UNREGISTERED` on FCM but `BadPath` on APNs. Mapping it here
+            // made a misconfigured APNs topic/environment report
+            // `should_remove_device()` for every device. Each provider now
+            // refines it at its own call site.
+            let err = map_status(
+                "test",
+                StatusCode::NOT_FOUND,
+                &HeaderMap::new(),
+                "device-token",
+                0,
+                4096,
+            );
+            assert!(
+                !err.should_remove_device(),
+                "the shared mapper must not claim device removal for 404: {err:?}"
+            );
+            assert!(
+                matches!(
+                    err,
+                    PushError::Provider {
+                        status: Some(404),
+                        ..
+                    }
+                ),
+                "expected Provider(404), got {err:?}"
+            );
         }
 
         #[test]
@@ -298,13 +403,73 @@ mod tests {
                 0,
                 4096,
             );
-            assert!(matches!(err, PushError::Provider(_)), "got {err:?}");
+            assert!(matches!(err, PushError::Provider { .. }), "got {err:?}");
             assert!(
                 !err.to_string().contains("attacker.example"),
                 "provider errors must not echo the subject: {err}"
             );
         }
+
+        #[test]
+        fn map_status_records_the_status_on_provider_errors() {
+            let err = map_status(
+                "test",
+                StatusCode::SERVICE_UNAVAILABLE,
+                &HeaderMap::new(),
+                "device-token",
+                0,
+                4096,
+            );
+            assert!(
+                matches!(
+                    err,
+                    PushError::Provider {
+                        status: Some(503),
+                        ..
+                    }
+                ),
+                "the status must survive into the error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn provider_5xx_and_408_are_retryable_but_4xx_is_not() {
+            // A transient FCM 503 used to be permanently non-retryable, so a
+            // five-minute outage dropped the whole batch. Push is not
+            // money-moving; there is no double-charge reason to differ from
+            // `MailError::is_retryable` here.
+            for status in [500u16, 502, 503, 504, 408] {
+                let err = map_status(
+                    "test",
+                    StatusCode::from_u16(status).unwrap(),
+                    &HeaderMap::new(),
+                    "device-token",
+                    0,
+                    4096,
+                );
+                assert!(err.is_retryable(), "{status} should be retryable: {err:?}");
+            }
+            for status in [400u16, 404, 405] {
+                let err = map_status(
+                    "test",
+                    StatusCode::from_u16(status).unwrap(),
+                    &HeaderMap::new(),
+                    "device-token",
+                    0,
+                    4096,
+                );
+                assert!(
+                    !err.is_retryable(),
+                    "{status} should not be retryable: {err:?}"
+                );
+            }
+        }
     } // mod status_mapping
+
+    #[test]
+    fn provider_without_a_status_is_not_retryable() {
+        assert!(!PushError::provider(None, "no status").is_retryable());
+    }
 
     #[test]
     fn auth_is_not_retryable_and_does_not_remove_device() {
@@ -331,7 +496,7 @@ mod tests {
             "test fixture should exercise the payload branch: {err}"
         );
         assert!(
-            matches!(err, PushError::Provider(_)),
+            matches!(err, PushError::Provider { status: None, .. }),
             "expected Provider, got {err:?}"
         );
     }

@@ -3,7 +3,7 @@
 use crate::{
     error::{PaymentError, PaymentResult},
     money::{Currency, Money},
-    provider::PaymentProvider,
+    provider::{PaymentProvider, retry_after_secs},
     types::*,
     webhook::{WebhookData, WebhookEvent, WebhookEventType, WebhookHeaders},
 };
@@ -24,6 +24,15 @@ pub struct PayPalProvider {
     base_url_override: Option<String>,
     client: Client,
     access_token: tokio::sync::RwLock<Option<PayPalToken>>,
+    /// Serializes OAuth refreshes without blocking readers.
+    ///
+    /// The write half of `access_token` used to be held across the entire OAuth
+    /// round-trip (up to a 30s request plus a 10s connect timeout), so a slow
+    /// auth endpoint blocked *every* concurrent charge for the whole window —
+    /// even the ones that only wanted to read a token that was about to be
+    /// refreshed. This mutex collapses concurrent refreshes onto one round-trip
+    /// while the `RwLock` write is taken only to store the result.
+    refresh: tokio::sync::Mutex<()>,
 }
 
 /// Headers PayPal signs each webhook transmission with. All five are required
@@ -54,9 +63,20 @@ struct PayPalToken {
 }
 
 impl PayPalProvider {
-    /// Create a new PayPal provider
-    pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
-        Self {
+    /// Create a new PayPal provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if the HTTP client cannot be built.
+    /// Fallible on purpose: the previous `unwrap_or_else(|_| Client::new())`
+    /// fallback produced a client with **no request and no connect timeout**,
+    /// which inside the processor's retry loop can hang a charge indefinitely —
+    /// silently, and with no log line to say the timeouts were lost.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+    ) -> PaymentResult<Self> {
+        Ok(Self {
             client_id: client_id.into(),
             client_secret: SecretString::new(client_secret.into().into()),
             webhook_id: None,
@@ -64,9 +84,10 @@ impl PayPalProvider {
             base_url_override: None,
             // Carries the shared connect/request timeouts; an untimed client
             // inside the processor's retry loop can hang a charge indefinitely.
-            client: crate::provider::build_http_client().unwrap_or_else(|_| Client::new()),
+            client: crate::provider::build_http_client()?,
             access_token: tokio::sync::RwLock::new(None),
-        }
+            refresh: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// Use production environment
@@ -114,31 +135,31 @@ impl PayPalProvider {
         }
     }
 
-    /// Get or refresh access token
+    /// Get or refresh the OAuth access token.
+    ///
+    /// # Locking
+    ///
+    /// The `RwLock` is only ever held for the duration of a read or a store,
+    /// never across the network call. Holding the *write* lock across the OAuth
+    /// round-trip — as this used to — serialized concurrent refreshes onto one
+    /// request, but at the cost of blocking every concurrent charge behind a
+    /// possibly-40-second auth request, including charges that only needed to
+    /// read the existing token. A dedicated refresh `Mutex` gets the same
+    /// deduplication without stalling readers.
     async fn get_token(&self) -> PaymentResult<String> {
         // Fast path: a valid token only needs a shared read lock.
-        {
-            let token = self.access_token.read().await;
-            if let Some(ref t) = *token
-                && t.expires_at > Utc::now()
-            {
-                return Ok(t.token.clone());
-            }
+        if let Some(token) = self.cached_token().await {
+            return Ok(token);
         }
 
-        // Slow path: take the write lock *before* the network call, not after.
-        // Releasing the read lock and fetching unguarded let N concurrent
-        // charges on a cold or expired token each issue their own OAuth
-        // round-trip; holding the write lock across the fetch serialises them
-        // onto one.
-        let mut token = self.access_token.write().await;
+        // Exactly one task performs the refresh; the rest queue here rather
+        // than each issuing their own OAuth round-trip.
+        let _refreshing = self.refresh.lock().await;
 
-        // Double-check under the write lock: while we waited for it, another
-        // task may have completed the refresh we were about to duplicate.
-        if let Some(ref t) = *token
-            && t.expires_at > Utc::now()
-        {
-            return Ok(t.token.clone());
+        // Double-check: while we waited for the refresh lock, another task may
+        // have completed the refresh we were about to duplicate.
+        if let Some(token) = self.cached_token().await {
+            return Ok(token);
         }
 
         let credentials = STANDARD.encode(format!(
@@ -168,13 +189,24 @@ impl PayPalProvider {
         }
 
         let token_response: PayPalTokenResponse = response.json().await?;
-        *token = Some(PayPalToken {
+
+        // Take the write lock only to store, so no reader ever waits on a
+        // network call.
+        *self.access_token.write().await = Some(PayPalToken {
             token: token_response.access_token.clone(),
-            expires_at: Utc::now()
-                + chrono::Duration::seconds(token_response.expires_in as i64 - 60),
+            expires_at: Utc::now() + token_lifetime(token_response.expires_in),
         });
 
         Ok(token_response.access_token)
+    }
+
+    /// The cached token, if one is present and still valid.
+    async fn cached_token(&self) -> Option<String> {
+        let token = self.access_token.read().await;
+        token
+            .as_ref()
+            .filter(|t| t.expires_at > Utc::now())
+            .map(|t| t.token.clone())
     }
 
     /// Make an authenticated API request
@@ -191,16 +223,36 @@ impl PayPalProvider {
     }
 }
 
-/// Read the `Retry-After` header as a whole number of seconds.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// How long a freshly issued token should be treated as valid.
+///
+/// PayPal reports `expires_in` in seconds; a 60-second safety margin keeps a
+/// token from expiring mid-flight. But `expires_in as i64 - 60` went *negative*
+/// for any lifetime under a minute, producing a token already expired at the
+/// moment it was stored — so every subsequent call re-authenticated, turning a
+/// short-lived token into an OAuth round-trip per request. Saturating and
+/// flooring at 30 seconds keeps a short token usable while still refreshing well
+/// before it dies.
+fn token_lifetime(expires_in: u64) -> chrono::Duration {
+    chrono::Duration::seconds(expires_in.saturating_sub(60).max(30) as i64)
+}
+
+/// The amount PayPal reported, parsed exactly.
+///
+/// Same defect as Braintree's: `value.parse::<f64>().unwrap_or(0.0)` turned any
+/// amount string the parse rejected into **$0.00 on a success path**, so a
+/// caller recorded a completed order or refund for money that had actually moved
+/// at some other figure. Parsing through [`Decimal`](rust_decimal::Decimal) also
+/// avoids the binary-float rounding that makes `"0.29"` into 28.999999999999996
+/// cents before rounding rescues it.
+fn paypal_amount(amount: &PayPalAmount, context: &str) -> PaymentResult<Money> {
+    let currency = Currency::from_code(&amount.currency_code).unwrap_or(Currency::USD);
+    Money::from_gateway_string(&amount.value, currency).ok_or_else(|| {
+        PaymentError::Serialization(format!(
+            "PayPal returned an unparseable {context} amount {:?} (currency {:?}). The operation \
+             may well have succeeded — reconcile against PayPal rather than assuming it did not.",
+            amount.value, amount.currency_code
+        ))
+    })
 }
 
 /// Map a PayPal order/capture `status` onto the crate's [`ChargeStatus`].
@@ -330,16 +382,12 @@ impl PaymentProvider for PayPalProvider {
 
         let order: PayPalOrder = response.json().await?;
 
-        let amount = order
-            .purchase_units
-            .first()
-            .map(|u| {
-                Money::from_float(
-                    u.amount.value.parse().unwrap_or(0.0),
-                    Currency::from_code(&u.amount.currency_code).unwrap_or(Currency::USD),
-                )
-            })
-            .unwrap_or(request.amount);
+        let amount = match order.purchase_units.first() {
+            Some(unit) => paypal_amount(&unit.amount, "order")?,
+            // PayPal echoed no purchase unit at all; the requested amount is the
+            // only figure we have, and it is the one we asked for.
+            None => request.amount,
+        };
 
         Ok(Charge {
             id: order.id,
@@ -413,16 +461,10 @@ impl PaymentProvider for PayPalProvider {
         // Derive the currency from what PayPal actually reported. Hardcoding
         // USD turned a €120 capture into Money { 12000, USD }, which then
         // passes `Money::add`'s currency assertion and corrupts a ledger.
-        let amount = order
-            .purchase_units
-            .first()
-            .map(|u| {
-                Money::from_float(
-                    u.amount.value.parse().unwrap_or(0.0),
-                    Currency::from_code(&u.amount.currency_code).unwrap_or(Currency::USD),
-                )
-            })
-            .unwrap_or(Money::usd(0));
+        let amount = match order.purchase_units.first() {
+            Some(unit) => paypal_amount(&unit.amount, "capture")?,
+            None => Money::usd(0),
+        };
 
         let status = order_charge_status(&order.status);
 
@@ -480,19 +522,15 @@ impl PaymentProvider for PayPalProvider {
         }
 
         let paypal_refund: PayPalRefund = response.json().await?;
+        let amount = match &paypal_refund.amount {
+            Some(a) => paypal_amount(a, "refund")?,
+            None => Money::usd(0),
+        };
 
         Ok(Refund {
             id: paypal_refund.id,
             charge_id: request.charge_id,
-            amount: paypal_refund
-                .amount
-                .map(|a| {
-                    Money::from_float(
-                        a.value.parse().unwrap_or(0.0),
-                        Currency::from_code(&a.currency_code).unwrap_or(Currency::USD),
-                    )
-                })
-                .unwrap_or(Money::usd(0)),
+            amount,
             status: match paypal_refund.status.as_str() {
                 "COMPLETED" => RefundStatus::Succeeded,
                 "CANCELLED" => RefundStatus::Canceled,
@@ -504,19 +542,38 @@ impl PaymentProvider for PayPalProvider {
         })
     }
 
+    // PayPal has no customer resource and no server-side payment-method vault
+    // reachable from this API, so all six of these operations are structurally
+    // absent rather than failing at runtime.
+    //
+    // They previously reported that absence three different ways — `Unsupported`
+    // for two, `Provider` for four, and `CustomerNotFound` for `get_customer`
+    // and `update_customer`. The last was actively misleading: it names a
+    // *runtime* condition ("this id does not exist, try another"), so a caller
+    // reasonably retries with a different id, or reports "customer not found" to
+    // an operator who then goes looking for a record that PayPal was never going
+    // to hold. `Unsupported` is documented as the permanent, structural gap and
+    // is never retryable, which is exactly what these are.
+
     async fn create_customer(&self, _request: CreateCustomerRequest) -> PaymentResult<Customer> {
-        // PayPal has no customer resource. Returning a locally minted UUID would
-        // hand back an ID PayPal has never heard of, so every later
-        // get/update/delete would fail — an explicit error is the honest answer.
-        Err(PaymentError::Provider(
-            "PayPal has no customer API; customers are identified by the payer on each order. \
-             Store your own customer record and pass its ID as ChargeRequest::customer_id."
-                .into(),
+        // Returning a locally minted UUID would hand back an ID PayPal has never
+        // heard of, so every later get/update/delete would fail.
+        Err(PaymentError::unsupported(
+            "paypal",
+            "create_customer: PayPal has no customer API; customers are identified by the payer on \
+             each order. Store your own customer record and pass its ID as \
+             ChargeRequest::customer_id.",
         ))
     }
 
     async fn get_customer(&self, id: &str) -> PaymentResult<Customer> {
-        Err(PaymentError::CustomerNotFound(id.to_string()))
+        Err(PaymentError::unsupported(
+            "paypal",
+            &format!(
+                "get_customer: PayPal has no customer API, so there is no record to read for \
+                 {id:?}. This is not a missing customer — the operation does not exist."
+            ),
+        ))
     }
 
     async fn update_customer(
@@ -524,19 +581,24 @@ impl PaymentProvider for PayPalProvider {
         id: &str,
         _request: UpdateCustomerRequest,
     ) -> PaymentResult<Customer> {
-        Err(PaymentError::CustomerNotFound(id.to_string()))
+        Err(PaymentError::unsupported(
+            "paypal",
+            &format!(
+                "update_customer: PayPal has no customer API, so there is no record to update for \
+                 {id:?}. This is not a missing customer — the operation does not exist."
+            ),
+        ))
     }
 
     async fn delete_customer(&self, _id: &str) -> PaymentResult<()> {
         // Returning `Ok(())` here was actively dangerous: a caller performing a
         // GDPR/CCPA erasure would record a successful deletion for data PayPal
-        // still holds. PayPal has no customer resource to delete, so the only
-        // truthful answer is that the operation does not exist.
-        Err(PaymentError::Unsupported(
-            "PayPal has no customer API, so there is no customer record to delete. Erase your own \
-             customer record; payer data held by PayPal is deleted through PayPal's own account \
-             and data-retention processes, not this API."
-                .into(),
+        // still holds.
+        Err(PaymentError::unsupported(
+            "paypal",
+            "delete_customer: PayPal has no customer API, so there is no customer record to \
+             delete. Erase your own customer record; payer data held by PayPal is deleted through \
+             PayPal's own account and data-retention processes, not this API.",
         ))
     }
 
@@ -544,8 +606,10 @@ impl PaymentProvider for PayPalProvider {
         &self,
         _request: CreatePaymentMethodRequest,
     ) -> PaymentResult<PaymentMethod> {
-        Err(PaymentError::Provider(
-            "PayPal handles payment methods through checkout flow".into(),
+        Err(PaymentError::unsupported(
+            "paypal",
+            "create_payment_method: PayPal handles payment methods through the checkout approval \
+             flow, not a server-side vault API.",
         ))
     }
 
@@ -554,14 +618,18 @@ impl PaymentProvider for PayPalProvider {
         _method_id: &str,
         _customer_id: &str,
     ) -> PaymentResult<PaymentMethod> {
-        Err(PaymentError::Provider(
-            "PayPal handles payment methods through checkout flow".into(),
+        Err(PaymentError::unsupported(
+            "paypal",
+            "attach_payment_method: PayPal handles payment methods through the checkout approval \
+             flow, not a server-side vault API.",
         ))
     }
 
     async fn detach_payment_method(&self, _method_id: &str) -> PaymentResult<PaymentMethod> {
-        Err(PaymentError::Provider(
-            "PayPal handles payment methods through checkout flow".into(),
+        Err(PaymentError::unsupported(
+            "paypal",
+            "detach_payment_method: PayPal handles payment methods through the checkout approval \
+             flow, not a server-side vault API.",
         ))
     }
 
@@ -569,10 +637,10 @@ impl PaymentProvider for PayPalProvider {
         // An empty Vec is indistinguishable from "this customer has no vaulted
         // payment methods", so a caller rendering a wallet would silently show
         // nothing rather than surfacing that the query is not supported.
-        Err(PaymentError::Unsupported(
-            "PayPal does not expose vaulted payment methods through this API; payment methods are \
-             selected by the buyer during the checkout approval flow."
-                .into(),
+        Err(PaymentError::unsupported(
+            "paypal",
+            "list_payment_methods: PayPal does not expose vaulted payment methods through this \
+             API; payment methods are selected by the buyer during the checkout approval flow.",
         ))
     }
 
@@ -791,14 +859,27 @@ impl PaymentProvider for PayPalProvider {
 
     fn parse_webhook(&self, payload: &[u8]) -> PaymentResult<WebhookEvent> {
         let event: PayPalWebhookEvent = serde_json::from_slice(payload)?;
+        let event_type = WebhookEventType::from_str(&event.event_type);
 
         Ok(WebhookEvent {
             id: event.id,
-            event_type: WebhookEventType::from_str(&event.event_type),
-            created_at: Utc::now(),
-            data: WebhookData::Generic(event.resource),
+            // Interpret the resource according to the event type rather than
+            // always emitting `Generic`; falls back to `Generic` losslessly when
+            // the payload does not match a modeled shape.
+            data: WebhookData::from_event_type(&event_type, event.resource),
+            event_type,
+            // PayPal reports the real emission time as `create_time`; it was
+            // simply never deserialized, so every event was stamped with the
+            // moment it happened to be parsed.
+            created_at: event.create_time.unwrap_or_else(Utc::now),
             provider: "paypal".to_string(),
-            livemode: true,
+            // `livemode` is the field consumers gate real side effects on —
+            // shipping goods, paying out, emailing a receipt. Hardcoding `true`
+            // reported every *sandbox* webhook as production, so a consumer
+            // doing exactly what the field is for acted on test events as if
+            // they were real. The provider already knows which environment it
+            // is pointed at.
+            livemode: !self.sandbox,
         })
     }
 }
@@ -971,6 +1052,11 @@ struct PayPalWebhookEvent {
     id: String,
     event_type: String,
     resource: serde_json::Value,
+    /// When PayPal emitted the event. Absent from older/partial payloads, in
+    /// which case the parse time is the best available approximation — but it
+    /// is read rather than fabricated whenever PayPal sends it.
+    #[serde(default)]
+    create_time: Option<chrono::DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -978,7 +1064,7 @@ mod tests {
     use super::*;
 
     fn provider() -> PayPalProvider {
-        PayPalProvider::new("client_id", "client_secret")
+        PayPalProvider::new("client_id", "client_secret").expect("HTTP client builds")
     }
 
     // ---- finding 1: base URL validation ----
@@ -1015,19 +1101,106 @@ mod tests {
     }
 
     // ---- finding 5: intent follows request.capture ----
+    //
+    // The wire-level assertion lives in tests/idempotency_retry_safety.rs
+    // (`order_intent_reaches_paypal_as_authorize_for_an_auth_only_charge`),
+    // which drives a stub server and reads `body["intent"]`. What used to be
+    // here re-implemented the `capture -> intent` mapping inline and asserted
+    // that re-implementation against itself, so it would have passed even if
+    // `charge` had stopped sending the intent at all.
+
+    // ---- webhook livemode and timestamp come from the provider/payload ----
 
     #[test]
-    fn order_intent_follows_capture_flag() {
-        // auth_only() and the default previously produced byte-identical bodies.
-        let capture = ChargeRequest::new(Money::usd(1000), PaymentSource::card("tok"));
-        assert!(capture.capture);
+    fn sandbox_webhooks_are_not_reported_as_livemode() {
+        // `livemode` is what a consumer gates real side effects on — shipping
+        // goods, paying out, emailing a receipt. Hardcoding `true` meant every
+        // sandbox event claimed to be production.
+        let payload = br#"{"id":"WH-1","event_type":"PAYMENT.CAPTURE.COMPLETED",
+            "create_time":"2024-03-01T10:15:30Z","resource":{"id":"cap_1"}}"#;
 
-        let auth = ChargeRequest::new(Money::usd(1000), PaymentSource::card("tok")).auth_only();
-        assert!(!auth.capture);
+        let sandbox = provider();
+        assert!(
+            !sandbox.parse_webhook(payload).unwrap().livemode,
+            "a sandbox provider must not report its webhooks as live"
+        );
 
-        let intent_for = |c: bool| if c { "CAPTURE" } else { "AUTHORIZE" };
-        assert_eq!(intent_for(capture.capture), "CAPTURE");
-        assert_eq!(intent_for(auth.capture), "AUTHORIZE");
+        let live = provider().production();
+        assert!(
+            live.parse_webhook(payload).unwrap().livemode,
+            "a production provider must report its webhooks as live"
+        );
+    }
+
+    #[test]
+    fn webhook_created_at_comes_from_paypals_create_time() {
+        // `create_time` was never deserialized, so every event was stamped with
+        // the moment it happened to be parsed.
+        let payload = br#"{"id":"WH-1","event_type":"PAYMENT.CAPTURE.COMPLETED",
+            "create_time":"2024-03-01T10:15:30Z","resource":{"id":"cap_1"}}"#;
+        let event = provider().parse_webhook(payload).unwrap();
+        assert_eq!(event.created_at.to_rfc3339(), "2024-03-01T10:15:30+00:00");
+    }
+
+    #[test]
+    fn webhook_without_create_time_falls_back_to_now() {
+        let payload = br#"{"id":"WH-2","event_type":"PAYMENT.CAPTURE.COMPLETED",
+            "resource":{"id":"cap_1"}}"#;
+        let before = Utc::now();
+        let event = provider().parse_webhook(payload).unwrap();
+        assert!(event.created_at >= before);
+    }
+
+    // ---- unsupported operations report themselves consistently ----
+
+    #[tokio::test]
+    async fn every_structurally_absent_operation_reports_unsupported() {
+        // These used to report their absence three different ways —
+        // `Unsupported`, `Provider`, and (for get/update_customer) the actively
+        // misleading `CustomerNotFound`, which names a runtime condition and
+        // invites a caller to retry with a different id.
+        let p = provider();
+
+        let errors: Vec<PaymentError> = vec![
+            p.create_customer(CreateCustomerRequest::default())
+                .await
+                .unwrap_err(),
+            p.get_customer("cus_1").await.unwrap_err(),
+            p.update_customer("cus_1", UpdateCustomerRequest::default())
+                .await
+                .unwrap_err(),
+            p.delete_customer("cus_1").await.unwrap_err(),
+            p.create_payment_method(CreatePaymentMethodRequest::nonce("nonce_1"))
+                .await
+                .unwrap_err(),
+            p.attach_payment_method("pm_1", "cus_1").await.unwrap_err(),
+            p.detach_payment_method("pm_1").await.unwrap_err(),
+            p.list_payment_methods("cus_1").await.unwrap_err(),
+        ];
+
+        for err in errors {
+            assert!(matches!(err, PaymentError::Unsupported(_)), "got {err:?}");
+            assert!(!err.is_retryable(), "a structural gap is never retryable");
+            assert!(err.to_string().contains("paypal"), "got {err}");
+        }
+    }
+
+    // ---- token lifetime ----
+
+    #[test]
+    fn a_short_token_lifetime_does_not_produce_an_already_expired_token() {
+        // `expires_in as i64 - 60` went negative for any lifetime under a
+        // minute, storing a token that had already expired — so every
+        // subsequent call re-authenticated.
+        for expires_in in [0u64, 1, 30, 59, 60] {
+            let lifetime = token_lifetime(expires_in);
+            assert!(
+                lifetime > chrono::Duration::zero(),
+                "expires_in={expires_in} yielded {lifetime:?}"
+            );
+        }
+        // A normal lifetime still keeps the 60s safety margin.
+        assert_eq!(token_lifetime(3600), chrono::Duration::seconds(3540));
     }
 
     #[test]

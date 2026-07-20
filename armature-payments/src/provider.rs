@@ -17,6 +17,23 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest gateway response body echoed into an error message.
 const MAX_BODY_SNIPPET: usize = 512;
 
+/// How much of an untrusted body [`sanitize_body`] will even look at.
+///
+/// The output is capped at [`MAX_BODY_SNIPPET`] regardless, so scanning further
+/// buys nothing — but scanning is proportional to the *input*, and the input is
+/// a gateway response body reached on the error path inside the retry loop. A
+/// hostile or MITM'd gateway that answers a charge with a 10 MB HTML error page
+/// would otherwise cost tens of megabytes of transient allocation per attempt.
+/// Four times the snippet gives redaction enough context to work with while
+/// keeping the whole operation O(2 KiB).
+const MAX_BODY_SCAN: usize = MAX_BODY_SNIPPET * 4;
+
+/// Marker appended when a body was cut short.
+const TRUNCATION_MARKER: &str = "…[truncated]";
+
+/// Replacement for anything that looks like a secret or a card number.
+const REDACTION: &str = "[redacted]";
+
 /// Payment provider trait
 ///
 /// Implement this trait for each payment gateway (Stripe, PayPal, etc.)
@@ -217,7 +234,11 @@ fn is_loopback_host(host: &str) -> bool {
 /// parsed `Retry-After` header in seconds, if the gateway sent one. 404 maps to
 /// `Provider`; callers with the context to know *what* was missing should refine
 /// it to [`PaymentError::ChargeNotFound`], [`PaymentError::RefundNotFound`], etc.
-pub fn classify_status(
+///
+/// Deliberately `pub(crate)`: this is an internal mapping table, not API. Making
+/// it public would freeze the exact error strings and the status→variant mapping
+/// under semver, and neither is something a third party should depend on.
+pub(crate) fn classify_status(
     provider: &str,
     status: impl Into<u16>,
     body: &str,
@@ -240,51 +261,120 @@ pub fn classify_status(
 /// leak risk: gateway errors routinely echo back the request, which can include
 /// a PAN or the API key that was rejected. This truncates to a bounded snippet
 /// and redacts long digit runs and credential-shaped tokens.
-pub fn sanitize_body(body: &str) -> String {
-    let mut out = String::with_capacity(body.len().min(MAX_BODY_SNIPPET) + 16);
-    let mut digit_run = 0usize;
+///
+/// # Bounded by construction
+///
+/// The input is clipped to [`MAX_BODY_SCAN`] *before* anything is scanned, and
+/// redaction happens in place on a single output buffer. Total work and total
+/// allocation are therefore O([`MAX_BODY_SCAN`]) no matter how large the body
+/// is — which matters because this runs on the error path inside the processor's
+/// retry loop, on input an attacker or a compromised gateway controls.
+///
+/// # Tokenization
+///
+/// Splitting is on *non-token* characters (anything that is not ASCII
+/// alphanumeric or `_`), not on whitespace. Real gateway errors are JSON with no
+/// spaces at all, so a whitespace split treats `{"key":"sk_live_…"}` as one
+/// token and the credential survives; splitting on punctuation reaches the
+/// credential wherever it is embedded.
+///
+/// Deliberately `pub(crate)`: this is a redaction heuristic whose thresholds and
+/// prefix list must stay free to tune. Exporting it would both freeze those
+/// details under semver and advertise a best-effort scrubber as a security
+/// control.
+pub(crate) fn sanitize_body(body: &str) -> String {
+    // Clip first: everything below is proportional to what we scan, and the
+    // output can never exceed MAX_BODY_SNIPPET anyway.
+    let input = clip_to_char_boundary(body, MAX_BODY_SCAN);
+    let was_clipped = input.len() < body.len();
 
-    for ch in body.chars() {
+    let mut out = String::with_capacity(input.len() + REDACTION.len());
+    let mut digit_run = 0usize;
+    let mut token_start: Option<usize> = None;
+    let mut redact_next_token = false;
+
+    for ch in input.chars() {
         if ch.is_ascii_digit() {
             digit_run += 1;
         } else {
-            // A run of 12+ digits is card-number shaped; drop it wholesale.
-            if digit_run >= 12 {
-                let keep = out.len() - digit_run;
-                out.truncate(keep);
-                out.push_str("[redacted]");
+            flush_digit_run(&mut out, &mut digit_run);
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if token_start.is_none() {
+                token_start = Some(out.len());
             }
-            digit_run = 0;
+        } else {
+            flush_token(&mut out, &mut token_start, &mut redact_next_token);
         }
         out.push(ch);
     }
-    if digit_run >= 12 {
-        let keep = out.len() - digit_run;
+    flush_digit_run(&mut out, &mut digit_run);
+    flush_token(&mut out, &mut token_start, &mut redact_next_token);
+
+    let mut result = truncate_on_char_boundary(&out, MAX_BODY_SNIPPET);
+    if was_clipped && !result.ends_with(TRUNCATION_MARKER) {
+        result.push_str(TRUNCATION_MARKER);
+    }
+    result
+}
+
+/// Drop a card-number-shaped digit run from the tail of `out`, in place.
+///
+/// A run of 12+ digits is a PAN under every scheme's length, and gateway errors
+/// echo the submitted number back verbatim.
+fn flush_digit_run(out: &mut String, digit_run: &mut usize) {
+    if *digit_run >= 12 {
+        // Digits are ASCII, so the run's char count is also its byte length.
+        let keep = out.len() - *digit_run;
         out.truncate(keep);
-        out.push_str("[redacted]");
+        out.push_str(REDACTION);
+    }
+    *digit_run = 0;
+}
+
+/// Replace the token ending at the tail of `out` if it looks like a credential.
+///
+/// Works on the output buffer directly rather than collecting tokens into a
+/// `Vec<String>` and re-joining them, which cost a second full copy of the body
+/// plus one allocation per token.
+fn flush_token(out: &mut String, token_start: &mut Option<usize>, redact_next: &mut bool) {
+    let Some(start) = token_start.take() else {
+        return;
+    };
+    let token = &out[start..];
+    if token.is_empty() {
+        return;
     }
 
-    // Redact credential-shaped tokens (Stripe-style keys, bearer tokens).
-    let redacted = out
-        .split_whitespace()
-        .map(|tok| {
-            let t = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-            if t.len() >= 12
-                && (t.starts_with("sk_")
-                    || t.starts_with("rk_")
-                    || t.starts_with("pk_")
-                    || t.starts_with("whsec_")
-                    || t.starts_with("Bearer"))
-            {
-                "[redacted]".to_string()
-            } else {
-                tok.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    // A bare `Bearer` is only 6 characters, so the credential that matters is
+    // the *next* token; `Authorization: Bearer <token>` is the usual shape.
+    let follows_bearer = *redact_next && token.len() >= 12;
+    *redact_next = token.eq_ignore_ascii_case("Bearer");
 
-    truncate_on_char_boundary(&redacted, MAX_BODY_SNIPPET)
+    let credential_shaped = token.len() >= 12
+        && (token.starts_with("sk_")
+            || token.starts_with("rk_")
+            || token.starts_with("pk_")
+            || token.starts_with("whsec_")
+            || token.starts_with("Bearer"));
+
+    if credential_shaped || follows_bearer {
+        out.truncate(start);
+        out.push_str(REDACTION);
+    }
+}
+
+/// Borrow at most `max` bytes of `s`, without splitting a UTF-8 character.
+fn clip_to_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 character.
@@ -292,11 +382,36 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…[truncated]", &s[..end])
+    format!("{}{TRUNCATION_MARKER}", clip_to_char_boundary(s, max))
+}
+
+/// Read the `Retry-After` header as a whole number of seconds.
+///
+/// Gateways send this on a 429 to say how long they actually want the caller to
+/// wait. Without it every throttle collapses to a hardcoded one-second backoff,
+/// which ignores the delay the gateway asked for and hammers an endpoint that
+/// has already said it is overloaded — so the value feeds straight into
+/// [`classify_status`], which turns it into
+/// [`PaymentError::RateLimited`]'s payload and hence
+/// [`PaymentError::retry_after`].
+///
+/// A missing, non-ASCII, or unparseable header yields `None`, leaving the caller
+/// on its own exponential schedule.
+///
+/// Shared by every provider: this was previously copy-pasted byte-identically
+/// into the Stripe, PayPal and Braintree modules, all three feeding the same
+/// classifier next door. `pub(crate)` rather than `pub` — it is an internal
+/// helper, and a glob re-export would otherwise put it in the published API.
+#[cfg(any(feature = "stripe", feature = "paypal", feature = "braintree"))]
+pub(crate) fn retry_after_secs(response: &reqwest::Response) -> Option<u32> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Common HTTP client for providers
@@ -306,18 +421,53 @@ pub struct ProviderClient {
     api_key: String,
 }
 
+impl std::fmt::Debug for ProviderClient {
+    /// Hand-written so `api_key` never reaches a log or a panic message. A
+    /// derived `Debug` would print `sk_live_…` verbatim from any
+    /// `unwrap`/`assert` that happens to format this struct.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderClient")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProviderClient {
     /// Create a new provider client.
     ///
-    /// The underlying HTTP client always carries the timeouts from
-    /// [`build_http_client`]; an untimed client inside the processor's retry
-    /// loop can hang a charge indefinitely.
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            client: build_http_client().unwrap_or_else(|_| reqwest::Client::new()),
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Config`] if the HTTP client cannot be built —
+    /// in practice a TLS backend that failed to initialize.
+    ///
+    /// This is fallible on purpose. The obvious shortcut,
+    /// `build_http_client().unwrap_or_else(|_| reqwest::Client::new())`, is
+    /// worse than failing: `Client::new()` carries **no request timeout and no
+    /// connect timeout**, so the fallback silently produces exactly the untimed
+    /// client [`build_http_client`] exists to prevent — inside the processor's
+    /// retry loop, where it can hang a charge indefinitely, and with no log line
+    /// to say the degradation happened. A constructor that returns an error the
+    /// caller must handle cannot degrade quietly.
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> PaymentResult<Self> {
+        Self::try_new(build_http_client, base_url, api_key)
+    }
+
+    /// [`new`](Self::new) with the client factory injected, so the failure path
+    /// is reachable from a test without a broken TLS backend.
+    fn try_new<F>(
+        build: F,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> PaymentResult<Self>
+    where
+        F: FnOnce() -> PaymentResult<reqwest::Client>,
+    {
+        Ok(Self {
+            client: build()?,
             base_url: base_url.into(),
             api_key: api_key.into(),
-        }
+        })
     }
 
     /// GET request
@@ -501,6 +651,50 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_redacts_credentials_embedded_in_json() {
+        // The shape that actually arrives from a gateway: minified JSON, with no
+        // whitespace anywhere. Splitting on whitespace made the *entire* body a
+        // single token, and `trim_matches` then stopped at the leading key name
+        // — so the token examined was `key":"sk_live_…`, which does not *start
+        // with* `sk_`, and nothing was redacted at all.
+        //
+        // Note a body with a space in front of the credential was scrubbed
+        // correctly by accident, which is why the old test passed: it used the
+        // one shape the old heuristic happened to handle.
+        let body =
+            r#"{"key":"sk_live_abcdefghij","hook":"whsec_abcdefghij","tok":"rk_live_abcdefghij"}"#;
+        let out = sanitize_body(body);
+
+        assert!(!out.contains("sk_live_abcdefghij"), "api key leaked: {out}");
+        assert!(
+            !out.contains("whsec_abcdefghij"),
+            "webhook secret leaked: {out}"
+        );
+        assert!(
+            !out.contains("rk_live_abcdefghij"),
+            "restricted key leaked: {out}"
+        );
+        assert!(out.contains("[redacted]"), "got {out}");
+        // Redaction is surgical: the surrounding structure survives, so the
+        // snippet is still useful for diagnosis.
+        assert!(out.contains("key"), "got {out}");
+        assert!(out.contains("hook"), "got {out}");
+    }
+
+    #[test]
+    fn sanitize_redacts_a_bearer_token_following_the_scheme_name() {
+        let out = sanitize_body(r#"{"Authorization":"Bearer abcdefghijklmnopqrst"}"#);
+        assert!(!out.contains("abcdefghijklmnopqrst"), "token leaked: {out}");
+        assert!(out.contains("[redacted]"), "got {out}");
+    }
+
+    #[test]
+    fn sanitize_redacts_a_pan_embedded_in_json_without_spaces() {
+        let out = sanitize_body(r#"{"card":{"number":"4242424242424242"}}"#);
+        assert!(!out.contains("4242424242424242"), "PAN leaked: {out}");
+    }
+
+    #[test]
     fn sanitize_truncates_long_bodies_on_a_char_boundary() {
         let body = "é".repeat(4000);
         let out = sanitize_body(&body);
@@ -509,12 +703,84 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_bounds_both_output_and_work_on_a_multi_megabyte_body() {
+        // A hostile or MITM'd gateway can answer a charge with an arbitrarily
+        // large error page, and this runs on the error path inside the retry
+        // loop. The previous implementation copied every char, then built a
+        // Vec<String> of every token, then joined it — ~4x the body in
+        // transient allocation and millions of allocations — before truncating.
+        let small = format!(r#"{{"error":"declined","attempt":"{}"}}"#, "y".repeat(2000));
+        let huge = format!(
+            r#"{{"error":"declined","filler":"{}"}}"#,
+            "y".repeat(8 * 1024 * 1024)
+        );
+
+        let timed = |body: &str| {
+            let started = std::time::Instant::now();
+            let out = sanitize_body(body);
+            (out, started.elapsed())
+        };
+
+        // Warm up so the first call's page faults do not skew the comparison.
+        let _ = timed(&small);
+        let (_, small_elapsed) = timed(&small);
+        let (out, huge_elapsed) = timed(&huge);
+
+        assert!(
+            out.len() <= MAX_BODY_SNIPPET + TRUNCATION_MARKER.len(),
+            "output not bounded: {} bytes",
+            out.len()
+        );
+        assert!(out.ends_with(TRUNCATION_MARKER), "got {out}");
+
+        // The real property: cost is a function of MAX_BODY_SCAN, not of the
+        // body. A 4000x larger input must not cost meaningfully more, because
+        // both are clipped to the same window before anything is scanned. The
+        // old implementation was linear in the *body* — it pushed every char,
+        // then allocated a String per whitespace token, then joined — so this
+        // ratio blew out entirely.
+        let budget = small_elapsed * 50 + std::time::Duration::from_millis(10);
+        assert!(
+            huge_elapsed < budget,
+            "8 MiB took {huge_elapsed:?} against a 2 KiB baseline of \
+             {small_elapsed:?}; work is scaling with the body, not with \
+             MAX_BODY_SCAN"
+        );
+    }
+
+    #[test]
     fn sanitize_leaves_short_clean_bodies_intact() {
         assert_eq!(sanitize_body("card_declined"), "card_declined");
+        assert_eq!(
+            sanitize_body(r#"{"code":"card_declined"}"#),
+            r#"{"code":"card_declined"}"#
+        );
     }
 
     #[test]
     fn http_client_builds_with_timeouts() {
         assert!(build_http_client().is_ok());
+    }
+
+    #[test]
+    fn provider_client_construction_surfaces_a_builder_failure() {
+        // The old code swallowed this and fell back to `reqwest::Client::new()`,
+        // which has neither a request nor a connect timeout — the exact untimed
+        // client inside the retry loop that build_http_client exists to rule
+        // out, with no error and no log line.
+        let err = ProviderClient::try_new(
+            || Err(PaymentError::Config("tls backend unavailable".into())),
+            "https://api.stripe.com/v1",
+            "sk_test",
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, PaymentError::Config(_)), "got {err:?}");
+        assert!(err.to_string().contains("tls backend unavailable"));
+    }
+
+    #[test]
+    fn provider_client_builds_normally() {
+        assert!(ProviderClient::new("https://api.stripe.com/v1", "sk_test").is_ok());
     }
 }

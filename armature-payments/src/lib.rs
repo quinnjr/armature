@@ -39,9 +39,11 @@
 //! #     body: Vec<u8>,
 //! #     signature_header: &str,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! // Initialize with Stripe
+//! // Initialize with Stripe. `new` is fallible because the provider's HTTP
+//! // client always carries a request and connect timeout — it will not fall
+//! // back to an untimed client that could hang a charge.
 //! let processor = PaymentProcessor::new(
-//!     StripeProvider::new("sk_test_...").with_webhook_secret("whsec_..."),
+//!     StripeProvider::new("sk_test_...")?.with_webhook_secret("whsec_..."),
 //! );
 //!
 //! // Create a charge
@@ -70,9 +72,19 @@ pub mod providers;
 
 pub use error::*;
 pub use money::*;
-pub use provider::*;
 pub use types::*;
 pub use webhook::*;
+
+// Deliberately *not* `pub use provider::*`. The glob dragged `sanitize_body`,
+// `classify_status` and `retry_after_secs` into the published API, where semver
+// would freeze them — `sanitize_body` worst of all, since it is a best-effort
+// redaction heuristic whose thresholds and prefix list need to stay tunable, and
+// exporting it advertises it as a security control. Those three are now
+// `pub(crate)`; what a third-party `PaymentProvider` implementor genuinely needs
+// is re-exported by name.
+pub use provider::{
+    PaymentProvider, ProviderClient, ProviderConfig, build_http_client, validate_base_url,
+};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -311,7 +323,16 @@ impl<P: PaymentProvider> PaymentProcessor<P> {
 
     /// How long to wait before retry number `attempt` (1-based).
     fn retry_delay(&self, error: &PaymentError, attempt: u32) -> Duration {
-        let cap = self.config.max_retry_delay_ms;
+        // `max_retry_delay_ms` is `#[serde(default)]`, so a stored config can
+        // carry 0 — and a cap of 0 makes *both* branches below return
+        // Duration::ZERO, firing max_retries + 1 requests back-to-back with no
+        // pause at a gateway that just answered 429. A cap below the base delay
+        // is a misconfiguration, not an instruction to remove the backoff, so
+        // the floor is the base delay itself.
+        let cap = self
+            .config
+            .max_retry_delay_ms
+            .max(self.config.retry_delay_ms);
 
         // A gateway that told us how long to wait knows better than our
         // schedule; honor it (still bounded by the cap).
@@ -520,9 +541,14 @@ mod tests {
     }
 
     /// Minimal provider used to exercise the processor's retry policy.
+    ///
+    /// Records the idempotency key of every `charge`/`refund` it is handed, so
+    /// tests can assert on what the processor *actually sent* rather than
+    /// re-deriving it from the request they built.
     struct FakeProvider {
         supports_idempotency: bool,
         calls: Arc<std::sync::atomic::AtomicU32>,
+        keys: Arc<std::sync::Mutex<Vec<Option<String>>>>,
     }
 
     impl FakeProvider {
@@ -530,7 +556,13 @@ mod tests {
             Self {
                 supports_idempotency,
                 calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                keys: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        fn record(&self, key: Option<String>) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.keys.lock().unwrap().push(key);
         }
     }
 
@@ -542,12 +574,12 @@ mod tests {
         fn supports_idempotency(&self) -> bool {
             self.supports_idempotency
         }
-        async fn charge(&self, _r: ChargeRequest) -> PaymentResult<Charge> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
+        async fn charge(&self, r: ChargeRequest) -> PaymentResult<Charge> {
+            self.record(r.idempotency_key);
             Err(PaymentError::Network("timeout".into()))
         }
-        async fn refund(&self, _r: RefundRequest) -> PaymentResult<Refund> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
+        async fn refund(&self, r: RefundRequest) -> PaymentResult<Refund> {
+            self.record(r.idempotency_key);
             Err(PaymentError::Network("timeout".into()))
         }
         async fn capture(&self, _i: &str, _a: Option<Money>) -> PaymentResult<Charge> {
@@ -688,17 +720,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refund_generates_an_idempotency_key() {
+    async fn refund_generates_an_idempotency_key_and_reuses_it_across_retries() {
         // Previously RefundRequest had no key field at all, so every refund
-        // retry was an unguarded second payout.
+        // retry was an unguarded second payout. This asserts through the
+        // provider — the old version of this test never called `refund` at all
+        // and only re-checked the builder it had just called.
         let provider = FakeProvider::new(true);
+        let keys = Arc::clone(&provider.keys);
         let processor = PaymentProcessor::with_config(provider, fast_config());
         assert!(processor.config().use_idempotency);
 
-        let req = RefundRequest::new("ch_1");
-        assert!(req.idempotency_key.is_none());
-        let explicit = RefundRequest::new("ch_1").idempotency_key("refund-42");
-        assert_eq!(explicit.idempotency_key.as_deref(), Some("refund-42"));
+        let request = RefundRequest::new("ch_1");
+        assert!(request.idempotency_key.is_none(), "nothing supplied a key");
+        let _ = processor.refund(request).await;
+
+        let seen = keys.lock().unwrap().clone();
+        assert_eq!(seen.len(), 4, "1 attempt + 3 retries; got {seen:?}");
+        let first = seen[0]
+            .as_deref()
+            .expect("the processor must generate a refund key when none is supplied");
+        assert!(!first.is_empty(), "an empty key deduplicates nothing");
+        assert!(
+            seen.iter().all(|k| k.as_deref() == Some(first)),
+            "every retried refund must reuse one key or the gateway pays out \
+             twice; got {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_supplied_refund_key_is_not_replaced() {
+        let provider = FakeProvider::new(true);
+        let keys = Arc::clone(&provider.keys);
+        let processor = PaymentProcessor::with_config(provider, fast_config());
+
+        let _ = processor
+            .refund(RefundRequest::new("ch_1").idempotency_key("refund-42"))
+            .await;
+
+        let seen = keys.lock().unwrap().clone();
+        assert!(!seen.is_empty());
+        assert!(
+            seen.iter().all(|k| k.as_deref() == Some("refund-42")),
+            "the caller's key ties the refund to their ledger entry; got {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_retry_delay_cap_does_not_erase_the_backoff() {
+        // max_retry_delay_ms is #[serde(default)], so a stored config can carry
+        // 0. Capping at 0 made both branches of retry_delay return ZERO, firing
+        // four requests back-to-back at a gateway that just said 429.
+        let processor = PaymentProcessor::with_config(
+            FakeProvider::new(true),
+            ProcessorConfig {
+                retry_delay_ms: 1000,
+                max_retry_delay_ms: 0,
+                ..Default::default()
+            },
+        );
+
+        let scheduled = processor.retry_delay(&PaymentError::Network("x".into()), 1);
+        assert!(!scheduled.is_zero(), "backoff erased by a zero cap");
+
+        // The same holds when the gateway supplied its own Retry-After.
+        let server = processor.retry_delay(&PaymentError::RateLimited(5), 1);
+        assert!(!server.is_zero(), "a 429 was retried with no pause at all");
     }
 
     #[test]

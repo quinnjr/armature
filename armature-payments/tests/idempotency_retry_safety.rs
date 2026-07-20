@@ -53,6 +53,7 @@ mod braintree {
 
     fn provider(server: &StubServer) -> BraintreeProvider {
         BraintreeProvider::new("merchant-1", "pub_key", "priv_key")
+            .expect("HTTP client builds")
             .with_base_url(server.url())
             .unwrap()
     }
@@ -131,6 +132,7 @@ mod stripe {
 
     fn provider(server: &StubServer) -> StripeProvider {
         StripeProvider::new("sk_test")
+            .expect("HTTP client builds")
             .with_base_url(server.url())
             .unwrap()
     }
@@ -243,6 +245,7 @@ mod paypal {
 
     fn provider(server: &StubServer) -> PayPalProvider {
         PayPalProvider::new("client-id", "client-secret")
+            .expect("HTTP client builds")
             .with_base_url(server.url())
             .unwrap()
     }
@@ -288,7 +291,15 @@ mod paypal {
             .start()
             .await;
 
-        let supports = provider(&server).supports_idempotency();
+        // Assert the property directly. Branching on `supports_idempotency()` —
+        // the value under test — made this test assert whichever outcome
+        // production happened to choose, so a regression flipping PayPal to
+        // `false` would have switched arms and stayed green.
+        assert!(
+            provider(&server).supports_idempotency(),
+            "PayPal deduplicates order creation on PayPal-Request-Id"
+        );
+
         let processor = PaymentProcessor::with_config(provider(&server), retrying_config());
         processor.charge(charge_request()).await.unwrap_err();
 
@@ -297,15 +308,6 @@ mod paypal {
             .into_iter()
             .filter(|r| r.path == "/v2/checkout/orders")
             .collect();
-
-        if !supports {
-            assert_eq!(
-                orders.len(),
-                1,
-                "a provider that reports no idempotency support must not be retried"
-            );
-            return;
-        }
 
         assert_eq!(orders.len(), 4, "max_retries=3 means four attempts");
         let ids: Vec<Option<&str>> = orders
@@ -317,5 +319,100 @@ mod paypal {
             ids.iter().all(|k| *k == Some(first)),
             "every retried order create must reuse one PayPal-Request-Id; got {ids:?}"
         );
+    }
+
+    /// The refund path was untested: only charges were covered, so a refund that
+    /// reached PayPal unkeyed — and therefore paid the customer out once per
+    /// retry — would not have failed anything.
+    #[tokio::test]
+    async fn a_refund_key_is_generated_and_repeated_across_retries() {
+        let server = StubServer::builder()
+            .route("POST", "/v1/oauth2/token", token_route())
+            .route("POST", "/v2/payments/captures/cap_1/refund", throttled())
+            .start()
+            .await;
+
+        let processor = PaymentProcessor::with_config(provider(&server), retrying_config());
+        processor
+            .refund(RefundRequest::new("cap_1"))
+            .await
+            .unwrap_err();
+
+        let refunds: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/v2/payments/captures/cap_1/refund")
+            .collect();
+        assert_eq!(refunds.len(), 4, "PayPal refunds are safe to retry");
+
+        let ids: Vec<Option<&str>> = refunds
+            .iter()
+            .map(|r| r.header("PayPal-Request-Id"))
+            .collect();
+        let first = ids[0].expect("use_idempotency must generate a key for refunds too");
+        assert!(
+            ids.iter().all(|k| *k == Some(first)),
+            "a retried refund must reuse its key or PayPal pays out twice; got {ids:?}"
+        );
+    }
+
+    /// A caller-supplied refund key must survive verbatim.
+    #[tokio::test]
+    async fn a_caller_supplied_refund_key_reaches_paypal_unchanged() {
+        let server = StubServer::builder()
+            .route("POST", "/v1/oauth2/token", token_route())
+            .route("POST", "/v2/payments/captures/cap_1/refund", throttled())
+            .start()
+            .await;
+
+        let mut request = RefundRequest::new("cap_1");
+        request.idempotency_key = Some("ledger-entry-88".into());
+
+        let processor = PaymentProcessor::with_config(provider(&server), retrying_config());
+        processor.refund(request).await.unwrap_err();
+
+        for sent in server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/v2/payments/captures/cap_1/refund")
+        {
+            assert_eq!(
+                sent.header("PayPal-Request-Id"),
+                Some("ledger-entry-88"),
+                "the caller's refund key must not be replaced"
+            );
+        }
+    }
+
+    /// The order intent must follow `ChargeRequest::capture` on the wire, not
+    /// just in a mapping the test re-implements and then asserts against itself.
+    #[tokio::test]
+    async fn order_intent_reaches_paypal_as_authorize_for_an_auth_only_charge() {
+        let order_response = StubResponse::json(
+            200,
+            r#"{"id":"ORDER1","status":"CREATED",
+                "purchase_units":[{"amount":{"currency_code":"USD","value":"29.99"}}]}"#,
+        );
+
+        for (auth_only, expected) in [(true, "AUTHORIZE"), (false, "CAPTURE")] {
+            let server = StubServer::builder()
+                .route("POST", "/v1/oauth2/token", token_route())
+                .route("POST", "/v2/checkout/orders", order_response.clone())
+                .start()
+                .await;
+
+            let mut request = charge_request();
+            if auth_only {
+                request = request.auth_only();
+            }
+            provider(&server).charge(request).await.unwrap();
+
+            let sent = server.assert_received("POST", "/v2/checkout/orders");
+            let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(
+                body["intent"], expected,
+                "auth_only()={auth_only} must reach PayPal as {expected}; sent {body}"
+            );
+        }
     }
 }

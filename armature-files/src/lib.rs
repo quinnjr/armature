@@ -213,7 +213,26 @@ pub enum OutputFormat {
     // Archive formats
     Zip,
 
-    // Keep original format
+    /// Keep the source format.
+    ///
+    /// # The two paths are not equivalent
+    ///
+    /// [`Pipeline::execute`] treats `Convert(Original)` as a **byte-identical
+    /// passthrough**: the bytes are already in the requested format, so the
+    /// codec is never touched. (Image *operations* in the same pipeline still
+    /// force a decode/encode round trip — the passthrough only applies to the
+    /// conversion step itself.)
+    ///
+    /// [`crate::image::convert_format`] instead performs a **full decode and
+    /// re-encode** in the detected source format — for JPEG, at
+    /// [`crate::image::DEFAULT_JPEG_QUALITY`], costing a generation of quality
+    /// every call.
+    ///
+    /// The asymmetry is intentional: the pipeline knows the input bytes are
+    /// untouched and can skip the work, whereas `convert_format` is a
+    /// standalone "produce encoded output" call whose entire contract is to
+    /// return freshly encoded bytes. If you want a no-op, do not call
+    /// `convert_format` at all.
     Original,
 }
 

@@ -34,6 +34,7 @@ async fn a_decode_failure_on_a_2xx_is_serialization_and_not_retryable() {
         .await;
 
     let provider = StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap();
 
@@ -61,6 +62,7 @@ async fn a_committed_charge_with_an_unreadable_reply_is_never_re_sent() {
 
     let processor = PaymentProcessor::with_config(
         StripeProvider::new("sk_test")
+            .expect("HTTP client builds")
             .with_base_url(server.url())
             .unwrap(),
         ProcessorConfig {
@@ -90,6 +92,7 @@ async fn a_connect_failure_is_network_and_retryable() {
     // Port 1 on loopback: nothing listens there, and `validate_base_url`
     // permits plaintext http to a loopback host.
     let provider = StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_base_url("http://127.0.0.1:1")
         .unwrap();
 
@@ -110,6 +113,7 @@ async fn a_connect_failure_is_network_and_retryable() {
 async fn a_connect_failure_is_retried_up_to_max_retries() {
     let processor = PaymentProcessor::with_config(
         StripeProvider::new("sk_test")
+            .expect("HTTP client builds")
             .with_base_url("http://127.0.0.1:1")
             .unwrap(),
         ProcessorConfig {
@@ -136,6 +140,7 @@ async fn decode_and_connect_failures_classify_differently() {
         .await;
 
     let decode_err = StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap()
         .charge(charge_request())
@@ -143,6 +148,7 @@ async fn decode_and_connect_failures_classify_differently() {
         .unwrap_err();
 
     let connect_err = StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_base_url("http://127.0.0.1:1")
         .unwrap()
         .charge(charge_request())

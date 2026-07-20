@@ -305,12 +305,29 @@ impl Email {
         if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
             return Err(MailError::MissingField("to/cc/bcc"));
         }
-        if self.subject.is_none() {
+        let Some(subject) = self.subject.as_deref() else {
             return Err(MailError::MissingField("subject"));
-        }
+        };
         if self.text.is_none() && self.html.is_none() {
             return Err(MailError::MissingField("text/html body"));
         }
+
+        // `subject` and the three threading fields all become header values on
+        // the wire — `Subject:` and Mailgun's `h:`-prefixed form fields, and
+        // SendGrid's `headers` JSON object. They bypassed `Email::header`, so a
+        // control character in any of them reached those transports unchecked
+        // and could inject a header exactly as a poisoned custom header would.
+        validate_header_value("Subject", subject)?;
+        if let Some(id) = &self.message_id {
+            validate_header_value("Message-ID", id)?;
+        }
+        if let Some(id) = &self.in_reply_to {
+            validate_header_value("In-Reply-To", id)?;
+        }
+        for reference in &self.references {
+            validate_header_value("References", reference)?;
+        }
+
         Ok(())
     }
 
@@ -318,11 +335,20 @@ impl Email {
     pub(crate) fn to_lettre(&self) -> Result<lettre::Message> {
         self.validate()?;
 
-        let from = self.from.as_ref().unwrap().to_mailbox()?;
+        // `validate` above proved both are present; binding them once here keeps
+        // the `unwrap_or_default()` that silently sent an empty subject — for an
+        // email that had already failed validation — out of the build path.
+        let from = self
+            .from
+            .as_ref()
+            .expect("validated: from is present")
+            .to_mailbox()?;
+        let subject = self
+            .subject
+            .as_deref()
+            .expect("validated: subject is present");
 
-        let mut builder = lettre::Message::builder()
-            .from(from)
-            .subject(self.subject.as_deref().unwrap_or_default());
+        let mut builder = lettre::Message::builder().from(from).subject(subject);
 
         // Add recipients
         for addr in &self.to {
@@ -436,6 +462,13 @@ pub fn validate_header(name: &str, value: &str) -> Result<()> {
             c, name
         )));
     }
+    validate_header_value(name, value)
+}
+
+/// Validate a header *value* only, for the fields that become headers without
+/// going through [`Email::header`] — `Subject`, `Message-ID`, `In-Reply-To` and
+/// `References`.
+pub fn validate_header_value(name: &str, value: &str) -> Result<()> {
     if let Some(c) = value.chars().find(|c| c.is_ascii_control()) {
         return Err(MailError::Config(format!(
             "Invalid control character {:?} in value of header {:?}",
@@ -491,7 +524,11 @@ fn build_part(attachment: &Attachment) -> Result<lettre::message::SinglePart> {
         }
     };
 
-    Ok(part.body(attachment.data.clone(), content_type))
+    // lettre's `IntoBody` is implemented over `Into<MaybeString>`, which `Bytes`
+    // is not, so the payload is materialized as a `Vec<u8>` here. `Attachment`
+    // itself holds `Bytes`, so this is the *only* copy on the path — cloning the
+    // `Email`, the `EmailJob`, or the attachment list no longer copies payloads.
+    Ok(part.body(attachment.data.to_vec(), content_type))
 }
 
 impl Default for Email {
@@ -839,6 +876,40 @@ mod tests {
         let email = base().header("X-Campaign-Id", "spring-2026");
         assert!(email.validate().is_ok());
         assert_eq!(email.wire_headers().len(), 1);
+    }
+
+    /// `validate` is documented as the single choke point every transport passes
+    /// through, but it checked only `headers` — `subject`, `message_id`,
+    /// `in_reply_to` and `references` all become `h:`-prefixed Mailgun fields
+    /// and entries in SendGrid's `headers` object, unchecked.
+    #[test]
+    fn control_characters_in_subject_and_threading_fields_are_rejected() {
+        let poison = "ok\r\nBcc: evil@example.com";
+
+        let cases: Vec<Email> = vec![
+            base().subject(poison),
+            base().message_id(poison),
+            base().in_reply_to(poison),
+            base().reference(poison),
+        ];
+
+        for email in cases {
+            assert!(
+                matches!(email.validate(), Err(MailError::Config(_))),
+                "injected value was accepted: {email:?}"
+            );
+            assert!(email.to_lettre().is_err());
+        }
+    }
+
+    #[test]
+    fn ordinary_subjects_and_threading_fields_still_pass() {
+        let email = base()
+            .subject("Your receipt — order #42")
+            .message_id("abc@armature")
+            .in_reply_to("<parent@example.com>")
+            .reference("<root@example.com>");
+        assert!(email.validate().is_ok());
     }
 
     #[test]

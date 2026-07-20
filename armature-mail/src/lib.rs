@@ -77,6 +77,12 @@ mod error;
 mod mailer;
 mod transport;
 
+#[cfg(feature = "reqwest")]
+mod http;
+
+#[cfg(any(feature = "handlebars", feature = "tera", feature = "minijinja"))]
+mod template_dir;
+
 #[cfg(feature = "handlebars")]
 mod template_handlebars;
 
@@ -99,8 +105,8 @@ mod mailgun;
 mod queue;
 
 pub use address::{Address, IntoAddress, Mailbox};
-pub use attachment::{Attachment, ContentDisposition};
-pub use email::{Email, EmailBuilder, validate_header};
+pub use attachment::{Attachment, ContentDisposition, DEFAULT_MAX_ATTACHMENT_BYTES};
+pub use email::{Email, EmailBuilder, validate_header, validate_header_value};
 pub use error::{MailError, Result};
 pub use mailer::{Mailer, MailerConfig};
 pub use transport::{SmtpConfig, SmtpSecurity, SmtpTransport, Transport};
@@ -126,7 +132,7 @@ pub use mailgun::{MailgunConfig, MailgunTransport};
 #[cfg(feature = "queue")]
 pub use queue::{
     EmailJob, EmailQueue, EmailQueueBackend, EmailQueueConfig, EmailQueueWorker, InMemoryBackend,
-    MailerQueueExt, QueueStats,
+    MAX_SERVER_RETRY_AFTER, MailerQueueExt, QueueStats,
 };
 
 #[cfg(feature = "redis")]

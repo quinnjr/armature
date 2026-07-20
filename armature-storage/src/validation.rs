@@ -131,10 +131,54 @@ impl ValidationError {
     }
 }
 
+/// Content-derived facts about a file, computed once per
+/// [`FileValidator::validate`] call and shared by every rule.
+///
+/// [`sniff_content_type`] scans the payload and, for the SVG probe, allocates a
+/// lossy `String` of the first KiB. Rules used to call it individually, so an
+/// N-rule validator re-scanned the same bytes N times.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationContext {
+    /// The MIME type sniffed from the file's magic bytes, if recognizable.
+    detected_content_type: Option<String>,
+}
+
+impl ValidationContext {
+    /// Sniff `file` once, producing the context every rule then reads.
+    pub fn for_file(file: &UploadedFile) -> Self {
+        Self {
+            detected_content_type: sniff_content_type(file.data()),
+        }
+    }
+
+    /// The MIME type sniffed from the file's content, or `None` when its bytes
+    /// match no format this can recognize.
+    pub fn detected_content_type(&self) -> Option<&str> {
+        self.detected_content_type.as_deref()
+    }
+}
+
 /// A validation rule for files.
 pub trait ValidationRule: Send + Sync {
     /// Validate a file.
+    ///
+    /// Implement [`Self::validate_with`] instead if the rule needs the sniffed
+    /// content type; this method is what that defaults to.
     fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError>;
+
+    /// Validate a file given content facts already computed for it.
+    ///
+    /// [`FileValidator::validate`] calls this, passing one [`ValidationContext`]
+    /// to every rule so the payload is sniffed once per file rather than once
+    /// per rule. The default ignores the context and defers to
+    /// [`Self::validate`].
+    fn validate_with(
+        &self,
+        file: &UploadedFile,
+        _context: &ValidationContext,
+    ) -> Result<(), ValidationError> {
+        self.validate(file)
+    }
 
     /// Rule description for error messages.
     fn description(&self) -> &str;
@@ -188,10 +232,7 @@ impl FileValidator {
     }
 
     fn allowed_types_inner(self, types: &[&str], require_detection: bool) -> Self {
-        self.rule(AllowedTypesRule {
-            allowed: types.iter().map(|s| s.to_string()).collect(),
-            require_detection,
-        })
+        self.rule(AllowedTypesRule::new(types, require_detection))
     }
 
     /// Set allowed file extensions.
@@ -261,10 +302,13 @@ impl FileValidator {
     /// [`ValidationError::Rule`]; match on [`ValidationError::kind`] to reach
     /// the underlying cause.
     pub fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
+        // Sniff the payload once and hand the result to every rule, rather
+        // than letting each content-inspecting rule re-scan the whole file.
+        let context = ValidationContext::for_file(file);
         let mut errors = Vec::new();
 
         for rule in &self.rules {
-            if let Err(e) = rule.validate(file) {
+            if let Err(e) = rule.validate_with(file, &context) {
                 errors.push(e.with_rule(rule.description()));
             }
         }
@@ -399,25 +443,53 @@ fn types_compatible(declared: &str, detected: &str) -> bool {
 /// its type. When `require_detection` is set, content whose type cannot be
 /// determined from its bytes is rejected outright.
 struct AllowedTypesRule {
-    allowed: HashSet<String>,
+    /// Exact types, e.g. `image/png`.
+    exact: HashSet<String>,
+    /// Top-level types from wildcard entries, e.g. `image` for `image/*`.
+    wildcard_tops: HashSet<String>,
     require_detection: bool,
 }
 
 impl AllowedTypesRule {
+    /// Partition the allowlist into exact and wildcard entries up front.
+    ///
+    /// `permits` used to build a `format!("{top}/*")` `String` on every call --
+    /// twice per file, per rule -- purely to probe a set. The split is decided
+    /// once, at construction, instead.
+    fn new(types: &[&str], require_detection: bool) -> Self {
+        let mut exact = HashSet::new();
+        let mut wildcard_tops = HashSet::new();
+
+        for entry in types {
+            match entry.split_once('/') {
+                Some((top, "*")) => {
+                    wildcard_tops.insert(top.to_string());
+                }
+                _ => {
+                    exact.insert((*entry).to_string());
+                }
+            }
+        }
+
+        Self {
+            exact,
+            wildcard_tops,
+            require_detection,
+        }
+    }
+
     fn permits(&self, mime_type: &str) -> bool {
-        if self.allowed.contains(mime_type) {
+        if self.exact.contains(mime_type) {
             return true;
         }
         // Wildcard form, e.g. "image/*".
         match mime_type.split_once('/') {
-            Some((top, _)) => self.allowed.contains(&format!("{top}/*")),
+            Some((top, _)) => self.wildcard_tops.contains(top),
             None => false,
         }
     }
-}
 
-impl ValidationRule for AllowedTypesRule {
-    fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
+    fn check(&self, file: &UploadedFile, detected: Option<&str>) -> Result<(), ValidationError> {
         // 1. The declared type must be present and allowed. Fail closed when
         //    the client declared nothing.
         let declared = match file.content_type() {
@@ -437,16 +509,20 @@ impl ValidationRule for AllowedTypesRule {
             }
         };
 
-        // 2. The declared type is only a claim. Check the bytes.
-        match sniff_content_type(file.data()) {
+        // 2. The declared type is only a claim. Check the bytes -- sniffed once
+        //    by `FileValidator::validate` and handed to us.
+        match detected {
             Some(detected) => {
-                if !self.permits(&detected) {
+                if !self.permits(detected) {
                     return Err(ValidationError::TypeNotAllowed {
-                        mime_type: detected,
+                        mime_type: detected.to_string(),
                     });
                 }
-                if !types_compatible(&declared, &detected) {
-                    return Err(ValidationError::ContentMismatch { declared, detected });
+                if !types_compatible(&declared, detected) {
+                    return Err(ValidationError::ContentMismatch {
+                        declared,
+                        detected: detected.to_string(),
+                    });
                 }
                 Ok(())
             }
@@ -455,6 +531,22 @@ impl ValidationRule for AllowedTypesRule {
             None if self.require_detection => Err(ValidationError::ContentUndetectable),
             None => Ok(()),
         }
+    }
+}
+
+impl ValidationRule for AllowedTypesRule {
+    /// Standalone entry point: sniffs the payload itself, for callers driving
+    /// the rule directly rather than through [`FileValidator::validate`].
+    fn validate(&self, file: &UploadedFile) -> Result<(), ValidationError> {
+        self.check(file, sniff_content_type(file.data()).as_deref())
+    }
+
+    fn validate_with(
+        &self,
+        file: &UploadedFile,
+        context: &ValidationContext,
+    ) -> Result<(), ValidationError> {
+        self.check(file, context.detected_content_type())
     }
 
     fn description(&self) -> &str {

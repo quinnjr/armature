@@ -15,14 +15,14 @@ use azure_storage_blob::models::{
 use azure_storage_blob::{BlobClient, BlobContainerClient, BlobServiceClient};
 use base64::Engine;
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures_util::TryStreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::{
     Result, Storage, StorageConfig, StorageError, StorageMetadata, UploadedFile,
-    calculate_checksum, generate_unique_key,
+    calculate_checksum, generate_unique_key, sanitize_filename,
 };
 
 /// Azure Blob Storage configuration.
@@ -151,12 +151,17 @@ impl AzureBlobStorage {
     }
 
     /// Generate a key for a file.
+    ///
+    /// `UploadedFile::name` comes straight off the client-controlled multipart
+    /// `filename` header, so it is sanitized before it becomes a blob name --
+    /// exactly as the local backend does. Taking it verbatim let a filename of
+    /// `../../secrets/key` become the blob name as written.
     fn generate_key(&self, original_name: Option<&str>) -> String {
         if self.config.storage.generate_unique_names {
             generate_unique_key(original_name, self.config.storage.preserve_extension)
         } else {
             original_name
-                .map(String::from)
+                .map(sanitize_filename)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         }
     }
@@ -326,13 +331,21 @@ impl Storage for AzureBlobStorage {
         Ok(metadata)
     }
 
+    /// Delete a blob, idempotently.
+    ///
+    /// This used to bypass [`map_blob_error`] -- the mapper defined in this
+    /// very file and used by `get`/`head` -- and report a missing blob as an
+    /// opaque [`StorageError::Storage`]. Per the [`Storage::delete`] contract a
+    /// missing key is now `Ok(())`, as it is on S3.
     async fn delete(&self, key: &str) -> Result<()> {
         let blob_client = self.blob_client(key);
 
-        blob_client
-            .delete(None)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+        if let Err(e) = blob_client.delete(None).await {
+            match map_blob_error(e, key) {
+                StorageError::NotFound(_) => return Ok(()),
+                other => return Err(other),
+            }
+        }
 
         debug!(
             key = %key,
@@ -350,7 +363,18 @@ impl Storage for AzureBlobStorage {
         }
     }
 
-    async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>> {
+    async fn list_page(
+        &self,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
+        let limit = if limit == 0 {
+            crate::DEFAULT_LIST_PAGE_SIZE
+        } else {
+            limit
+        };
+
         let mut full_prefix = String::new();
         if let Some(p) = &self.config.storage.path_prefix {
             full_prefix.push_str(p);
@@ -362,29 +386,55 @@ impl Storage for AzureBlobStorage {
 
         let options = BlobContainerClientListBlobsOptions {
             prefix: Some(full_prefix),
+            marker: cursor.map(String::from),
+            maxresults: Some(limit.min(i32::MAX as usize) as i32),
             ..Default::default()
         };
 
-        let mut results = Vec::new();
-        let mut blobs = self
+        // `into_pages()` so exactly one request goes out and the server's
+        // `NextMarker` is observable; iterating the item pager instead drains
+        // the whole container into memory with no way to stop.
+        let mut pages = self
             .container_client
             .list_blobs(Some(options))
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(|e| StorageError::Storage(e.to_string()))?
+            .into_pages();
 
-        while let Some(blob) = blobs
+        let Some(page) = pages
             .try_next()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?
-        {
+        else {
+            return Ok((Vec::new(), None));
+        };
+
+        let page = page
+            .into_model()
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
+
+        let next = page.next_marker.clone().filter(|m: &String| !m.is_empty());
+
+        // Hoisted out of the per-blob loop: this was reallocated for every
+        // blob in the container.
+        let strip = self
+            .config
+            .storage
+            .path_prefix
+            .as_ref()
+            .map(|p| format!("{p}/"));
+
+        let mut results = Vec::with_capacity(page.blob_items.len());
+
+        for blob in page.blob_items {
             let name = blob.name.unwrap_or_default();
 
             // Remove prefix to get the relative key
-            let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                name.strip_prefix(&format!("{}/", p))
+            let relative_key = match &strip {
+                Some(strip) => name
+                    .strip_prefix(strip.as_str())
                     .unwrap_or(&name)
-                    .to_string()
-            } else {
-                name.clone()
+                    .to_string(),
+                None => name.clone(),
             };
 
             let properties = blob.properties.unwrap_or_default();
@@ -405,7 +455,7 @@ impl Storage for AzureBlobStorage {
             results.push(metadata);
         }
 
-        Ok(results)
+        Ok((results, next))
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata> {
@@ -416,11 +466,13 @@ impl Storage for AzureBlobStorage {
 
         // The new SDK performs a server-side copy via "upload from URL" on the
         // destination block blob (sets the `x-ms-copy-source` header).
+        // Routed through `map_blob_error` so a missing source is `NotFound`
+        // here as it is on every other backend, rather than opaque `Storage`.
         to_client
             .block_blob_client()
             .upload_blob_from_url(source_url, None)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(|e| map_blob_error(e, from))?;
 
         self.head(to).await
     }
@@ -443,6 +495,7 @@ impl Storage for AzureBlobStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use armature_testkit::http_stub::{StubResponse, StubServer};
 
     /// `temporary_url` used to return `Some(public_url)` regardless of
     /// `expires_in`, which is a permanent, unsigned URL masquerading as a
@@ -502,6 +555,135 @@ mod tests {
             Err(other) => panic!("expected a Config error, got {other:?}"),
             Ok(_) => panic!("a malformed endpoint must be rejected"),
         }
+    }
+
+    /// `put_file` sanitized the client-supplied filename on the local backend
+    /// only; S3/GCS/Azure used it verbatim, so a multipart `filename` of
+    /// `../../secrets/key` became the blob name as written -- while the README
+    /// advertised traversal rejection as a trait-level guarantee.
+    #[tokio::test]
+    async fn generate_key_sanitizes_a_path_bearing_filename() {
+        let mut config = AzureBlobConfig::new("devstoreaccount1", "container").emulator();
+        config.storage.generate_unique_names = false;
+        let storage = AzureBlobStorage::new(config)
+            .await
+            .expect("emulator config should build without network access");
+
+        assert_eq!(
+            storage.generate_key(Some("../../secrets/key")),
+            "key",
+            "a path-bearing filename must not survive into the blob name"
+        );
+        assert_eq!(storage.generate_key(Some("/etc/shadow")), "shadow");
+        assert_eq!(storage.generate_key(Some("ok.txt")), "ok.txt");
+    }
+
+    /// A stub-backed storage in emulator mode: the emulator pipeline is
+    /// unauthenticated, so a plain HTTP stub is enough to drive real requests.
+    async fn stub_azure_storage(server: &StubServer) -> AzureBlobStorage {
+        AzureBlobStorage::new(
+            AzureBlobConfig::new("devstoreaccount1", "container")
+                .emulator()
+                .endpoint(server.url()),
+        )
+        .await
+        .expect("stub-backed emulator config should build")
+    }
+
+    /// `delete` bypassed `map_blob_error` -- defined in this same file and used
+    /// by `get`/`head` -- so a missing blob came back as an opaque `Storage`
+    /// error while S3 returned `Ok(())`. Deletion is idempotent on every
+    /// backend per the `Storage::delete` contract.
+    #[tokio::test]
+    async fn delete_of_a_missing_blob_is_ok() {
+        let server = StubServer::start_single(StubResponse::new(
+            404,
+            "<?xml version=\"1.0\"?><Error><Code>BlobNotFound</Code></Error>",
+        ))
+        .await;
+        let storage = stub_azure_storage(&server).await;
+
+        storage
+            .delete("never-existed.txt")
+            .await
+            .expect("deleting a missing blob must be Ok(()), not a Storage error");
+
+        server.assert_received("DELETE", "/container/never-existed.txt");
+    }
+
+    /// ...but a real failure is still a failure.
+    #[tokio::test]
+    async fn delete_propagates_a_non_not_found_failure() {
+        let server = StubServer::start_single(StubResponse::new(
+            403,
+            "<?xml version=\"1.0\"?><Error><Code>AuthorizationFailure</Code></Error>",
+        ))
+        .await;
+        let storage = stub_azure_storage(&server).await;
+
+        match storage.delete("k.txt").await {
+            Err(StorageError::Storage(_)) => {}
+            other => panic!("a 403 must not be swallowed by the idempotent path, got {other:?}"),
+        }
+    }
+
+    /// `copy` reported a missing source as an opaque `Storage` error; every
+    /// backend now agrees that a missing copy source is `NotFound`.
+    #[tokio::test]
+    async fn copy_of_a_missing_source_is_not_found() {
+        let server = StubServer::start_single(StubResponse::new(
+            404,
+            "<?xml version=\"1.0\"?><Error><Code>BlobNotFound</Code></Error>",
+        ))
+        .await;
+        let storage = stub_azure_storage(&server).await;
+
+        match storage.copy("missing.txt", "dst.txt").await {
+            Err(StorageError::NotFound(key)) => assert_eq!(key, "missing.txt"),
+            other => panic!("expected NotFound naming the source, got {other:?}"),
+        }
+    }
+
+    /// `list` drained the whole container into one `Vec`; `list_page` requests
+    /// a single page and surfaces the server's `NextMarker`.
+    #[tokio::test]
+    async fn list_page_requests_one_page_and_returns_the_next_marker() {
+        let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+            <EnumerationResults ContainerName=\"container\">\
+            <Blobs><Blob><Name>a.txt</Name><Properties><Content-Length>3</Content-Length>\
+            </Properties></Blob></Blobs><NextMarker>MARKER-2</NextMarker></EnumerationResults>";
+        let server = StubServer::start_single(StubResponse::new(200, body)).await;
+        let storage = stub_azure_storage(&server).await;
+
+        let (page, next) = storage
+            .list_page(None, None, 1)
+            .await
+            .expect("list_page should succeed");
+
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+        assert_eq!(next.as_deref(), Some("MARKER-2"));
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "list_page must issue exactly one request"
+        );
+
+        let query = server.requests()[0].query.clone().unwrap_or_default();
+        assert!(
+            query.contains("maxresults=1"),
+            "the limit must reach the service: {query}"
+        );
+
+        // The cursor is sent back as the marker.
+        let _ = storage.list_page(None, Some("MARKER-2"), 1).await;
+        let query = server.requests()[1].query.clone().unwrap_or_default();
+        assert!(
+            query.contains("marker=MARKER-2"),
+            "the cursor must be sent as the marker: {query}"
+        );
     }
 
     #[tokio::test]

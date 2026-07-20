@@ -1,7 +1,7 @@
 //! Multipart form data parsing.
 
 use bytes::Bytes;
-use futures::Stream;
+use futures_core::Stream;
 
 use crate::{Result, StorageError, UploadedFile};
 

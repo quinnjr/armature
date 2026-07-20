@@ -2,12 +2,20 @@
 
 use async_trait::async_trait;
 use reqwest::{Client, multipart::Form};
+use std::fmt;
+use std::time::Duration;
 use tracing::debug;
 
+use crate::http::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT, build_client, retry_after_secs};
 use crate::{Email, MailError, Result, Transport};
 
 /// Mailgun configuration.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]`: this type gained `timeout` and then `connect_timeout`
+/// and `base_url`, and each addition broke every downstream struct literal.
+/// Construct it with [`MailgunConfig::new`] plus the builders.
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct MailgunConfig {
     /// API key.
     pub api_key: String,
@@ -15,12 +23,38 @@ pub struct MailgunConfig {
     pub domain: String,
     /// API endpoint region (US or EU).
     pub region: MailgunRegion,
+    /// Base URL override, bypassing [`MailgunConfig::region`].
+    ///
+    /// For pointing tests or an egress proxy somewhere other than Mailgun.
+    /// Validated by [`MailgunTransport::new`].
+    pub base_url: Option<String>,
     /// Per-request timeout.
     ///
     /// Set at the transport level so a hung request tears the connection down
     /// deterministically. The queue worker's `job_timeout` only drops the
     /// future, which does not un-send anything — keep this below it.
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
+    /// Connect-phase timeout.
+    ///
+    /// Defaults to 10 seconds. Bounded separately from [`Self::timeout`] so an
+    /// unreachable endpoint fails quickly rather than consuming the whole
+    /// request budget.
+    pub connect_timeout: Duration,
+}
+
+/// Hand-written so the API key is never rendered — a derived `Debug` put the
+/// full key into any `tracing::debug!(?config)`.
+impl fmt::Debug for MailgunConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MailgunConfig")
+            .field("api_key", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("region", &self.region)
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
 }
 
 /// Mailgun API region.
@@ -40,13 +74,31 @@ impl MailgunConfig {
             api_key: api_key.into(),
             domain: domain.into(),
             region: MailgunRegion::Us,
-            timeout: std::time::Duration::from_secs(30),
+            base_url: None,
+            timeout: DEFAULT_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 
-    /// Set the per-request timeout.
-    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    /// Set the per-request timeout (default: 30 seconds).
+    pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the connect-phase timeout (default: 10 seconds).
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// Override the API base URL, bypassing [`MailgunConfig::region`].
+    ///
+    /// Validated by [`MailgunTransport::new`]: the API key is sent as HTTP basic
+    /// auth on every request, so a plaintext base URL to a non-loopback host is
+    /// rejected.
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
         self
     }
 
@@ -63,10 +115,13 @@ impl MailgunConfig {
     }
 
     /// Get the API endpoint.
-    fn endpoint(&self) -> String {
-        let base = match self.region {
-            MailgunRegion::Us => "https://api.mailgun.net",
-            MailgunRegion::Eu => "https://api.eu.mailgun.net",
+    pub(crate) fn endpoint(&self) -> String {
+        let base = match &self.base_url {
+            Some(base) => base.trim_end_matches('/'),
+            None => match self.region {
+                MailgunRegion::Us => "https://api.mailgun.net",
+                MailgunRegion::Eu => "https://api.eu.mailgun.net",
+            },
         };
         format!("{}/v3/{}/messages", base, self.domain)
     }
@@ -150,13 +205,17 @@ pub struct MailgunTransport {
 
 impl MailgunTransport {
     /// Create a new Mailgun transport.
-    pub fn new(config: MailgunConfig) -> Self {
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new());
+    ///
+    /// Fallible for two reasons. The endpoint is validated — `send` attaches the
+    /// API key as HTTP basic auth, so a plaintext endpoint to a remote host is a
+    /// credential disclosure on every send. And a client that cannot be built is
+    /// surfaced rather than swapped for `Client::new()`, which carries neither a
+    /// request nor a connect timeout.
+    pub fn new(config: MailgunConfig) -> Result<Self> {
+        crate::http::validate_endpoint(&config.endpoint())?;
+        let client = build_client(config.timeout, config.connect_timeout)?;
 
-        Self { client, config }
+        Ok(Self { client, config })
     }
 }
 
@@ -178,7 +237,12 @@ impl Transport for MailgunTransport {
 
         // Add attachments
         for attachment in &email.attachments {
-            let part = reqwest::multipart::Part::bytes(attachment.data.clone())
+            // `Part::stream_with_length` over the `Bytes` rather than
+            // `Part::bytes`, which needs a `Cow<'static, [u8]>` and so would
+            // copy the whole payload on every send attempt. The length is passed
+            // explicitly so the part still carries a Content-Length.
+            let len = attachment.data.len() as u64;
+            let part = reqwest::multipart::Part::stream_with_length(attachment.data.clone(), len)
                 .file_name(attachment.filename.clone())
                 .mime_str(&attachment.content_type)
                 .map_err(|e| MailError::Attachment(e.to_string()))?;
@@ -206,7 +270,13 @@ impl Transport for MailgunTransport {
             debug!("Email sent successfully via Mailgun");
             Ok(())
         } else if status.as_u16() == 429 {
-            Err(MailError::RateLimited(60))
+            // Previously hardcoded 60 and ignored the header. The queue's whole
+            // retry schedule for a throttled job is keyed off this value, so
+            // discarding a `Retry-After: 300` guaranteed a re-throttle.
+            Err(MailError::RateLimited(retry_after_secs(
+                response.headers(),
+                60,
+            )))
         } else {
             let body = response.text().await.unwrap_or_default();
             Err(MailError::provider(
@@ -327,6 +397,66 @@ mod tests {
             "CRLF leaked into the Mailgun form: {fields:?}"
         );
         assert!(find(&fields, "h:X-Tag").is_empty());
+    }
+
+    /// The API key travels as HTTP basic auth on every request, so a plaintext
+    /// base URL to a remote host discloses it.
+    #[test]
+    fn a_cleartext_base_url_is_rejected() {
+        let config = MailgunConfig::new("key-secret", "example.com")
+            .base_url("http://collector.example.com");
+        let err = MailgunTransport::new(config).err().expect("must reject");
+
+        assert!(matches!(err, MailError::Config(_)), "{err}");
+        assert!(err.to_string().contains("https"), "{err}");
+    }
+
+    #[test]
+    fn https_and_loopback_endpoints_are_accepted() {
+        assert!(MailgunTransport::new(MailgunConfig::new("key", "example.com")).is_ok());
+        assert!(MailgunTransport::new(MailgunConfig::new("key", "example.com").eu()).is_ok());
+        assert!(
+            MailgunTransport::new(
+                MailgunConfig::new("key", "example.com").base_url("http://127.0.0.1:8080")
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn both_timeouts_have_bounded_defaults() {
+        let config = MailgunConfig::new("key", "example.com");
+        assert_eq!(config.timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+
+        let config = config.connect_timeout(Duration::from_millis(250));
+        assert_eq!(config.connect_timeout, Duration::from_millis(250));
+    }
+
+    /// A derived `Debug` dumped the API key into any `tracing::debug!(?config)`.
+    #[test]
+    fn debug_never_renders_the_api_key() {
+        let rendered = format!(
+            "{:?}",
+            MailgunConfig::new("key-super-secret", "example.com")
+        );
+
+        assert!(
+            !rendered.contains("super-secret"),
+            "API key leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn base_url_overrides_the_region() {
+        let config = MailgunConfig::new("key", "example.com")
+            .eu()
+            .base_url("https://proxy.internal/");
+        assert_eq!(
+            config.endpoint(),
+            "https://proxy.internal/v3/example.com/messages"
+        );
     }
 
     #[test]

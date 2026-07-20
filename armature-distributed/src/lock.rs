@@ -429,10 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutual_exclusion_second_acquire_fails_while_first_held() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let conn = connection_manager(&container.url()).await;
 
@@ -458,10 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_guarded_release_does_not_delete_lock_reacquired_by_someone_else() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let conn1 = connection_manager(&container.url()).await;
         let conn2 = connection_manager(&container.url()).await;
@@ -511,10 +505,7 @@ mod tests {
 
     #[test]
     fn dropping_guard_off_a_tokio_runtime_does_not_panic() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         // Construct a real guard inside a runtime (acquiring the lock and
         // spawning its watchdog both need one), then move it out and drop it
         // from a plain OS thread that has no Tokio runtime, exercising the
@@ -544,10 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_held_flips_false_when_the_lease_is_stolen() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let conn = connection_manager(&container.url()).await;
         let mut stealer = connection_manager(&container.url()).await;
@@ -585,10 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn renewal_watchdog_keeps_lock_held_past_original_ttl() {
-        if !armature_testkit::docker_available() {
-            eprintln!("skipping: Docker not available");
-            return;
-        }
+        armature_testkit::skip_if_no_docker!();
         let container = armature_testkit::containers::RedisContainer::start().await;
         let conn = connection_manager(&container.url()).await;
 

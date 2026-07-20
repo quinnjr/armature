@@ -127,7 +127,11 @@ pub struct WebhookEvent {
 }
 
 /// Webhook event types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Hash` is derived so [`WebhookRouter`] can key its handler map on the enum
+/// itself; it previously keyed on `format!("{:?}", event_type)`, allocating a
+/// `String` on every registration *and* every routed event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEventType {
     // Charge events
@@ -301,17 +305,24 @@ impl WebhookData {
     ///
     /// Note the enum is `#[serde(untagged)]`, so matching on the variant is the
     /// only reliable way to tell a typed payload from a generic one.
-    pub fn from_event_type(event_type: &WebhookEventType, raw: &serde_json::Value) -> WebhookData {
+    ///
+    /// `raw` is taken by value: the fallback hands the original tree straight
+    /// back as `Generic` instead of deep-copying it, and the typed attempt
+    /// deserializes out of a borrow. The previous version called
+    /// `serde_json::from_value(raw.clone())` — a full recursive copy of the
+    /// whole payload on the success path — and cloned a second time to build
+    /// the fallback.
+    pub fn from_event_type(event_type: &WebhookEventType, raw: serde_json::Value) -> WebhookData {
         use WebhookEventType as E;
 
-        fn typed<T, F>(raw: &serde_json::Value, wrap: F) -> WebhookData
+        fn typed<T, F>(raw: serde_json::Value, wrap: F) -> WebhookData
         where
-            T: for<'de> Deserialize<'de>,
+            T: serde::de::DeserializeOwned,
             F: FnOnce(T) -> WebhookData,
         {
-            match serde_json::from_value::<T>(raw.clone()) {
+            match T::deserialize(&raw) {
                 Ok(v) => wrap(v),
-                Err(_) => WebhookData::Generic(raw.clone()),
+                Err(_) => WebhookData::Generic(raw),
             }
         }
 
@@ -359,7 +370,7 @@ impl WebhookData {
             | E::DisputeCreated
             | E::DisputeUpdated
             | E::DisputeClosed
-            | E::Unknown(_) => WebhookData::Generic(raw.clone()),
+            | E::Unknown(_) => WebhookData::Generic(raw),
         }
     }
 }
@@ -454,7 +465,11 @@ pub trait WebhookHandler: Send + Sync {
 
 /// Webhook router for handling multiple event types
 pub struct WebhookRouter {
-    handlers: HashMap<String, Box<dyn WebhookHandler>>,
+    /// Keyed on the event type itself. Keying on `format!("{:?}", ..)` cost a
+    /// `String` allocation per routed event, and made the routing table depend
+    /// on `Debug` output — a formatting change would have silently unbound
+    /// every handler.
+    handlers: HashMap<WebhookEventType, Box<dyn WebhookHandler>>,
     default_handler: Option<Box<dyn WebhookHandler>>,
 }
 
@@ -473,8 +488,7 @@ impl WebhookRouter {
         event_type: WebhookEventType,
         handler: H,
     ) -> Self {
-        let key = format!("{:?}", event_type);
-        self.handlers.insert(key, Box::new(handler));
+        self.handlers.insert(event_type, Box::new(handler));
         self
     }
 
@@ -489,9 +503,7 @@ impl WebhookRouter {
         &self,
         event: &WebhookEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let key = format!("{:?}", event.event_type);
-
-        if let Some(handler) = self.handlers.get(&key) {
+        if let Some(handler) = self.handlers.get(&event.event_type) {
             handler.handle(event).await
         } else if let Some(ref handler) = self.default_handler {
             handler.handle(event).await
@@ -584,7 +596,7 @@ mod tests {
             "status": "succeeded",
             "customer": "cus_1"
         });
-        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, &raw);
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, raw);
         match data {
             WebhookData::Charge(c) => {
                 assert_eq!(c.id, "ch_123");
@@ -603,7 +615,7 @@ mod tests {
             "id": "sub_1", "customer": "cus_1", "status": "active"
         });
         assert!(matches!(
-            WebhookData::from_event_type(&WebhookEventType::SubscriptionCreated, &sub),
+            WebhookData::from_event_type(&WebhookEventType::SubscriptionCreated, sub),
             WebhookData::Subscription(_)
         ));
 
@@ -611,7 +623,7 @@ mod tests {
             "id": "in_1", "customer": "cus_1", "status": "paid", "currency": "usd"
         });
         assert!(matches!(
-            WebhookData::from_event_type(&WebhookEventType::InvoicePaid, &inv),
+            WebhookData::from_event_type(&WebhookEventType::InvoicePaid, inv),
             WebhookData::Invoice(_)
         ));
     }
@@ -621,8 +633,9 @@ mod tests {
         // A payload that does not fit the typed shape must not be lost or
         // error — it degrades to Generic with the original body intact.
         let raw = serde_json::json!({"unexpected": "shape"});
-        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, &raw);
+        let data = WebhookData::from_event_type(&WebhookEventType::ChargeSucceeded, raw.clone());
         match data {
+            // The original tree is handed back intact, not a lossy rebuild.
             WebhookData::Generic(v) => assert_eq!(v, raw),
             other => panic!("expected Generic, got {other:?}"),
         }
@@ -637,10 +650,73 @@ mod tests {
             WebhookEventType::Unknown("something.else".into()),
         ] {
             assert!(matches!(
-                WebhookData::from_event_type(&et, &raw),
+                WebhookData::from_event_type(&et, raw.clone()),
                 WebhookData::Generic(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_on_the_event_type_enum() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl WebhookHandler for Counting {
+            async fn handle(
+                &self,
+                _event: &WebhookEvent,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let matched = Arc::new(AtomicUsize::new(0));
+        let fallback = Arc::new(AtomicUsize::new(0));
+        let router = WebhookRouter::new()
+            .on(
+                WebhookEventType::ChargeSucceeded,
+                Counting(Arc::clone(&matched)),
+            )
+            // A payload-carrying variant must key on its payload too, which a
+            // Debug-string key only did by accident.
+            .on(
+                WebhookEventType::Unknown("vendor.custom".into()),
+                Counting(Arc::clone(&matched)),
+            )
+            .default(Counting(Arc::clone(&fallback)));
+
+        let event = |event_type| WebhookEvent {
+            id: "evt_1".into(),
+            event_type,
+            created_at: Utc::now(),
+            data: WebhookData::Generic(serde_json::Value::Null),
+            provider: "stripe".into(),
+            livemode: false,
+        };
+
+        router
+            .route(&event(WebhookEventType::ChargeSucceeded))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::Unknown("vendor.custom".into())))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::Unknown("vendor.other".into())))
+            .await
+            .unwrap();
+        router
+            .route(&event(WebhookEventType::PayoutPaid))
+            .await
+            .unwrap();
+
+        assert_eq!(matched.load(Ordering::Relaxed), 2);
+        assert_eq!(fallback.load(Ordering::Relaxed), 2);
     }
 
     #[test]

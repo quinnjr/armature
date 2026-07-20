@@ -85,6 +85,9 @@ async fn status_200_is_ok() {
 
 #[tokio::test]
 async fn status_404_maps_to_unregistered() {
+    // On FCM a 404 genuinely is `UNREGISTERED`. It is mapped at the FCM call
+    // site rather than centrally, because 404 on APNs means `BadPath` — see
+    // `status_404_is_bad_path_and_never_removes_the_device` in tests/apns.rs.
     let (provider, _server) = provider_against(StubResponse::new(404, "")).await;
     let err = provider
         .send("device-token", &Notification::new("Hi", "there"))
@@ -94,6 +97,30 @@ async fn status_404_maps_to_unregistered() {
         matches!(err, PushError::Unregistered(_)),
         "expected Unregistered, got {err:?}"
     );
+    assert!(err.should_remove_device());
+}
+
+#[tokio::test]
+async fn status_503_is_retryable() {
+    // A transient FCM outage used to produce a permanently non-retryable
+    // `Provider` error, so a five-minute 503 window dropped whole batches.
+    let (provider, _server) = provider_against(StubResponse::new(503, "")).await;
+    let err = provider
+        .send("device-token", &Notification::new("Hi", "there"))
+        .await
+        .expect_err("expected error for 503");
+    assert!(
+        matches!(
+            err,
+            PushError::Provider {
+                status: Some(503),
+                ..
+            }
+        ),
+        "expected Provider(503), got {err:?}"
+    );
+    assert!(err.is_retryable(), "a 5xx from FCM must be retryable");
+    assert!(!err.should_remove_device());
 }
 
 #[tokio::test]

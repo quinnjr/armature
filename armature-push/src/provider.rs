@@ -1,7 +1,7 @@
 //! Push notification provider trait and service.
 
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
+use futures_util::stream::{self, StreamExt};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -10,7 +10,7 @@ use crate::{DeviceToken, Notification, Platform, PushError, Result, Subscription
 /// Maximum number of in-flight requests when fanning a batch send out
 /// concurrently. Bounded so a large token slice can't open an unbounded
 /// number of simultaneous connections to the provider.
-const BATCH_CONCURRENCY: usize = 32;
+pub(crate) const BATCH_CONCURRENCY: usize = 32;
 
 /// Push provider trait.
 #[async_trait]
@@ -139,19 +139,21 @@ impl PushService {
     /// cannot cause a caller to prune a valid token. If every provider
     /// asserted removal, that verdict is consistent and is passed through.
     fn select_error(errors: Vec<PushError>) -> PushError {
-        if errors.is_empty() {
+        // One pass, no `expect`: take the first error; if it is already not a
+        // removal verdict it wins outright, otherwise scan on for the first
+        // non-removal error, falling back to the first when every provider
+        // agreed on removal.
+        let mut errors = errors.into_iter();
+
+        let Some(first) = errors.next() else {
             return PushError::Config("No push providers configured".to_string());
+        };
+
+        if !first.should_remove_device() {
+            return first;
         }
 
-        let all_claim_removal = errors.iter().all(|e| e.should_remove_device());
-        if all_claim_removal {
-            return errors.into_iter().next().expect("checked non-empty");
-        }
-
-        errors
-            .into_iter()
-            .find(|e| !e.should_remove_device())
-            .expect("not all errors claim removal")
+        errors.find(|e| !e.should_remove_device()).unwrap_or(first)
     }
 
     /// Send to a device token with platform hint.

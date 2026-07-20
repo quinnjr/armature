@@ -134,21 +134,56 @@ jobs:
   # coverage job (`--workspace`) builds each member with only its *default*
   # features. Both leave whole test suites — mail queue/Redis, files PDF, push
   # APNS/Web-Push, storage S3/GCS/Azure — silently unexecuted. Test them
-  # explicitly with every feature enabled.
+  # explicitly with every feature enabled, and again with a *minimal* feature
+  # set so documented off-paths (e.g. `armature-files` without `embedded-font`,
+  # `armature-mail` with no template engine) are compiled rather than assumed.
+  #
+  # COVERAGE GAP (auditable, deliberately unfinished): the same rationale
+  # applies to every workspace member, not just the ones listed below. The
+  # workspace has 63 members; this matrix covers 7. The remaining 56 are still
+  # built only with their default features by the `coverage` job and are never
+  # exercised with `--all-features` or `--no-default-features`. Notably
+  # uncovered: armature-acme, armature-opensearch, armature-redis,
+  # armature-aws/-azure/-gcp, armature-lambda, armature-cloudrun,
+  # armature-azure-functions, armature-graphql(-client), armature-grpc,
+  # armature-seaorm, armature-diesel, armature-siem, armature-collab.
+  # Regenerate the full member list with:
+  #   cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'
+  # Extending this matrix crate-by-crate is preferred over a generated matrix
+  # until each added crate is known to build under both feature shapes.
+  #
+  # Members are added here with an explicit `minimal` feature string because
+  # some crates have no testable surface with zero features.
   # ============================================================================
 
   test-members:
-    name: Test member crates (all features)
+    name: Test member crates (${{ matrix.crate }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        crate:
-          - armature-payments
-          - armature-mail
-          - armature-files
-          - armature-push
-          - armature-storage
+        include:
+          - crate: armature-payments
+            minimal: "--no-default-features"
+          - crate: armature-mail
+            minimal: "--no-default-features"
+          - crate: armature-files
+            # `images` on, `embedded-font` off: the documented path where a
+            # TextWatermark without a font must error cleanly instead of
+            # panicking. Plain `--no-default-features` compiles no image code
+            # at all and would not cover it.
+            minimal: "--no-default-features --features images"
+          - crate: armature-push
+            minimal: "--no-default-features"
+          - crate: armature-storage
+            minimal: "--no-default-features"
+          # armature-queue and armature-distributed have Redis/testcontainer
+          # suites and no cargo features, so `--no-default-features` is a
+          # no-op for them; they are here for the Docker enforcement below.
+          - crate: armature-queue
+            minimal: "--no-default-features"
+          - crate: armature-distributed
+            minimal: "--no-default-features"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -156,11 +191,21 @@ jobs:
       - name: Run tests
         # Docker is present on ubuntu-latest, so container-gated suites must
         # actually run here rather than self-skipping into a green pass.
+        # Enforced by `armature_testkit::skip_if_no_docker!`, which panics
+        # when this is set to "1" and no daemon is reachable. Crates that
+        # hand-roll their own guard instead of using the shared macro are not
+        # yet covered by that enforcement.
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
         run: cargo test -p ${{ matrix.crate }} --all-features --verbose
       - name: Run doc tests
         run: cargo test -p ${{ matrix.crate }} --all-features --doc
+      # Separate step so a minimal-feature failure is attributable rather than
+      # buried in the --all-features run.
+      - name: Run tests (minimal features)
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
 
   doc-tests:
     name: Documentation Tests

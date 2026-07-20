@@ -148,10 +148,14 @@ Each provider is a `Transport`; construct one and hand it to `Mailer::new`.
 
 ```rust
 # #[cfg(feature = "sendgrid")]
-# fn example() {
+# fn example() -> Result<(), armature_mail::MailError> {
 use armature_mail::{Mailer, SendGridConfig, SendGridTransport};
 
-let mailer = Mailer::new(SendGridTransport::new(SendGridConfig::new("SG.api-key")));
+// Fallible: the endpoint is rejected if it is not https (the API key rides on
+// every request), and a client that cannot be built is surfaced rather than
+// silently replaced by one with no timeouts.
+let mailer = Mailer::new(SendGridTransport::new(SendGridConfig::new("SG.api-key"))?);
+# Ok(())
 # }
 ```
 
@@ -159,13 +163,14 @@ let mailer = Mailer::new(SendGridTransport::new(SendGridConfig::new("SG.api-key"
 
 ```rust
 # #[cfg(feature = "mailgun")]
-# fn example() {
+# fn example() -> Result<(), armature_mail::MailError> {
 use armature_mail::{MailgunConfig, MailgunTransport, Mailer};
 
 let mailer = Mailer::new(MailgunTransport::new(MailgunConfig::new(
     "api-key",
     "mg.example.com",
-)));
+))?);
+# Ok(())
 # }
 ```
 

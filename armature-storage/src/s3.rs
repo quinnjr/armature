@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use crate::{
     Result, Storage, StorageConfig, StorageError, StorageMetadata, UploadedFile,
-    calculate_checksum, generate_unique_key,
+    calculate_checksum, generate_unique_key, sanitize_filename,
 };
 
 /// S3 storage configuration.
@@ -165,12 +165,17 @@ impl S3Storage {
     }
 
     /// Generate a key for a file.
+    ///
+    /// `UploadedFile::name` comes straight off the client-controlled multipart
+    /// `filename` header, so it is sanitized before it becomes an object key --
+    /// exactly as the local backend does. Taking it verbatim let a filename of
+    /// `../../secrets/key` become the object key as written.
     fn generate_key(&self, original_name: Option<&str>) -> String {
         if self.config.storage.generate_unique_names {
             generate_unique_key(original_name, self.config.storage.preserve_extension)
         } else {
             original_name
-                .map(String::from)
+                .map(sanitize_filename)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         }
     }
@@ -364,6 +369,11 @@ impl Storage for S3Storage {
         Ok(metadata)
     }
 
+    /// Delete an object.
+    ///
+    /// `DeleteObject` succeeds for a key that is not there, which is the
+    /// idempotent semantic the [`Storage::delete`] contract adopts for every
+    /// backend.
     async fn delete(&self, key: &str) -> Result<()> {
         let full_key = self.full_key(key);
 
@@ -387,7 +397,18 @@ impl Storage for S3Storage {
         }
     }
 
-    async fn list(&self, prefix: Option<&str>) -> Result<Vec<StorageMetadata>> {
+    async fn list_page(
+        &self,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StorageMetadata>, Option<String>)> {
+        let limit = if limit == 0 {
+            crate::DEFAULT_LIST_PAGE_SIZE
+        } else {
+            limit
+        };
+
         let mut full_prefix = String::new();
         if let Some(p) = &self.config.storage.path_prefix {
             full_prefix.push_str(p);
@@ -397,47 +418,61 @@ impl Storage for S3Storage {
             full_prefix.push_str(p);
         }
 
-        let mut request = self.client.list_objects_v2().bucket(&self.config.bucket);
+        let mut request = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.config.bucket)
+            .max_keys(limit.min(i32::MAX as usize) as i32)
+            .set_continuation_token(cursor.map(String::from));
 
         if !full_prefix.is_empty() {
             request = request.prefix(&full_prefix);
         }
 
-        // S3 caps a single `list_objects_v2` response at 1000 keys and signals
-        // more via `IsTruncated`/`NextContinuationToken`. Drain the paginator
-        // so this matches the Azure and GCS implementations of `list`, which
-        // both return every object.
-        let mut pages = request.into_paginator().send();
-        let mut results = Vec::new();
+        let page = request
+            .send()
+            .await
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        while let Some(page) = pages.next().await {
-            let page = page.map_err(|e| StorageError::Storage(e.to_string()))?;
+        // Hoisted out of the per-object loop: this was reallocated for every
+        // key in the bucket.
+        let strip = self
+            .config
+            .storage
+            .path_prefix
+            .as_ref()
+            .map(|p| format!("{p}/"));
 
-            for object in page.contents() {
-                if let Some(key) = object.key() {
-                    // Remove prefix to get the relative key
-                    let relative_key = if let Some(p) = &self.config.storage.path_prefix {
-                        key.strip_prefix(&format!("{}/", p))
-                            .unwrap_or(key)
-                            .to_string()
-                    } else {
-                        key.to_string()
-                    };
+        let mut results = Vec::with_capacity(page.contents().len());
 
-                    let size = object.size().unwrap_or(0) as u64;
-                    let mut metadata = StorageMetadata::new(&relative_key, size)
-                        .with_url(self.public_url(&relative_key));
+        for object in page.contents() {
+            let Some(key) = object.key() else { continue };
 
-                    if let Some(etag) = object.e_tag() {
-                        metadata = metadata.with_checksum(etag.trim_matches('"'));
-                    }
+            // Remove prefix to get the relative key
+            let relative_key = match &strip {
+                Some(strip) => key.strip_prefix(strip.as_str()).unwrap_or(key).to_string(),
+                None => key.to_string(),
+            };
 
-                    results.push(metadata);
-                }
+            let size = object.size().unwrap_or(0) as u64;
+            let mut metadata =
+                StorageMetadata::new(&relative_key, size).with_url(self.public_url(&relative_key));
+
+            if let Some(etag) = object.e_tag() {
+                metadata = metadata.with_checksum(etag.trim_matches('"'));
             }
+
+            results.push(metadata);
         }
 
-        Ok(results)
+        // S3 caps a single `list_objects_v2` response at 1000 keys and signals
+        // more via `IsTruncated`/`NextContinuationToken`.
+        let next = page
+            .next_continuation_token()
+            .filter(|t| !t.is_empty())
+            .map(String::from);
+
+        Ok((results, next))
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<StorageMetadata> {
@@ -451,7 +486,17 @@ impl Storage for S3Storage {
             .key(&to_key)
             .send()
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                // A missing source is `NotFound` on every backend, so
+                // `is_not_found()` means the same thing everywhere. (Only
+                // `delete` is idempotent.)
+                let err_str = e.to_string();
+                if err_str.contains("NoSuchKey") || err_str.contains("NotFound") {
+                    StorageError::NotFound(from.to_string())
+                } else {
+                    StorageError::Storage(err_str)
+                }
+            })?;
 
         self.head(to).await
     }
@@ -790,6 +835,99 @@ mod tests {
             "the second call must carry the continuation token, got: {}",
             queries[1]
         );
+    }
+
+    /// `put_file` sanitized the client-supplied filename on the local backend
+    /// only; S3/GCS/Azure used it verbatim, so a multipart `filename` of
+    /// `../../secrets/key` became the object key as written -- while the
+    /// README advertised traversal rejection as a trait-level guarantee.
+    #[tokio::test]
+    async fn put_file_sanitizes_a_path_bearing_filename() {
+        let server = StubServer::start_single(StubResponse::new(200, "")).await;
+        let base = stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+        let mut config = base.config.clone();
+        config.storage.generate_unique_names = false;
+        let storage = S3Storage::from_client(base.client, config);
+
+        assert_eq!(storage.generate_key(Some("../../secrets/key")), "key");
+        assert_eq!(storage.generate_key(Some("/etc/shadow")), "shadow");
+        assert_eq!(storage.generate_key(Some("ok.txt")), "ok.txt");
+
+        // ...and that is what actually goes on the wire.
+        let file = UploadedFile::from_bytes(Bytes::from_static(b"x"), "../../secrets/key");
+        let metadata = storage
+            .put_file(&file)
+            .await
+            .expect("put_file should succeed");
+
+        assert_eq!(metadata.key, "key");
+        server.assert_received("PUT", "/test-bucket/key");
+        assert!(
+            !server.requests().iter().any(|r| r.path.contains("secrets")),
+            "the traversal path must never reach the bucket: {:?}",
+            server.requests()
+        );
+    }
+
+    /// `DeleteObject` is idempotent server-side, which is the semantic the
+    /// `Storage::delete` contract now standardizes on for all four backends.
+    #[tokio::test]
+    async fn delete_of_a_missing_key_is_ok() {
+        let server = StubServer::start_single(StubResponse::new(204, "")).await;
+        let storage =
+            stub_s3_storage(&server, S3Config::new("test-bucket").region("us-east-1")).await;
+
+        storage
+            .delete("never-existed.txt")
+            .await
+            .expect("deleting a missing key must be Ok(()), not NotFound");
+        server.assert_received("DELETE", "/test-bucket/never-existed.txt");
+    }
+
+    /// `list` now pages through `list_page`, which asks for one page at a time
+    /// and hands back the continuation token, so a caller can stop early
+    /// instead of draining a 5M-object bucket into a single `Vec`.
+    #[tokio::test]
+    async fn list_page_returns_one_page_and_its_continuation_token() {
+        let stub = start_list_stub().await;
+
+        let ambient = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(SharedCredentialsProvider::new(Credentials::for_tests()))
+            .build();
+        let config = S3Config::new("test-bucket")
+            .region("us-east-1")
+            .endpoint(stub.base_url.clone());
+        let client = Client::from_conf(S3Storage::build_client_config(&ambient, &config));
+        let storage = S3Storage::from_client(client, config);
+
+        let (page, next) = storage
+            .list_page(None, None, 1)
+            .await
+            .expect("list_page should succeed");
+
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["page1.txt"],
+            "only the first page must be fetched"
+        );
+        assert_eq!(next.as_deref(), Some("TOKEN-2"));
+        assert_eq!(
+            stub.request_queries.lock().unwrap().len(),
+            1,
+            "list_page must issue exactly one request"
+        );
+
+        // Feeding the cursor back yields the final page and no continuation.
+        let (page, next) = storage
+            .list_page(None, next.as_deref(), 1)
+            .await
+            .expect("the second page should succeed");
+        assert_eq!(
+            page.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(),
+            ["page2.txt"]
+        );
+        assert_eq!(next, None);
     }
 
     #[tokio::test]

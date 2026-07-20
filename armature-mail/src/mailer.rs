@@ -8,7 +8,12 @@ use crate::{
 };
 
 /// Mailer configuration.
+///
+/// `#[non_exhaustive]`: this type gained `bulk_concurrency` last round, which
+/// broke every downstream struct literal. Construct it with
+/// `MailerConfig::default()` plus the builders.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MailerConfig {
     /// Default from address.
     pub default_from: Option<Address>,
@@ -192,11 +197,11 @@ impl Mailer {
     /// one slow recipient no longer stalls the whole batch. Results are returned
     /// in the same order as `emails` regardless of completion order.
     pub async fn send_bulk(&self, emails: Vec<Email>) -> Vec<Result<()>> {
-        use futures::stream::StreamExt;
+        use futures_util::stream::StreamExt;
 
         let concurrency = self.config.bulk_concurrency.max(1);
 
-        futures::stream::iter(emails)
+        futures_util::stream::iter(emails)
             .map(|email| self.send(email))
             // `buffered` (not `buffer_unordered`) preserves input ordering.
             .buffered(concurrency)
@@ -250,8 +255,13 @@ impl Mailer {
             }
         }
 
-        Err(last_error
-            .unwrap_or_else(|| MailError::Smtp("Unknown error after retries".to_string())))
+        // Unreachable: the loop runs `0..=retry_count`, and on its final
+        // iteration `attempt >= retry_count` holds, so every path through the
+        // last iteration returns — `Ok(())` or `Err(e)`. Kept as an `Err` rather
+        // than `unreachable!()`: trading a guaranteed-unused error return for a
+        // panic in a library is a strictly worse failure mode if the invariant
+        // above is ever broken by an edit to the loop.
+        Err(last_error.expect("send_with_retry always returns on its final attempt"))
     }
 }
 

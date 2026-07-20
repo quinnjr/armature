@@ -3,12 +3,20 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
+use std::fmt;
+use std::time::Duration;
 use tracing::debug;
 
+use crate::http::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT, build_client, retry_after_secs};
 use crate::{Email, MailError, Result, Transport};
 
 /// SendGrid configuration.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]`: this type gained `timeout` and then `connect_timeout`,
+/// and each addition broke every downstream struct literal. Construct it with
+/// [`SendGridConfig::new`] plus the builders.
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct SendGridConfig {
     /// API key.
     pub api_key: String,
@@ -19,7 +27,26 @@ pub struct SendGridConfig {
     /// Set at the transport level so a hung request tears the connection down
     /// deterministically. The queue worker's `job_timeout` only drops the
     /// future, which does not un-send anything — keep this below it.
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
+    /// Connect-phase timeout.
+    ///
+    /// Defaults to 10 seconds. Bounded separately from [`Self::timeout`] so an
+    /// unreachable endpoint fails quickly rather than consuming the whole
+    /// request budget.
+    pub connect_timeout: Duration,
+}
+
+/// Hand-written so the API key is never rendered — a derived `Debug` put the
+/// full key into any `tracing::debug!(?config)`.
+impl fmt::Debug for SendGridConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendGridConfig")
+            .field("api_key", &"<redacted>")
+            .field("endpoint", &self.endpoint)
+            .field("timeout", &self.timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
 }
 
 impl SendGridConfig {
@@ -28,19 +55,29 @@ impl SendGridConfig {
         Self {
             api_key: api_key.into(),
             endpoint: "https://api.sendgrid.com/v3/mail/send".to_string(),
-            timeout: std::time::Duration::from_secs(30),
+            timeout: DEFAULT_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 
-    /// Set a custom endpoint (for testing).
+    /// Set a custom endpoint (for testing, or a proxy).
+    ///
+    /// Validated by [`SendGridTransport::new`]: the API key travels on every
+    /// request, so a plaintext endpoint to a non-loopback host is rejected.
     pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
         self
     }
 
-    /// Set the per-request timeout.
-    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    /// Set the per-request timeout (default: 30 seconds).
+    pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the connect-phase timeout (default: 10 seconds).
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
         self
     }
 }
@@ -53,13 +90,17 @@ pub struct SendGridTransport {
 
 impl SendGridTransport {
     /// Create a new SendGrid transport.
-    pub fn new(config: SendGridConfig) -> Self {
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new());
+    ///
+    /// Fallible for two reasons. The endpoint is validated — `send` attaches
+    /// `Authorization: Bearer <api key>`, so a plaintext endpoint to a remote
+    /// host is a credential disclosure on every send. And a client that cannot
+    /// be built is surfaced rather than swapped for `Client::new()`, which
+    /// carries neither a request nor a connect timeout.
+    pub fn new(config: SendGridConfig) -> Result<Self> {
+        crate::http::validate_endpoint(&config.endpoint)?;
+        let client = build_client(config.timeout, config.connect_timeout)?;
 
-        Self { client, config }
+        Ok(Self { client, config })
     }
 }
 
@@ -92,14 +133,10 @@ impl Transport for SendGridTransport {
             debug!("Email sent successfully via SendGrid");
             Ok(())
         } else if status.as_u16() == 429 {
-            // Rate limited
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60);
-            Err(MailError::RateLimited(retry_after))
+            Err(MailError::RateLimited(retry_after_secs(
+                response.headers(),
+                60,
+            )))
         } else {
             let body = response.text().await.unwrap_or_default();
             // The status is carried on the error so `is_retryable` can tell a
@@ -417,6 +454,56 @@ mod tests {
         let payload = SendGridPayload::from_email(&base()).unwrap();
         let json = serde_json::to_value(&payload).unwrap();
         assert!(json.get("headers").is_none());
+    }
+
+    /// `SendGridConfig::new(key).endpoint("http://collector.example.com/…")`
+    /// shipped the live API key in cleartext on every send, because `send`
+    /// attaches `Authorization: Bearer {api_key}`.
+    #[test]
+    fn a_cleartext_endpoint_is_rejected() {
+        let config = SendGridConfig::new("SG.secret").endpoint("http://collector.example.com/v3");
+        let err = SendGridTransport::new(config).err().expect("must reject");
+
+        assert!(matches!(err, MailError::Config(_)), "{err}");
+        assert!(err.to_string().contains("https"), "{err}");
+    }
+
+    #[test]
+    fn https_and_loopback_endpoints_are_accepted() {
+        assert!(SendGridTransport::new(SendGridConfig::new("SG.secret")).is_ok());
+        assert!(
+            SendGridTransport::new(
+                SendGridConfig::new("SG.secret").endpoint("http://127.0.0.1:8080/v3/mail/send")
+            )
+            .is_ok()
+        );
+    }
+
+    /// The client fallback had no request *and* no connect timeout. Both are
+    /// configured, and the connect timeout has a bounded default.
+    #[test]
+    fn both_timeouts_have_bounded_defaults() {
+        let config = SendGridConfig::new("SG.secret");
+        assert_eq!(config.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, std::time::Duration::from_secs(10));
+
+        let config = config.connect_timeout(std::time::Duration::from_millis(250));
+        assert_eq!(
+            config.connect_timeout,
+            std::time::Duration::from_millis(250)
+        );
+    }
+
+    /// A derived `Debug` dumped the API key into any `tracing::debug!(?config)`.
+    #[test]
+    fn debug_never_renders_the_api_key() {
+        let rendered = format!("{:?}", SendGridConfig::new("SG.super-secret-key"));
+
+        assert!(
+            !rendered.contains("super-secret-key"),
+            "API key leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 
     #[test]

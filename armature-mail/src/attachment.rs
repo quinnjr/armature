@@ -1,8 +1,42 @@
 //! Email attachments.
 
 use crate::{MailError, Result};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Default ceiling on the size of a file read by [`Attachment::from_file`] and
+/// [`Attachment::from_file_async`].
+///
+/// 25 MB is the smallest of the common provider limits (Gmail, SendGrid, SES),
+/// so anything above it could not be delivered anyway — and reading it would
+/// pull the whole file into memory first, which is exactly what an uncapped
+/// read on a path the caller does not fully control gets you.
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Serialize attachment payloads as base64 rather than a JSON number array.
+///
+/// `Vec<u8>`/`Bytes` serialize as a sequence, which in JSON is `[104,105,…]` —
+/// roughly 3.5–4 bytes of JSON per source byte. The email queue stores the whole
+/// job as JSON in Redis and rewrites it on every retry, so a 10 MB attachment
+/// cost ~37 MB per `SET`. Base64 costs 1.33x instead.
+mod base64_bytes {
+    use base64::Engine;
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(data: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(data))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let encoded = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map(Bytes::from)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Content disposition for attachments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -22,7 +56,12 @@ pub struct Attachment {
     /// MIME type.
     pub content_type: String,
     /// File content.
-    pub data: Vec<u8>,
+    ///
+    /// [`Bytes`] rather than `Vec<u8>`: an `Attachment` is cloned once per send
+    /// attempt and once per queue retry, and a refcount bump is not a copy of a
+    /// 10 MB payload. Serialized as base64 — see [`base64_bytes`].
+    #[serde(with = "base64_bytes")]
+    pub data: Bytes,
     /// Content disposition.
     pub disposition: ContentDisposition,
     /// Content ID (for inline attachments).
@@ -34,7 +73,7 @@ impl Attachment {
     pub fn new(
         filename: impl Into<String>,
         content_type: impl Into<String>,
-        data: impl Into<Vec<u8>>,
+        data: impl Into<Bytes>,
     ) -> Self {
         Self {
             filename: filename.into(),
@@ -45,10 +84,58 @@ impl Attachment {
         }
     }
 
-    /// Create an attachment from a file path.
+    /// Create an attachment from a file path, reading the file synchronously.
+    ///
+    /// Rejects a file larger than [`DEFAULT_MAX_ATTACHMENT_BYTES`] *before*
+    /// reading it, so a wrong path cannot pull an arbitrarily large file into
+    /// memory. This blocks the calling thread; from async code use
+    /// [`Attachment::from_file_async`], which does not.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::from_file_with_limit(path, DEFAULT_MAX_ATTACHMENT_BYTES)
+    }
 
+    /// [`Attachment::from_file`] with an explicit size ceiling.
+    pub fn from_file_with_limit(path: impl AsRef<Path>, max_bytes: u64) -> Result<Self> {
+        let path = path.as_ref();
+        let (filename, content_type) = Self::describe(path)?;
+
+        let size = std::fs::metadata(path)?.len();
+        Self::check_size(&filename, size, max_bytes)?;
+
+        let data = std::fs::read(path)?;
+
+        Ok(Self::new(filename, content_type, data))
+    }
+
+    /// Create an attachment from a file path without blocking the runtime.
+    ///
+    /// [`Attachment::from_file`] does a blocking `std::fs::read`; called from a
+    /// task it stalls the whole executor thread for the duration of the read,
+    /// which for a multi-megabyte attachment on a slow disk is exactly the kind
+    /// of stall an async crate exists to avoid. The size is checked against
+    /// [`DEFAULT_MAX_ATTACHMENT_BYTES`] via `metadata` before any bytes are read.
+    pub async fn from_file_async(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_file_async_with_limit(path, DEFAULT_MAX_ATTACHMENT_BYTES).await
+    }
+
+    /// [`Attachment::from_file_async`] with an explicit size ceiling.
+    pub async fn from_file_async_with_limit(
+        path: impl AsRef<Path>,
+        max_bytes: u64,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let (filename, content_type) = Self::describe(path)?;
+
+        let size = tokio::fs::metadata(path).await?.len();
+        Self::check_size(&filename, size, max_bytes)?;
+
+        let data = tokio::fs::read(path).await?;
+
+        Ok(Self::new(filename, content_type, data))
+    }
+
+    /// Derive the attachment filename and MIME type from a path.
+    fn describe(path: &Path) -> Result<(String, String)> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -60,13 +147,20 @@ impl Attachment {
             .map(|m| m.to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        let data = std::fs::read(path)?;
+        Ok((filename, content_type))
+    }
 
-        Ok(Self::new(filename, content_type, data))
+    fn check_size(filename: &str, size: u64, max_bytes: u64) -> Result<()> {
+        if size > max_bytes {
+            return Err(MailError::Attachment(format!(
+                "attachment {filename:?} is {size} bytes, over the {max_bytes}-byte limit"
+            )));
+        }
+        Ok(())
     }
 
     /// Create an attachment from bytes with automatic MIME type detection.
-    pub fn from_bytes(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn from_bytes(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         let filename = filename.into();
         let content_type = mime_guess::from_path(&filename)
             .first()
@@ -116,22 +210,22 @@ impl Attachment {
 /// Common attachment builders.
 impl Attachment {
     /// Create a PDF attachment.
-    pub fn pdf(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn pdf(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(filename, "application/pdf", data)
     }
 
     /// Create a PNG image attachment.
-    pub fn png(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn png(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(filename, "image/png", data)
     }
 
     /// Create a JPEG image attachment.
-    pub fn jpeg(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn jpeg(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(filename, "image/jpeg", data)
     }
 
     /// Create a GIF image attachment.
-    pub fn gif(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn gif(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(filename, "image/gif", data)
     }
 
@@ -159,7 +253,7 @@ impl Attachment {
     }
 
     /// Create an Excel attachment.
-    pub fn xlsx(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn xlsx(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(
             filename,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -168,7 +262,7 @@ impl Attachment {
     }
 
     /// Create a Word document attachment.
-    pub fn docx(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn docx(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(
             filename,
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -177,7 +271,7 @@ impl Attachment {
     }
 
     /// Create a ZIP archive attachment.
-    pub fn zip(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+    pub fn zip(filename: impl Into<String>, data: impl Into<Bytes>) -> Self {
         Self::new(filename, "application/zip", data)
     }
 }
@@ -201,7 +295,7 @@ mod tests {
 
         assert_eq!(attachment.filename, "report.pdf");
         assert_eq!(attachment.content_type, "application/pdf");
-        assert_eq!(attachment.data, b"%PDF-1.4 fake");
+        assert_eq!(&attachment.data[..], b"%PDF-1.4 fake");
         assert_eq!(attachment.size(), 13);
         assert_eq!(attachment.disposition, ContentDisposition::Attachment);
         assert!(attachment.content_id.is_none());
@@ -232,6 +326,89 @@ mod tests {
     fn from_file_errors_on_a_missing_path() {
         let missing = std::env::temp_dir().join("armature-mail-does-not-exist-9d1f2/x.txt");
         assert!(Attachment::from_file(&missing).is_err());
+    }
+
+    /// `from_file` did a blocking `std::fs::read` on an async crate's path, so
+    /// there was no way to load an attachment from a task without stalling the
+    /// executor thread. The async variant must produce an identical attachment.
+    #[tokio::test]
+    async fn from_file_async_matches_the_blocking_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.pdf");
+        std::fs::write(&path, b"%PDF-1.4 fake").unwrap();
+
+        let sync = Attachment::from_file(&path).unwrap();
+        let asynced = Attachment::from_file_async(&path).await.unwrap();
+
+        assert_eq!(asynced.filename, sync.filename);
+        assert_eq!(asynced.content_type, sync.content_type);
+        assert_eq!(asynced.data, sync.data);
+    }
+
+    #[tokio::test]
+    async fn from_file_async_errors_on_a_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Attachment::from_file_async(dir.path().join("nope.txt"))
+                .await
+                .is_err()
+        );
+    }
+
+    /// The read was uncapped: a wrong path pulled an arbitrarily large file into
+    /// memory in full. The size must be checked via `metadata` *before* reading.
+    #[tokio::test]
+    async fn an_oversized_file_is_rejected_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        for err in [
+            Attachment::from_file_with_limit(&path, 1024).unwrap_err(),
+            Attachment::from_file_async_with_limit(&path, 1024)
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(err, MailError::Attachment(ref m) if m.contains("limit")),
+                "unexpected error: {err}"
+            );
+        }
+
+        // At or under the limit it still reads.
+        assert_eq!(
+            Attachment::from_file_with_limit(&path, 4096)
+                .unwrap()
+                .size(),
+            4096
+        );
+    }
+
+    /// An attachment payload used to serialize as a JSON number array — ~4 bytes
+    /// of JSON per source byte, paid again on every queue retry.
+    #[test]
+    fn payloads_serialize_as_base64_not_a_number_array() {
+        let attachment = Attachment::new("x.bin", "application/octet-stream", vec![1u8, 2, 3]);
+        let json = serde_json::to_string(&attachment).unwrap();
+
+        assert!(json.contains(r#""data":"AQID""#), "not base64: {json}");
+        assert!(!json.contains("[1,2,3]"), "number array emitted: {json}");
+
+        let round_tripped: Attachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.data, attachment.data);
+    }
+
+    /// The base64 encoding must stay compact for a realistic payload: 1.33x, not
+    /// the ~3.5-4x a number array costs.
+    #[test]
+    fn base64_payloads_stay_close_to_the_source_size() {
+        let attachment = Attachment::new("x.bin", "application/octet-stream", vec![0xABu8; 10_000]);
+        let json = serde_json::to_string(&attachment).unwrap();
+        assert!(
+            json.len() < 15_000,
+            "payload encoding is not compact: {} bytes for 10000",
+            json.len()
+        );
     }
 
     #[test]

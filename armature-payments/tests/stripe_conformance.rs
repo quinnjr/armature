@@ -17,6 +17,7 @@ const CARD_DECLINED: &str = r#"{"error":{"type":"card_error","code":"card_declin
 
 fn provider(server: &StubServer) -> StripeProvider {
     StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .expect("a loopback stub URL is a valid base URL")
 }
@@ -393,5 +394,88 @@ async fn charge_sends_idempotency_key_statement_descriptor_and_metadata() {
     assert!(
         body.contains("metadata%5Border_id%5D=A-1"),
         "metadata missing from {body}"
+    );
+}
+
+/// `list_payment_methods` must follow Stripe's pagination.
+///
+/// Stripe's list endpoints default to `limit: 10` and report `has_more`
+/// alongside a `starting_after` cursor. The previous implementation issued one
+/// unpaginated GET and read neither, so a customer with 11 or more saved cards
+/// silently lost every card past the tenth — a wallet UI rendered an incomplete
+/// list with no error to say so.
+#[tokio::test]
+async fn list_payment_methods_requests_a_full_page_and_stops_when_told() {
+    let server = StubServer::start_single(StubResponse::json(
+        200,
+        r#"{"object":"list","has_more":false,"data":[
+            {"id":"pm_1","type":"card","customer":"cus_1","created":1700000000},
+            {"id":"pm_2","type":"card","customer":"cus_1","created":1700000001}]}"#,
+    ))
+    .await;
+
+    let methods = provider(&server)
+        .list_payment_methods("cus_1")
+        .await
+        .unwrap();
+    assert_eq!(methods.len(), 2);
+
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "has_more:false means one request; got {requests:?}"
+    );
+
+    let query = requests[0].query.as_deref().unwrap_or_default();
+    assert!(
+        query.contains("limit=100"),
+        "an explicit limit must be sent or Stripe defaults to 10; got {query:?}"
+    );
+    assert!(
+        !query.contains("starting_after"),
+        "the first page carries no cursor; got {query:?}"
+    );
+}
+
+/// When Stripe reports `has_more`, the next page must be requested with the last
+/// object's id as the cursor — and the walk must terminate rather than trusting
+/// a gateway that keeps saying there is more.
+#[tokio::test]
+async fn list_payment_methods_follows_the_cursor_and_terminates() {
+    let server = StubServer::start_single(StubResponse::json(
+        200,
+        r#"{"object":"list","has_more":true,"data":[
+            {"id":"pm_1","type":"card","customer":"cus_1","created":1700000000},
+            {"id":"pm_last","type":"card","customer":"cus_1","created":1700000001}]}"#,
+    ))
+    .await;
+
+    let methods = provider(&server)
+        .list_payment_methods("cus_1")
+        .await
+        .unwrap();
+
+    let requests = server.requests();
+    assert!(
+        requests.len() > 1,
+        "has_more:true must drive a second request; got {requests:?}"
+    );
+    assert!(
+        requests.len() <= 20,
+        "a gateway that always answers has_more must not spin forever; \
+         got {} requests",
+        requests.len()
+    );
+    assert_eq!(
+        methods.len(),
+        requests.len() * 2,
+        "every page's objects must be kept, not just the last page's"
+    );
+
+    let second = requests[1].query.as_deref().unwrap_or_default();
+    assert!(
+        second.contains("starting_after=pm_last"),
+        "the cursor is the id of the last object on the previous page; got {second:?}"
     );
 }

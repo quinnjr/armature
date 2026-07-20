@@ -96,9 +96,22 @@ impl From<reqwest::Error> for PaymentError {
             PaymentError::Serialization(err.to_string())
         } else if err.is_builder() {
             PaymentError::Config(err.to_string())
+        } else if let Some(status) = err.status() {
+            // `is_status()` means the gateway answered and reqwest turned that
+            // answer into an error (via `error_for_status`). The request
+            // therefore *was* committed, and a 4xx is permanently fatal — the
+            // catch-all below would have classified it retryable and replayed a
+            // charge the gateway already rejected for a structural reason.
+            // Route it through the shared classifier so it lands on the same
+            // variant a hand-checked status would.
+            //
+            // No provider calls `error_for_status()` today, so this is
+            // unreachable in practice; it exists so that adding such a call
+            // cannot silently make declines retryable.
+            crate::provider::classify_status("provider", status, &err.to_string(), None)
         } else {
-            // timeout / connect / request / redirect / status: the request may
-            // not have been committed, so these stay retryable.
+            // timeout / connect / request / redirect: the request may not have
+            // been committed, so these stay retryable.
             PaymentError::Network(err.to_string())
         }
     }
@@ -242,6 +255,43 @@ mod tests {
         let err: PaymentError = serde_json::from_str::<i32>("not json").unwrap_err().into();
         assert!(matches!(err, PaymentError::Serialization(_)));
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn a_status_carrying_transport_error_is_classified_by_status() {
+        // The catch-all used to swallow `is_status()` errors as retryable
+        // Network failures. A reqwest error that carries a status means the
+        // gateway *answered* — and a 4xx answer is permanently fatal, so
+        // replaying the charge just re-posts a request the gateway already
+        // rejected for a structural reason.
+        let bad_request = reqwest::Response::from(
+            http::Response::builder()
+                .status(400)
+                .body("bad request")
+                .unwrap(),
+        );
+        let err: PaymentError = bad_request.error_for_status().unwrap_err().into();
+        assert!(matches!(err, PaymentError::Provider(_)), "got {err:?}");
+        assert!(!err.is_retryable(), "a 400 must never be replayed");
+
+        let unauthorized =
+            reqwest::Response::from(http::Response::builder().status(401).body("nope").unwrap());
+        let err: PaymentError = unauthorized.error_for_status().unwrap_err().into();
+        assert!(
+            matches!(err, PaymentError::Authentication(_)),
+            "got {err:?}"
+        );
+        assert!(!err.is_retryable());
+
+        let throttled = reqwest::Response::from(
+            http::Response::builder()
+                .status(429)
+                .body("slow down")
+                .unwrap(),
+        );
+        let err: PaymentError = throttled.error_for_status().unwrap_err().into();
+        assert!(matches!(err, PaymentError::RateLimited(_)), "got {err:?}");
+        assert!(err.is_retryable(), "throttling is the one retryable status");
     }
 
     #[test]

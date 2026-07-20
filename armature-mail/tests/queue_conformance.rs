@@ -286,19 +286,35 @@ async fn permanent_failure_with_the_dlq_disabled_is_not_silently_lost() {
     let handle = tokio::spawn(queue.worker(mailer).with_shutdown(shutdown_rx).run());
 
     // The job must leave the "processing" state rather than being abandoned
-    // there: the worker now accounts for it via `complete` and logs an error.
+    // there: the worker accounts for it via `discard` and logs an error.
+    //
+    // `discard`, not `complete`. `complete` increments `processed`, so routing
+    // permanent failures through it inflated the success counter with failures
+    // and made `QueueStats::processed` unusable as the numerator of a
+    // delivery-rate alert — a run where every send failed reported 100%.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if seen.lock().unwrap().len() == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "send was never attempted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let stats = queue.stats().await.unwrap();
-        if stats.processed == 1 {
+        if stats.processing == 0 && stats.pending == 0 {
             assert_eq!(stats.dead_letter, 0, "DLQ is disabled");
-            assert_eq!(stats.processing, 0, "job left in flight: {stats:?}");
-            assert_eq!(stats.pending, 0);
+            assert_eq!(
+                stats.processed, 0,
+                "a job that was never sent must not count as processed: {stats:?}"
+            );
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "permanently failed job was silently dropped (stats: {stats:?})"
+            "permanently failed job was left in flight (stats: {stats:?})"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

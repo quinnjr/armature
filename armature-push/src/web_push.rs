@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use tracing::debug;
 use url::Host;
 use web_push::{
@@ -299,6 +300,23 @@ impl WebPushProvider {
         subscription: &WebPushSubscription,
         notification: &Notification,
     ) -> Result<()> {
+        let payload = serde_json::to_string(notification)?;
+        self.send_prepared(subscription, notification, &payload)
+            .await
+    }
+
+    /// Send to a web push subscription using an already-serialized payload.
+    ///
+    /// The ECE encryption genuinely is per-subscription (it is keyed by the
+    /// subscription's p256dh/auth), but the *plaintext* JSON is not — it is
+    /// identical for every recipient. Batch sends serialize it once and pass
+    /// it in here rather than re-running `serde_json::to_string` per device.
+    async fn send_prepared(
+        &self,
+        subscription: &WebPushSubscription,
+        notification: &Notification,
+        payload: &str,
+    ) -> Result<()> {
         // SSRF hardening: reject non-https / internal-target endpoints before we
         // sign anything or open a connection.
         validate_endpoint(&subscription.endpoint, self.config.allow_insecure_loopback)?;
@@ -321,9 +339,6 @@ impl WebPushProvider {
             .build()
             .map_err(|e: web_push::WebPushError| PushError::Config(e.to_string()))?;
 
-        // Build payload
-        let payload = serde_json::to_string(notification)?;
-
         // Pre-flight the plaintext against the ceiling that can still encrypt
         // into a body within WEB_PUSH_MAX_PAYLOAD. Without this the oversize
         // case surfaces as an opaque build failure, giving callers no
@@ -344,7 +359,7 @@ impl WebPushProvider {
 
         let message = builder
             .build()
-            .map_err(|e| PushError::Provider(e.to_string()))?;
+            .map_err(|e| PushError::provider(None, e.to_string()))?;
 
         // Pre-flight size check against the *encrypted* body, which is what the
         // 4096-byte limit actually applies to (AES128GCM adds an 86-byte header,
@@ -390,18 +405,54 @@ impl WebPushProvider {
             request = request.body(payload.content);
         }
 
-        // No `map_err` here: `?` goes through `From<reqwest::Error>`, which
-        // classifies timeouts as `PushError::Timeout` and connect failures as
-        // `PushError::Network` — both `is_retryable()`. Collapsing them into
-        // `Provider` (as this previously did) made a Web Push timeout report
+        // Classify the transport failure *here* rather than letting `?` run
+        // `From<reqwest::Error>`.
+        //
+        // Two requirements have to hold at once. First, timeouts must stay
+        // `PushError::Timeout` and connect failures `PushError::Network`, both
+        // of which are `is_retryable()`: collapsing them into `Provider` (as
+        // an earlier revision did) made a Web Push timeout report
         // `is_retryable() == false` while an identical FCM/APNS timeout
         // reported `true`, so callers' retry loops gave up on exactly the
-        // transient failures they were written for. It also kept the
-        // attacker-supplied endpoint URL out of the error text.
-        let response = request.send().await?;
+        // transient failures they were written for.
+        //
+        // Second — and this is what `?` got wrong — the attacker-supplied
+        // endpoint URL must not reach the error text. `From<reqwest::Error>`
+        // formats the error with `to_string()`, and `reqwest::Error`'s
+        // `Display` appends ` for url (…)`, so a DNS or connect failure
+        // produced `Network("error sending request for url
+        // (https://attacker.example/push?tok=…)")` and put it straight into
+        // caller logs. That contradicted the invariant asserted a few lines
+        // below, where `map_status` is deliberately handed a fixed string for
+        // the same reason. Every message here is a constant.
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                PushError::Timeout
+            } else if e.is_connect() {
+                PushError::Network("web push endpoint unreachable".to_string())
+            } else {
+                PushError::provider(None, "web push request failed")
+            }
+        })?;
 
         let status = response.status();
         if !status.is_success() {
+            // RFC 8030 §7.3: a push service answers 404 when the subscription
+            // has expired, so here — as on FCM, and unlike on APNs, where 404
+            // is `BadPath` — it really does mean the recipient is gone. It is
+            // mapped at this call site rather than in `error::map_status`
+            // because the shared mapper deliberately refuses to guess what 404
+            // means; see that function's documentation.
+            //
+            // The fixed subject string is load-bearing: this provider's
+            // "token" is an attacker-supplied endpoint URL that must not be
+            // echoed into error text or logs.
+            if status.as_u16() == 404 {
+                return Err(PushError::Unregistered(
+                    "web push subscription is no longer valid".to_string(),
+                ));
+            }
+
             // The mapper reads Retry-After from the headers. We deliberately do
             // NOT read or propagate the upstream response body into the
             // returned error: it is attacker-influenced content and echoing it
@@ -436,6 +487,52 @@ impl PushProvider for WebPushProvider {
 
         let subscription = WebPushSubscription::new(parts[0], parts[1], parts[2]);
         self.send_to_web_subscription(&subscription, notification)
+            .await
+    }
+
+    /// Overrides the default fan-out so the recipient-invariant plaintext JSON
+    /// is serialized once for the whole batch. (The ECE encryption below it is
+    /// genuinely per-subscription and still runs per token.) Concurrency and
+    /// result ordering match the trait default.
+    async fn send_batch(&self, tokens: &[String], notification: &Notification) -> Vec<Result<()>> {
+        let payload = match serde_json::to_string(notification) {
+            Ok(payload) => payload,
+            Err(e) => {
+                let message = e.to_string();
+                return tokens
+                    .iter()
+                    .map(|_| Err(PushError::Serialization(message.clone())))
+                    .collect();
+            }
+        };
+
+        let subscriptions: Vec<Result<WebPushSubscription>> = tokens
+            .iter()
+            .map(|token| {
+                let parts: Vec<&str> = token.split('|').collect();
+                if parts.len() != 3 {
+                    Err(PushError::InvalidSubscription(
+                        "Invalid web push token format. Expected: endpoint|p256dh|auth".to_string(),
+                    ))
+                } else {
+                    Ok(WebPushSubscription::new(parts[0], parts[1], parts[2]))
+                }
+            })
+            .collect();
+
+        let (payload, subscriptions) = (payload.as_str(), &subscriptions);
+        futures_util::stream::iter(0..subscriptions.len())
+            .map(|i| async move {
+                match &subscriptions[i] {
+                    Ok(sub) => self.send_prepared(sub, notification, payload).await,
+                    Err(PushError::InvalidSubscription(m)) => {
+                        Err(PushError::InvalidSubscription(m.clone()))
+                    }
+                    Err(other) => Err(PushError::provider(None, other.to_string())),
+                }
+            })
+            .buffered(crate::provider::BATCH_CONCURRENCY)
+            .collect()
             .await
     }
 

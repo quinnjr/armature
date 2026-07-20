@@ -359,7 +359,7 @@ impl Pipeline {
 
                 for op in image_ops {
                     let op = apply_default_font(op, &default_font);
-                    img = crate::image::apply_operation(img, &op)?;
+                    img = crate::image::apply_operation(img, &op, limits)?;
                 }
 
                 let encoded = crate::image::encode_variant(

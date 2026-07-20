@@ -13,13 +13,14 @@ categories = ["email", "web-programming"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.52", features = ["sync", "time"] }
+tokio = { version = "1.52", features = ["sync", "time", "fs"] }
 async-trait = "0.1"
-futures = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Email
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
-mail-builder = "0.4"
+# `pool` is required for `SmtpConfig::pool_size`, which is wired through
+# lettre's `PoolConfig`.
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "pool", "builder", "hostname"] }
 
 # Templates
 handlebars = { version = "6.4", optional = true }
@@ -37,16 +38,21 @@ thiserror = "2.0"
 
 # Utilities
 tracing = "0.1"
+# Used by `crate::http::validate_endpoint` to reject a plaintext provider
+# endpoint before an API key is written to it in the clear.
 url = "2.5"
-mime = "0.3"
 mime_guess = "2.0"
 uuid = { version = "1.23", features = ["v4"] }
+# `Attachment::data`: cloning an attachment (per queue retry, per send attempt)
+# is a refcount bump rather than a copy of the payload.
+bytes = "1.12"
 
 # HTTP client for API providers
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"], optional = true }
 
-# Base64 encoding for provider attachments
-base64 = { version = "0.22", optional = true }
+# Base64: provider attachment payloads *and* the queue's job serialization —
+# a `Vec<u8>` serialized as a JSON number array costs ~4 bytes per source byte.
+base64 = "0.22"
 
 # AWS SES
 aws-sdk-sesv2 = { version = "1.112", optional = true }
@@ -61,8 +67,8 @@ chrono = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
-tokio-test = "0.4"
 async-trait = "0.1"
+tempfile = "3"
 armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 armature-redis = { path = "../armature-redis", version = "0.2.0" }
 redis = { version = "1.3", features = ["tokio-comp"] }
@@ -73,7 +79,7 @@ default = ["handlebars"]
 handlebars = ["dep:handlebars"]
 tera = ["dep:tera"]
 minijinja = ["dep:minijinja"]
-sendgrid = ["reqwest", "dep:base64"]
+sendgrid = ["reqwest"]
 mailgun = ["reqwest"]
 ses = ["aws-sdk-sesv2", "aws-config"]
 queue = ["chrono"]

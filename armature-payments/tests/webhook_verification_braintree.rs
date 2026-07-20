@@ -29,7 +29,7 @@ fn braintree_sign(private_key: &str, payload: &[u8]) -> String {
 }
 
 fn braintree_provider() -> BraintreeProvider {
-    BraintreeProvider::new("merchant-1", BT_PUBLIC_KEY, BT_PRIVATE_KEY)
+    BraintreeProvider::new("merchant-1", BT_PUBLIC_KEY, BT_PRIVATE_KEY).expect("HTTP client builds")
 }
 
 #[tokio::test]
@@ -150,7 +150,7 @@ async fn braintree_rejects_empty_credentials_instead_of_a_forged_signature() {
     // under a missing-secret misconfiguration. Both must be rejected as a
     // config error, before the (attacker-satisfiable) signature is even
     // checked.
-    let provider = BraintreeProvider::new("merchant-1", "", "");
+    let provider = BraintreeProvider::new("merchant-1", "", "").expect("HTTP client builds");
     let forged_signature = format!("|{}", braintree_sign("", BRAINTREE_EVENT.as_bytes()));
 
     let err = provider

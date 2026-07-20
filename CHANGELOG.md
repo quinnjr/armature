@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Delivery provider features (`armature-mail`, `armature-push`, `armature-payments`, `armature-storage`, `armature-files`)
 - `armature-mail`: `TeraEngine` and `MiniJinjaEngine` are now real `TemplateEngine` implementations (they were empty structs); SES sends raw MIME so **attachments are actually delivered**; custom headers and `Email::priority` reach SMTP/SES/Mailgun/SendGrid; inline attachments carry a Content-ID inside `multipart/related` so `cid:` references resolve; the queue enforces `job_timeout`, batches `pop` with `MGET`, and pipelines `enqueue_batch`.
-- `armature-payments`: `ProcessorConfig` retry/idempotency/logging are wired (stable idempotency key across retries; declines are never retried); every Stripe call site checks HTTP status and maps a typed provider error; subscription `price_id`/`quantity` come from the real line items; `PaymentSource::PaymentMethod` routes via PaymentIntents and `Bank` via `source`; PayPal plan changes use `revise`; both providers send partial capture amounts; Braintree lists real vaulted payment methods.
+- `armature-payments`: `ProcessorConfig` retry/idempotency/logging are wired (stable idempotency key across retries; declines are never retried); every Stripe call site checks HTTP status and maps a typed provider error; subscription `price_id`/`quantity` come from the real line items; `PaymentSource::PaymentMethod` routes via PaymentIntents and `Bank` via `source`; PayPal plan changes use `revise`; Braintree sends partial capture amounts, while PayPal returns `PaymentError::Unsupported` for a partial capture (its Orders v2 capture endpoint has no `amount` field, so the previous code sent a field the API ignores); Braintree lists real vaulted payment methods.
 - `armature-storage`: `public_access` applies a predefined ACL, S3 honors `region` and `storage_class`, GCS honors a custom `endpoint` (emulators) and sends `project_id` as the quota/billing project (`x-goog-user-project`) on every object operation, `MultipartConstraints` are enforced and re-exported, and the new `Storage::temporary_url_default` trait method honors each backend's configured signed-URL duration (reachable through `Arc<dyn Storage>`, unlike the per-backend inherent methods it replaces).
 - `armature-files`: `OutputFormat::Original` round-trips (so `MultiSizeBuilder::generate()` works at all), `TextWatermark` renders real glyphs, `AutoOrient` applies EXIF orientation, PDF horizontal lines emit a real stroke, and `MultiSizeBuilder` decodes the source once instead of once per size.
 - `armature-push`: Web Push maps `Notification::urgency` to the RFC 8030 `Urgency` header, APNS honors a per-notification `topic`, and batch sends use bounded concurrency instead of serial round-trips.
@@ -178,6 +178,59 @@ A multi-agent audit of the WF3 branch (code-review + audit + optimize) found sev
 - **Web Push SSRF hardening (`armature-push`).** The new reqwest sender now blocks redirects, enforces HTTPS, rejects internal/link-local/private-IP endpoints (push subscription endpoints are client-supplied), no longer echoes the upstream response body into errors, and applies a 30s request timeout.
 - **NATS credentials no longer serializable/loggable (`armature-messaging`).** `NatsConfig`'s `jwt`/`nkey_seed`/`credentials_file` are redacted in `Debug` and skipped on serialization.
 - Robustness: `armature-queue` `backoff_delay` no longer overflows/panics for large attempt counts and `complete`/`fail` always drain the processing set; `armature-discovery` etcd/consul/health-check clients now have request timeouts and the etcd prefix scan uses a correct range successor; `armature-webhooks` signs over raw payload bytes and resolves signature headers deterministically.
+
+#### Breaking changes in the delivery-provider crates (0.2.0)
+
+The two audit-battery passes below changed a large amount of public surface. This
+list is the migration guide; an earlier revision of this changelog described the
+behavioral fixes in prose and labelled none of them breaking, which left a
+consumer upgrading from `0.1.x` with a wall of compile errors and nothing to work
+from.
+
+**`armature-payments`**
+- `StripeProvider::new`, `PayPalProvider::new`, `BraintreeProvider::new` and `ProviderClient::new` return `PaymentResult<Self>`. They previously fell back to an HTTP client with **no request and no connect timeout** when the builder failed, which is the unbounded hang the timeouts exist to prevent.
+- `with_base_url` returns `PaymentResult<Self>` and rejects any non-`https` URL that is not loopback. It previously accepted any scheme, leaking `sk_live_…`/Basic credentials in cleartext — and, because PayPal's webhook verification POSTs to that base, letting an attacker-chosen host answer `{"verification_status":"SUCCESS"}`.
+- `with_webhook_tolerance(Option<Duration>)` → `with_webhook_tolerance(Duration)` plus an explicit `without_webhook_tolerance()`. Disabling replay protection can no longer happen by passing `None`.
+- Removed: `PaymentError::{InvalidCard, InvalidAmount, Unknown}`, `ProviderClient::base_url()`. Added: `PaymentError::Unsupported { provider, message }`.
+- `sanitize_body`, `classify_status` and `retry_after_secs` are now `pub(crate)`; `lib.rs` no longer glob-re-exports `provider::*`. These were internal helpers accidentally published — `sanitize_body` in particular is a best-effort redaction heuristic whose thresholds must stay free to tune.
+- `ProcessorConfig` gained `max_retry_delay_ms`; `RefundRequest` gained `idempotency_key`; `WebhookData::from_event_type` takes `raw` by value; `WebhookEventType` derives `Hash`.
+- **Behavioral:** `charge` and `refund` no longer retry unless the provider reports `PaymentProvider::supports_idempotency()` *and* the request carries a key. Stripe and PayPal opt in; **Braintree does not**, because it has no general idempotency mechanism — a transient Braintree failure now surfaces instead of being retried. One visible error beats up to four real charges.
+- **Behavioral:** PayPal's `get_customer`/`update_customer` return `Unsupported` rather than `CustomerNotFound`, and `create_customer`/`create_payment_method`/`attach`/`detach` return `Unsupported` rather than `Provider`.
+- Dependency: `armature-core` removed (it was declared and never referenced); `hmac`/`sha2`/`hex` are now optional behind `stripe`+`braintree`, `base64` behind `paypal`+`braintree`.
+
+**`armature-mail`**
+- `MailError::Provider(String)` → `MailError::Provider { status: Option<u16>, message: String }`. This is what lets `is_retryable()` tell a transient 503 from a permanent 400; previously a SendGrid 503 was dead-lettered on the first attempt. Use `MailError::provider(status, message)` to construct.
+- `SendGridTransport::new` and `MailgunTransport::new` return `Result<Self>` and validate the endpoint scheme. Both previously fell back to an untimed client, and neither rejected a cleartext endpoint — which ships the API key in the clear, since `send()` attaches `Authorization: Bearer`.
+- `EmailQueueBackend` gained two **required** methods: `discard(&self, job_id)` and `reclaim_stale(&self, Duration) -> Result<u64>`. Deliberately not defaulted: a no-op `reclaim_stale` would let an external backend silently keep losing jobs while appearing to implement recovery.
+- `Attachment::data` is now `bytes::Bytes`; constructors take `impl Into<Bytes>`. `EmailJob::email` is `Arc<Email>`. `Email` gained `invalid_headers`.
+- `#[non_exhaustive]` on `MailerConfig`, `MailgunConfig`, `SendGridConfig`, `EmailQueueConfig` — construct via `new` plus builders rather than struct literals.
+- `HandlebarsEngine::register_helper` gained a `Clone` bound (the helper is installed into both the escaping and non-escaping registries).
+- **Behavioral:** Handlebars no longer HTML-escapes the `text` and `subject` parts. It previously escaped every part, so `Bob & Alice` reached recipients as `Bob &amp; Alice` in the plain-text body and in the `Subject:` header. All three engines now escape the `html` part only, pinned by a cross-engine conformance test.
+- Dependency: `mail-builder`, `mime`, `tokio-test` removed; `bytes` added.
+
+**`armature-files`**
+- Removed: `OutputFormat::Avif` (the encoder always errored and no detection path could produce it), `OutputFormat::WebP`'s `quality` field, `Pipeline::output_format`. `ImageOp::TextWatermark` gained `font: Option<Bytes>`; `decode_image` takes `DecodeLimits`.
+- **`image` is now built with `default-features = false`, so AVIF, DDS, OpenEXR, farbfeld, HDR, PNM, QOI and TGA can no longer be _decoded_.** Only bmp/gif/ico/jpeg/png/tiff/webp are enabled. Re-enable with `image/<format>` if you accept those inputs. This drops `ravif`/`rav1e`/`exr` from the tree.
+- **Behavioral:** `ZipExtractor::extract_to` is now **non-clobbering** — an entry whose destination already exists (file, directory or symlink) is an error rather than an overwrite. This falls out of using `O_EXCL`, which is what stops an archive writing *through* a pre-existing symlink.
+- **Behavioral:** `ImageOp::Crop` returns `InvalidDimensions` on overflowing coordinates instead of panicking in debug / wrapping in release. Image-watermark overlays are decoded under the pipeline's configured `DecodeLimits`, so a previously-accepted oversized overlay may now be rejected.
+- Added: `archive::DEFAULT_MAX_ARCHIVE_BYTES`, `ZipExtractor::max_archive_bytes`, `extract_all_async`, `image::{process_image_async, convert_format_async}`, and an `embedded-font` feature (default-on).
+- Dependency: `armature-core`, `armature-log`, `base64`, `sha2`, `printpdf` removed — all had zero call sites. `armature-files` drops from ~155 transitive crates to 21 with `--no-default-features`.
+
+**`armature-storage`**
+- `Storage::list_page(prefix, cursor, limit)` is a new **required** trait method; `list` is now a provided method over it and errors past `LIST_MAX_ITEMS` (10 000) instead of allocating without bound. Fixing S3's silent truncation had removed the bound rather than exposing it.
+- **`Storage::delete` now contracts idempotent deletion** — deleting a missing key is `Ok(())` on all four backends. `LocalStorage` previously returned `NotFound` while S3 returned `Ok(())` and GCS/Azure returned `Storage`, so `is_not_found()` was correct on one backend and wrong on three.
+- Removed: `AzureBlobConfig::{sas_duration, access_key, connection_string}` — the SDK cannot use key or connection-string auth, so those builders only ever produced a deferred constructor failure.
+- `FileValidator::validate` wraps failures in `ValidationError::Rule { rule, source }`; match on `err.kind()`. `allowed_types`/`images_only`/`documents_only` now sniff magic bytes, so uploads that lie about their `Content-Type` are rejected where they previously passed. S3 `put` rejects unknown `storage_class`/`default_acl`/`server_side_encryption` rather than forwarding them verbatim.
+- **Security:** `LocalStorage` now physically resolves every key — each path component is `lstat`ed and rejected if it is a symlink, and the deepest existing ancestor is canonicalized and re-checked against the canonical root (again after `create_dir_all`, the one step that changes what a path resolves to). The previous release's containment check was **lexical only**: it blocked `..` and absolute keys, but a symlink already under the root escaped it entirely, giving arbitrary filesystem read and write. `list` no longer follows directory symlinks (which could loop forever and leak absolute host paths into public URLs), and `put_file` sanitizes client-supplied filenames on all four backends, not just Local.
+- Added: `DEFAULT_LIST_PAGE_SIZE`, `LIST_MAX_ITEMS`, `ValidationContext`, `ValidationRule::validate_with` (defaulted). Dependency: `infer` added; `tempfile`/`serde_json` moved to dev-dependencies.
+
+**`armature-push`**
+- `PushError::Provider(String)` → `PushError::Provider { status: Option<u16>, message: String }`, mirroring `MailError`. Use `PushError::provider(status, message)`.
+- **Behavioral:** `is_retryable()` now returns `true` for a `Provider` carrying a 5xx or 408. A five-minute FCM 503 window previously dropped an entire notification batch permanently.
+- **Behavioral:** `should_remove_device()` no longer returns `true` for an APNs **404**. A 404 from APNs is `BadPath` — a wrong `:path`, topic or environment — not a dead device. Mapping it centrally alongside FCM's 404 meant one bad deploy could report every send as "device gone" and prune an entire iOS token table. FCM and Web Push keep 404 → `Unregistered` at their own call sites, where it is correct.
+- `#[non_exhaustive]` on `ApnsEnvironment`, `FcmConfig`, `ApnsConfig`, `WebPushConfig`; `ApnsEnvironment` is no longer `Copy` and gained `Custom(String)`. `WebPushConfig::public_key` was removed. `NotificationBuilder` is `#[deprecated]` and out of the prelude; `SubscriptionKeys` is newly exported.
+- All three configs gained `allow_insecure_loopback` (default `false`), `timeout` and `connect_timeout`. Non-`https` API bases are rejected at construction for FCM and APNS; Web Push validates each subscription endpoint at send time.
+- Dependency: `uuid`, `base64`, `tokio-test`, `futures` removed; `futures-util` and `bytes` added.
 
 #### Delivery-provider hardening (audit-battery follow-up)
 

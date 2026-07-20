@@ -402,6 +402,20 @@ impl PdfBuilder {
         }
     }
 
+    /// The page drawing operations are currently appended to.
+    ///
+    /// `pages` is seeded with one entry in [`Self::new`] (which `Default`
+    /// delegates to) and is only ever pushed to — there is no `pop`, `clear`,
+    /// `drain`, `truncate`, `retain` or reassignment anywhere in this module —
+    /// so the vector is non-empty by construction. The `if let Some(page) =
+    /// self.pages.last_mut()` this replaces was therefore unreachable in its
+    /// `None` arm, and that arm silently discarded the drawing operation.
+    fn current_page(&mut self) -> &mut PageContent {
+        self.pages
+            .last_mut()
+            .expect("pages is seeded in new() and only ever pushed to")
+    }
+
     /// Add a new page internally
     fn add_page_internal(&mut self) {
         self.pages.push(PageContent::default());
@@ -436,17 +450,19 @@ impl PdfBuilder {
     /// Compute the x position for a line of `text` at `font_size` given
     /// `align`, clamped to not go left of the margin.
     fn aligned_x(&self, text: &str, font_size: f32, align: TextAlign) -> f32 {
+        self.aligned_x_for_width(Self::estimate_text_width(text, font_size), align)
+    }
+
+    /// [`Self::aligned_x`] for a line whose width the caller already knows.
+    ///
+    /// The word-wrapper tracks a running width as it appends words, so it would
+    /// otherwise measure every line a second time purely to place it.
+    fn aligned_x_for_width(&self, text_width: f32, align: TextAlign) -> f32 {
         let content_width = self.content_width();
         match align {
             TextAlign::Left => self.margins.left,
-            TextAlign::Center => {
-                let text_width = Self::estimate_text_width(text, font_size);
-                self.margins.left + ((content_width - text_width) / 2.0).max(0.0)
-            }
-            TextAlign::Right => {
-                let text_width = Self::estimate_text_width(text, font_size);
-                self.margins.left + (content_width - text_width).max(0.0)
-            }
+            TextAlign::Center => self.margins.left + ((content_width - text_width) / 2.0).max(0.0),
+            TextAlign::Right => self.margins.left + (content_width - text_width).max(0.0),
         }
     }
 
@@ -460,15 +476,17 @@ impl PdfBuilder {
         let line_height = size.line_height();
         self.ensure_space(line_height);
 
+        // Both `cursor_y` and `aligned_x` read `self` immutably, so they must
+        // be evaluated *before* `current_page` takes the mutable borrow.
         let x = self.aligned_x(text, size.points(), align);
-        if let Some(page) = self.pages.last_mut() {
-            page.texts.push(TextOp {
-                text: text.to_string(),
-                x,
-                y: self.cursor_y,
-                font_size: size.points(),
-            });
-        }
+        let y = self.cursor_y;
+        let font_size = size.points();
+        self.current_page().texts.push(TextOp {
+            text: text.to_string(),
+            x,
+            y,
+            font_size,
+        });
 
         self.cursor_y -= line_height;
         self
@@ -484,57 +502,69 @@ impl PdfBuilder {
         self.add_text_aligned(text, size, TextAlign::Left)
     }
 
-    /// Add text with custom font size and explicit alignment
+    /// Add text with custom font size and explicit alignment.
+    ///
+    /// Wrapping is measured in points via the real Helvetica advance widths,
+    /// not by comparing a UTF-8 byte length against a character count.
+    ///
+    /// The accumulated line and its width are both carried forward as words are
+    /// appended. Building `format!("{current_line} {word}")` per word and
+    /// re-measuring the whole prefix — then measuring it a *third* time in
+    /// `aligned_x` — made a single paragraph O(n^2) in its word count, since
+    /// advance widths are additive and the prefix never changes.
     pub fn add_text_aligned(mut self, text: &str, size: FontSize, align: TextAlign) -> Self {
         let line_height = size.line_height();
-
-        // Word wrapping measured in points via the real Helvetica metrics,
-        // not by comparing a UTF-8 byte length against a character count.
+        let font_size = size.points();
         let content_width = self.content_width();
+        // Advance width of the separator added ahead of each appended word.
+        let space_width = Self::estimate_text_width(" ", font_size);
 
         for line in text.lines() {
-            let words: Vec<&str> = line.split_whitespace().collect();
             let mut current_line = String::new();
+            let mut current_width = 0.0f32;
 
-            for word in words {
-                let test_line = if current_line.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{} {}", current_line, word)
-                };
+            for word in line.split_whitespace() {
+                let word_width = Self::estimate_text_width(word, font_size);
 
-                if Self::estimate_text_width(&test_line, size.points()) > content_width
-                    && !current_line.is_empty()
-                {
+                if current_line.is_empty() {
+                    current_line.push_str(word);
+                    current_width = word_width;
+                    continue;
+                }
+
+                let candidate_width = current_width + space_width + word_width;
+                if candidate_width > content_width {
                     self.ensure_space(line_height);
-                    let x = self.aligned_x(&current_line, size.points(), align);
-                    if let Some(page) = self.pages.last_mut() {
-                        page.texts.push(TextOp {
-                            text: current_line.clone(),
-                            x,
-                            y: self.cursor_y,
-                            font_size: size.points(),
-                        });
-                    }
+                    let x = self.aligned_x_for_width(current_width, align);
+                    let y = self.cursor_y;
+                    self.current_page().texts.push(TextOp {
+                        text: std::mem::take(&mut current_line),
+                        x,
+                        y,
+                        font_size,
+                    });
                     self.cursor_y -= line_height;
-                    current_line = word.to_string();
+
+                    current_line.push_str(word);
+                    current_width = word_width;
                 } else {
-                    current_line = test_line;
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                    current_width = candidate_width;
                 }
             }
 
             // Write remaining text
             if !current_line.is_empty() {
                 self.ensure_space(line_height);
-                let x = self.aligned_x(&current_line, size.points(), align);
-                if let Some(page) = self.pages.last_mut() {
-                    page.texts.push(TextOp {
-                        text: current_line,
-                        x,
-                        y: self.cursor_y,
-                        font_size: size.points(),
-                    });
-                }
+                let x = self.aligned_x_for_width(current_width, align);
+                let y = self.cursor_y;
+                self.current_page().texts.push(TextOp {
+                    text: current_line,
+                    x,
+                    y,
+                    font_size,
+                });
                 self.cursor_y -= line_height;
             }
         }
@@ -555,14 +585,12 @@ impl PdfBuilder {
         let y = self.cursor_y;
         let x1 = self.margins.left;
         let x2 = x1 + self.content_width();
-        if let Some(page) = self.pages.last_mut() {
-            page.lines.push(LineOp {
-                x1,
-                y1: y,
-                x2,
-                y2: y,
-            });
-        }
+        self.current_page().lines.push(LineOp {
+            x1,
+            y1: y,
+            x2,
+            y2: y,
+        });
 
         self.cursor_y -= 10.0;
         self
@@ -587,14 +615,13 @@ impl PdfBuilder {
 
             for (col_idx, cell) in row.iter().enumerate() {
                 let x = self.margins.left + (col_idx as f32 * col_width) + 5.0;
-                if let Some(page) = self.pages.last_mut() {
-                    page.texts.push(TextOp {
-                        text: cell.to_string(),
-                        x,
-                        y: self.cursor_y,
-                        font_size: FontSize::Normal.points(),
-                    });
-                }
+                let y = self.cursor_y;
+                self.current_page().texts.push(TextOp {
+                    text: cell.to_string(),
+                    x,
+                    y,
+                    font_size: FontSize::Normal.points(),
+                });
             }
             self.cursor_y -= row_height;
         }
@@ -759,7 +786,19 @@ impl PdfBuilder {
 
         // Compress and save
         doc.compress();
-        let mut buffer = Vec::new();
+
+        // Seed the serialization buffer instead of doubling from zero. Roughly
+        // one object header plus its content stream per page, floored so small
+        // documents still get a single allocation.
+        let text_bytes: usize = self
+            .pages
+            .iter()
+            .flat_map(|page| page.texts.iter())
+            .map(|op| op.text.len() + 64)
+            .sum();
+        let estimate = (4096 + text_bytes + self.pages.len() * 512).min(16 * 1024 * 1024);
+
+        let mut buffer = Vec::with_capacity(estimate);
         doc.save_to(&mut buffer)
             .map_err(|e| crate::FileError::Pdf(e.to_string()))?;
 

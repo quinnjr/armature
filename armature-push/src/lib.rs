@@ -107,7 +107,7 @@ pub use error::{PushError, Result};
 pub use notification::NotificationBuilder;
 pub use notification::{Notification, NotificationAction, Priority, Urgency};
 pub use provider::{PushProvider, PushService};
-pub use subscription::{DeviceToken, Platform, Subscription};
+pub use subscription::{DeviceToken, Platform, Subscription, SubscriptionKeys};
 
 #[cfg(feature = "web-push")]
 pub use web_push::{WebPushConfig, WebPushProvider, WebPushSubscription};
@@ -129,7 +129,7 @@ pub mod prelude {
     // of `Notification::new(..)`'s chaining methods, which cover every field.
     pub use crate::notification::{Notification, NotificationAction, Priority, Urgency};
     pub use crate::provider::{PushProvider, PushService};
-    pub use crate::subscription::{DeviceToken, Platform, Subscription};
+    pub use crate::subscription::{DeviceToken, Platform, Subscription, SubscriptionKeys};
 
     #[cfg(feature = "web-push")]
     pub use crate::web_push::{WebPushConfig, WebPushProvider, WebPushSubscription};

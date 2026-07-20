@@ -30,7 +30,9 @@ fn stripe_signature(secret: &str, timestamp: i64, payload: &[u8]) -> String {
 }
 
 fn stripe_provider() -> StripeProvider {
-    StripeProvider::new("sk_test").with_webhook_secret(STRIPE_SECRET)
+    StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
+        .with_webhook_secret(STRIPE_SECRET)
 }
 
 fn now() -> i64 {
@@ -120,6 +122,7 @@ async fn stripe_rejects_a_replayed_timestamp_outside_tolerance() {
 
     // ...and is accepted when the tolerance check is explicitly disabled.
     StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
         .with_webhook_secret(STRIPE_SECRET)
         .without_webhook_tolerance()
         .verify_webhook(
@@ -199,7 +202,7 @@ async fn stripe_rejects_near_miss_and_far_miss_signatures() {
 
 #[tokio::test]
 async fn stripe_verification_requires_a_configured_secret() {
-    let provider = StripeProvider::new("sk_test");
+    let provider = StripeProvider::new("sk_test").expect("HTTP client builds");
     let err = provider
         .verify_webhook(
             STRIPE_EVENT.as_bytes(),
@@ -215,7 +218,9 @@ async fn stripe_verification_rejects_an_empty_secret() {
     // An empty secret is a misconfiguration, not a valid HMAC key — it must
     // not be treated as "verification passes for whoever guesses the empty
     // string", which is trivial.
-    let provider = StripeProvider::new("sk_test").with_webhook_secret("");
+    let provider = StripeProvider::new("sk_test")
+        .expect("HTTP client builds")
+        .with_webhook_secret("");
     let sig = stripe_signature("", now(), STRIPE_EVENT.as_bytes());
 
     let err = provider

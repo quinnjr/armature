@@ -30,6 +30,37 @@ fn solid_jpeg(width: u32, height: u32, color: [u8; 3]) -> Bytes {
     Bytes::from(buf)
 }
 
+/// Encode a deterministically noisy RGB image as JPEG bytes.
+///
+/// A *solid* field is DCT-idempotent: every 8x8 block is DC-only, so decoding
+/// and re-encoding reproduces the same coefficients and a byte-identical file.
+/// Any test asserting "this path encoded only once" is therefore blind when fed
+/// a flat fixture — it passes just as happily against an N-encode
+/// implementation. Per-pixel variation puts real energy in the AC coefficients,
+/// so quantization is genuinely lossy and a second generation is visible.
+fn noisy_jpeg(width: u32, height: u32) -> Bytes {
+    let img = RgbImage::from_fn(width, height, |x, y| {
+        Rgb([
+            ((x * 97 + y * 131) % 256) as u8,
+            ((x * 53 + y * 181) % 256) as u8,
+            ((x * 29 + y * 211) % 256) as u8,
+        ])
+    });
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .unwrap();
+    Bytes::from(buf)
+}
+
+/// Encode `img` as JPEG at the crate's default quality.
+fn encode_jpeg(img: &image::DynamicImage) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    img.write_with_encoder(encoder).unwrap();
+    buf
+}
+
 /// Build a minimal TIFF/Exif blob (as consumed by
 /// `image::codecs::jpeg::JpegEncoder::set_exif_metadata`, i.e. *without* the
 /// leading `"Exif\0\0"` marker, which the encoder adds itself) containing
@@ -129,9 +160,15 @@ async fn convert_to_original_is_a_byte_identical_no_op() {
 /// encode, not N of each. Byte-for-byte, `.grayscale().rotate(180)` through
 /// the pipeline must equal the same two operations applied to a single decode
 /// — which is only true if no intermediate re-encode happened.
+///
+/// The fixture is deliberately *noisy*: with a flat single-colour JPEG the
+/// single-encode and N-encode paths produce byte-identical output (see
+/// [`noisy_jpeg`]), so the test would pass against the very code it exists to
+/// catch. The `assert_ne!` against a deliberately double-encoded reference
+/// proves the fixture really can tell the two apart.
 #[tokio::test]
 async fn chained_operations_encode_only_once() {
-    let data = solid_jpeg(64, 48, [200, 100, 50]);
+    let data = noisy_jpeg(64, 48);
 
     let chained = Pipeline::new()
         .load_bytes(data.clone(), "photo.jpg")
@@ -141,16 +178,24 @@ async fn chained_operations_encode_only_once() {
         .await
         .expect("chained operations should succeed");
 
-    // Reference: one decode, both operations, one encode.
+    // Reference A: one decode, both operations, one encode.
     let decoded = image::load_from_memory(&data).unwrap();
-    let expected = decoded.grayscale().rotate180();
-    let mut buf = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
-    expected.write_with_encoder(encoder).unwrap();
+    let single_encode = encode_jpeg(&decoded.grayscale().rotate180());
+
+    // Reference B: what the old encode-per-operation path produced — encode
+    // after grayscale, decode again, then encode after the rotate.
+    let intermediate = encode_jpeg(&decoded.grayscale());
+    let double_encode = encode_jpeg(&image::load_from_memory(&intermediate).unwrap().rotate180());
+
+    assert_ne!(
+        single_encode, double_encode,
+        "the fixture must be lossy enough for the two paths to differ, otherwise \
+         this test cannot detect the generation loss it exists to catch"
+    );
 
     assert_eq!(
         &chained.data[..],
-        &buf[..],
+        &single_encode[..],
         "the pipeline should decode once and encode once; a byte mismatch means \
          an intermediate re-encode (and, for JPEG, a lost generation) crept back in"
     );
@@ -206,6 +251,12 @@ async fn oversized_image_header_is_rejected_not_allocated() {
 }
 
 /// The limits are configurable, and a normal image is unaffected by them.
+///
+/// They must also cover the *overlay* of an image watermark: it is a second
+/// buffer of caller-supplied, untrusted image bytes going through the same
+/// decode path. Hardcoding `DecodeLimits::default()` there meant a caller who
+/// tightened the limits for an untrusted upload path still permitted a
+/// 16384x16384 / 256 MiB overlay decode.
 #[tokio::test]
 async fn decode_limits_are_configurable() {
     use armature_files::image::DecodeLimits;
@@ -226,11 +277,86 @@ async fn decode_limits_are_configurable() {
     assert!(err.to_string().to_lowercase().contains("limit"));
 
     Pipeline::new()
-        .load_bytes(data, "photo.png")
+        .load_bytes(data.clone(), "photo.png")
         .resize(16, 16)
         .execute()
         .await
         .expect("the default limits must not reject an ordinary image");
+
+    // A 128x128 overlay under a 64x64 cap: the base image fits, the overlay
+    // does not, and the configured limits must be what rejects it.
+    let limits = DecodeLimits {
+        max_width: 64,
+        max_height: 64,
+        ..DecodeLimits::default()
+    };
+
+    let err = Pipeline::new()
+        .load_bytes(data.clone(), "photo.png")
+        .decode_limits(limits)
+        .image(ImageOp::ImageWatermark {
+            overlay: solid_png(128, 128, [255, 0, 0, 128]),
+            position: Position::Center,
+            opacity: 0.5,
+        })
+        .execute()
+        .await
+        .expect_err("an oversized watermark overlay must be rejected by the configured limits");
+    assert!(
+        err.to_string().to_lowercase().contains("limit"),
+        "expected a decode-limit error for the overlay, got: {err}"
+    );
+
+    // ...and an overlay within the limits still works.
+    Pipeline::new()
+        .load_bytes(data, "photo.png")
+        .decode_limits(limits)
+        .image(ImageOp::ImageWatermark {
+            overlay: solid_png(16, 16, [255, 0, 0, 128]),
+            position: Position::Center,
+            opacity: 0.5,
+        })
+        .execute()
+        .await
+        .expect("an overlay inside the configured limits must still be accepted");
+}
+
+/// `ImageOp::Crop`'s bounds check must not overflow on caller-supplied
+/// coordinates.
+///
+/// `x + width` with `x = u32::MAX` panics in debug and, in release, wraps to a
+/// small value that *passes* the check and reaches `crop_imm` with a nonsensical
+/// origin. `Pipeline::crop` passes its arguments straight through, so this is
+/// reachable from the public convenience method.
+#[tokio::test]
+async fn crop_bounds_check_does_not_overflow() {
+    let data = solid_png(32, 32, [9, 9, 9, 255]);
+
+    for (x, y, width, height) in [
+        (u32::MAX, 0, 10, 10),
+        (0, u32::MAX, 10, 10),
+        (10, 10, u32::MAX, 10),
+        (10, 10, 10, u32::MAX),
+    ] {
+        let result = Pipeline::new()
+            .load_bytes(data.clone(), "photo.png")
+            .crop(x, y, width, height)
+            .execute()
+            .await;
+
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!(
+                "crop({x}, {y}, {width}, {height}) on a 32x32 image must be rejected, \
+                 not silently wrapped into an in-bounds region"
+            ),
+        };
+
+        assert!(
+            err.to_string().to_lowercase().contains("dimension"),
+            "expected an InvalidDimensions error, got: {err}"
+        );
+    }
 }
 
 /// Finding #3: watermark text wider than the image must not underflow the
@@ -567,6 +693,144 @@ async fn text_watermark_renders_glyph_shapes_not_a_box() {
         "expected anti-aliased glyph rendering to produce a range of blended \
          shades, only found {} distinct colors (looks like a solid/striped box)",
         distinct_colors.len()
+    );
+}
+
+/// The watermark composite must apply the glyph coverage exactly once.
+///
+/// The scratch layer is read for coverage only; the colour comes from the
+/// operation's `color`. Sourcing the colour from the layer as well is only
+/// correct while imageproc composites with *straight* alpha — an edge pixel at
+/// coverage `v` coming out as `[r, g, b, 255*v]`. Were it ever premultiplied
+/// (`[v*r, v*g, v*b, 255*v]`), scaling by the coverage a second time would give
+/// `v^2 * color`: exact at `v == 1`, which is why solid-glyph tests pass, but
+/// antialiased edges blending toward `0.5 * color` — grey fringes around a
+/// white watermark on a dark photo.
+///
+/// Pinned via a channel the background and the watermark colour agree on:
+/// drawing pure red over pure white, the red channel is `(1-a)*255 + a*255`,
+/// i.e. **exactly 255 at every coverage**. A doubled multiply turns that into
+/// `255*(1 - a + a^2)`, which dips to 191 at half coverage.
+#[cfg(feature = "embedded-font")]
+#[tokio::test]
+async fn antialiased_watermark_edges_are_not_double_darkened() {
+    let data = solid_png(200, 100, [255, 255, 255, 255]);
+
+    let result = Pipeline::new()
+        .load_bytes(data, "photo.png")
+        .image(ImageOp::TextWatermark {
+            text: "Hi".to_string(),
+            position: Position::Center,
+            font_size: 48.0,
+            color: [255, 0, 0, 255], // opaque pure red
+            font: None,
+        })
+        .execute()
+        .await
+        .expect("watermark should succeed");
+
+    let decoded = image::load_from_memory_with_format(&result.data, image::ImageFormat::Png)
+        .expect("output should decode")
+        .to_rgba8();
+
+    // Sanity: the glyphs really were antialiased, i.e. there are partially
+    // covered pixels for the invariant below to say anything about.
+    let partial = decoded
+        .pixels()
+        .filter(|p| p.0[1] > 0 && p.0[1] < 255)
+        .count();
+    assert!(
+        partial > 0,
+        "expected antialiased glyph edges (green strictly between 0 and 255)"
+    );
+
+    // Every partially covered edge pixel must sit *between* the background and
+    // the watermark colour, never outside the segment joining them.
+    for pixel in decoded.pixels() {
+        let [r, g, b, _] = pixel.0;
+        assert_eq!(
+            r, 255,
+            "red is 255 in both the background and the watermark colour, so it \
+             must be 255 at every coverage; got {r} (pixel {:?}) — the glyph \
+             coverage was applied twice",
+            pixel.0
+        );
+        assert_eq!(g, b, "green and blue should blend identically");
+    }
+}
+
+/// `ImageOp::AutoOrient` is position-independent: the EXIF orientation is read
+/// and applied at decode time regardless of where the operation sits in the
+/// chain, because the tag is only reachable from the decoder. Pin that, since
+/// it is otherwise a surprising ordering.
+#[tokio::test]
+async fn auto_orient_is_applied_at_decode_time_regardless_of_position() {
+    let data = jpeg_with_orientation(6, 4, 6);
+
+    let orient_first = Pipeline::new()
+        .load_bytes(data.clone(), "photo.jpg")
+        .image(ImageOp::AutoOrient)
+        .rotate(90.0)
+        .execute()
+        .await
+        .expect("auto-orient then rotate should succeed");
+
+    let orient_last = Pipeline::new()
+        .load_bytes(data, "photo.jpg")
+        .rotate(90.0)
+        .image(ImageOp::AutoOrient)
+        .execute()
+        .await
+        .expect("rotate then auto-orient should succeed");
+
+    assert_eq!(
+        orient_first.data, orient_last.data,
+        "AutoOrient is hoisted to decode time, so its position in the chain must \
+         not change the result"
+    );
+    // 6x4 stored, EXIF-rotated to 4x6, then rotated 90 deg back to 6x4.
+    assert_eq!(
+        (orient_first.metadata.width, orient_first.metadata.height),
+        (Some(6), Some(4))
+    );
+}
+
+/// `OutputFormat::Original` means different things on the two code paths, and
+/// the difference is load-bearing: `Pipeline` passes the bytes through
+/// untouched, while `convert_format` re-encodes in the detected source format
+/// (for JPEG, at quality 85 — a full generation of loss per call).
+#[tokio::test]
+async fn convert_format_re_encodes_original_while_the_pipeline_passes_through() {
+    use armature_files::FileMetadata;
+    use armature_files::image::convert_format;
+
+    let data = noisy_jpeg(64, 48);
+
+    let mut metadata = FileMetadata::from_bytes(&data, "photo.jpg");
+    let converted =
+        convert_format(&data, OutputFormat::Original, &mut metadata).expect("conversion succeeds");
+
+    assert_eq!(metadata.extension.as_deref(), Some("jpg"));
+    assert_ne!(
+        converted, data,
+        "convert_format(Original) re-encodes in the source format; a byte-identical \
+         result would mean it had quietly become a passthrough"
+    );
+    // It really is a decodable JPEG of the same dimensions, just re-compressed.
+    let redecoded = image::load_from_memory_with_format(&converted, image::ImageFormat::Jpeg)
+        .expect("output should decode as JPEG");
+    assert_eq!((redecoded.width(), redecoded.height()), (64, 48));
+
+    // The pipeline, by contrast, must not touch the codec at all.
+    let piped = Pipeline::new()
+        .load_bytes(data.clone(), "photo.jpg")
+        .convert(OutputFormat::Original)
+        .execute()
+        .await
+        .expect("pipeline conversion succeeds");
+    assert_eq!(
+        piped.data, data,
+        "Pipeline::execute treats Convert(Original) as a byte-identical passthrough"
     );
 }
 

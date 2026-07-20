@@ -15,6 +15,7 @@ use armature_testkit::http_stub::{StubResponse, StubServer};
 
 fn provider(server: &StubServer) -> BraintreeProvider {
     BraintreeProvider::new("merchant-1", "pub_key", "priv_key")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap()
 }
@@ -641,4 +642,106 @@ async fn cancel_subscription_does_not_silently_ignore_end_of_period() {
             panic!("expected Unsupported or genuine end-of-period handling, got {other:?}")
         }
     }
+}
+
+/// A transaction amount Braintree sends in a shape we cannot parse must surface
+/// as an error, not as a `Charge` reporting `$0.00`.
+///
+/// The old code did `txn.amount.parse::<f64>().unwrap_or(0.0)`, so a malformed
+/// amount produced a *successful* charge for zero dollars: the money moved, the
+/// caller recorded nothing, and no receipt, ledger entry, or reconciliation run
+/// had any signal that the figure was invented. A charge that fails loudly can
+/// be investigated; a charge that succeeds with the wrong amount cannot.
+#[tokio::test]
+async fn a_malformed_transaction_amount_fails_instead_of_reporting_zero() {
+    for bad_amount in [r#""N/A""#, r#""""#, r#""1,234.00""#, r#""$120.00""#] {
+        let body = Box::leak(
+            format!(
+                r#"{{"transaction":{{"id":"tx_1","amount":{bad_amount},"status":"settled",
+                    "currency_iso_code":"USD"}}}}"#
+            )
+            .into_boxed_str(),
+        );
+        let server = StubServer::builder()
+            .route("POST", TX_PATH, StubResponse::json(201, &*body))
+            .start()
+            .await;
+
+        let err = provider(&server)
+            .charge(ChargeRequest::new(
+                Money::usd(12000),
+                PaymentSource::card("nonce_1"),
+            ))
+            .await
+            .expect_err("an unparseable amount must not be reported as a successful $0.00 charge");
+
+        match err {
+            PaymentError::Serialization(msg) => {
+                assert!(
+                    msg.contains("unparseable") && msg.contains("tx_1"),
+                    "the error must name the problem and the transaction: {msg}"
+                );
+                assert!(
+                    msg.contains("reconcile"),
+                    "the caller must be told the charge may have gone through: {msg}"
+                );
+            }
+            other => panic!("expected Serialization for {bad_amount}, got {other:?}"),
+        }
+    }
+}
+
+/// The same guard on the refund path: a refund reporting `$0.00` for money
+/// returned to the customer is the identical defect.
+#[tokio::test]
+async fn a_malformed_refund_amount_fails_instead_of_reporting_zero() {
+    let server = StubServer::builder()
+        .route(
+            "POST",
+            "/merchants/merchant-1/transactions/tx_1/refund",
+            StubResponse::json(
+                201,
+                r#"{"transaction":{"id":"rf_1","amount":"not-a-number","status":"settled",
+                    "currency_iso_code":"USD"}}"#,
+            ),
+        )
+        .start()
+        .await;
+
+    let err = provider(&server)
+        .refund(RefundRequest::new("tx_1"))
+        .await
+        .expect_err("an unparseable refund amount must not become $0.00");
+    assert!(matches!(err, PaymentError::Serialization(_)), "got {err:?}");
+}
+
+/// A well-formed amount is projected exactly, including through the decimal
+/// values a binary float cannot represent.
+#[tokio::test]
+async fn a_well_formed_transaction_amount_is_exact() {
+    let server = StubServer::builder()
+        .route(
+            "POST",
+            TX_PATH,
+            StubResponse::json(
+                201,
+                r#"{"transaction":{"id":"tx_1","amount":"0.29","status":"settled",
+                    "currency_iso_code":"EUR"}}"#,
+            ),
+        )
+        .start()
+        .await;
+
+    let charge = provider(&server)
+        .charge(ChargeRequest::new(
+            Money::eur(29),
+            PaymentSource::card("nonce_1"),
+        ))
+        .await
+        .unwrap();
+
+    // 0.29 * 100.0 in binary floating point is 28.999999999999996.
+    assert_eq!(charge.amount, Money::eur(29));
+    assert_eq!(charge.amount.currency, Currency::EUR);
+    assert_eq!(charge.status, ChargeStatus::Succeeded);
 }

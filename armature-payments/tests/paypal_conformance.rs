@@ -29,6 +29,7 @@ fn token_route() -> StubResponse {
 
 fn provider(server: &StubServer) -> PayPalProvider {
     PayPalProvider::new("client-id", "client-secret")
+        .expect("HTTP client builds")
         .with_base_url(server.url())
         .unwrap()
 }

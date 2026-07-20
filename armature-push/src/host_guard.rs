@@ -22,12 +22,20 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// True for IPv4 addresses that belong to internal/infrastructure ranges.
 ///
 /// Covers RFC 1918 private space (10/8, 172.16/12, 192.168/16), link-local
-/// (169.254/16 — the cloud metadata range), the unspecified address,
-/// 100.64/10 (RFC 6598 CGNAT, which is routable to infrastructure inside many
-/// cloud VPCs) and 192.0.0.0/24 (RFC 6890 IETF protocol assignments).
+/// (169.254/16 — the cloud metadata range), the whole 0.0.0.0/8 "this network"
+/// block, 100.64/10 (RFC 6598 CGNAT, which is routable to infrastructure
+/// inside many cloud VPCs), 192.0.0.0/24 (RFC 6890 IETF protocol
+/// assignments), the limited broadcast address, and all of 224.0.0.0/4
+/// multicast.
+///
+/// The 0.0.0.0/8 rule is broader than `is_unspecified()` on purpose:
+/// `is_unspecified()` matches only `0.0.0.0` exactly, so `https://0.1.2.3/`
+/// passed this guard while many stacks still route it to the local host.
 ///
 /// Loopback is deliberately *not* included here; callers decide whether to
 /// exempt it, because it is the one range local tests legitimately need.
+/// (Its IPv6 counterpart [`is_internal_v6`] *does* include loopback — see
+/// there for why.)
 ///
 /// Only Web Push validates arbitrary caller-supplied hosts; FCM and APNS just
 /// need the loopback check above for their base-URL scheme rule.
@@ -36,27 +44,71 @@ pub(crate) fn is_internal_v4(ip: &Ipv4Addr) -> bool {
     let o = ip.octets();
     let cgnat = o[0] == 100 && (64..128).contains(&o[1]);
     let protocol_assignments = o[0] == 192 && o[1] == 0 && o[2] == 0;
+    // RFC 1122 "this network" — 0.0.0.0/8, not just the unspecified address.
+    let this_network = o[0] == 0;
 
-    ip.is_private() || ip.is_link_local() || ip.is_unspecified() || cgnat || protocol_assignments
+    ip.is_private()
+        || ip.is_link_local()
+        || this_network
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || cgnat
+        || protocol_assignments
 }
 
 /// True for IPv6 addresses that belong to internal ranges.
 ///
-/// Critically, this resolves IPv4-mapped addresses (`::ffff:a.b.c.d`) first
-/// and delegates to the IPv4 rules. Without that step
-/// `https://[::ffff:169.254.169.254]/` reached the cloud metadata service:
-/// segment 0 of a mapped address is `0`, so none of the IPv6 prefix masks
-/// match, `Ipv6Addr::is_loopback` is false for `::ffff:127.0.0.1`, and the
-/// `Host::Ipv4` arm is never consulted because the URL parses as `Host::Ipv6`.
+/// Every IPv6 form that can carry an embedded IPv4 address is resolved first
+/// and delegated to the IPv4 rules, because none of the IPv6 prefix masks
+/// match those forms and the `Host::Ipv4` arm is never consulted (the URL
+/// parses as `Host::Ipv6`):
+///
+/// - **IPv4-mapped, `::ffff:a.b.c.d`** — the original bypass:
+///   `https://[::ffff:169.254.169.254]/` reached the cloud metadata service.
+/// - **IPv4-compatible, `::a.b.c.d`** — deprecated and usually unroutable,
+///   but free to block, and covered for free by `to_ipv4()` (which matches
+///   both forms, unlike `to_ipv4_mapped()`).
+/// - **NAT64, `64:ff9b::/96`** — the important one. On an IPv6-only cluster
+///   behind a NAT64/DNS64 gateway (the standard configuration for IPv6 EKS
+///   and GKE), `https://[64:ff9b::a9fe:a9fe]/latest/meta-data/` is translated
+///   by the gateway into a plain IPv4 request to 169.254.169.254. That is
+///   precisely the bypass this guard exists to close.
+/// - **6to4, `2002::/16`** — the embedded v4 sits in segments 1 and 2, so
+///   `https://[2002:a9fe:a9fe::]/` reaches 169.254.169.254 on any host with a
+///   6to4 tunnel.
+///
+/// Unlike [`is_internal_v4`], loopback *is* included here. The asymmetry was a
+/// trap: plain `::1` returned `false`, and only `web_push.rs`'s separate
+/// loopback branch kept it from being reachable. Any second caller of this
+/// function would have inherited a loopback hole.
 #[cfg(feature = "web-push")]
 pub(crate) fn is_internal_v6(ip: &Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    if ip.is_loopback() {
+        return true;
+    }
+
+    // Covers both the IPv4-mapped (`::ffff:a.b.c.d`) and the deprecated
+    // IPv4-compatible (`::a.b.c.d`) embeddings.
+    if let Some(v4) = ip.to_ipv4() {
         return is_internal_v4(&v4) || v4.is_loopback();
     }
 
-    let seg0 = ip.segments()[0];
+    let s = ip.segments();
+
+    // NAT64 well-known prefix 64:ff9b::/96 — the embedded v4 is the low 32 bits.
+    if s[0] == 0x0064 && s[1] == 0xff9b {
+        let v4 = Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
+        return is_internal_v4(&v4) || v4.is_loopback();
+    }
+
+    // 6to4 2002::/16 — the embedded v4 is segments 1 and 2.
+    if s[0] == 0x2002 {
+        let v4 = Ipv4Addr::from(((s[1] as u32) << 16) | s[2] as u32);
+        return is_internal_v4(&v4) || v4.is_loopback();
+    }
+
     // fe80::/10 link-local or fc00::/7 unique-local, plus the unspecified address.
-    ip.is_unspecified() || (seg0 & 0xffc0) == 0xfe80 || (seg0 & 0xfe00) == 0xfc00
+    ip.is_unspecified() || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xfe00) == 0xfc00
 }
 
 #[cfg(all(test, feature = "web-push"))]
@@ -115,5 +167,59 @@ mod tests {
         assert!(is_internal_v6(&v6("fc00::1")));
         assert!(is_internal_v6(&v6("fd12:3456::1")));
         assert!(is_internal_v6(&v6("::")));
+    }
+
+    #[test]
+    fn nat64_wellknown_prefix_reaches_the_metadata_service() {
+        // On an IPv6-only cluster behind a NAT64/DNS64 gateway this is
+        // translated into a plain IPv4 request to 169.254.169.254.
+        assert!(is_internal_v6(&v6("64:ff9b::a9fe:a9fe")));
+        assert!(is_internal_v6(&v6("64:ff9b::169.254.169.254")));
+        assert!(is_internal_v6(&v6("64:ff9b::10.0.0.1")));
+        assert!(is_internal_v6(&v6("64:ff9b::127.0.0.1")));
+        // A NAT64-embedded *public* address is still allowed through.
+        assert!(!is_internal_v6(&v6("64:ff9b::93.184.216.34")));
+    }
+
+    #[test]
+    fn six_to_four_embedded_v4_is_resolved() {
+        // 2002:a9fe:a9fe:: carries 169.254.169.254 in segments 1 and 2.
+        assert!(is_internal_v6(&v6("2002:a9fe:a9fe::")));
+        assert!(is_internal_v6(&v6("2002:0a00:0001::")));
+        assert!(is_internal_v6(&v6("2002:7f00:0001::")));
+        // A 6to4 address wrapping a public v4 is not internal.
+        assert!(!is_internal_v6(&v6("2002:5db8:d822::")));
+    }
+
+    #[test]
+    fn ipv4_compatible_addresses_are_resolved() {
+        // Deprecated `::a.b.c.d` form; `to_ipv4_mapped()` did not see it.
+        assert!(is_internal_v6(&v6("::169.254.169.254")));
+        assert!(is_internal_v6(&v6("::10.0.0.1")));
+    }
+
+    #[test]
+    fn plain_ipv6_loopback_is_internal() {
+        // Used to return false, leaving the loopback hole to `web_push.rs`'s
+        // separate branch — a trap for the next caller of this function.
+        assert!(is_internal_v6(&v6("::1")));
+    }
+
+    #[test]
+    fn this_network_block_is_internal_not_just_the_unspecified_address() {
+        // `is_unspecified()` matches only 0.0.0.0, so `https://0.1.2.3/` used
+        // to pass the guard.
+        assert!(is_internal_v4(&v4("0.0.0.0")));
+        assert!(is_internal_v4(&v4("0.1.2.3")));
+        assert!(is_internal_v4(&v4("0.255.255.255")));
+        assert!(!is_internal_v4(&v4("1.0.0.1")));
+    }
+
+    #[test]
+    fn broadcast_and_multicast_are_internal() {
+        assert!(is_internal_v4(&v4("255.255.255.255")));
+        assert!(is_internal_v4(&v4("224.0.0.1")));
+        assert!(is_internal_v4(&v4("239.255.255.250")));
+        assert!(!is_internal_v4(&v4("223.255.255.255")));
     }
 }
