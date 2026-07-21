@@ -79,6 +79,8 @@ impl GraphQLConfig {
     /// assert!(!config.enable_playground);
     /// assert!(!config.enable_graphiql);
     /// assert!(!config.enable_introspection); // Disabled for security
+    /// assert_eq!(config.max_depth, 15); // DoS protection enabled by default
+    /// assert_eq!(config.max_complexity, 1000); // DoS protection enabled by default
     /// ```
     pub fn production(endpoint: impl Into<String>) -> Self {
         let mut config = Self::new(endpoint);
@@ -86,6 +88,14 @@ impl GraphQLConfig {
         config.enable_graphiql = false;
         config.enable_introspection = false;
         config.enable_schema_docs = false; // Can be enabled separately if needed
+        // `new()` defaults max_depth/max_complexity to 0 (unlimited), which
+        // leaves the server open to deeply nested or combinatorially
+        // expensive queries. Production deployments need real limits, not
+        // just introspection disabled; these are conservative starting
+        // points (see `configure()`/`limit_depth`/`limit_complexity`) that
+        // callers can override with `.with_max_depth()`/`.with_max_complexity()`.
+        config.max_depth = 15;
+        config.max_complexity = 1000;
         config
     }
 
@@ -275,6 +285,19 @@ mod tests {
         assert!(!config.enable_graphiql);
         assert!(!config.enable_introspection);
         assert!(!config.enable_schema_docs);
+    }
+
+    #[test]
+    fn test_production_config_enforces_dos_protection() {
+        // `production()` disables introspection but must also set non-zero
+        // max_depth/max_complexity, otherwise the DoS-protection half of
+        // the "production" preset is inert (0 == unlimited, see `configure()`).
+        let config = GraphQLConfig::production("/graphql");
+        assert!(config.max_depth > 0, "production() must cap query depth");
+        assert!(
+            config.max_complexity > 0,
+            "production() must cap query complexity"
+        );
     }
 
     #[test]

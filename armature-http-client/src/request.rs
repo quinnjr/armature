@@ -188,11 +188,20 @@ impl<'a> RequestBuilder<'a> {
 
         // Add default headers from config
         for (name, value) in &self.client.config().default_headers {
-            if let (Ok(name), Ok(value)) = (
+            match (
                 HeaderName::try_from(name.as_str()),
                 HeaderValue::try_from(value.as_str()),
             ) {
-                headers.insert(name, value);
+                (Ok(name), Ok(value)) => {
+                    headers.insert(name, value);
+                }
+                _ => {
+                    tracing::warn!(
+                        name = %name,
+                        value = %value,
+                        "skipping malformed default header"
+                    );
+                }
             }
         }
 
@@ -208,5 +217,90 @@ impl<'a> RequestBuilder<'a> {
         };
 
         self.client.execute(spec).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{HttpClient, HttpClientConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    /// Minimal hand-rolled `tracing::Subscriber` that records whether any
+    /// event's `message` field contains `needle`. Avoids pulling in a full
+    /// `tracing-subscriber` dev-dependency just to assert a warning fired.
+    struct RecordingSubscriber {
+        saw_needle: Arc<AtomicBool>,
+        needle: &'static str,
+    }
+
+    struct MessageVisitor<'a> {
+        needle: &'a str,
+        found: &'a mut bool,
+    }
+
+    impl Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" && format!("{value:?}").contains(self.needle) {
+                *self.found = true;
+            }
+        }
+    }
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut found = false;
+            event.record(&mut MessageVisitor {
+                needle: self.needle,
+                found: &mut found,
+            });
+            if found {
+                self.saw_needle.store(true, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Regression test: previously, a malformed default header (one whose
+    /// name or value cannot be parsed into a valid `HeaderName`/
+    /// `HeaderValue`) was silently skipped with no diagnostic at all. Now it
+    /// must emit a `tracing::warn!` so the misconfiguration is observable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_default_header_is_warned_not_silently_dropped() {
+        let saw_needle = Arc::new(AtomicBool::new(false));
+        let subscriber = RecordingSubscriber {
+            saw_needle: saw_needle.clone(),
+            needle: "malformed default header",
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let config = HttpClientConfig::builder()
+            // A header value containing a raw newline is not a valid
+            // `HeaderValue`, forcing the malformed path.
+            .default_header("X-Bad", "bad\nvalue")
+            .build();
+        let client = HttpClient::new(config);
+
+        // The target is unreachable; we only care that header construction
+        // (which happens synchronously before the network call) emitted the
+        // warning, not whether the request itself succeeds.
+        let _ = client.get("http://127.0.0.1:1/unreachable").send().await;
+
+        assert!(
+            saw_needle.load(Ordering::SeqCst),
+            "expected a tracing::warn! about the malformed default header"
+        );
     }
 }

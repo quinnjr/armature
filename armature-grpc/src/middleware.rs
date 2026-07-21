@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Semaphore};
 use tonic::Status;
-use tower::Layer;
 
 use crate::TonicBody;
 
@@ -37,30 +36,6 @@ pub trait GrpcMiddleware<S> {
 
     /// Wrap the service with this middleware.
     fn wrap(self, service: S) -> Self::Service;
-}
-
-/// Middleware layer for Tower compatibility.
-#[derive(Clone)]
-pub struct MiddlewareLayer<M> {
-    middleware: M,
-}
-
-impl<M> MiddlewareLayer<M> {
-    /// Create a new middleware layer.
-    pub fn new(middleware: M) -> Self {
-        Self { middleware }
-    }
-}
-
-impl<S, M> Layer<S> for MiddlewareLayer<M>
-where
-    M: GrpcMiddleware<S> + Clone,
-{
-    type Service = M::Service;
-
-    fn layer(&self, service: S) -> Self::Service {
-        self.middleware.clone().wrap(service)
-    }
 }
 
 /// Bound shared by every server-side middleware wrapper in this module: a
@@ -345,6 +320,7 @@ impl<S: tonic::server::NamedService> tonic::server::NamedService for LoadSheddin
 /// Rate limiting middleware for gRPC. Rejects requests over the configured
 /// per-second rate with `Status::resource_exhausted` using a fixed 1-second
 /// sliding window.
+#[derive(Clone)]
 pub struct RateLimitMiddleware {
     requests_per_second: u64,
 }
@@ -360,14 +336,6 @@ impl RateLimitMiddleware {
     /// Get the rate limit.
     pub fn rps(&self) -> u64 {
         self.requests_per_second
-    }
-}
-
-impl Clone for RateLimitMiddleware {
-    fn clone(&self) -> Self {
-        Self {
-            requests_per_second: self.requests_per_second,
-        }
     }
 }
 
@@ -519,59 +487,36 @@ impl RetryMiddleware {
     }
 }
 
-impl<S> GrpcMiddleware<S> for RetryMiddleware {
-    type Service = RetryService<S>;
-
-    fn wrap(self, service: S) -> Self::Service {
-        RetryService {
-            inner: service,
-            config: self,
-        }
-    }
-}
-
-/// Service produced by [`RetryMiddleware`]. Requires a `Clone` request body
-/// so a failed attempt's request can be replayed.
-#[derive(Clone)]
-pub struct RetryService<S> {
-    inner: S,
-    config: RetryMiddleware,
-}
-
-impl<S, ReqBody> tower::Service<http::Request<ReqBody>> for RetryService<S>
-where
-    S: tower::Service<http::Request<ReqBody>, Error = Status> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-    S::Response: Send + 'static,
-    ReqBody: Clone + Send + Sync + 'static,
-{
-    type Response = S::Response;
-    type Error = Status;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Status>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
-        let clone = self.inner.clone();
-        let mut inner = std::mem::replace(&mut self.inner, clone);
-        let config = self.config.clone();
-        Box::pin(async move { config.call_with_retry(|| inner.call(req.clone())).await })
-    }
-}
-
-impl<S: tonic::server::NamedService> tonic::server::NamedService for RetryService<S> {
-    const NAME: &'static str = S::NAME;
-}
-
 // ===========================================================================
-// Compression (config holder — actual (de)compression is enabled via tonic's
-// own `gzip`/`zstd` service builder methods, this type just carries the
-// preference for callers to apply)
+// Compression
 // ===========================================================================
+//
+// Real wire-level gRPC compression, implemented as a pair of generic Tower
+// service wrappers (`CompressionService` for the server side,
+// `CompressionClientService` for the client side) that operate directly on
+// the gRPC length-prefixed message framing — the same technique
+// `MaxRecvMessageSizeService` (see `server.rs`) uses to inspect/rewrite
+// message frames generically.
+//
+// tonic's own `.accept_compressed()` / `.send_compressed()` methods (used by
+// this comment's earlier revision as the intended integration point) are
+// inherent methods on `tonic::server::Grpc<T>` / `tonic::client::Grpc<T>` —
+// types that only exist *inside* tonic-build's generated
+// `<Service>Server<T>` / `<Service>Client<T>` wrappers. Since this crate's
+// `serve<S>` and client channel helpers are generic over any `S`/`Channel`
+// and never see the generated wrapper type, there is no generic way to call
+// those inherent methods (the same limitation documented on
+// `max_recv_message_size`/`max_send_message_size` handling). So instead of a
+// no-op, this module performs the compression itself: it decodes each
+// length-prefixed gRPC message, gzip/zstd (de)compresses the payload, and
+// rewrites the frame's compressed-flag byte and length — real bytes-on-the-
+// wire compression, verified in this module's tests.
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use http_body_util::{BodyExt, Full};
 
 /// Compression middleware configuration.
+#[derive(Clone)]
 pub struct CompressionMiddleware {
     encoding: CompressionEncoding,
 }
@@ -607,6 +552,381 @@ impl CompressionMiddleware {
     pub fn encoding(&self) -> CompressionEncoding {
         self.encoding
     }
+
+    /// Wrap a server-side service so it actually decompresses incoming
+    /// requests (when their `grpc-encoding` header matches this middleware's
+    /// encoding) and compresses outgoing responses (when the request's
+    /// `grpc-accept-encoding` header lists this encoding).
+    pub fn wrap_server<S>(&self, service: S) -> CompressionService<S> {
+        CompressionService {
+            inner: service,
+            encoding: self.encoding,
+        }
+    }
+
+    /// Wrap a client-side channel (e.g. `channel.inner().clone()`, or any
+    /// other `tower::Service<http::Request<TonicBody>>`) so outgoing requests
+    /// are actually compressed with this encoding (advertised via
+    /// `grpc-encoding`/`grpc-accept-encoding`) and incoming responses are
+    /// decompressed when the server compressed them.
+    ///
+    /// The result satisfies tonic's generated-client bound
+    /// (`tonic::client::GrpcService<tonic::body::Body>`) and can be passed
+    /// directly to a generated `<Service>Client::new`:
+    ///
+    /// ```rust,ignore
+    /// let compressed = CompressionMiddleware::gzip().wrap_channel(channel.inner().clone());
+    /// let mut client = GreeterClient::new(compressed);
+    /// ```
+    pub fn wrap_channel<S>(&self, channel: S) -> CompressionClientService<S> {
+        CompressionClientService {
+            inner: channel,
+            encoding: self.encoding,
+        }
+    }
+}
+
+impl CompressionEncoding {
+    /// The `grpc-encoding` / `grpc-accept-encoding` wire value for this
+    /// encoding, or `None` for [`CompressionEncoding::None`] (which never
+    /// compresses).
+    fn wire_name(self) -> Option<&'static str> {
+        match self {
+            CompressionEncoding::Gzip => Some("gzip"),
+            CompressionEncoding::Zstd => Some("zstd"),
+            CompressionEncoding::None => None,
+        }
+    }
+
+    fn compress_bytes(self, data: &[u8]) -> std::io::Result<Vec<u8>> {
+        match self {
+            CompressionEncoding::Gzip => {
+                use flate2::Compression;
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(data)?;
+                encoder.finish()
+            }
+            CompressionEncoding::Zstd => zstd::stream::encode_all(data, 0),
+            CompressionEncoding::None => Ok(data.to_vec()),
+        }
+    }
+
+    fn decompress_bytes(self, data: &[u8]) -> std::io::Result<Vec<u8>> {
+        match self {
+            CompressionEncoding::Gzip => {
+                use flate2::read::GzDecoder;
+                use std::io::Read;
+                let mut decoder = GzDecoder::new(data);
+                let mut out = Vec::new();
+                decoder.read_to_end(&mut out)?;
+                Ok(out)
+            }
+            CompressionEncoding::Zstd => zstd::stream::decode_all(data),
+            CompressionEncoding::None => Ok(data.to_vec()),
+        }
+    }
+}
+
+/// Rewrite every gRPC length-prefixed message frame in `bytes` whose
+/// compressed-flag byte equals `matching_flag`, applying `transform` to its
+/// payload and flipping the flag to `1 - matching_flag`. Frames that don't
+/// match `matching_flag` are copied through unchanged. Returns `Err` if the
+/// buffer isn't a clean sequence of complete gRPC frames (truncated length
+/// prefix, truncated payload, or trailing bytes) or if `transform` fails —
+/// callers must not forward `bytes` unmodified in that case, since it may be
+/// a genuinely malformed/corrupted body.
+fn transform_grpc_frames(
+    mut bytes: Bytes,
+    matching_flag: u8,
+    transform: impl Fn(&[u8]) -> std::io::Result<Vec<u8>>,
+) -> std::io::Result<Bytes> {
+    let mut out = BytesMut::with_capacity(bytes.len());
+    while !bytes.is_empty() {
+        if bytes.len() < 5 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated gRPC message length-prefix",
+            ));
+        }
+        let flag = bytes[0];
+        let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        if bytes.len() < 5 + len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated gRPC message payload",
+            ));
+        }
+        let payload = &bytes[5..5 + len];
+        if flag == matching_flag {
+            let transformed = transform(payload)?;
+            out.put_u8(1 - matching_flag);
+            out.put_u32(transformed.len() as u32);
+            out.put_slice(&transformed);
+        } else {
+            out.put_u8(flag);
+            out.put_u32(len as u32);
+            out.put_slice(payload);
+        }
+        bytes.advance(5 + len);
+    }
+    Ok(out.freeze())
+}
+
+async fn buffer_body(body: TonicBody) -> Result<Bytes, tonic::Status> {
+    Ok(body.collect().await?.to_bytes())
+}
+
+fn accept_encoding_contains(headers: &http::HeaderMap, name: &str) -> bool {
+    headers
+        .get("grpc-accept-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').any(|part| part.trim() == name))
+        .unwrap_or(false)
+}
+
+/// Server-side service produced by [`CompressionMiddleware::wrap_server`].
+/// See the module-level comment above [`CompressionMiddleware`] for why this
+/// is a generic frame-rewriting wrapper rather than a call to tonic's
+/// `accept_compressed`/`send_compressed`.
+pub struct CompressionService<S> {
+    inner: S,
+    encoding: CompressionEncoding,
+}
+
+impl<S: Clone> Clone for CompressionService<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            encoding: self.encoding,
+        }
+    }
+}
+
+impl<S> tower::Service<http::Request<TonicBody>> for CompressionService<S>
+where
+    S: tower::Service<http::Request<TonicBody>, Response = http::Response<TonicBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = http::Response<TonicBody>;
+    type Error = S::Error;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let encoding = self.encoding;
+
+        Box::pin(async move {
+            let (mut parts, body) = req.into_parts();
+
+            let incoming_encoding = parts
+                .headers
+                .get("grpc-encoding")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.to_string());
+            let client_accepts_our_encoding =
+                accept_encoding_contains(&parts.headers, encoding.wire_name().unwrap_or_default());
+
+            // Decompress the request body only when the client told us it's
+            // compressed with the encoding we understand; otherwise pass the
+            // body through unmodified (preserves streaming for the common
+            // uncompressed case).
+            let req_body = if incoming_encoding.as_deref() == encoding.wire_name() {
+                let bytes = match buffer_body(body).await {
+                    Ok(b) => b,
+                    Err(status) => return Ok(status_response(status)),
+                };
+                match transform_grpc_frames(bytes, 1, |p| encoding.decompress_bytes(p)) {
+                    Ok(decompressed) => {
+                        parts.headers.remove("grpc-encoding");
+                        TonicBody::new(Full::new(decompressed))
+                    }
+                    Err(e) => {
+                        return Ok(status_response(Status::internal(format!(
+                            "failed to decompress gRPC request message: {e}"
+                        ))));
+                    }
+                }
+            } else {
+                body
+            };
+
+            let resp = inner
+                .call(http::Request::from_parts(parts, req_body))
+                .await?;
+
+            // Compress the response only if we have a real encoding and the
+            // client advertised support for it.
+            let Some(name) = encoding.wire_name() else {
+                return Ok(resp);
+            };
+            if !client_accepts_our_encoding {
+                return Ok(resp);
+            }
+
+            let (mut rparts, rbody) = resp.into_parts();
+            let bytes = match buffer_body(rbody).await {
+                Ok(b) => b,
+                Err(status) => return Ok(status_response(status)),
+            };
+            match transform_grpc_frames(bytes.clone(), 0, |p| encoding.compress_bytes(p)) {
+                Ok(compressed) => {
+                    rparts
+                        .headers
+                        .insert("grpc-encoding", http::HeaderValue::from_static(name));
+                    Ok(http::Response::from_parts(
+                        rparts,
+                        TonicBody::new(Full::new(compressed)),
+                    ))
+                }
+                Err(_) => {
+                    // Fall back to the original, uncompressed bytes rather
+                    // than dropping the response.
+                    Ok(http::Response::from_parts(
+                        rparts,
+                        TonicBody::new(Full::new(bytes)),
+                    ))
+                }
+            }
+        })
+    }
+}
+
+impl<S: tonic::server::NamedService> tonic::server::NamedService for CompressionService<S> {
+    const NAME: &'static str = S::NAME;
+}
+
+impl<S> GrpcMiddleware<S> for CompressionMiddleware
+where
+    S: tower::Service<http::Request<TonicBody>, Response = http::Response<TonicBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Service = CompressionService<S>;
+
+    fn wrap(self, service: S) -> Self::Service {
+        self.wrap_server(service)
+    }
+}
+
+/// Client-side service produced by [`CompressionMiddleware::wrap_channel`].
+pub struct CompressionClientService<S> {
+    inner: S,
+    encoding: CompressionEncoding,
+}
+
+impl<S: Clone> Clone for CompressionClientService<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            encoding: self.encoding,
+        }
+    }
+}
+
+impl<S> tower::Service<http::Request<TonicBody>> for CompressionClientService<S>
+where
+    S: tower::Service<http::Request<TonicBody>, Response = http::Response<TonicBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = http::Response<TonicBody>;
+    type Error = S::Error;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let encoding = self.encoding;
+
+        Box::pin(async move {
+            let (mut parts, body) = req.into_parts();
+
+            let req_body = if let Some(name) = encoding.wire_name() {
+                match buffer_body(body).await {
+                    Ok(bytes) => match transform_grpc_frames(bytes.clone(), 0, |p| {
+                        encoding.compress_bytes(p)
+                    }) {
+                        Ok(compressed) => {
+                            parts
+                                .headers
+                                .insert("grpc-encoding", http::HeaderValue::from_static(name));
+                            parts.headers.insert(
+                                "grpc-accept-encoding",
+                                http::HeaderValue::from_static(name),
+                            );
+                            TonicBody::new(Full::new(compressed))
+                        }
+                        Err(_) => {
+                            // Compression failed; send the original bytes
+                            // uncompressed rather than dropping the request.
+                            TonicBody::new(Full::new(bytes))
+                        }
+                    },
+                    Err(status) => return Ok(status_response(status)),
+                }
+            } else {
+                body
+            };
+
+            let resp = inner
+                .call(http::Request::from_parts(parts, req_body))
+                .await?;
+
+            let (mut rparts, rbody) = resp.into_parts();
+            let response_encoding = rparts
+                .headers
+                .get("grpc-encoding")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.to_string());
+
+            if response_encoding.as_deref() != encoding.wire_name()
+                || encoding.wire_name().is_none()
+            {
+                return Ok(http::Response::from_parts(rparts, rbody));
+            }
+
+            let bytes = match buffer_body(rbody).await {
+                Ok(b) => b,
+                Err(status) => return Ok(status_response(status)),
+            };
+            match transform_grpc_frames(bytes, 1, |p| encoding.decompress_bytes(p)) {
+                Ok(decompressed) => {
+                    rparts.headers.remove("grpc-encoding");
+                    Ok(http::Response::from_parts(
+                        rparts,
+                        TonicBody::new(Full::new(decompressed)),
+                    ))
+                }
+                Err(e) => Ok(status_response(Status::internal(format!(
+                    "failed to decompress gRPC response message: {e}"
+                )))),
+            }
+        })
+    }
+}
+
+impl<S: tonic::server::NamedService> tonic::server::NamedService for CompressionClientService<S> {
+    const NAME: &'static str = S::NAME;
 }
 
 #[cfg(test)]
@@ -843,5 +1163,181 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // =======================================================================
+    // Compression
+    // =======================================================================
+
+    /// Build a single gRPC length-prefixed message frame: 1 compressed-flag
+    /// byte + 4 big-endian length bytes + payload.
+    fn frame(flag: u8, payload: &[u8]) -> Bytes {
+        let mut out = BytesMut::with_capacity(5 + payload.len());
+        out.put_u8(flag);
+        out.put_u32(payload.len() as u32);
+        out.put_slice(payload);
+        out.freeze()
+    }
+
+    #[derive(Clone)]
+    struct CaptureService {
+        received: Arc<Mutex<Option<Bytes>>>,
+        response_payload: Bytes,
+    }
+
+    impl tower::Service<http::Request<TonicBody>> for CaptureService {
+        type Response = http::Response<TonicBody>;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Infallible>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+            let received = self.received.clone();
+            let response_payload = self.response_payload.clone();
+            Box::pin(async move {
+                let bytes = req.into_body().collect().await.unwrap().to_bytes();
+                *received.lock().await = Some(bytes);
+                let body = TonicBody::new(Full::new(frame(0, &response_payload)));
+                Ok(http::Response::new(body))
+            })
+        }
+    }
+
+    /// Regression test: `CompressionMiddleware` must actually transform
+    /// bytes on the wire — decompressing a compressed incoming request
+    /// before the inner service sees it, and compressing the response when
+    /// the caller advertised support — not merely store the configured
+    /// encoding as inert config.
+    #[tokio::test]
+    async fn compression_service_decompresses_request_and_compresses_response() {
+        let original_request_text =
+            b"hello, this is the original uncompressed request payload text";
+        let compressed_request = CompressionEncoding::Gzip
+            .compress_bytes(original_request_text)
+            .unwrap();
+        let request_frame = frame(1, &compressed_request); // flag=1: compressed
+
+        let mut req = http::Request::new(TonicBody::new(Full::new(request_frame)));
+        req.headers_mut()
+            .insert("grpc-encoding", http::HeaderValue::from_static("gzip"));
+        req.headers_mut().insert(
+            "grpc-accept-encoding",
+            http::HeaderValue::from_static("gzip"),
+        );
+
+        // A large, highly repetitive response payload — compresses well, so
+        // we can assert the wire bytes actually shrank.
+        let response_payload: Bytes = Bytes::from(vec![b'a'; 4096]);
+
+        let captured = Arc::new(Mutex::new(None));
+        let inner = CaptureService {
+            received: captured.clone(),
+            response_payload: response_payload.clone(),
+        };
+
+        let mut svc = CompressionMiddleware::gzip().wrap_server(inner);
+        let resp = svc.call(req).await.unwrap();
+
+        // The inner service must have received the *decompressed* original
+        // text with the frame's flag rewritten to 0.
+        let received = captured.lock().await.clone().unwrap();
+        assert_eq!(received[0], 0, "decompressed frame must carry flag=0");
+        assert_eq!(&received[5..], original_request_text);
+
+        // The response must have been compressed: grpc-encoding set, flag=1,
+        // and the wire payload strictly smaller than the uncompressed original.
+        assert_eq!(resp.headers().get("grpc-encoding").unwrap(), "gzip");
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            resp_bytes[0], 1,
+            "response frame must carry flag=1 (compressed)"
+        );
+        let resp_len =
+            u32::from_be_bytes([resp_bytes[1], resp_bytes[2], resp_bytes[3], resp_bytes[4]])
+                as usize;
+        let resp_payload = &resp_bytes[5..5 + resp_len];
+        assert!(
+            resp_payload.len() < response_payload.len(),
+            "compressed payload ({} bytes) must be smaller than the original ({} bytes) — \
+             proves real compression happened, not a no-op",
+            resp_payload.len(),
+            response_payload.len()
+        );
+        let decompressed = CompressionEncoding::Gzip
+            .decompress_bytes(resp_payload)
+            .unwrap();
+        assert_eq!(decompressed, response_payload.to_vec());
+    }
+
+    /// Regression test: `CompressionMiddleware::wrap_channel` must actually
+    /// compress outgoing requests (setting `grpc-encoding`) and decompress
+    /// compressed incoming responses, mirroring the server-side behavior
+    /// above for the client path.
+    #[tokio::test]
+    async fn compression_client_service_compresses_request_and_decompresses_response() {
+        #[derive(Clone)]
+        struct ServerLikeService;
+
+        impl tower::Service<http::Request<TonicBody>> for ServerLikeService {
+            type Response = http::Response<TonicBody>;
+            type Error = Infallible;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Infallible>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+                Box::pin(async move {
+                    assert_eq!(
+                        req.headers().get("grpc-encoding").unwrap(),
+                        "gzip",
+                        "the client must advertise the encoding it used"
+                    );
+                    let bytes = req.into_body().collect().await.unwrap().to_bytes();
+                    assert_eq!(
+                        bytes[0], 1,
+                        "the outgoing request must actually be compressed (flag=1)"
+                    );
+                    let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                    let decompressed = CompressionEncoding::Gzip
+                        .decompress_bytes(&bytes[5..5 + len])
+                        .unwrap();
+                    assert_eq!(
+                        decompressed,
+                        b"the client's original outgoing message, sent uncompressed"
+                    );
+
+                    let response_payload = vec![b'z'; 2048];
+                    let compressed = CompressionEncoding::Gzip
+                        .compress_bytes(&response_payload)
+                        .unwrap();
+                    let mut resp =
+                        http::Response::new(TonicBody::new(Full::new(frame(1, &compressed))));
+                    resp.headers_mut()
+                        .insert("grpc-encoding", http::HeaderValue::from_static("gzip"));
+                    Ok(resp)
+                })
+            }
+        }
+
+        let mut svc = CompressionMiddleware::gzip().wrap_channel(ServerLikeService);
+        let req = http::Request::new(TonicBody::new(Full::new(frame(
+            0,
+            b"the client's original outgoing message, sent uncompressed",
+        ))));
+        let resp = svc.call(req).await.unwrap();
+
+        assert!(
+            resp.headers().get("grpc-encoding").is_none(),
+            "a fully-decompressed response should have grpc-encoding stripped"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes[0], 0, "decompressed response frame must carry flag=0");
+        let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        assert_eq!(&bytes[5..5 + len], vec![b'z'; 2048].as_slice());
     }
 }

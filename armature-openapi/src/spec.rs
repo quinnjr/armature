@@ -176,6 +176,7 @@ pub struct Components {
 /// Security scheme
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SecurityScheme {
     #[serde(rename = "http")]
     Http {

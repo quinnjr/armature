@@ -1,7 +1,7 @@
 //! Circuit breaker pattern implementation.
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -80,7 +80,12 @@ pub struct CircuitBreaker {
     failure_count: AtomicU32,
     success_count: AtomicU32,
     half_open_count: AtomicU32,
-    last_failure_time: AtomicU64,
+    /// Timestamp of the most recent recorded failure, used to reset the
+    /// failure count once `failure_window` has elapsed since the last one.
+    /// Stored as a real `Instant` (not millis derived from a
+    /// freshly-created `Instant`) so elapsed time between failures is
+    /// computed correctly.
+    last_failure_time: RwLock<Option<Instant>>,
     opened_at: RwLock<Option<Instant>>,
 }
 
@@ -93,7 +98,7 @@ impl CircuitBreaker {
             failure_count: AtomicU32::new(0),
             success_count: AtomicU32::new(0),
             half_open_count: AtomicU32::new(0),
-            last_failure_time: AtomicU64::new(0),
+            last_failure_time: RwLock::new(None),
             opened_at: RwLock::new(None),
         }
     }
@@ -144,17 +149,23 @@ impl CircuitBreaker {
     /// Record a failed request.
     pub fn record_failure(&self) {
         let now = Instant::now();
-        let now_millis = now.elapsed().as_millis() as u64;
 
         let state = *self.state.read();
 
         match state {
             CircuitState::Closed => {
-                // Check if we should reset the failure window
-                let last_failure = self.last_failure_time.load(Ordering::SeqCst);
-                let window_millis = self.config.failure_window.as_millis() as u64;
+                // Check if we should reset the failure window. `last_failure`
+                // is the real `Instant` of the previous failure (not derived
+                // from a just-created `Instant`'s near-zero elapsed time), so
+                // `now.duration_since` correctly reflects the time actually
+                // elapsed between failures.
+                let last_failure = *self.last_failure_time.read();
+                let should_reset = match last_failure {
+                    Some(last) => now.duration_since(last) > self.config.failure_window,
+                    None => false,
+                };
 
-                if now_millis.saturating_sub(last_failure) > window_millis {
+                if should_reset {
                     self.failure_count.store(1, Ordering::SeqCst);
                 } else {
                     let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -163,7 +174,7 @@ impl CircuitBreaker {
                     }
                 }
 
-                self.last_failure_time.store(now_millis, Ordering::SeqCst);
+                *self.last_failure_time.write() = Some(now);
             }
             CircuitState::HalfOpen => {
                 // Any failure in half-open state reopens the circuit
@@ -260,6 +271,47 @@ mod tests {
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
         assert!(!cb.is_allowed());
+    }
+
+    /// Regression test for a bug where `record_failure` computed the
+    /// "now" timestamp as `Instant::now().elapsed()` on an `Instant` that
+    /// had just been created - which is always ~0 - instead of using a real
+    /// timestamp. That made the stored `last_failure_time` always ~0, so
+    /// the failure-window reset (`now - last_failure > failure_window`)
+    /// essentially never fired: failures accumulated forever regardless of
+    /// how much real time passed between them.
+    ///
+    /// Here, two failures are recorded with a real sleep between them that
+    /// exceeds a short `failure_window`. With the bug, the window is never
+    /// seen as elapsed, so the second failure pushes the count to the
+    /// threshold and opens the circuit. With the fix, the window has
+    /// genuinely elapsed, so the failure count resets and the circuit stays
+    /// closed.
+    #[test]
+    fn test_failure_window_actually_resets_after_real_elapsed_time() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            failure_window: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        std::thread::sleep(Duration::from_millis(150));
+
+        cb.record_failure();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Closed,
+            "failure window should have reset the count after real elapsed time"
+        );
+        assert_eq!(
+            cb.failure_count(),
+            1,
+            "failure count should have been reset to 1, not accumulated"
+        );
     }
 
     #[test]

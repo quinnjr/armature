@@ -1,7 +1,6 @@
-//! Regression test for Finding 8: `GrpcClientConfig::retry_enabled` /
-//! `max_retry_attempts` were dead config — nothing on the client call path
-//! ever retried. `GrpcChannel::call_with_retry` now wires them to a real
-//! retry loop.
+//! Regression test: `GrpcClientConfig::retry_enabled` / `max_retry_attempts`
+//! must not be dead config — `GrpcChannel::call_with_retry` wires them to a
+//! real retry loop.
 
 use armature_grpc::{GrpcClient, GrpcClientConfig};
 use std::sync::Arc;

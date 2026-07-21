@@ -64,7 +64,6 @@ mod client;
 mod config;
 mod error;
 mod interceptor;
-mod middleware;
 mod request;
 mod response;
 mod retry;
@@ -77,7 +76,6 @@ pub use interceptor::{
     AuthInterceptor, Interceptor, LoggingInterceptor, RateLimitInterceptor, RequestInterceptor,
     ResponseInterceptor,
 };
-pub use middleware::{Middleware, MiddlewareChain};
 pub use request::RequestBuilder;
 pub use response::Response;
 pub use retry::{BackoffStrategy, RetryConfig, RetryStrategy};
@@ -98,7 +96,6 @@ pub mod prelude {
     pub use crate::config::{HttpClientConfig, HttpClientConfigBuilder};
     pub use crate::error::{HttpClientError, Result};
     pub use crate::interceptor::{Interceptor, RequestInterceptor, ResponseInterceptor};
-    pub use crate::middleware::{Middleware, MiddlewareChain};
     pub use crate::request::RequestBuilder;
     pub use crate::response::Response;
     pub use crate::retry::{BackoffStrategy, RetryConfig, RetryStrategy};

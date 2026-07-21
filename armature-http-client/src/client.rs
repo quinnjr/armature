@@ -190,8 +190,13 @@ impl HttpClient {
         }
 
         // Run request interceptors once, before the first attempt. Any
-        // header/method/url mutation they make is folded back into the spec
-        // so it is preserved across every retry attempt.
+        // method/url/header/body mutation they make is folded back into the
+        // spec so it is preserved across every retry attempt. The request
+        // built here for the interceptors to run against is also reused as
+        // the first send attempt below (instead of rebuilding an identical
+        // request from `spec`), so the body is only cloned once even though
+        // interceptors are configured.
+        let mut first_request = None;
         if !self.interceptors.is_empty() || !self.request_interceptors.is_empty() {
             let mut request = spec.to_request();
             for interceptor in &self.interceptors {
@@ -203,13 +208,23 @@ impl HttpClient {
             spec.method = request.method().clone();
             spec.url = request.url().clone();
             spec.headers = request.headers().clone();
+            // Copy any body mutation back into the spec too, otherwise a
+            // body-rewriting interceptor's change would be silently dropped
+            // once the send path rebuilds a fresh request from `spec`.
+            spec.body = request
+                .body()
+                .and_then(|b| b.as_bytes())
+                .map(|b| b.to_vec());
+            first_request = Some(request);
         }
 
         // Execute with retry if configured
         let result = if let Some(retry_config) = &self.config.retry {
-            self.execute_with_retry(&spec, retry_config).await
+            self.execute_with_retry(&spec, retry_config, first_request)
+                .await
         } else {
-            self.execute_once(spec.to_request()).await
+            let request = first_request.unwrap_or_else(|| spec.to_request());
+            self.execute_once(request).await
         };
 
         // Run response interceptors once, on the final outcome.
@@ -230,15 +245,19 @@ impl HttpClient {
     /// Execute request with retry logic.
     ///
     /// A fresh `reqwest::Request` (with the original body and timeout) is
-    /// built from `spec` for every attempt, including the first.
+    /// built from `spec` for every attempt, except the first, which reuses
+    /// `first_request` when the caller already built one (e.g. because
+    /// interceptors ran) to avoid cloning the body out of `spec` twice.
     async fn execute_with_retry(
         &self,
         spec: &RequestSpec,
         retry_config: &crate::RetryConfig,
+        first_request: Option<Request>,
     ) -> Result<Response> {
         let mut attempt = 0;
         let mut last_error: Option<HttpClientError> = None;
         let start = std::time::Instant::now();
+        let mut first_request = first_request;
 
         loop {
             // Check max retry time
@@ -248,7 +267,11 @@ impl HttpClient {
                 break;
             }
 
-            let request = spec.to_request();
+            // Reuse the already-built (and possibly interceptor-mutated)
+            // request for the first attempt instead of cloning the body out
+            // of `spec` a second time; every subsequent retry attempt still
+            // needs a fresh request built from `spec`.
+            let request = first_request.take().unwrap_or_else(|| spec.to_request());
 
             match self.execute_once(request).await {
                 Ok(response) => {

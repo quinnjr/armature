@@ -1,7 +1,7 @@
-//! Regression test for Finding 3: the README advertises "TLS - Secure
-//! connections with rustls" but neither the client nor the server actually
-//! wired any TLS configuration. This asserts a plaintext connection to a
-//! TLS-only server fails, while a properly-configured TLS client succeeds.
+//! Regression test: the README advertises "TLS - Secure connections with
+//! rustls"; this asserts the client and server actually wire TLS
+//! configuration through — a plaintext connection to a TLS-only server
+//! fails, while a properly-configured TLS client succeeds.
 
 use armature_grpc::{
     GrpcClient, GrpcClientConfig, GrpcClientTlsConfig, GrpcServer, GrpcServerConfig,

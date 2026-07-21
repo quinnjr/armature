@@ -51,7 +51,7 @@ impl GrpcChannel {
     }
 
     /// Execute a gRPC call with retry, honoring this channel's
-    /// `retry_enabled` / `max_retry_attempts` configuration (Finding 8).
+    /// `retry_enabled` / `max_retry_attempts` configuration.
     ///
     /// `make_call` is invoked (and re-invoked on a retriable failure) to
     /// issue the RPC — typically a closure calling a generated client method
@@ -225,8 +225,8 @@ mod tests {
         assert_eq!(config.timeout, Duration::from_secs(60));
     }
 
-    /// Finding 7 regression test: `tcp_keepalive` is a documented, builder-set
-    /// config field previously read by neither client nor server. A pure
+    /// `tcp_keepalive` is a documented, builder-set config field that must
+    /// actually be applied by the client (not silently ignored). A pure
     /// unit assertion on socket-level keepalive isn't practical from a Tower
     /// `Endpoint` (tonic doesn't expose it for introspection), so this is a
     /// behavioral smoke test: a client built with `tcp_keepalive` configured

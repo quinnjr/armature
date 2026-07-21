@@ -54,7 +54,7 @@ impl Respond for FailThenSucceed {
     }
 }
 
-/// Finding 1: retried requests must carry the original body (and the
+/// Retried requests must carry the original body (and the
 /// original per-request timeout is likewise preserved, exercised indirectly
 /// since a lost timeout would surface as spurious client-side timeouts).
 #[tokio::test]
@@ -111,7 +111,7 @@ async fn retried_request_carries_original_body() {
     }
 }
 
-/// Finding 2: the circuit breaker must open on a run of failing HTTP status
+/// The circuit breaker must open on a run of failing HTTP status
 /// responses (5xx), not just transport-level errors.
 #[tokio::test]
 async fn circuit_breaker_opens_on_repeated_5xx_status() {
@@ -148,7 +148,7 @@ async fn circuit_breaker_opens_on_repeated_5xx_status() {
     }
 }
 
-/// Finding 3: registered interceptors must actually run around execute().
+/// Registered interceptors must actually run around execute().
 #[derive(Default)]
 struct CountingInterceptor {
     request_count: Arc<AtomicU32>,
@@ -201,7 +201,7 @@ async fn registered_interceptor_runs_on_execute() {
     );
 }
 
-/// Finding 4: `RateLimitInterceptor` must actually delay for (approximately)
+/// `RateLimitInterceptor` must actually delay for (approximately)
 /// the parsed `Retry-After` duration instead of only logging.
 #[tokio::test]
 async fn rate_limit_interceptor_actually_delays() {
@@ -227,7 +227,7 @@ async fn rate_limit_interceptor_actually_delays() {
     );
 }
 
-/// Finding 5: a body-read failure (connection closed mid-body) must surface
+/// A body-read failure (connection closed mid-body) must surface
 /// as an error, not a silently empty 2xx response.
 #[tokio::test]
 async fn body_read_failure_is_not_a_silent_empty_success() {
@@ -259,7 +259,7 @@ async fn body_read_failure_is_not_a_silent_empty_success() {
     );
 }
 
-/// Finding 6: `RequestBuilder::json`/`form` must surface serialization
+/// `RequestBuilder::json`/`form` must surface serialization
 /// failures to the caller instead of silently sending a bodyless request.
 #[tokio::test]
 async fn json_serialization_failure_is_surfaced() {
@@ -287,6 +287,89 @@ async fn json_serialization_failure_is_surfaced() {
         result.is_err(),
         "expected .json() to return an error on serialization failure"
     );
+}
+
+/// Responder that fails with 500 for the first `fail_times` requests it
+/// sees, then returns 200, recording every request body it observes (like
+/// `FailThenSucceed`, but not tied to a specific fail count at construction
+/// via a closure-friendly shape - kept separate since its record includes
+/// no body-content-specific behavior of its own).
+struct RecordBodyFailThenSucceed {
+    fail_times: u32,
+    seen: AtomicU32,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Respond for RecordBodyFailThenSucceed {
+    fn respond(&self, request: &WmRequest) -> ResponseTemplate {
+        self.bodies.lock().unwrap().push(request.body.clone());
+        let n = self.seen.fetch_add(1, Ordering::SeqCst);
+        if n < self.fail_times {
+            ResponseTemplate::new(500)
+        } else {
+            ResponseTemplate::new(200)
+        }
+    }
+}
+
+/// An interceptor that rewrites the request body.
+struct BodyRewritingInterceptor;
+
+#[async_trait]
+impl Interceptor for BodyRewritingInterceptor {
+    async fn intercept_request(&self, mut request: Request) -> HttpResult<Request> {
+        *request.body_mut() = Some(reqwest::Body::from(b"rewritten".to_vec()));
+        Ok(request)
+    }
+}
+
+/// An interceptor-mutated body must actually be sent, not silently
+/// discarded when the interceptor-processed request is folded back into the
+/// `RequestSpec` used for the real send - and this must hold for *every*
+/// retry attempt, not just the first (a naive fix that only reuses the
+/// already-mutated request object for attempt 1 but never copies the
+/// mutation into `RequestSpec.body` would still lose it on attempt 2+,
+/// since retries rebuild the request from the spec). This test forces a
+/// retry (first attempt 500, second attempt 200) and asserts both attempts
+/// carried the rewritten body.
+#[tokio::test]
+async fn interceptor_body_mutation_is_sent_on_every_retry_attempt() {
+    let server = MockServer::start().await;
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+
+    Mock::given(matchers::method("POST"))
+        .respond_with(RecordBodyFailThenSucceed {
+            fail_times: 1,
+            seen: AtomicU32::new(0),
+            bodies: bodies.clone(),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let config = HttpClientConfig::builder()
+        .retry(RetryConfig::immediate(3))
+        .build();
+    let client = HttpClient::new(config).with_interceptor(BodyRewritingInterceptor);
+
+    let response = client
+        .post(server.uri())
+        .body(b"original".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2, "expected exactly 2 attempts");
+    for (i, body) in bodies.iter().enumerate() {
+        assert_eq!(
+            body,
+            &b"rewritten".to_vec(),
+            "attempt {i} did not carry the interceptor's rewritten body; got {:?}",
+            String::from_utf8_lossy(body)
+        );
+    }
 }
 
 #[tokio::test]

@@ -17,6 +17,9 @@ pub struct GraphQLClientConfig {
     pub caching: bool,
     /// Cache TTL.
     pub cache_ttl: Duration,
+    /// Maximum number of entries retained in the response cache before the
+    /// least-recently-used entry is evicted to make room for a new one.
+    pub max_cache_entries: usize,
     /// User agent string.
     pub user_agent: String,
     /// Retry failed requests.
@@ -34,6 +37,7 @@ impl Default for GraphQLClientConfig {
             default_headers: Vec::new(),
             caching: false,
             cache_ttl: Duration::from_secs(300),
+            max_cache_entries: 1000,
             user_agent: format!("armature-graphql-client/{}", env!("CARGO_PKG_VERSION")),
             retry_enabled: true,
             max_retries: 3,
@@ -107,6 +111,14 @@ impl GraphQLClientConfigBuilder {
     /// Set cache TTL.
     pub fn cache_ttl(mut self, ttl: Duration) -> Self {
         self.config.cache_ttl = ttl;
+        self
+    }
+
+    /// Set the maximum number of entries retained in the response cache
+    /// before the least-recently-used entry is evicted. Must be greater than
+    /// zero; a value of `0` is coerced to `1`.
+    pub fn max_cache_entries(mut self, max_entries: usize) -> Self {
+        self.config.max_cache_entries = max_entries.max(1);
         self
     }
 

@@ -117,6 +117,15 @@ pub struct GrpcServerConfig {
     /// Maximum message size for receiving.
     pub max_recv_message_size: usize,
     /// Maximum message size for sending.
+    ///
+    /// **Currently unenforced.** This crate's generic `serve<S>` has no
+    /// access to `.max_encoding_message_size()` (or similar codec setters) —
+    /// those are inherent methods on tonic-build's generated
+    /// `<Service>Server<T>` wrapper types, not something a generic wrapper
+    /// service can call on an arbitrary `S`. Setting this field currently
+    /// has no effect; if you need outgoing size enforcement, call the
+    /// generated service's own setter directly (e.g.
+    /// `MyServiceServer::new(impl).max_encoding_message_size(n)`).
     pub max_send_message_size: usize,
     /// Enable HTTP/2 keepalive.
     pub http2_keepalive_interval: Option<Duration>,
@@ -200,6 +209,11 @@ impl GrpcServerConfigBuilder {
     }
 
     /// Set the maximum send message size.
+    ///
+    /// **Currently unenforced** — see the doc comment on
+    /// [`GrpcServerConfig::max_send_message_size`] for why: this crate's
+    /// generic `serve<S>` has no way to call the codegen-only setter that
+    /// would actually apply it.
     pub fn max_send_message_size(mut self, size: usize) -> Self {
         self.config.max_send_message_size = size;
         self

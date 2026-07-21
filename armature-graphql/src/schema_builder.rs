@@ -164,7 +164,7 @@ mod tests {
             .build();
     }
 
-    // Finding 2 regression: `create_merged_schema` used to silently ignore its
+    // Regression test: `create_merged_schema` used to silently ignore its
     // resolver arguments and return an unconfigured `ProgrammaticSchemaBuilder`
     // that panicked on `.build()`. It has been removed; the crate's real,
     // working merging mechanism is the `merge_resolvers!` macro (compile-time

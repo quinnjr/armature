@@ -96,12 +96,29 @@ impl Interceptor for LoggingInterceptor {
     }
 }
 
+/// Compare two byte strings for equality in constant time (with respect to
+/// their content — not their length), to avoid leaking how many leading
+/// bytes of a submitted credential matched the expected value via a timing
+/// side-channel. No `subtle`-equivalent crate is used elsewhere in this
+/// workspace, so this is a small manual implementation rather than a new
+/// dependency.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Authentication interceptor.
 ///
 /// This type is deliberately direction-agnostic: it can attach credentials to
-/// outgoing (client-side) requests via [`AuthInterceptor::add_auth`] /
-/// [`AuthInterceptor::client_interceptor`], or validate incoming (server-side)
-/// requests via [`AuthInterceptor::validate`] / [`AuthInterceptor::server_interceptor`].
+/// outgoing (client-side) requests via [`AuthInterceptor::add_auth`], or
+/// validate incoming (server-side) requests via [`AuthInterceptor::validate`]
+/// / [`AuthInterceptor::server_interceptor`].
 /// The blanket [`Interceptor`] impl below is the **client-side** behavior only —
 /// it attaches credentials and never rejects a request. Do not use it as a
 /// `tonic::service::Interceptor` on the server; use [`AuthInterceptor::server_interceptor`]
@@ -156,7 +173,7 @@ impl AuthInterceptor {
                     .and_then(|v| v.strip_prefix("Bearer "))
                     .ok_or_else(|| Status::unauthenticated("Missing bearer token"))?;
 
-                if token != expected {
+                if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
                     return Err(Status::unauthenticated("Invalid token"));
                 }
                 Ok(())
@@ -167,7 +184,7 @@ impl AuthInterceptor {
                     .and_then(|v| v.to_str().ok())
                     .ok_or_else(|| Status::unauthenticated("Missing API key"))?;
 
-                if provided != key {
+                if !constant_time_eq(provided.as_bytes(), key.as_bytes()) {
                     return Err(Status::unauthenticated("Invalid API key"));
                 }
                 Ok(())
@@ -211,15 +228,6 @@ impl AuthInterceptor {
             self.validate(request.metadata())?;
             Ok(request)
         }
-    }
-
-    /// Build a `tonic::service::Interceptor` suitable for **client-side** use
-    /// that attaches credentials to every outgoing request (equivalent to
-    /// [`AuthInterceptor::add_auth`], but usable as a tonic interceptor).
-    pub fn client_interceptor(
-        self,
-    ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
-        move |request: Request<()>| -> Result<Request<()>, Status> { Ok(self.add_auth(request)) }
     }
 }
 

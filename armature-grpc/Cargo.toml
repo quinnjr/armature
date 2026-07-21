@@ -26,14 +26,33 @@ prost-types = "0.14"
 # crate is built alongside anything else that also compiles in the
 # `aws-lc-rs` provider (e.g. most AWS SDK crates) — Cargo unifies both
 # providers into one binary and rustls refuses to guess between them.
+#
+# NOTE: `rustls` and tonic's `tls-ring` feature are deliberately kept
+# unconditional (not behind an opt-in Cargo feature), unlike `health`/
+# `reflection`. `crypto_provider::ensure_installed` and the TLS config types
+# (`GrpcServerTlsConfig`/`GrpcClientTlsConfig`) are wired directly into the
+# non-optional server/client code paths (`server.rs`, `client.rs`,
+# `config.rs`); cfg-gating TLS out would require threading a Cargo feature
+# through those public config structs and every call site, which is a much
+# larger, riskier change than the footprint this saves. This is an accepted
+# tradeoff: every consumer pays for rustls + tonic's `tls-ring` even if they
+# never configure TLS.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Compression: used by `middleware::CompressionMiddleware` to actually
+# (de)compress gRPC message frames on the wire (see `middleware.rs`), since
+# tonic's own `accept_compressed`/`send_compressed` are inherent methods on
+# generated per-service wrapper types this crate's generic `serve<S>`/client
+# helpers never see.
+flate2 = "1.1"
+zstd = "0.13"
 
 # Async runtime
 tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # Tower (middleware)
-tower = { version = "0.5", features = ["timeout", "limit", "load-shed", "retry", "util"] }
+tower = { version = "0.5", features = ["timeout", "limit", "load-shed"] }
 tower-service = "0.3"
 
 # HTTP

@@ -1,11 +1,12 @@
 //! GraphQL client implementation.
 
 use futures::StreamExt;
+use lru::LruCache;
 use reqwest::Client;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
@@ -25,7 +26,10 @@ type CacheEntry = (Instant, GraphQLResponse<Value>);
 pub struct GraphQLClient {
     http_client: Client,
     config: Arc<GraphQLClientConfig>,
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    /// Bounded response cache: capped at `config.max_cache_entries`, evicting
+    /// the least-recently-used entry once that bound is exceeded so the
+    /// cache cannot grow without limit.
+    cache: Arc<Mutex<LruCache<String, CacheEntry>>>,
 }
 
 impl GraphQLClient {
@@ -44,10 +48,13 @@ impl GraphQLClient {
             .build()
             .expect("Failed to build HTTP client");
 
+        let cache_capacity =
+            NonZeroUsize::new(config.max_cache_entries).unwrap_or(NonZeroUsize::new(1).unwrap());
+
         Self {
             http_client,
             config: Arc::new(config),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(LruCache::new(cache_capacity))),
         }
     }
 
@@ -126,7 +133,7 @@ impl GraphQLClient {
         self.cache
             .lock()
             .unwrap()
-            .insert(key, (Instant::now(), response.clone()));
+            .put(key, (Instant::now(), response.clone()));
         Ok(response)
     }
 

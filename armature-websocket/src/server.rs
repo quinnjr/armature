@@ -204,9 +204,23 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
         // interval has elapsed.
         heartbeat_ticker.tick().await;
 
+        // `last_read` tracks the instant of the most recent successful read
+        // (including the initial connection setup). It is deliberately NOT
+        // touched by the heartbeat branch below, so the idle-read deadline
+        // derived from it reflects genuine read inactivity rather than being
+        // reset every time the heartbeat ticker happens to fire first in the
+        // `select!`. Reconstructing a fresh `tokio::time::timeout` around
+        // `read.next()` on every loop iteration would restart its internal
+        // clock each time the heartbeat branch wins the race, effectively
+        // starving `connection_timeout` whenever `heartbeat_interval` is
+        // shorter than it (the crate's own defaults: 30s vs 60s) — this
+        // persistent deadline avoids that.
+        let mut last_read = tokio::time::Instant::now();
+
         // Read messages, racing against the heartbeat ticker and an
         // idle-read timeout derived from `connection_timeout`.
         'read_loop: loop {
+            let idle_deadline = last_read + config.connection_timeout;
             tokio::select! {
                 _ = heartbeat_ticker.tick() => {
                     missed_heartbeats += 1;
@@ -218,14 +232,12 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
                         break 'read_loop;
                     }
                 }
-                read_result = tokio::time::timeout(config.connection_timeout, read.next()) => {
-                    let result = match read_result {
-                        Ok(inner) => inner,
-                        Err(_) => {
-                            tracing::debug!(connection_id = %connection_id, "Connection idle timeout elapsed");
-                            break 'read_loop;
-                        }
-                    };
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    tracing::debug!(connection_id = %connection_id, "Connection idle timeout elapsed");
+                    break 'read_loop;
+                }
+                result = read.next() => {
+                    last_read = tokio::time::Instant::now();
 
                     match result {
                         Some(Ok(msg)) => {
@@ -415,6 +427,59 @@ mod tests {
                 other
             ),
         }
+    }
+
+    /// Regression test for the bug where `connection_timeout` was
+    /// neutralized whenever `heartbeat_interval` was meaningfully smaller
+    /// than it (as in the crate's own defaults: 30s heartbeat vs 60s
+    /// timeout). Uses a realistic *ratio* between the two settings (roughly
+    /// 1:2, same as the defaults) rather than the artificially huge
+    /// `heartbeat_interval` used by `closes_idle_connection_after_timeout`.
+    ///
+    /// `connection_timeout` (90ms) is set well below the time it would take
+    /// the separate missed-heartbeat path to close the connection
+    /// (`(MAX_MISSED_HEARTBEATS + 1) * heartbeat_interval` = 4 * 50ms =
+    /// 200ms), so if the connection closes by the time we advance to
+    /// 120ms, it must have been `connection_timeout` — not missed
+    /// heartbeats — that closed it.
+    #[tokio::test(start_paused = true)]
+    async fn closes_idle_connection_via_timeout_independent_of_heartbeat() {
+        let (addr, _handler) = spawn_test_server(|c| {
+            c.max_message_size = 1024 * 1024;
+            c.heartbeat_interval = Duration::from_millis(50);
+            c.connection_timeout = Duration::from_millis(90);
+        })
+        .await;
+
+        let url = format!("ws://{}", addr);
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+
+        // Past connection_timeout (90ms) but well short of the
+        // missed-heartbeat closure time (200ms), so only the idle-read
+        // timeout path can plausibly have closed the connection.
+        tokio::time::advance(Duration::from_millis(120)).await;
+
+        // The client never answers the server's heartbeat Ping with a Pong,
+        // so a Ping frame may legitimately arrive on the wire before the
+        // connection is closed; skip over it and keep reading until the
+        // connection actually closes (or the stream ends).
+        let mut saw_close_or_end = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(1), ws.next()).await {
+                Ok(Some(Ok(RawMessage::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                    saw_close_or_end = true;
+                    break;
+                }
+                Ok(Some(Ok(_))) => continue,
+                Err(_) => break,
+            }
+        }
+
+        assert!(
+            saw_close_or_end,
+            "expected connection_timeout alone to close the idle connection before \
+             the missed-heartbeat path could"
+        );
     }
 
     #[tokio::test(start_paused = true)]

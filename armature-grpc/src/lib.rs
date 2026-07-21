@@ -10,11 +10,15 @@
 //! ## Features
 //!
 //! - **Server**: Build gRPC servers with middleware support
-//! - **Client**: Type-safe gRPC client with retry and load balancing
+//! - **Client**: Type-safe gRPC client with load balancing and *opt-in*
+//!   retry — retry does not happen automatically; every call must be
+//!   explicitly wrapped via [`GrpcChannel::call_with_retry`](client::GrpcChannel::call_with_retry).
+//!   See "Retry" below.
 //! - **Interceptors**: Request/response interceptors for auth, logging, etc.
 //! - **Health Checking**: Built-in gRPC health checking service
 //! - **Reflection**: Server reflection for tools like grpcurl
-//! - **Compression**: gzip and zstd compression support
+//! - **Compression**: gzip and zstd compression support, via
+//!   [`CompressionMiddleware::wrap_server`]/[`CompressionMiddleware::wrap_channel`]
 //!
 //! ## Quick Start
 //!
@@ -58,6 +62,24 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ### Retry
+//!
+//! `GrpcClientConfig::retry_enabled` / `max_retry_attempts` are **not**
+//! applied automatically — tonic's generated client methods have no generic
+//! hook for this crate to intercept. Retry only happens when you explicitly
+//! wrap each call via [`GrpcChannel::call_with_retry`](client::GrpcChannel::call_with_retry):
+//!
+//! ```rust,ignore
+//! let channel = GrpcClient::connect(config).await?;
+//! let response = channel
+//!     .call_with_retry(|| {
+//!         let mut client = GreeterClient::new(channel.inner().clone());
+//!         let request = HelloRequest { name: "World".into() };
+//!         async move { client.say_hello(request).await }
+//!     })
+//!     .await?;
+//! ```
 
 mod client;
 mod config;
@@ -86,8 +108,9 @@ pub use interceptor::{
     ResponseInterceptor,
 };
 pub use middleware::{
-    CompressionMiddleware, ConcurrencyLimitMiddleware, GrpcMiddleware, LoadSheddingMiddleware,
-    MiddlewareLayer, RateLimitMiddleware, RetryMiddleware, TimeoutMiddleware,
+    CompressionClientService, CompressionEncoding, CompressionMiddleware, CompressionService,
+    ConcurrencyLimitMiddleware, GrpcMiddleware, LoadSheddingMiddleware, RateLimitMiddleware,
+    RetryMiddleware, TimeoutMiddleware,
 };
 pub use server::{GrpcServer, GrpcServerBuilder};
 
@@ -119,8 +142,8 @@ pub mod prelude {
         AuthInterceptor, Interceptor, LoggingInterceptor, MetricsInterceptor,
     };
     pub use crate::middleware::{
-        ConcurrencyLimitMiddleware, GrpcMiddleware, LoadSheddingMiddleware, MiddlewareLayer,
-        RateLimitMiddleware, RetryMiddleware, TimeoutMiddleware,
+        CompressionEncoding, CompressionMiddleware, ConcurrencyLimitMiddleware, GrpcMiddleware,
+        LoadSheddingMiddleware, RateLimitMiddleware, RetryMiddleware, TimeoutMiddleware,
     };
     pub use crate::server::{GrpcServer, GrpcServerBuilder};
     pub use tonic::{

@@ -1,4 +1,4 @@
-//! Regression tests for Finding 2: `GraphQLClientConfig::retry_enabled` /
+//! Regression tests: `GraphQLClientConfig::retry_enabled` /
 //! `max_retries` must actually be honored by `execute_request` (and `batch`),
 //! and a well-formed GraphQL error response must never be retried.
 

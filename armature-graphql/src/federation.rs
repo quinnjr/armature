@@ -24,7 +24,11 @@
 //! - **Subgraph Creation**: Define federated subgraphs with entity resolvers
 //! - **Entity Resolution**: Automatic `_entities` query implementation
 //! - **Federation Directives**: `@key`, `@external`, `@requires`, `@provides`, `@shareable`
-//! - **Gateway Composition**: Compose multiple subgraphs into a supergraph
+//! - **SDL Bundling**: Concatenate multiple subgraphs' SDL into a single
+//!   bundle via [`compose_supergraph`] — a convenience for eyeballing/bundling
+//!   SDL text, not real Apollo Federation composition (no type merging, no
+//!   `@join`/`@link` generation, no conflict resolution). For production
+//!   composition, use Apollo's official tooling (e.g. `rover supergraph compose`).
 //!
 //! ## Example: Creating a Subgraph
 //!
@@ -269,7 +273,17 @@ where
 
         let mut builder = Schema::build(query, mutation, subscription);
 
-        if self.enable_tracing {
+        // `self.enable_tracing()` and an attached `GraphQLConfig.enable_tracing`
+        // (applied below via `config.configure()`) both register `ApolloTracing`.
+        // Register it at most once here, regardless of how many of the two
+        // flags are set, and skip the config-driven registration for tracing
+        // specifically so it isn't added twice.
+        let config_wants_tracing = self
+            .config
+            .as_ref()
+            .map(|config| config.enable_tracing)
+            .unwrap_or(false);
+        if self.enable_tracing || config_wants_tracing {
             builder = builder.extension(ApolloTracing);
         }
 
@@ -279,6 +293,8 @@ where
         }
 
         if let Some(config) = &self.config {
+            let mut config = config.clone();
+            config.enable_tracing = false; // already handled above; avoid double-registration
             builder = config.configure(builder);
         }
 
@@ -923,7 +939,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Finding 5 regression: `_entities` query selection set
+    // Regression test: `_entities` query selection set
     //
     // Previously `resolve_entities` always sent a hardcoded
     // `... on _Entity { __typename }` selection, so callers could never
@@ -954,7 +970,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Finding 7 regression: no test previously asserted that a
+    // Regression test: no test previously asserted that a
     // federation-enabled subgraph SDL actually contains federation
     // directives, or that `is_federated()` reflects the schema's real
     // state.
@@ -1031,7 +1047,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Finding 1 wiring: SubgraphSchemaBuilder::config() actually reaches
+    // Wiring test: SubgraphSchemaBuilder::config() actually reaches
     // the built schema (introspection is disabled when configured).
     // -------------------------------------------------------------------
 
@@ -1077,7 +1093,7 @@ mod gateway_tests {
     use std::time::{Duration, Instant};
 
     // -------------------------------------------------------------------
-    // Finding 6 regression: `SubgraphConfig::with_timeout` was recorded on
+    // Regression test: `SubgraphConfig::with_timeout` was recorded on
     // the config but `execute_query` never applied it — only the gateway
     // builder's one-time, global client timeout was ever in effect. This
     // spins up a subgraph that accepts a connection and then never

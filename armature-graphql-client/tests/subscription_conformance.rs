@@ -1,9 +1,9 @@
 //! Regression tests for GraphQL subscription conformance:
 //!
-//! - Finding 1: headers set via `SubscriptionBuilder::header` (and default
-//!   client headers) must actually reach the server on the WebSocket
-//!   handshake request instead of being silently dropped.
-//! - Finding 6: a server `Ping` frame must be answered with a `Pong` frame.
+//! - Headers set via `SubscriptionBuilder::header` (and default client
+//!   headers) must actually reach the server on the WebSocket handshake
+//!   request instead of being silently dropped.
+//! - A server `Ping` frame must be answered with a `Pong` frame.
 
 use std::sync::{Arc, Mutex};
 
@@ -116,6 +116,41 @@ async fn subscription_header_reaches_server() {
     assert!(
         has_auth_header,
         "expected Authorization header to reach the WebSocket handshake request, got: {headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn subscription_default_header_reaches_server() {
+    let captured_headers = Arc::new(Mutex::new(Vec::new()));
+    let pong_received = Arc::new(Mutex::new(false));
+    let ws_url = spawn_test_server(captured_headers.clone(), false, pong_received).await;
+
+    let config = GraphQLClientConfig::builder()
+        .endpoint("http://127.0.0.1:1/graphql")
+        .ws_endpoint(ws_url)
+        .header("Authorization", "Bearer default-token")
+        .build();
+    let client = GraphQLClient::with_config(config);
+
+    // No per-call `.header(...)` here — only the client's `default_headers`
+    // should be responsible for getting the header to the server.
+    let _subscription = client
+        .subscribe("subscription { messageAdded { id } }")
+        .send()
+        .await
+        .expect("subscription should connect");
+
+    // Give the server task a moment to finish recording headers.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let headers = captured_headers.lock().unwrap();
+    let has_auth_header = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("authorization") && value == "Bearer default-token"
+    });
+
+    assert!(
+        has_auth_header,
+        "expected default_headers Authorization header to reach the WebSocket handshake request, got: {headers:?}"
     );
 }
 

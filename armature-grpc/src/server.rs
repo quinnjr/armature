@@ -82,6 +82,46 @@ impl GrpcServerBuilder {
         Ok(builder)
     }
 
+    /// Register the health-check and reflection services (when enabled in
+    /// `self.config`) onto `router`, keeping the health reporter so
+    /// registered services can actually be marked SERVING (previously this
+    /// dropped the reporter, so Check/Watch always answered NOT_SERVING).
+    ///
+    /// Shared by [`GrpcServerBuilder::serve`] and
+    /// [`GrpcServerBuilder::serve_with_shutdown`] so the two entry points
+    /// have identical health/reflection behavior instead of drifting apart.
+    async fn register_optional_services<S, L>(
+        &self,
+        router: tonic::transport::server::Router<L>,
+    ) -> tonic::transport::server::Router<L>
+    where
+        S: ServableService,
+    {
+        #[cfg(feature = "health")]
+        let router = if self.config.enable_health_check {
+            let (health_reporter, health_service) = tonic_health::server::health_reporter();
+            health_reporter.set_serving::<S>().await;
+            router.add_service(health_service)
+        } else {
+            router
+        };
+
+        #[cfg(feature = "reflection")]
+        let router = if self.config.enable_reflection {
+            match tonic_reflection::server::Builder::configure().build_v1() {
+                Ok(reflection_service) => router.add_service(reflection_service),
+                Err(e) => {
+                    error!(error = %e, "Failed to build gRPC reflection service");
+                    router
+                }
+            }
+        } else {
+            router
+        };
+
+        router
+    }
+
     /// Build and start the server with a service.
     pub async fn serve<S>(self, service: S) -> Result<()>
     where
@@ -95,32 +135,7 @@ impl GrpcServerBuilder {
         let mut builder = self.build_transport()?;
         let limited = limit_recv_message_size(service, self.config.max_recv_message_size);
         let router = builder.add_service(limited);
-
-        // Add health check service, keeping the reporter so registered
-        // services can actually be marked SERVING (previously this dropped
-        // the reporter, so Check/Watch always answered NOT_SERVING).
-        #[cfg(feature = "health")]
-        let router = if self.config.enable_health_check {
-            let (health_reporter, health_service) = tonic_health::server::health_reporter();
-            health_reporter.set_serving::<S>().await;
-            router.add_service(health_service)
-        } else {
-            router
-        };
-
-        // Add reflection service when enabled.
-        #[cfg(feature = "reflection")]
-        let router = if self.config.enable_reflection {
-            match tonic_reflection::server::Builder::configure().build_v1() {
-                Ok(reflection_service) => router.add_service(reflection_service),
-                Err(e) => {
-                    error!(error = %e, "Failed to build gRPC reflection service");
-                    router
-                }
-            }
-        } else {
-            router
-        };
+        let router = self.register_optional_services::<S, _>(router).await;
 
         router.serve(addr).await.map_err(|e| {
             error!(error = %e, "gRPC server error");
@@ -157,6 +172,7 @@ impl GrpcServerBuilder {
         let mut builder = self.build_transport()?;
         let limited = limit_recv_message_size(service, self.config.max_recv_message_size);
         let router = builder.add_service(limited);
+        let router = self.register_optional_services::<S, _>(router).await;
 
         router.serve_with_shutdown(addr, signal).await.map_err(|e| {
             error!(error = %e, "gRPC server error");
@@ -165,11 +181,13 @@ impl GrpcServerBuilder {
     }
 }
 
-/// A body that replays an already-consumed leading `Frame` before delegating
-/// to the rest of the original body. Used by [`MaxRecvMessageSizeService`] to
-/// peek the gRPC length-prefix without discarding the data it read.
+/// A body that replays a queue of already-consumed leading `Frame`s before
+/// delegating to the rest of the original body. Used by
+/// [`MaxRecvMessageSizeService`] to peek the gRPC length-prefix — which may
+/// be split across multiple small HTTP/2 DATA frames — without discarding
+/// the data it read.
 struct PrefetchedBody<B> {
-    first: Option<http_body::Frame<bytes::Bytes>>,
+    buffered: std::collections::VecDeque<http_body::Frame<bytes::Bytes>>,
     rest: B,
 }
 
@@ -185,14 +203,14 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<bytes::Bytes>, Self::Error>>>
     {
-        if let Some(frame) = self.first.take() {
+        if let Some(frame) = self.buffered.pop_front() {
             return std::task::Poll::Ready(Some(Ok(frame)));
         }
         std::pin::Pin::new(&mut self.rest).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
-        self.first.is_none() && self.rest.is_end_stream()
+        self.buffered.is_empty() && self.rest.is_end_stream()
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -200,8 +218,8 @@ where
     }
 }
 
-/// Service wrapper that enforces `max_recv_message_size` (Finding 6):
-/// requests whose gRPC length-prefix (the 4-byte big-endian length that
+/// Service wrapper that enforces `max_recv_message_size`: requests whose
+/// gRPC length-prefix (the 4-byte big-endian length that
 /// precedes every encoded gRPC message, per the wire protocol) declares a
 /// message larger than the configured limit are rejected with
 /// `Status::resource_exhausted` before reaching the inner service. Applied
@@ -260,23 +278,49 @@ where
 
         Box::pin(async move {
             use http_body_util::BodyExt;
+            use std::collections::VecDeque;
 
             let (parts, mut body) = req.into_parts();
-            let first_frame = body.frame().await;
 
-            let (data, oversized) = match first_frame {
-                Some(Ok(frame)) => {
-                    let oversized = frame
-                        .data_ref()
-                        .filter(|d| d.len() >= 5)
-                        .map(|d| {
-                            let len = u32::from_be_bytes([d[1], d[2], d[3], d[4]]) as usize;
-                            len > max_recv_message_size
-                        })
-                        .unwrap_or(false);
-                    (Some(Ok(frame)), oversized)
+            // Accumulate leading frames (and the data bytes within them)
+            // until we have the full 5-byte gRPC length-prefix (1
+            // compression-flag byte + 4 big-endian length bytes) or the body
+            // ends. A short first DATA frame does NOT mean "not oversized" —
+            // an attacker can fragment the length-prefix itself across
+            // several small frames to bypass a check that only inspects the
+            // first frame; this loop closes that bypass by not deciding
+            // anything until enough bytes have actually been seen.
+            let mut buffered: VecDeque<http_body::Frame<bytes::Bytes>> = VecDeque::new();
+            let mut prefix = bytes::BytesMut::with_capacity(5);
+
+            while prefix.len() < 5 {
+                match body.frame().await {
+                    Some(Ok(frame)) => {
+                        if let Some(data) = frame.data_ref() {
+                            prefix.extend_from_slice(data);
+                        }
+                        buffered.push_back(frame);
+                    }
+                    Some(Err(e)) => {
+                        // A genuine transport/read error must be surfaced,
+                        // not silently discarded (which would previously
+                        // forward a corrupted/truncated body to the inner
+                        // service as if nothing had gone wrong).
+                        return Ok(crate::middleware::status_response(tonic::Status::internal(
+                            format!(
+                                "failed to read request body while enforcing max_recv_message_size: {e}"
+                            ),
+                        )));
+                    }
+                    None => break, // body ended before 5 bytes were seen
                 }
-                other => (other, false),
+            }
+
+            let oversized = if prefix.len() >= 5 {
+                let len = u32::from_be_bytes([prefix[1], prefix[2], prefix[3], prefix[4]]) as usize;
+                len > max_recv_message_size
+            } else {
+                false
             };
 
             if oversized {
@@ -288,7 +332,7 @@ where
             }
 
             let rebuilt_body = tonic::body::Body::new(PrefetchedBody {
-                first: data.transpose().ok().flatten(),
+                buffered,
                 rest: body,
             });
             let req = http::Request::from_parts(parts, rebuilt_body);
@@ -356,6 +400,7 @@ mod tests {
     use tonic::service::interceptor::InterceptedService;
     use tonic_health::pb::health_client::HealthClient;
     use tonic_health::pb::{HealthCheckRequest, health_server::HealthServer};
+    use tower::Service as _;
 
     async fn bind_ephemeral() -> (tokio::net::TcpListener, SocketAddr) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -363,8 +408,8 @@ mod tests {
         (listener, addr)
     }
 
-    /// Finding 5 regression test: the health reporter must not be dropped —
-    /// a registered service should report SERVING, not NOT_SERVING/not_found.
+    /// The health reporter must not be dropped — a registered service should
+    /// report SERVING, not NOT_SERVING/not_found.
     #[tokio::test]
     async fn health_check_reports_serving_for_registered_service() {
         let (listener, addr) = bind_ephemeral().await;
@@ -411,8 +456,8 @@ mod tests {
         );
     }
 
-    /// Finding 1 regression test: a server-side `AuthInterceptor` must reject
-    /// unauthenticated requests and accept authenticated ones.
+    /// A server-side `AuthInterceptor` must reject unauthenticated requests
+    /// and accept authenticated ones.
     #[tokio::test]
     async fn server_side_auth_interceptor_rejects_and_accepts() {
         let (listener, addr) = bind_ephemeral().await;
@@ -461,8 +506,8 @@ mod tests {
         );
     }
 
-    /// Finding 4 regression test: `enable_reflection` must actually register
-    /// a working reflection service.
+    /// `enable_reflection` must actually register a working reflection
+    /// service.
     #[tokio::test]
     async fn enable_reflection_registers_working_reflection_service() {
         let (listener, addr) = bind_ephemeral().await;
@@ -516,8 +561,8 @@ mod tests {
         ));
     }
 
-    /// Finding 6 regression test: requests larger than `max_recv_message_size`
-    /// must be rejected, not silently accepted.
+    /// Requests larger than `max_recv_message_size` must be rejected, not
+    /// silently accepted.
     #[tokio::test]
     async fn oversized_request_is_rejected_when_message_size_limited() {
         let (listener, addr) = bind_ephemeral().await;
@@ -551,5 +596,260 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    /// A minimal inner service used to unit-test `MaxRecvMessageSizeService`
+    /// below without a real network round-trip. Reads the whole rebuilt
+    /// request body and echoes its byte length back as the status message,
+    /// so tests can confirm the reconstructed body (after our
+    /// buffer-and-replay logic) matches what was actually sent.
+    #[derive(Clone)]
+    struct EchoInner;
+
+    impl tower::Service<http::Request<tonic::body::Body>> for EchoInner {
+        type Response = http::Response<TonicBody>;
+        type Error = std::convert::Infallible;
+        type Future = std::pin::Pin<
+            Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+            Box::pin(async move {
+                use http_body_util::BodyExt;
+                let bytes = req
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| c.to_bytes())
+                    .unwrap_or_default();
+                Ok(crate::middleware::status_response(tonic::Status::ok(
+                    format!("received {} bytes", bytes.len()),
+                )))
+            })
+        }
+    }
+
+    /// A body that yields its bytes one at a time as separate frames (each
+    /// frame is under 5 bytes), used to simulate an attacker fragmenting the
+    /// gRPC length-prefix across multiple small HTTP/2 DATA frames.
+    struct FragmentedBody {
+        chunks: std::collections::VecDeque<bytes::Bytes>,
+    }
+
+    impl http_body::Body for FragmentedBody {
+        type Data = bytes::Bytes;
+        type Error = tonic::Status;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<bytes::Bytes>, Self::Error>>>
+        {
+            match self.chunks.pop_front() {
+                Some(chunk) => std::task::Poll::Ready(Some(Ok(http_body::Frame::data(chunk)))),
+                None => std::task::Poll::Ready(None),
+            }
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.chunks.is_empty()
+        }
+    }
+
+    fn one_byte_frames(data: &[u8]) -> std::collections::VecDeque<bytes::Bytes> {
+        data.iter().map(|b| bytes::Bytes::from(vec![*b])).collect()
+    }
+
+    /// Regression test: fragmenting the 5-byte gRPC length-prefix across
+    /// many 1-byte frames must not bypass `max_recv_message_size` — against
+    /// the pre-fix code (which only inspected whether the *first* frame was
+    /// >= 5 bytes, via `filter(|d| d.len() >= 5).unwrap_or(false)`), this
+    /// fragmentation would have made every oversized request look "not
+    /// oversized" and sail through uninspected.
+    #[tokio::test]
+    async fn fragmented_length_prefix_still_enforces_max_recv_message_size() {
+        let declared_len: u32 = 1000;
+        let mut full = vec![0u8]; // uncompressed flag
+        full.extend_from_slice(&declared_len.to_be_bytes());
+        full.extend(std::iter::repeat_n(b'x', declared_len as usize));
+
+        let body = tonic::body::Body::new(FragmentedBody {
+            chunks: one_byte_frames(&full),
+        });
+
+        let mut svc = MaxRecvMessageSizeService {
+            inner: EchoInner,
+            max_recv_message_size: 8,
+        };
+
+        let resp = svc.call(http::Request::new(body)).await.unwrap();
+        let status = tonic::Status::from_header_map(resp.headers()).unwrap();
+        assert_eq!(
+            status.code(),
+            tonic::Code::ResourceExhausted,
+            "a fragmented length-prefix must still be size-checked, not waved through"
+        );
+    }
+
+    /// Companion to the above: a fragmented message that is genuinely within
+    /// the configured limit must still reach the inner service, with its
+    /// full body intact (proving the buffer-and-replay via `PrefetchedBody`
+    /// doesn't drop or corrupt data).
+    #[tokio::test]
+    async fn fragmented_length_prefix_within_limit_reaches_inner_service_intact() {
+        let payload_len: u32 = 4;
+        let mut full = vec![0u8];
+        full.extend_from_slice(&payload_len.to_be_bytes());
+        full.extend_from_slice(b"data");
+
+        let total_len = full.len();
+        let body = tonic::body::Body::new(FragmentedBody {
+            chunks: one_byte_frames(&full),
+        });
+
+        let mut svc = MaxRecvMessageSizeService {
+            inner: EchoInner,
+            max_recv_message_size: 1024,
+        };
+
+        let resp = svc.call(http::Request::new(body)).await.unwrap();
+        let status = tonic::Status::from_header_map(resp.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::Ok);
+        assert_eq!(
+            status.message(),
+            format!("received {total_len} bytes"),
+            "the reconstructed body must include every byte the fragmented body sent"
+        );
+    }
+
+    /// A body that yields one small (< 5 byte) frame and then a transport
+    /// error, used to prove a genuine read error is surfaced rather than
+    /// silently discarded.
+    struct FlakyBody {
+        first: Option<bytes::Bytes>,
+    }
+
+    impl http_body::Body for FlakyBody {
+        type Data = bytes::Bytes;
+        type Error = tonic::Status;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<bytes::Bytes>, Self::Error>>>
+        {
+            if let Some(b) = self.first.take() {
+                return std::task::Poll::Ready(Some(Ok(http_body::Frame::data(b))));
+            }
+            std::task::Poll::Ready(Some(Err(tonic::Status::unavailable(
+                "simulated transport read error",
+            ))))
+        }
+
+        fn is_end_stream(&self) -> bool {
+            false
+        }
+    }
+
+    /// Regression test: a genuine transport-level read error while
+    /// accumulating the length-prefix must be surfaced to the caller, not
+    /// discarded via `.ok().flatten()` (which previously made the request
+    /// look like it simply had no data, silently forwarding a
+    /// corrupted/truncated body to the inner service instead of failing).
+    #[tokio::test]
+    async fn transport_read_error_while_buffering_prefix_is_surfaced() {
+        let body = tonic::body::Body::new(FlakyBody {
+            first: Some(bytes::Bytes::from_static(b"ab")), // 2 bytes: not enough to decide size yet
+        });
+
+        let mut svc = MaxRecvMessageSizeService {
+            inner: EchoInner,
+            max_recv_message_size: 1024,
+        };
+
+        let resp = svc.call(http::Request::new(body)).await.unwrap();
+        let status = tonic::Status::from_header_map(resp.headers()).unwrap();
+        assert_eq!(
+            status.code(),
+            tonic::Code::Internal,
+            "a transport read error must be surfaced as an error status, not silently dropped"
+        );
+    }
+
+    /// Reserve an ephemeral port and immediately release it, so
+    /// `GrpcServerBuilder::serve`/`serve_with_shutdown` (which bind their own
+    /// listener internally rather than accepting a pre-bound one) can be
+    /// configured with a concrete, likely-free address.
+    async fn free_addr() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    /// Regression test: `serve_with_shutdown` must register the health-check
+    /// service exactly like `serve` does — previously `serve` was fixed to
+    /// retain the health reporter and call `set_serving::<S>()`, but
+    /// `serve_with_shutdown` never got the same treatment, so a service run
+    /// via `serve_with_shutdown` would never answer health checks at all.
+    #[tokio::test]
+    async fn serve_with_shutdown_registers_health_check_like_serve() {
+        let addr = free_addr().await;
+        let config = GrpcServerConfig::builder()
+            .bind_socket_addr(addr)
+            .enable_health_check()
+            .build()
+            .unwrap();
+
+        // The service under test is reflection (distinct from the
+        // auto-registered health service below), so registering the
+        // config-driven health service doesn't collide with a
+        // manually-added one under the same route.
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .build_v1()
+            .unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            let _ = GrpcServerBuilder::new(config)
+                .serve_with_shutdown(reflection_service, async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = HealthClient::new(channel);
+
+        let resp = client
+            .check(HealthCheckRequest {
+                service: String::new(),
+            })
+            .await
+            .expect("serve_with_shutdown must register a working health check service");
+        let status = tonic_health::pb::health_check_response::ServingStatus::try_from(
+            resp.into_inner().status,
+        )
+        .unwrap();
+        assert_eq!(
+            status,
+            tonic_health::pb::health_check_response::ServingStatus::Serving,
+            "serve_with_shutdown must report SERVING just like serve does"
+        );
+
+        let _ = tx.send(());
     }
 }
