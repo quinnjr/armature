@@ -1,13 +1,74 @@
 //! Code generation commands.
 
 use colored::Colorize;
+use heck::ToSnakeCase;
 
 use crate::error::{CliError, CliResult};
 use crate::generators::{NameCases, ensure_dir, get_src_dir, update_mod_file, write_file};
-use crate::templates::{ComponentData, ControllerData, ModuleData, TemplateRegistry};
+use crate::templates::{
+    ComponentData, ControllerData, DtoData, EntityData, ModuleData, TemplateRegistry,
+};
+
+/// A single user-specified field parsed from a `--fields` spec.
+struct FieldDef {
+    snake: String,
+    rust_type: &'static str,
+}
+
+/// Map a field type token (e.g. `string`, `i32`, `bool`) to a Rust type.
+fn rust_type_for(spec: &str) -> &'static str {
+    match spec.trim().to_lowercase().as_str() {
+        "string" | "str" | "text" | "varchar" | "uuid" => "String",
+        "int" | "integer" | "i32" => "i32",
+        "i64" | "long" | "bigint" => "i64",
+        "u32" => "u32",
+        "u64" => "u64",
+        "float" | "f64" | "double" | "decimal" => "f64",
+        "f32" => "f32",
+        "bool" | "boolean" => "bool",
+        "date" | "datetime" | "timestamp" => "String",
+        "json" => "serde_json::Value",
+        _ => "String",
+    }
+}
+
+/// Map a Rust type to a Diesel SQL column type.
+fn diesel_type_for(rust_type: &str) -> &'static str {
+    match rust_type {
+        "String" => "Text",
+        "i32" => "Integer",
+        "i64" | "u32" | "u64" => "BigInt",
+        "f64" | "f32" => "Double",
+        "bool" => "Bool",
+        _ => "Text",
+    }
+}
+
+/// Parse a `--fields` spec like `name:string,email:string` into field definitions.
+///
+/// Invalid or empty entries are skipped; a bare `name` (no type) defaults to `String`.
+fn parse_fields(spec: Option<&str>) -> Vec<FieldDef> {
+    let Some(spec) = spec else {
+        return Vec::new();
+    };
+    spec.split(',')
+        .filter_map(|pair| {
+            let mut it = pair.splitn(2, ':');
+            let name = it.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let ty = it.next().unwrap_or("string");
+            Some(FieldDef {
+                snake: name.to_snake_case(),
+                rust_type: rust_type_for(ty),
+            })
+        })
+        .collect()
+}
 
 /// Generate a controller.
-pub async fn controller(name: &str, crud: bool, skip_tests: bool) -> CliResult<()> {
+pub async fn controller(name: &str, crud: bool, skip_tests: bool, auth: bool) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let controllers_dir = src_dir.join("controllers");
@@ -22,11 +83,19 @@ pub async fn controller(name: &str, crud: bool, skip_tests: bool) -> CliResult<(
         names.kebab.clone()
     };
 
+    // When --auth is set, attach an authentication guard to the controller.
+    let guard_attr = if auth {
+        "#[guard(AuthGuard)]\n".to_string()
+    } else {
+        String::new()
+    };
+
     let data = ControllerData {
         name_pascal: names.pascal.clone(),
         name_snake: names.snake.clone(),
         name_kebab: names.kebab.clone(),
         base_path,
+        guard_attr,
     };
 
     // Generate controller file
@@ -158,9 +227,21 @@ pub async fn middleware(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("middleware", name, skip_tests).await
 }
 
-/// Generate a guard.
-pub async fn guard(name: &str, skip_tests: bool) -> CliResult<()> {
-    generate_component("guard", name, skip_tests).await
+/// Generate a guard, choosing the implementation from `guard_type`.
+///
+/// `guard_type` is one of `custom`, `auth`, `role`, `permission`, `apikey`,
+/// `ratelimit`. Each renders a distinct guard implementation.
+pub async fn guard(name: &str, skip_tests: bool, guard_type: &str) -> CliResult<()> {
+    let (template, test_template): (&str, Option<&str>) = match guard_type {
+        "auth" => ("guard_auth", Some("guard_test")),
+        "role" => ("guard_role", None),
+        "permission" => ("guard_permission", None),
+        "apikey" => ("guard_apikey", None),
+        "ratelimit" => ("guard_ratelimit", None),
+        // "custom" and anything else fall back to the generic guard.
+        _ => ("guard", Some("guard_test")),
+    };
+    generate_component_templated("guards", "Guard", template, test_template, name, skip_tests).await
 }
 
 /// Generate a service.
@@ -184,7 +265,7 @@ pub async fn resource(name: &str, crud: bool) -> CliResult<()> {
 
     // Generate controller
     println!("  {} Generating controller...", "2/3".dimmed());
-    controller(name, crud, false).await?;
+    controller(name, crud, false, false).await?;
     println!();
 
     // Generate module
@@ -209,8 +290,8 @@ pub async fn repository(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("repository", name, skip_tests).await
 }
 
-/// Generate DTOs (Data Transfer Objects).
-pub async fn dto(name: &str) -> CliResult<()> {
+/// Generate DTOs (Data Transfer Objects), optionally injecting `--fields`.
+pub async fn dto(name: &str, fields: Option<&str>) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let dto_dir = src_dir.join("dto");
@@ -218,10 +299,49 @@ pub async fn dto(name: &str) -> CliResult<()> {
 
     let templates = TemplateRegistry::new();
 
-    let data = ComponentData {
+    let parsed = parse_fields(fields);
+
+    // Response struct: extra fields between `id` and the timestamps.
+    let response_fields = parsed
+        .iter()
+        .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+        .collect::<String>();
+
+    // Create request: validated fields (defaults to a single `name` field).
+    let create_fields = if parsed.is_empty() {
+        "    #[validate(length(min = 1, max = 255, message = \"Name must be between 1 and 255 characters\"))]\n    pub name: String,\n".to_string()
+    } else {
+        parsed
+            .iter()
+            .map(|f| {
+                if f.rust_type == "String" {
+                    format!(
+                        "    #[validate(length(min = 1, message = \"{} is required\"))]\n    pub {}: {},\n",
+                        f.snake, f.snake, f.rust_type
+                    )
+                } else {
+                    format!("    pub {}: {},\n", f.snake, f.rust_type)
+                }
+            })
+            .collect::<String>()
+    };
+
+    // Update request: every field optional.
+    let update_fields = if parsed.is_empty() {
+        "    pub name: Option<String>,\n".to_string()
+    } else {
+        parsed
+            .iter()
+            .map(|f| format!("    pub {}: Option<{}>,\n", f.snake, f.rust_type))
+            .collect::<String>()
+    };
+
+    let data = DtoData {
         name_pascal: names.pascal.clone(),
         name_snake: names.snake.clone(),
-        name_kebab: names.kebab.clone(),
+        response_fields,
+        create_fields,
+        update_fields,
     };
 
     let content = templates.render("dto", &data).map_err(CliError::Template)?;
@@ -252,9 +372,18 @@ pub async fn graphql_resolver(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("graphql_resolver", name, skip_tests).await
 }
 
-/// Generate a background job.
-pub async fn job(name: &str, skip_tests: bool) -> CliResult<()> {
-    generate_component("job", name, skip_tests).await
+/// Generate a background job, choosing the implementation from `job_type`.
+///
+/// `job_type` is one of `async` (queue processor), `scheduled` (cron), or
+/// `recurring` (fixed interval).
+pub async fn job(name: &str, skip_tests: bool, job_type: &str) -> CliResult<()> {
+    let (template, test_template): (&str, Option<&str>) = match job_type {
+        "scheduled" => ("job_scheduled", None),
+        "recurring" => ("job_recurring", None),
+        // "async" (default) is a queue processor and ships with a test.
+        _ => ("job", Some("job_test")),
+    };
+    generate_component_templated("jobs", "Job", template, test_template, name, skip_tests).await
 }
 
 /// Generate an event handler.
@@ -341,11 +470,11 @@ impl std::str::FromStr for OrmType {
 
 /// Generate a database entity.
 pub async fn entity(name: &str) -> CliResult<()> {
-    entity_with_orm(name, OrmType::Generic).await
+    entity_with_orm(name, OrmType::Generic, None).await
 }
 
-/// Generate a database entity with specific ORM support.
-pub async fn entity_with_orm(name: &str, orm: OrmType) -> CliResult<()> {
+/// Generate a database entity with specific ORM support, optionally injecting `--fields`.
+pub async fn entity_with_orm(name: &str, orm: OrmType, fields: Option<&str>) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let entities_dir = src_dir.join("entities");
@@ -353,20 +482,48 @@ pub async fn entity_with_orm(name: &str, orm: OrmType) -> CliResult<()> {
 
     let templates = TemplateRegistry::new();
 
-    let data = ComponentData {
-        name_pascal: names.pascal.clone(),
-        name_snake: names.snake.clone(),
-        name_kebab: names.kebab.clone(),
+    // The Prax ORM sources fields from `schema.prax`, so it uses the plain template.
+    let content = if matches!(orm, OrmType::Prax) {
+        let data = ComponentData {
+            name_pascal: names.pascal.clone(),
+            name_snake: names.snake.clone(),
+            name_kebab: names.kebab.clone(),
+        };
+        templates
+            .render("entity_prax", &data)
+            .map_err(CliError::Template)?
+    } else {
+        let parsed = parse_fields(fields);
+        let entity_fields = parsed
+            .iter()
+            .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let update_fields = parsed
+            .iter()
+            .map(|f| format!("    pub {}: Option<{}>,\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let diesel_cols = parsed
+            .iter()
+            .map(|f| format!("        {} -> {},\n", f.snake, diesel_type_for(f.rust_type)))
+            .collect::<String>();
+        let seaorm_fields = parsed
+            .iter()
+            .map(|f| format!("        pub {}: {},\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let data = EntityData {
+            name_pascal: names.pascal.clone(),
+            name_snake: names.snake.clone(),
+            name_kebab: names.kebab.clone(),
+            entity_fields: entity_fields.clone(),
+            new_fields: entity_fields,
+            update_fields,
+            diesel_cols,
+            seaorm_fields,
+        };
+        templates
+            .render("entity", &data)
+            .map_err(CliError::Template)?
     };
-
-    let template_name = match orm {
-        OrmType::Prax => "entity_prax",
-        _ => "entity",
-    };
-
-    let content = templates
-        .render(template_name, &data)
-        .map_err(CliError::Template)?;
 
     let file_path = entities_dir.join(format!("{}.rs", names.snake));
     write_file(&file_path, &content, false)?;
@@ -513,7 +670,7 @@ pub async fn prax_module(name: &str) -> CliResult<()> {
 
     // 2. Generate entity
     println!("  {} Generating entity...", "2/5".dimmed());
-    entity_with_orm(name, OrmType::Prax).await?;
+    entity_with_orm(name, OrmType::Prax, None).await?;
     println!();
 
     // 3. Generate repository
@@ -643,6 +800,72 @@ pub async fn health_controller() -> CliResult<()> {
     );
 
     println!("\n{} Generated HealthController", "✓".green().bold());
+    Ok(())
+}
+
+/// Generate a component from an explicit template + directory + test template.
+///
+/// Used by generators whose implementation varies (e.g. guards by `--guard-type`,
+/// jobs by `--job-type`). `test_template` is `None` when the variant ships no test.
+async fn generate_component_templated(
+    dir_name: &str,
+    type_name: &str,
+    template_name: &str,
+    test_template: Option<&str>,
+    name: &str,
+    skip_tests: bool,
+) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+
+    let component_dir = src_dir.join(dir_name);
+    ensure_dir(&component_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates
+        .render(template_name, &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = component_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&component_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        component_dir.join("mod.rs").display()
+    );
+
+    if !skip_tests && let Some(test_template) = test_template {
+        let test_content = templates
+            .render(test_template, &data)
+            .map_err(CliError::Template)?;
+
+        let tests_dir = component_dir.join("tests");
+        ensure_dir(&tests_dir)?;
+
+        let test_file = tests_dir.join(format!("{}_test.rs", names.snake));
+        write_file(&test_file, &test_content, false)?;
+
+        println!("  {} {}", "CREATE".green().bold(), test_file.display());
+    }
+
+    println!(
+        "\n{} Generated {}{}",
+        "✓".green().bold(),
+        names.pascal,
+        type_name
+    );
+
     Ok(())
 }
 

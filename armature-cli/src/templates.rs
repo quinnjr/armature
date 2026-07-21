@@ -29,6 +29,16 @@ impl TemplateRegistry {
             .expect("Failed to register middleware test template");
         hbs.register_template_string("guard", GUARD_TEMPLATE)
             .expect("Failed to register guard template");
+        hbs.register_template_string("guard_auth", GUARD_AUTH_TEMPLATE)
+            .expect("Failed to register auth guard template");
+        hbs.register_template_string("guard_role", GUARD_ROLE_TEMPLATE)
+            .expect("Failed to register role guard template");
+        hbs.register_template_string("guard_permission", GUARD_PERMISSION_TEMPLATE)
+            .expect("Failed to register permission guard template");
+        hbs.register_template_string("guard_apikey", GUARD_APIKEY_TEMPLATE)
+            .expect("Failed to register apikey guard template");
+        hbs.register_template_string("guard_ratelimit", GUARD_RATELIMIT_TEMPLATE)
+            .expect("Failed to register ratelimit guard template");
         hbs.register_template_string("guard_test", GUARD_TEST_TEMPLATE)
             .expect("Failed to register guard test template");
         hbs.register_template_string("service", SERVICE_TEMPLATE)
@@ -61,6 +71,10 @@ impl TemplateRegistry {
             .expect("Failed to register GraphQL resolver test template");
         hbs.register_template_string("job", JOB_TEMPLATE)
             .expect("Failed to register job template");
+        hbs.register_template_string("job_scheduled", JOB_SCHEDULED_TEMPLATE)
+            .expect("Failed to register scheduled job template");
+        hbs.register_template_string("job_recurring", JOB_RECURRING_TEMPLATE)
+            .expect("Failed to register recurring job template");
         hbs.register_template_string("job_test", JOB_TEST_TEMPLATE)
             .expect("Failed to register job test template");
         hbs.register_template_string("event_handler", EVENT_HANDLER_TEMPLATE)
@@ -141,7 +155,7 @@ use armature::prelude::*;
 
 /// {{name_pascal}} controller handles {{name_snake}} related endpoints.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
 impl {{name_pascal}}Controller {
@@ -191,7 +205,7 @@ pub struct Update{{name_pascal}}Request {
 
 /// {{name_pascal}} controller handles {{name_snake}} CRUD operations.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
 impl {{name_pascal}}Controller {
@@ -491,6 +505,224 @@ mod tests {
 }
 "#;
 
+const GUARD_AUTH_TEMPLATE: &str = r#"//! {{name_pascal}} authentication guard.
+
+use armature::prelude::*;
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a valid `Authorization: Bearer <token>` header.
+#[derive(Default)]
+pub struct {{name_pascal}}Guard;
+
+impl {{name_pascal}}Guard {
+    /// Create a new {{name_pascal}}Guard.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn extract_bearer<'a>(&self, req: &'a HttpRequest) -> Option<&'a str> {
+        req.headers
+            .get("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+        match self.extract_bearer(req) {
+            // TODO: verify the JWT / session token here.
+            Some(token) if !token.is_empty() => Ok(true),
+            _ => Err(Error::Unauthorized("Missing bearer token".to_string())),
+        }
+    }
+}
+"#;
+
+const GUARD_ROLE_TEMPLATE: &str = r#"//! {{name_pascal}} role-based guard.
+
+use armature::prelude::*;
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: allows requests only from users holding a required role.
+pub struct {{name_pascal}}Guard {
+    required_role: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_role`.
+    pub fn new(required_role: impl Into<String>) -> Self {
+        Self {
+            required_role: required_role.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("admin")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+        // TODO: source the role from your authenticated principal.
+        let role = req.headers.get("x-user-role").map(|s| s.as_str()).unwrap_or("");
+        if role == self.required_role {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires role '{}'",
+                self.required_role
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_PERMISSION_TEMPLATE: &str = r#"//! {{name_pascal}} permission-based guard.
+
+use armature::prelude::*;
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: checks that the caller holds a required permission.
+pub struct {{name_pascal}}Guard {
+    required_permission: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_permission`.
+    pub fn new(required_permission: impl Into<String>) -> Self {
+        Self {
+            required_permission: required_permission.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("{{name_snake}}:read")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+        // TODO: source granted permissions from your authenticated principal.
+        let granted = req
+            .headers
+            .get("x-user-permissions")
+            .map(|s| s.split(',').any(|p| p.trim() == self.required_permission))
+            .unwrap_or(false);
+        if granted {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires permission '{}'",
+                self.required_permission
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_APIKEY_TEMPLATE: &str = r#"//! {{name_pascal}} API-key guard.
+
+use armature::prelude::*;
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a matching `X-API-Key` header.
+pub struct {{name_pascal}}Guard {
+    expected_key: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard expecting `expected_key`.
+    pub fn new(expected_key: impl Into<String>) -> Self {
+        Self {
+            expected_key: expected_key.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        // TODO: load the real key from configuration / environment.
+        Self::new(std::env::var("API_KEY").unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+        let provided = req.headers.get("x-api-key").map(|s| s.as_str());
+        if !self.expected_key.is_empty() && provided == Some(self.expected_key.as_str()) {
+            Ok(true)
+        } else {
+            Err(Error::Unauthorized("Invalid API key".to_string()))
+        }
+    }
+}
+"#;
+
+const GUARD_RATELIMIT_TEMPLATE: &str = r#"//! {{name_pascal}} rate-limiting guard.
+
+use armature::prelude::*;
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// {{name_pascal}} guard: rejects callers that exceed a fixed request budget per window.
+pub struct {{name_pascal}}Guard {
+    max_requests: u32,
+    window: Duration,
+    hits: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard allowing `max_requests` per `window`.
+    pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            hits: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new(60, Duration::from_secs(60))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+        let key = req
+            .headers
+            .get("x-forwarded-for")
+            .cloned()
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        let mut hits = self.hits.lock().unwrap();
+        let now = Instant::now();
+        let entry = hits.entry(key).or_insert((0, now));
+        if now.duration_since(entry.1) > self.window {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        if entry.0 > self.max_requests {
+            Err(Error::TooManyRequests("Rate limit exceeded".to_string()))
+        } else {
+            Ok(true)
+        }
+    }
+}
+"#;
+
 // =============================================================================
 // SERVICE TEMPLATES
 // =============================================================================
@@ -612,7 +844,7 @@ authors = ["Your Name <your.email@example.com>"]
 description = "{{description}}"
 
 [dependencies]
-armature = "0.1"
+{{{armature_dep}}}
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -620,7 +852,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
 thiserror = "2.0"
-
+{{{extra_deps}}}
 [dev-dependencies]
 tokio-test = "0.4"
 "#;
@@ -843,28 +1075,21 @@ use validator::Validate;
 #[serde(rename_all = "camelCase")]
 pub struct {{name_pascal}}Response {
     pub id: u64,
-    pub created_at: String,
+{{{response_fields}}}    pub created_at: String,
     pub updated_at: String,
-    // Add more fields as needed
 }
 
 /// Create {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Create{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: String,
-    // Add more fields as needed
-}
+{{{create_fields}}}}
 
 /// Update {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Update{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: Option<String>,
-    // Add more fields as needed
-}
+{{{update_fields}}}}
 
 /// Query parameters for listing {{name_snake}}s.
 #[derive(Debug, Clone, Deserialize)]
@@ -1298,6 +1523,91 @@ mod tests {
         assert_eq!(job.retry_delay(1), std::time::Duration::from_secs(2));
         assert_eq!(job.retry_delay(2), std::time::Duration::from_secs(4));
         assert_eq!(job.retry_delay(3), std::time::Duration::from_secs(8));
+    }
+}
+"#;
+
+const JOB_SCHEDULED_TEMPLATE: &str = r#"//! {{name_pascal}} scheduled job (runs at a fixed cron time).
+
+use armature::prelude::*;
+use armature_cron::{CronJob, Schedule};
+use async_trait::async_trait;
+
+/// {{name_pascal}} scheduled job.
+///
+/// Runs on a cron schedule. Register it with your scheduler at startup.
+#[derive(Clone)]
+pub struct {{name_pascal}}Job;
+
+impl {{name_pascal}}Job {
+    /// Create a new scheduled job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Cron expression controlling when this job fires (default: every day at midnight).
+    pub const CRON: &'static str = "0 0 * * *";
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CronJob for {{name_pascal}}Job {
+    fn schedule(&self) -> Schedule {
+        Schedule::from_cron(Self::CRON)
+    }
+
+    async fn run(&self) -> Result<(), Error> {
+        tracing::info!("Running scheduled {{name_pascal}}Job");
+        // TODO: implement scheduled work.
+        Ok(())
+    }
+}
+"#;
+
+const JOB_RECURRING_TEMPLATE: &str = r#"//! {{name_pascal}} recurring job (runs on a fixed interval).
+
+use armature::prelude::*;
+use armature_cron::{CronJob, Schedule};
+use async_trait::async_trait;
+use std::time::Duration;
+
+/// {{name_pascal}} recurring job.
+///
+/// Runs repeatedly on a fixed interval.
+#[derive(Clone)]
+pub struct {{name_pascal}}Job {
+    interval: Duration,
+}
+
+impl {{name_pascal}}Job {
+    /// Create a new recurring job with the given interval.
+    pub fn new(interval: Duration) -> Self {
+        Self { interval }
+    }
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        // Default: run every 5 minutes.
+        Self::new(Duration::from_secs(300))
+    }
+}
+
+#[async_trait]
+impl CronJob for {{name_pascal}}Job {
+    fn schedule(&self) -> Schedule {
+        Schedule::every(self.interval)
+    }
+
+    async fn run(&self) -> Result<(), Error> {
+        tracing::info!("Running recurring {{name_pascal}}Job (every {:?})", self.interval);
+        // TODO: implement recurring work.
+        Ok(())
     }
 }
 "#;
@@ -1935,7 +2245,7 @@ pub struct {{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
+{{{entity_fields}}}    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -1946,7 +2256,7 @@ pub struct {{name_pascal}} {
 pub struct New{{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default = "default_active")]
+{{{new_fields}}}    #[serde(default = "default_active")]
     pub active: bool,
 }
 
@@ -1962,7 +2272,7 @@ pub struct Update{{name_pascal}} {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub active: Option<bool>,
-}
+{{{update_fields}}}}
 
 #[cfg(feature = "diesel")]
 diesel::table! {
@@ -1971,7 +2281,7 @@ diesel::table! {
         name -> Varchar,
         description -> Nullable<Text>,
         active -> Bool,
-        created_at -> Timestamptz,
+{{{diesel_cols}}}        created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
 }
@@ -1990,7 +2300,7 @@ mod sea_orm_entity {
         pub name: String,
         pub description: Option<String>,
         pub active: bool,
-        pub created_at: DateTimeUtc,
+{{{seaorm_fields}}}        pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
 
@@ -3632,6 +3942,8 @@ pub struct ControllerData {
     pub name_snake: String,
     pub name_kebab: String,
     pub base_path: String,
+    /// Optional guard attribute (e.g. `#[guard(AuthGuard)]\n`) placed on the controller.
+    pub guard_attr: String,
 }
 
 /// Template data for module generation.
@@ -3663,6 +3975,10 @@ pub struct ProjectData {
     pub description: String,
     pub curly_open: String,
     pub curly_close: String,
+    /// The `armature` dependency line (may enable features).
+    pub armature_dep: String,
+    /// Extra dependency lines (database, features, template-specific), joined with newlines.
+    pub extra_deps: String,
 }
 
 impl ProjectData {
@@ -3681,16 +3997,53 @@ impl ProjectData {
             description,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
+            armature_dep: "armature = \"0.1\"".to_string(),
+            extra_deps: String::new(),
         }
+    }
+
+    /// Set the `armature` dependency line (e.g. with feature flags).
+    pub fn with_armature_dep(mut self, dep: String) -> Self {
+        self.armature_dep = dep;
+        self
+    }
+
+    /// Set extra dependency lines injected into the generated `[dependencies]` table.
+    pub fn with_extra_deps(mut self, deps: String) -> Self {
+        self.extra_deps = deps;
+        self
     }
 }
 
-/// Template data for entity generation.
+/// Template data for entity generation, with optional user-specified fields.
 #[derive(Serialize)]
 pub struct EntityData {
     pub name_pascal: String,
     pub name_snake: String,
     pub name_kebab: String,
+    /// Extra fields for the main entity struct (`    pub x: T,\n` lines).
+    pub entity_fields: String,
+    /// Extra fields for the `New{{name}}` insertion struct.
+    pub new_fields: String,
+    /// Extra fields for the `Update{{name}}` changeset struct (all `Option<T>`).
+    pub update_fields: String,
+    /// Extra columns for the Diesel `table!` macro.
+    pub diesel_cols: String,
+    /// Extra fields for the SeaORM `Model`.
+    pub seaorm_fields: String,
+}
+
+/// Template data for DTO generation, with optional user-specified fields.
+#[derive(Serialize)]
+pub struct DtoData {
+    pub name_pascal: String,
+    pub name_snake: String,
+    /// Extra fields for the response struct.
+    pub response_fields: String,
+    /// Full body of the create-request struct (validated fields).
+    pub create_fields: String,
+    /// Full body of the update-request struct (all `Option<T>`).
+    pub update_fields: String,
 }
 
 /// Template data for Rhai script generation.

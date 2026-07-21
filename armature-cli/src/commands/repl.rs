@@ -96,16 +96,43 @@ fn is_evcxr_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Build the init script fed to evcxr at launch so the Armature prelude is
+/// available in the REPL (adds the dependency and imports the prelude).
+fn repl_init_script() -> String {
+    let mut script = String::new();
+    // Add the armature dependency and pull in the prelude.
+    script.push_str(":dep armature = \"0.2\"\n");
+    script.push_str("use armature::prelude::*;\n");
+    script
+}
+
 fn launch_evcxr_repl() -> Result<(), CliError> {
-    println!("Starting evcxr REPL...");
+    println!("Starting evcxr REPL with the Armature prelude...");
     println!();
 
     let mut child = Command::new("evcxr")
-        .stdin(Stdio::inherit())
+        .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(CliError::Io)?;
+
+    // Feed the init script (":dep" + "use armature::prelude::*;") so the prelude
+    // is loaded before handing the session to the user.
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| CliError::Tool("failed to open evcxr stdin".to_string()))?;
+    child_stdin
+        .write_all(repl_init_script().as_bytes())
+        .map_err(CliError::Io)?;
+    child_stdin.flush().map_err(CliError::Io)?;
+
+    // Forward the user's stdin to the REPL for the interactive session.
+    std::thread::spawn(move || {
+        let mut user_input = io::stdin();
+        let _ = io::copy(&mut user_input, &mut child_stdin);
+    });
 
     let status = child.wait().map_err(CliError::Io)?;
 
@@ -147,5 +174,15 @@ mod tests {
     fn test_is_evcxr_installed() {
         // This will vary by system
         let _ = is_evcxr_installed();
+    }
+
+    #[test]
+    fn repl_init_script_injects_prelude() {
+        let script = repl_init_script();
+        assert!(script.contains(":dep"), "init script must add a dependency");
+        assert!(
+            script.contains("use armature::prelude::*;"),
+            "init script must import the Armature prelude"
+        );
     }
 }

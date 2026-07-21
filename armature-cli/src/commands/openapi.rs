@@ -71,10 +71,8 @@ impl ClientLanguage {
 /// Client generation options
 #[derive(Debug, Clone, Default)]
 pub struct ClientOptions {
-    /// Base URL for the API (can be overridden at runtime)
+    /// Default base URL baked into the generated client (still overridable at runtime)
     pub base_url: Option<String>,
-    /// Generate async client (Rust only)
-    pub async_client: bool,
     /// Include request/response logging
     pub with_logging: bool,
     /// Generate with retry logic
@@ -204,26 +202,80 @@ export interface RequestOptions {
 "#,
     );
 
-    // Client class
+    // Optional default base URL baked into the client.
+    if let Some(url) = &options.base_url {
+        client.push_str(&format!("export const DEFAULT_BASE_URL = '{}';\n\n", url));
+    }
+
+    // Constructor's base URL initializer (defaults to DEFAULT_BASE_URL when set).
+    let base_url_init = if options.base_url.is_some() {
+        "(config.baseUrl ?? DEFAULT_BASE_URL).replace(/\\/$/, '')"
+    } else {
+        "config.baseUrl.replace(/\\/$/, '')"
+    };
+
+    // Client class header + constructor.
     client.push_str(&format!(
         r#"// =============================================================================
-// {} Client
+// {api_name} Client
 // =============================================================================
 
-export class {}Client {{
+export class {api_name}Client {{
   private baseUrl: string;
   private headers: Record<string, string>;
   private timeout: number;
   private onError?: (error: ApiError) => void;
 
   constructor(config: ClientConfig) {{
-    this.baseUrl = config.baseUrl.replace(/\/$/, '');
+    this.baseUrl = {base_url_init};
     this.headers = config.headers ?? {{}};
     this.timeout = config.timeout ?? 30000;
     this.onError = config.onError;
   }}
 
-  private async request<T>(
+"#,
+        api_name = api_name,
+        base_url_init = base_url_init,
+    ));
+
+    // Request method body, varying by logging/retry options.
+    let log_request = if options.with_logging {
+        "        console.debug(`[client] -> ${method} ${url.toString()}`);\n"
+    } else {
+        ""
+    };
+    let log_response = if options.with_logging {
+        "        console.debug(`[client] <- ${response.status} ${method} ${url.toString()}`);\n"
+    } else {
+        ""
+    };
+
+    let send_block = if options.with_retry {
+        r#"    let response: Response | undefined;
+    let lastError: unknown;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        response = await doFetch();
+        // Retry only on server errors (5xx).
+        if (response.status < 500) break;
+      } catch (err) {
+        lastError = err;
+      }
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 2 ** attempt * 100));
+      }
+    }
+    if (!response) {
+      throw lastError ?? new Error('request failed after retries');
+    }
+"#
+    } else {
+        "    const response = await doFetch();\n"
+    };
+
+    client.push_str(&format!(
+        r#"  private async request<T>(
     method: string,
     path: string,
     options?: RequestOptions & {{ body?: unknown; query?: Record<string, string> }}
@@ -238,46 +290,48 @@ export class {}Client {{
       }}
     }}
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-
-    try {{
-      const response = await fetch(url.toString(), {{
-        method,
-        headers: {{
-          'Content-Type': 'application/json',
-          ...this.headers,
-          ...options?.headers,
-        }},
-        body: options?.body ? JSON.stringify(options.body) : undefined,
-        signal: options?.signal ?? controller.signal,
-      }});
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {{
-        const error: ApiError = {{
-          status: response.status,
-          message: response.statusText,
-          body: await response.json().catch(() => undefined),
-        }};
-        this.onError?.(error);
-        throw error;
+    const doFetch = async (): Promise<Response> => {{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+      try {{
+{log_request}        const response = await fetch(url.toString(), {{
+          method,
+          headers: {{
+            'Content-Type': 'application/json',
+            ...this.headers,
+            ...options?.headers,
+          }},
+          body: options?.body ? JSON.stringify(options.body) : undefined,
+          signal: options?.signal ?? controller.signal,
+        }});
+{log_response}        return response;
+      }} finally {{
+        clearTimeout(timeoutId);
       }}
+    }};
 
-      if (response.status === 204) {{
-        return undefined as T;
-      }}
-
-      return response.json();
-    }} catch (error) {{
-      clearTimeout(timeoutId);
+{send_block}
+    if (!response.ok) {{
+      const error: ApiError = {{
+        status: response.status,
+        message: response.statusText,
+        body: await response.json().catch(() => undefined),
+      }};
+      this.onError?.(error);
       throw error;
     }}
+
+    if (response.status === 204) {{
+      return undefined as T;
+    }}
+
+    return response.json();
   }}
 
 "#,
-        api_name, api_name
+        log_request = log_request,
+        log_response = log_response,
+        send_block = send_block,
     ));
 
     // Generate methods for each operation
@@ -801,9 +855,30 @@ impl {}Client {{
         api_name, spec.info.version, module_name, api_name, api_name, api_name, api_name, api_name
     ));
 
+    // Bake in a default base URL when requested.
+    if let Some(url) = &options.base_url {
+        let const_decl = format!(
+            "/// Default base URL baked into this client.\npub const DEFAULT_BASE_URL: &str = \"{}\";\n",
+            url
+        );
+        client = client.replace(
+            "mod types;\npub use types::*;\n",
+            &format!("mod types;\npub use types::*;\n\n{}", const_decl),
+        );
+        client = client.replace(
+            "base_url: String::new(),",
+            "base_url: DEFAULT_BASE_URL.to_string(),",
+        );
+    }
+
+    // Retry helper (only when --with-retry is set).
+    if options.with_retry {
+        client.push_str(RUST_RETRY_HELPER);
+    }
+
     // Generate methods
     for op in &operations {
-        client.push_str(&generate_rust_method(op));
+        client.push_str(&generate_rust_method(op, options));
     }
 
     client.push_str("}\n");
@@ -850,7 +925,7 @@ reqwest = {{ version = "0.12", features = ["json"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = {{ version = "1", features = ["rt-multi-thread", "macros"] }}
+tokio = {{ version = "1", features = ["rt-multi-thread", "macros", "time"] }}
 "#,
         module_name, api_name
     );
@@ -1078,7 +1153,40 @@ fn parse_rust_operation(method: &str, path: &str, op: &Operation) -> RustOperati
     }
 }
 
-fn generate_rust_method(op: &RustOperationInfo) -> String {
+/// Retry helper method injected into the client `impl` when `--with-retry` is set.
+const RUST_RETRY_HELPER: &str = r#"    /// Send a request, retrying up to 3 times on transport errors and 5xx responses.
+    async fn send_with_retry(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ApiError> {
+        let max_retries = 3u32;
+        let mut last_err: Option<reqwest::Error> = None;
+        for attempt in 0..=max_retries {
+            let req = match builder.try_clone() {
+                Some(r) => r,
+                None => return builder.send().await.map_err(ApiError::Http),
+            };
+            match req.send().await {
+                Ok(resp) => {
+                    if resp.status().as_u16() < 500 || attempt == max_retries {
+                        return Ok(resp);
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+            if attempt < max_retries {
+                let backoff = std::time::Duration::from_millis(100 * 2u64.pow(attempt));
+                tokio::time::sleep(backoff).await;
+            }
+        }
+        Err(last_err
+            .map(ApiError::Http)
+            .unwrap_or_else(|| ApiError::Config("request failed after retries".to_string())))
+    }
+
+"#;
+
+fn generate_rust_method(op: &RustOperationInfo, options: &ClientOptions) -> String {
     let method_name = op
         .operation_id
         .clone()
@@ -1147,6 +1255,29 @@ fn generate_rust_method(op: &RustOperationInfo) -> String {
         request_build.push_str("\n            .json(body)");
     }
 
+    // Optional request logging.
+    let log_line = if options.with_logging {
+        format!(
+            "        eprintln!(\"[client] {{}} {{}}\", \"{}\", path);\n",
+            op.method.to_uppercase()
+        )
+    } else {
+        String::new()
+    };
+
+    // Send statement: via the retry helper when enabled, otherwise a plain send.
+    let send_stmt = if options.with_retry {
+        format!(
+            "let response = self.send_with_retry({})\n            .await?;",
+            request_build
+        )
+    } else {
+        format!(
+            "let response = {}\n            .send()\n            .await?;",
+            request_build
+        )
+    };
+
     let mut output = String::new();
 
     if let Some(ref summary) = op.summary {
@@ -1154,11 +1285,9 @@ fn generate_rust_method(op: &RustOperationInfo) -> String {
     }
 
     output.push_str(&format!(
-        r#"    pub async fn {}({}) -> Result<{}, ApiError> {{
-        {}
-        let response = {}
-            .send()
-            .await?;
+        r#"    pub async fn {method_name}({params_str}) -> Result<{response_type}, ApiError> {{
+        {path_code}
+{log_line}        {send_stmt}
 
         if !response.status().is_success() {{
             return Err(ApiError::Api {{
@@ -1171,7 +1300,12 @@ fn generate_rust_method(op: &RustOperationInfo) -> String {
     }}
 
 "#,
-        method_name, params_str, op.response_type, path_code, request_build
+        method_name = method_name,
+        params_str = params_str,
+        response_type = op.response_type,
+        path_code = path_code,
+        log_line = log_line,
+        send_stmt = send_stmt,
     ));
 
     output
