@@ -171,6 +171,25 @@ impl ResponseBinding {
         }
     }
 
+    /// Build a `ResponseBinding` that mirrors an existing `HttpResponse`.
+    ///
+    /// Used to hand middleware scripts the *real* outgoing response
+    /// (status/headers/body) instead of a blank slate, so a script can
+    /// inspect it and amend it (e.g. add a header) without discarding
+    /// whatever the handler already produced.
+    pub fn from_http_response(response: &HttpResponse) -> Self {
+        let mut headers = HashMap::new();
+        for (name, value) in response.headers.iter() {
+            headers.insert(name.clone(), value.clone());
+        }
+
+        Self {
+            status: response.status,
+            headers,
+            body: Some(response.body_ref().to_vec()),
+        }
+    }
+
     /// Set status code.
     pub fn status(&mut self, code: i64) -> Self {
         self.status = code as u16;

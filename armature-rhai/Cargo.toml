@@ -19,7 +19,9 @@ armature-core = { path = "../armature-core", version = "0.2.1" }
 rhai = { version = "1.25", features = ["sync", "serde", "metadata"] }
 
 # Async runtime
-tokio = { version = "1.52", features = ["sync", "fs", "time"] }
+# `rt`/`rt-multi-thread` are required so `script_handler` can detect and
+# safely block on the caller's runtime flavor (see src/handler.rs).
+tokio = { version = "1.52", features = ["sync", "fs", "time", "rt", "rt-multi-thread"] }
 async-trait = "0.1"
 
 # Serialization

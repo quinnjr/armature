@@ -184,20 +184,34 @@ impl ScriptMiddleware {
 
         let mut scope = context.into_scope();
 
-        // Make the response available for modification
-        let resp_binding = ResponseBinding::new();
+        // Make the *real* outgoing response available, both as `response`
+        // (for in-place mutation via method calls, e.g.
+        // `response.header("x-served-by", "rhai");`) and as
+        // `original_response` (for scripts that build a new response from
+        // the original and return it explicitly). Without this, scripts can
+        // only replace the response wholesale and lose whatever
+        // status/headers/body the handler already produced.
+        let resp_binding = ResponseBinding::from_http_response(&response);
+        scope.set_value("response", resp_binding.clone());
         scope.push("original_response", resp_binding);
 
         let script = self.engine.compile_file(script_path)?;
         let result = self.engine.eval(&script, &mut scope)?;
 
-        // Check if a new response was returned
+        // A script that returns a ResponseBinding as its final expression
+        // replaces the response outright.
         if result.is::<ResponseBinding>() {
-            let response: ResponseBinding = result.cast();
-            return Ok(response.into_http_response());
+            let new_response: ResponseBinding = result.cast();
+            return Ok(new_response.into_http_response());
         }
 
-        // Return original response if not modified
+        // A script that mutated `response` in place amends the real
+        // response instead of discarding it.
+        if let Some(mutated) = scope.get_value::<ResponseBinding>("response") {
+            return Ok(mutated.into_http_response());
+        }
+
+        // Script didn't touch the response at all: pass it through unchanged.
         Ok(response)
     }
 }
@@ -206,17 +220,58 @@ impl ScriptMiddleware {
 pub type ScriptHandlerFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse> + Send + Sync>;
 
 /// Create a handler function from a script.
+///
+/// The returned closure is a plain sync `Fn`, but internally it always has
+/// to drive an async [`ScriptHandler::handle`] call to completion. It never
+/// panics regardless of the caller's Tokio context:
+///
+/// - Inside a multi-thread runtime worker, it uses
+///   [`tokio::task::block_in_place`] plus [`Handle::block_on`] — safe because
+///   `block_in_place` hands this worker's other tasks off elsewhere first.
+/// - Inside a current-thread runtime (or with no runtime at all), blocking
+///   the calling thread could deadlock the executor (or is simply
+///   impossible), so the future is instead driven to completion on a
+///   dedicated thread with its own minimal runtime.
 pub fn script_handler(engine: Arc<RhaiEngine>, script_path: impl Into<PathBuf>) -> ScriptHandlerFn {
     let handler = Arc::new(ScriptHandler::new(engine, script_path));
 
     Box::new(move |request| {
-        // For sync context, we need to block on the async handler
-        // In practice, this would be called from an async context
         let handler = handler.clone();
-        let rt = tokio::runtime::Handle::try_current().expect("must be called from async context");
-
-        rt.block_on(handler.handle(request))
+        run_blocking(async move { handler.handle(request).await })
     })
+}
+
+/// Run `fut` to completion from synchronous code, regardless of whether the
+/// calling thread is a Tokio multi-thread runtime worker, a current-thread
+/// runtime, or has no Tokio runtime at all. Never panics because of the
+/// caller's runtime context.
+fn run_blocking<Fut>(fut: Fut) -> Fut::Output
+where
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        // Already inside a multi-thread runtime worker: `block_in_place`
+        // moves this worker's other tasks to another thread first, so
+        // blocking here to drive `fut` to completion is safe.
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        // No runtime, or a single-threaded `current_thread` runtime: this
+        // thread may be the only one driving the executor, so blocking it
+        // directly could deadlock (or is outright impossible with no
+        // runtime). Run the future on a dedicated thread with its own
+        // minimal runtime instead, and block *this* thread on the join.
+        _ => std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("failed to start a dedicated runtime for a Rhai script handler");
+            rt.block_on(fut)
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+    }
 }
 
 #[cfg(test)]
@@ -231,5 +286,93 @@ mod tests {
     async fn test_script_handler_basic() {
         // This test requires a real script file
         // In a real test, we'd use tempfile to create a test script
+    }
+
+    #[tokio::test]
+    async fn test_call_after_can_amend_the_real_response() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("after.rhai"),
+            r#"
+                original_response.header("x-served-by", "script");
+                original_response
+            "#,
+        )
+        .unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let middleware = ScriptMiddleware::after(engine, "after.rhai");
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut real_response = HttpResponse::new(201);
+        real_response
+            .headers
+            .insert("x-real".to_string(), "yes".to_string());
+        let real_response = real_response.with_body(b"hello".to_vec());
+
+        let amended = middleware
+            .call_after(&request, real_response)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            amended.status, 201,
+            "script must see the real status, not a fresh 200"
+        );
+        assert_eq!(
+            amended.headers.get("x-real"),
+            Some(&"yes".to_string()),
+            "existing headers must survive"
+        );
+        assert_eq!(
+            amended.headers.get("x-served-by"),
+            Some(&"script".to_string())
+        );
+        assert_eq!(
+            amended.body_ref(),
+            b"hello",
+            "existing body must survive when the script only adds a header"
+        );
+    }
+
+    #[test]
+    fn test_script_handler_without_tokio_runtime() {
+        // No Tokio runtime is active on this thread at all.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("handler.rhai"), "").unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let handler = script_handler(engine, "handler.rhai");
+
+        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+            .expect("script_handler must not panic without a Tokio runtime");
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_script_handler_inside_current_thread_runtime() {
+        // The default `#[tokio::test]` flavor is a current-thread runtime.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("handler.rhai"), "").unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let handler = script_handler(engine, "handler.rhai");
+
+        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+            .expect("script_handler must not panic inside a current-thread runtime");
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_handler_inside_multi_thread_runtime() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("handler.rhai"), "").unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let handler = script_handler(engine, "handler.rhai");
+
+        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+            .expect("script_handler must not panic inside a multi-thread runtime");
+        assert_eq!(response.status, 200);
     }
 }

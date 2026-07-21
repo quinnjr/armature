@@ -112,10 +112,18 @@ impl RhaiEngine {
         let path = path.as_ref();
         let full_path = self.loader.resolve_path(path);
 
-        // Check cache first (unless hot reload is enabled)
-        if !self.config.hot_reload
-            && let Some(script) = self.cache.read().get(&full_path)
-        {
+        if self.config.hot_reload {
+            // In hot-reload mode, evict any cached scripts whose source file
+            // has changed since it was compiled (`CompiledScript::is_stale`
+            // via `ScriptCache::evict_stale`), so a stale AST is never
+            // served and a subsequent cache lookup below naturally falls
+            // through to a fresh recompilation. An unchanged file is left
+            // in the cache and served as normal.
+            self.cache.write().evict_stale();
+        }
+
+        // Check cache first.
+        if let Some(script) = self.cache.read().get(&full_path) {
             return Ok(script);
         }
 
@@ -278,5 +286,76 @@ impl RhaiEngineBuilder {
     /// Build the engine.
     pub fn build(self) -> Result<RhaiEngine> {
         RhaiEngine::from_config(self.config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::Duration;
+
+    #[test]
+    fn test_hot_reload_recompiles_only_when_stale() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let script_path = temp.path().join("route.rhai");
+        fs::write(&script_path, "40 + 2").unwrap();
+
+        let engine = RhaiEngine::new()
+            .scripts_dir(temp.path())
+            .hot_reload(true)
+            .build()
+            .unwrap();
+
+        let first = engine.compile_file("route.rhai").unwrap();
+
+        // Re-compiling an unchanged file must be served from cache, not
+        // recompiled unconditionally just because hot-reload is on.
+        let second = engine.compile_file("route.rhai").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "unchanged script should be served from cache under hot-reload"
+        );
+
+        // Change the file's contents and bump its mtime forward so it is
+        // unambiguously newer than the first compilation (avoids relying on
+        // filesystem mtime resolution / real-time sleeps).
+        fs::write(&script_path, "1 + 1").unwrap();
+        let future = first.compiled_at() + Duration::from_secs(2);
+        let file = fs::File::options().write(true).open(&script_path).unwrap();
+        file.set_modified(future).unwrap();
+
+        let third = engine.compile_file("route.rhai").unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "changed script must be recompiled under hot-reload"
+        );
+
+        // Confirm the *new* source actually got compiled.
+        let mut scope = Scope::new();
+        let value = engine.eval(&third, &mut scope).unwrap();
+        assert_eq!(value.as_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_without_hot_reload_cache_is_never_invalidated_by_mtime() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let script_path = temp.path().join("route.rhai");
+        fs::write(&script_path, "40 + 2").unwrap();
+
+        let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
+
+        let first = engine.compile_file("route.rhai").unwrap();
+
+        fs::write(&script_path, "1 + 1").unwrap();
+        let future = first.compiled_at() + Duration::from_secs(2);
+        let file = fs::File::options().write(true).open(&script_path).unwrap();
+        file.set_modified(future).unwrap();
+
+        let second = engine.compile_file("route.rhai").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "without hot-reload, a changed file must still be served from cache"
+        );
     }
 }
