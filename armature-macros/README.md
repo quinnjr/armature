@@ -10,7 +10,7 @@ Declarative macros for the Armature framework that reduce boilerplate and improv
 - ✅ **Utilities** - JSON building, pagination, logging
 
 > Looking for `validate!`, `validate_required!`, or `validate_email!`? Those
-> are proc-macro attribute/derive-style validation helpers and live in
+> are function-like proc-macro validation helpers and live in
 > [`armature-macros-utils`](../armature-macros-utils), not in this crate.
 
 ## Installation
@@ -187,8 +187,12 @@ impl UserController {
         let name: String = extract_field(&req, "name")?;
         let email: String = extract_field(&req, "email")?;
 
-        guard!(!name.is_empty(), "Name is required");
-        guard!(email.contains('@'), "Invalid email format");
+        if name.is_empty() {
+            return validation_error!("Name is required");
+        }
+        if !email.contains('@') {
+            return validation_error!("Invalid email format");
+        }
 
         let user = db.create_user(name, email).await?;
         created_json!({ "user": user })

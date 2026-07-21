@@ -315,6 +315,10 @@ macro_rules! path_params {
 
 /// Log and return an error
 ///
+/// Expands to a call to `tracing::error!`, so callers must depend on
+/// `tracing` directly (the path is unprefixed and resolves at the call
+/// site, not in this crate).
+///
 /// # Examples
 ///
 /// ```ignore

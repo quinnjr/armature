@@ -283,10 +283,11 @@ fn json_object_builds_expected_map() {
 #[test]
 fn paginated_response_reports_correct_fields_without_use_after_move() {
     // `users` is an owned Vec, matching the README's documented call form
-    // (`paginated_response!(users, page, total)`). This is a regression
-    // test for the double-substitution bug: `$data` used to be evaluated
-    // twice (once serialized, once for `.len()`), which is a use-after-move
-    // for an owned `Vec` and, at best, a double evaluation.
+    // (`paginated_response!(users, page, total)`). This guards that `$data`
+    // is bound once (`__armature_paginated_data`) and reused for both the
+    // serialized `data` field and the `per_page` length, so a side-effecting
+    // `$data` expression is evaluated only once and `per_page`/`len()` stay
+    // in sync with the serialized payload.
     let users = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
     let expected_data = users.clone();
     let page = 2u32;
