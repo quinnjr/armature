@@ -211,10 +211,30 @@ impl HttpClient {
             // Copy any body mutation back into the spec too, otherwise a
             // body-rewriting interceptor's change would be silently dropped
             // once the send path rebuilds a fresh request from `spec`.
-            spec.body = request
+            let buffered_body = request
                 .body()
                 .and_then(|b| b.as_bytes())
                 .map(|b| b.to_vec());
+
+            // Guard against the streaming-interceptor retry hazard: if an
+            // interceptor installed a body that cannot be buffered (e.g. a
+            // `reqwest::Body::wrap_stream`), `as_bytes()` returns `None`. The
+            // first attempt would consume that stream, so every retry attempt
+            // rebuilt from `spec` would send an empty body. Rather than
+            // silently truncating the request, reject it up front. A streaming
+            // body is only unsafe when more than one attempt is possible; with
+            // retries disabled (or a single attempt) it is sent once and is
+            // fine, so the common buffered-body path is entirely unaffected.
+            let retries_possible = self
+                .config
+                .retry
+                .as_ref()
+                .is_some_and(|r| r.max_attempts > 1);
+            if retries_possible && buffered_body.is_none() && request.body().is_some() {
+                return Err(HttpClientError::StreamingBodyNotRetryable);
+            }
+
+            spec.body = buffered_body;
             first_request = Some(request);
         }
 
@@ -382,7 +402,25 @@ impl Default for HttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RetryConfig;
+    use async_trait::async_trait;
     use std::time::Duration;
+
+    /// Request interceptor that swaps the body for a non-buffered streaming
+    /// body (as `reqwest::Body::wrap_stream` produces), for which
+    /// `Body::as_bytes()` returns `None`.
+    struct StreamingBodyInterceptor;
+
+    #[async_trait]
+    impl RequestInterceptor for StreamingBodyInterceptor {
+        async fn intercept(&self, mut request: Request) -> Result<Request> {
+            let stream = futures::stream::once(async {
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"streamed chunk"))
+            });
+            *request.body_mut() = Some(reqwest::Body::wrap_stream(stream));
+            Ok(request)
+        }
+    }
 
     #[test]
     fn test_client_creation() {
@@ -403,6 +441,51 @@ mod tests {
         assert_eq!(
             client.config().base_url.as_deref(),
             Some("https://api.example.com")
+        );
+    }
+
+    /// A streaming body installed by an interceptor cannot be replayed, so
+    /// when retries are configured the request must be rejected loudly rather
+    /// than silently sending an empty body on retry attempts. The guard runs
+    /// inside `execute` before any network I/O, so no server is needed.
+    #[tokio::test]
+    async fn streaming_interceptor_body_with_retries_is_rejected() {
+        let config = HttpClientConfig::builder()
+            .retry(RetryConfig::constant(3, Duration::from_millis(1)))
+            .build();
+        let client = HttpClient::new(config).with_request_interceptor(StreamingBodyInterceptor);
+
+        let result = client
+            .post("http://127.0.0.1:0/")
+            .body(b"original".to_vec())
+            .send()
+            .await;
+
+        assert!(
+            matches!(result, Err(HttpClientError::StreamingBodyNotRetryable)),
+            "expected StreamingBodyNotRetryable, got {result:?}"
+        );
+    }
+
+    /// A streaming body installed by an interceptor is fine when retries are
+    /// NOT configured: it is sent exactly once, so the guard must not trip.
+    /// (The request fails at the transport layer against the bogus address,
+    /// but the error must NOT be `StreamingBodyNotRetryable`.)
+    #[tokio::test]
+    async fn streaming_interceptor_body_without_retries_is_allowed() {
+        // No `.retry(..)` -> single attempt, streaming body is replay-safe.
+        let client =
+            HttpClient::default_client().with_request_interceptor(StreamingBodyInterceptor);
+
+        let result = client
+            .post("http://127.0.0.1:0/")
+            .body(b"original".to_vec())
+            .send()
+            .await;
+
+        assert!(
+            !matches!(result, Err(HttpClientError::StreamingBodyNotRetryable)),
+            "streaming body must be allowed without retries, got {result:?}"
         );
     }
 }

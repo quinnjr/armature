@@ -6,6 +6,43 @@ use tracing::{debug, info};
 
 use crate::{GrpcClientConfig, GrpcError, Result};
 
+/// Apply the full `GrpcClientConfig` knob set to a tonic `Endpoint`.
+///
+/// This is the single source of truth for translating a `GrpcClientConfig`
+/// into a configured `Endpoint`, shared by every constructor (`connect`,
+/// `lazy`, `connect_balanced`). Every knob here is an inherent `Endpoint`
+/// method, so it applies uniformly across all three connection strategies —
+/// eager, lazy, and load-balanced alike. TLS (see [`apply_tls`]) is folded in
+/// as the final step so no caller can forget it.
+fn configure_endpoint(endpoint: Endpoint, config: &GrpcClientConfig) -> Result<Endpoint> {
+    let mut endpoint = endpoint
+        .timeout(config.timeout)
+        .connect_timeout(config.connect_timeout)
+        .tcp_nodelay(config.tcp_nodelay)
+        .tcp_keepalive(config.tcp_keepalive);
+
+    if let Some(interval) = config.http2_keepalive_interval {
+        endpoint = endpoint.http2_keep_alive_interval(interval);
+    }
+    if let Some(timeout) = config.http2_keepalive_timeout {
+        endpoint = endpoint.keep_alive_timeout(timeout);
+    }
+    if let Some(window) = config.initial_connection_window_size {
+        endpoint = endpoint.initial_connection_window_size(window);
+    }
+    if let Some(window) = config.initial_stream_window_size {
+        endpoint = endpoint.initial_stream_window_size(window);
+    }
+    if let Some(limit) = config.concurrency_limit {
+        endpoint = endpoint.concurrency_limit(limit);
+    }
+    if let Some(rps) = config.rate_limit {
+        endpoint = endpoint.rate_limit(rps, Duration::from_secs(1));
+    }
+
+    apply_tls(endpoint, config)
+}
+
 /// Apply this config's TLS settings (if any) to an `Endpoint`. TLS support is
 /// always compiled in (`tonic`'s `tls-ring` feature is enabled unconditionally
 /// in this crate's `Cargo.toml`), so this simply no-ops when `config.tls` is
@@ -101,32 +138,9 @@ impl GrpcClient {
     pub async fn connect(config: GrpcClientConfig) -> Result<GrpcChannel> {
         info!(endpoint = %config.endpoint, "Connecting to gRPC server");
 
-        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
-            .map_err(|e| GrpcError::Config(e.to_string()))?
-            .timeout(config.timeout)
-            .connect_timeout(config.connect_timeout)
-            .tcp_nodelay(config.tcp_nodelay)
-            .tcp_keepalive(config.tcp_keepalive);
-
-        if let Some(interval) = config.http2_keepalive_interval {
-            endpoint = endpoint.http2_keep_alive_interval(interval);
-        }
-        if let Some(timeout) = config.http2_keepalive_timeout {
-            endpoint = endpoint.keep_alive_timeout(timeout);
-        }
-        if let Some(window) = config.initial_connection_window_size {
-            endpoint = endpoint.initial_connection_window_size(window);
-        }
-        if let Some(window) = config.initial_stream_window_size {
-            endpoint = endpoint.initial_stream_window_size(window);
-        }
-        if let Some(limit) = config.concurrency_limit {
-            endpoint = endpoint.concurrency_limit(limit);
-        }
-        if let Some(rps) = config.rate_limit {
-            endpoint = endpoint.rate_limit(rps, Duration::from_secs(1));
-        }
-        endpoint = apply_tls(endpoint, &config)?;
+        let endpoint = Endpoint::from_shared(config.endpoint.clone())
+            .map_err(|e| GrpcError::Config(e.to_string()))?;
+        let endpoint = configure_endpoint(endpoint, &config)?;
 
         let channel = endpoint.connect().await.map_err(GrpcError::Transport)?;
 
@@ -148,23 +162,9 @@ impl GrpcClient {
     pub fn lazy(config: GrpcClientConfig) -> Result<GrpcChannel> {
         info!(endpoint = %config.endpoint, "Creating lazy gRPC channel");
 
-        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
-            .map_err(|e| GrpcError::Config(e.to_string()))?
-            .timeout(config.timeout)
-            .connect_timeout(config.connect_timeout)
-            .tcp_nodelay(config.tcp_nodelay)
-            .tcp_keepalive(config.tcp_keepalive);
-
-        if let Some(interval) = config.http2_keepalive_interval {
-            endpoint = endpoint.http2_keep_alive_interval(interval);
-        }
-        if let Some(timeout) = config.http2_keepalive_timeout {
-            endpoint = endpoint.keep_alive_timeout(timeout);
-        }
-        if let Some(limit) = config.concurrency_limit {
-            endpoint = endpoint.concurrency_limit(limit);
-        }
-        endpoint = apply_tls(endpoint, &config)?;
+        let endpoint = Endpoint::from_shared(config.endpoint.clone())
+            .map_err(|e| GrpcError::Config(e.to_string()))?;
+        let endpoint = configure_endpoint(endpoint, &config)?;
 
         let channel = endpoint.connect_lazy();
 
@@ -187,18 +187,10 @@ impl GrpcClient {
         let endpoints: Vec<Endpoint> = endpoints
             .into_iter()
             .map(|ep| {
-                Endpoint::from_shared(ep).map(|e| {
-                    e.timeout(config.timeout)
-                        .connect_timeout(config.connect_timeout)
-                        .tcp_nodelay(config.tcp_nodelay)
-                        .tcp_keepalive(config.tcp_keepalive)
-                })
+                let endpoint =
+                    Endpoint::from_shared(ep).map_err(|e| GrpcError::Config(e.to_string()))?;
+                configure_endpoint(endpoint, &config)
             })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| GrpcError::Config(e.to_string()))?;
-        let endpoints: Vec<Endpoint> = endpoints
-            .into_iter()
-            .map(|e| apply_tls(e, &config))
             .collect::<Result<Vec<_>>>()?;
 
         let channel = Channel::balance_list(endpoints.into_iter());

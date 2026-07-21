@@ -241,6 +241,19 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
 
                     match result {
                         Some(Ok(msg)) => {
+                            // Any successful inbound frame proves the peer is
+                            // alive, so reset the missed-heartbeat counter here
+                            // (not only in the Pong arm below). Otherwise a peer
+                            // that streams data continuously but never answers
+                            // Pings — a non-conforming client, or Pongs eaten by
+                            // an intermediary — would be closed after
+                            // MAX_MISSED_HEARTBEATS intervals despite being
+                            // demonstrably live. Genuinely idle peers still get
+                            // pinged and eventually closed via missed heartbeats,
+                            // and the separate `connection_timeout`/`last_read`
+                            // path still governs true read inactivity.
+                            missed_heartbeats = 0;
+
                             if msg.is_close() {
                                 break 'read_loop;
                             }
@@ -548,5 +561,81 @@ mod tests {
             closed,
             "server should close a connection that never answers heartbeat pings"
         );
+    }
+
+    /// Regression test: a peer that continuously sends data messages but never
+    /// answers a heartbeat Ping with a Pong must stay connected. Inbound data
+    /// is proof of liveness, so it resets the missed-heartbeat counter just as
+    /// a Pong would. Without that reset, `missed_heartbeats` would climb on
+    /// every ticker tick and the connection would be closed after
+    /// `MAX_MISSED_HEARTBEATS` intervals despite the peer being demonstrably
+    /// alive.
+    ///
+    /// Runs in real time (not `start_paused`) so the data-send / server-read /
+    /// heartbeat-tick interleaving reflects genuine socket activity rather than
+    /// a virtual clock; the timings are short but leave ample margin.
+    #[tokio::test]
+    async fn keeps_alive_peer_that_sends_data_but_never_pongs() {
+        let (addr, handler) = spawn_test_server(|c| {
+            c.max_message_size = 1024 * 1024;
+            c.heartbeat_interval = Duration::from_millis(30);
+            // Large enough that the idle-read timeout cannot be the thing that
+            // closes (or keeps open) the connection during this test — the
+            // only liveness signal under test is inbound data vs. missed
+            // heartbeats.
+            c.connection_timeout = Duration::from_secs(3600);
+        })
+        .await;
+
+        let url = format!("ws://{}", addr);
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut write, mut read) = ws.split();
+
+        // Drain everything the server sends (heartbeat Ping frames, etc.) and
+        // flag if the server ever closes the connection. We deliberately never
+        // answer a Ping with a Pong.
+        let closed = Arc::new(AtomicUsize::new(0));
+        let closed_reader = Arc::clone(&closed);
+        let reader = tokio::spawn(async move {
+            while let Some(frame) = read.next().await {
+                match frame {
+                    Ok(RawMessage::Close(_)) | Err(_) => {
+                        closed_reader.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        // Send a data message every 20ms for ~260ms. That is well past
+        // (MAX_MISSED_HEARTBEATS + 1) * heartbeat_interval = 4 * 30ms = 120ms,
+        // so if data did not reset the missed-heartbeat counter the connection
+        // would have been closed before this loop finished.
+        const SENDS: usize = 13;
+        for _ in 0..SENDS {
+            write
+                .send(RawMessage::Text("keepalive".into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Let the server drain the final in-flight messages.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            0,
+            "server closed a connection that was continuously sending data, \
+             even though inbound traffic proves the peer is alive"
+        );
+        assert_eq!(
+            handler.messages.lock().unwrap().len(),
+            SENDS,
+            "every data message from the live peer should have been delivered"
+        );
+
+        reader.abort();
     }
 }

@@ -524,6 +524,31 @@ mod gateway {
             }
 
             let typename = &representations[0].typename;
+
+            // Enforce the single-typename batch constraint this code (and the
+            // doc comment above) already assumes: the query narrows to
+            // `representations[0]`'s typename via a single inline fragment, so
+            // a batch mixing typenames would silently send later entries under
+            // the wrong fragment. Reject rather than mis-resolve.
+            if let Some(mismatch) = representations.iter().find(|r| r.typename != *typename) {
+                return Err(FederationError::EntityResolutionError(format!(
+                    "all representations must share the same __typename; \
+                     found both '{}' and '{}' in one batch",
+                    typename, mismatch.typename
+                )));
+            }
+
+            // `typename` is attacker-influenceable in a gateway (it is echoed
+            // from inbound `representations`) and is spliced raw into the
+            // query string, so validate it against the GraphQL Name grammar
+            // before building the query to prevent GraphQL injection.
+            if !is_valid_graphql_name(typename) {
+                return Err(FederationError::EntityResolutionError(format!(
+                    "invalid entity __typename {typename:?}: must match the GraphQL \
+                     Name grammar /^[_A-Za-z][_0-9A-Za-z]*$/"
+                )));
+            }
+
             let query = build_entities_query(typename, fields);
 
             let variables = serde_json::json!({
@@ -679,6 +704,23 @@ mod gateway {
     }
 }
 
+/// Returns `true` if `name` matches the GraphQL `Name` grammar
+/// (`/^[_A-Za-z][_0-9A-Za-z]*$/`): a leading `_` or ASCII letter followed by
+/// any number of `_`, ASCII letters, or ASCII digits.
+///
+/// Hand-rolled (no `regex` dependency) and used to reject
+/// attacker-influenceable `__typename` values before they are spliced into a
+/// subgraph query, preventing GraphQL injection.
+#[cfg_attr(not(feature = "federation"), allow(dead_code))]
+fn is_valid_graphql_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 /// Build the `_entities` query for [`FederationGateway::resolve_entities`].
 ///
 /// Uses an inline fragment on the concrete entity `typename` so the
@@ -686,6 +728,19 @@ mod gateway {
 /// selected — the `_entities` field returns a `_Entity` union, and only
 /// `__typename` is selectable without narrowing to a concrete type via
 /// `... on <Type> { ... }`.
+///
+/// # Trust assumptions
+///
+/// - `typename` MUST already be a valid GraphQL `Name` (see
+///   [`is_valid_graphql_name`]). Callers (`resolve_entities`) validate it
+///   before calling; it is spliced raw into the query, so an unvalidated
+///   value would allow GraphQL injection.
+/// - `fields` is a raw GraphQL selection set and is spliced verbatim into the
+///   query. It is treated as **trusted, developer-supplied** input (the
+///   selection the application wants for each entity), NOT as data echoed
+///   from an inbound federation request. Do not forward attacker-controlled
+///   strings as `fields`; validating a full selection set is out of scope
+///   here (it is far more complex than a single Name).
 #[cfg_attr(not(feature = "federation"), allow(dead_code))]
 fn build_entities_query(typename: &str, fields: &str) -> String {
     let selection = if fields.trim().is_empty() {
@@ -970,6 +1025,40 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Security regression: GraphQL Name validation for `__typename`.
+    //
+    // `__typename` is echoed from attacker-influenceable `representations`
+    // in a federation gateway and is spliced raw into the subgraph query,
+    // so it must be validated against the GraphQL Name grammar before use.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_valid_graphql_name_accepts_valid_names() {
+        assert!(is_valid_graphql_name("User"));
+        assert!(is_valid_graphql_name("_Entity"));
+        assert!(is_valid_graphql_name("Order2"));
+        assert!(is_valid_graphql_name("a_b_c123"));
+    }
+
+    #[test]
+    fn test_is_valid_graphql_name_rejects_injection_and_malformed() {
+        // Classic GraphQL-injection payload that would rewrite the query.
+        assert!(!is_valid_graphql_name(
+            "User { id } } } query x { adminSecrets"
+        ));
+        // Braces, spaces, and other punctuation are all invalid Name chars.
+        assert!(!is_valid_graphql_name("User { id }"));
+        assert!(!is_valid_graphql_name("User Name"));
+        assert!(!is_valid_graphql_name("User{"));
+        assert!(!is_valid_graphql_name("User}"));
+        // Empty and digit-leading names are invalid.
+        assert!(!is_valid_graphql_name(""));
+        assert!(!is_valid_graphql_name("2User"));
+        // Non-ASCII letters are outside the GraphQL Name grammar.
+        assert!(!is_valid_graphql_name("Usér"));
+    }
+
+    // -------------------------------------------------------------------
     // Regression test: no test previously asserted that a
     // federation-enabled subgraph SDL actually contains federation
     // directives, or that `is_federated()` reflects the schema's real
@@ -1144,5 +1233,121 @@ mod gateway_tests {
              timeout, but the request took {:?}",
             elapsed
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Security regression: `resolve_entities` must reject a malicious
+    // `__typename` (GraphQL injection) BEFORE splicing it into the query
+    // and BEFORE making any network call. We point the subgraph at an
+    // unreachable address; a passing test proves the request failed at
+    // validation, not at the network layer.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_entities_rejects_malicious_typename() {
+        let gateway = FederationGateway::builder()
+            // 127.0.0.1:0 is not a listening address; if we ever reached the
+            // network we'd get a NetworkError instead of the validation error.
+            .subgraph("users", "http://127.0.0.1:0/graphql")
+            .build()
+            .expect("build gateway");
+
+        let malicious = EntityReference::new("User { id } } } query x { adminSecrets")
+            .with_key("id", serde_json::json!("1"));
+
+        let err = gateway
+            .resolve_entities("users", vec![malicious], "id name")
+            .await
+            .expect_err("malicious __typename must be rejected");
+
+        match err {
+            FederationError::EntityResolutionError(msg) => {
+                assert!(
+                    msg.contains("invalid entity __typename"),
+                    "expected a Name-validation error, got: {msg}"
+                );
+            }
+            other => panic!("expected EntityResolutionError, got: {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Security regression: a batch mixing `__typename` values must be
+    // rejected, since the query narrows to representations[0]'s type via a
+    // single inline fragment and would otherwise silently mis-resolve the
+    // rest.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_entities_rejects_mixed_typename_batch() {
+        let gateway = FederationGateway::builder()
+            .subgraph("users", "http://127.0.0.1:0/graphql")
+            .build()
+            .expect("build gateway");
+
+        let reps = vec![
+            EntityReference::new("User").with_key("id", serde_json::json!("1")),
+            EntityReference::new("Product").with_key("id", serde_json::json!("2")),
+        ];
+
+        let err = gateway
+            .resolve_entities("users", reps, "id")
+            .await
+            .expect_err("mixed-typename batch must be rejected");
+
+        match err {
+            FederationError::EntityResolutionError(msg) => {
+                assert!(
+                    msg.contains("same __typename"),
+                    "expected a batch-uniformity error, got: {msg}"
+                );
+            }
+            other => panic!("expected EntityResolutionError, got: {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Happy path: a valid, uniform batch passes validation and resolves
+    // against a real (canned) subgraph response. Proves the security
+    // checks did not break normal operation.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_entities_valid_typename_still_resolves() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            if let Some(mut stream) = listener.incoming().flatten().next() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let json =
+                    r#"{"data":{"_entities":[{"__typename":"User","id":"1","name":"Ada"}]}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                use std::io::Write;
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let gateway = FederationGateway::builder()
+            .subgraph("users", format!("http://{}/graphql", addr))
+            .build()
+            .expect("build gateway");
+
+        let reps = vec![EntityReference::new("User").with_key("id", serde_json::json!("1"))];
+
+        let entities = gateway
+            .resolve_entities("users", reps, "id name")
+            .await
+            .expect("valid typename should resolve");
+
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0]["__typename"], "User");
+        assert_eq!(entities[0]["name"], "Ada");
     }
 }

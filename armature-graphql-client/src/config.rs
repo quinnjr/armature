@@ -117,6 +117,23 @@ impl GraphQLClientConfigBuilder {
     /// Set the maximum number of entries retained in the response cache
     /// before the least-recently-used entry is evicted. Must be greater than
     /// zero; a value of `0` is coerced to `1`.
+    ///
+    /// ```
+    /// use armature_graphql_client::GraphQLClientConfig;
+    ///
+    /// let config = GraphQLClientConfig::builder()
+    ///     .endpoint("https://api.example.com/graphql")
+    ///     .max_cache_entries(500)
+    ///     .build();
+    /// assert_eq!(config.max_cache_entries, 500);
+    ///
+    /// // Zero is coerced to one.
+    /// let config = GraphQLClientConfig::builder()
+    ///     .endpoint("https://api.example.com/graphql")
+    ///     .max_cache_entries(0)
+    ///     .build();
+    /// assert_eq!(config.max_cache_entries, 1);
+    /// ```
     pub fn max_cache_entries(mut self, max_entries: usize) -> Self {
         self.config.max_cache_entries = max_entries.max(1);
         self

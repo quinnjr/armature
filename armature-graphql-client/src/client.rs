@@ -211,7 +211,19 @@ impl GraphQLClient {
             let attempt_result: Result<Resp> = async {
                 let response = http_request.json(body).send().await?;
                 if !response.status().is_success() {
-                    return Err(GraphQLError::Http(response.error_for_status().unwrap_err()));
+                    // `is_success()` is false for 1xx/3xx as well as 4xx/5xx, but
+                    // reqwest's `error_for_status()` only yields `Err` for 400-599.
+                    // A 3xx surfaced instead of followed (e.g. a broken proxy/cache
+                    // returning `304 Not Modified`) would make `error_for_status()`
+                    // return `Ok`, so never `.unwrap_err()` it — that would panic on
+                    // server-controlled input. Handle the `Ok` case explicitly.
+                    return match response.error_for_status() {
+                        Err(e) => Err(GraphQLError::Http(e)),
+                        Ok(resp) => Err(GraphQLError::Connection(format!(
+                            "unexpected non-success HTTP status {}",
+                            resp.status()
+                        ))),
+                    };
                 }
                 let parsed: Resp = response.json().await?;
                 Ok(parsed)

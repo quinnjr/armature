@@ -5,7 +5,7 @@ use tonic::transport::Server;
 use tracing::{error, info};
 
 use crate::TonicBody;
-use crate::middleware::GrpcMiddleware;
+use crate::middleware::{GRPC_FRAME_HEADER_LEN, GrpcMiddleware, read_frame_header};
 use crate::{GrpcError, GrpcServerConfig, Result};
 
 /// gRPC server builder.
@@ -186,10 +186,10 @@ impl GrpcServerBuilder {
 /// stream — a client-streaming/bidi RPC's body carries many gRPC messages
 /// one after another, not just one — instead of only the first. Reuses the
 /// shared frame-header layout from [`crate::middleware::GRPC_FRAME_HEADER_LEN`]
-/// / [`crate::middleware::read_frame_header`], the same helper
-/// `middleware::transform_grpc_frames` uses for its own (whole-buffer) frame
-/// parsing, so this streaming-friendly variant doesn't hand-encode a second,
-/// divergent copy of the frame layout.
+/// / [`crate::middleware::read_frame_header`], the same helpers
+/// `middleware`'s streaming `CompressionBody` adapter uses for its own frame
+/// parsing, so this variant doesn't hand-encode a second, divergent copy of
+/// the frame layout.
 enum FrameScanState {
     /// Accumulating the [`crate::middleware::GRPC_FRAME_HEADER_LEN`]-byte
     /// gRPC frame header (1 flag byte + 4 big-endian length bytes); holds
@@ -204,9 +204,7 @@ enum FrameScanState {
 
 impl Default for FrameScanState {
     fn default() -> Self {
-        FrameScanState::Header(bytes::BytesMut::with_capacity(
-            crate::middleware::GRPC_FRAME_HEADER_LEN,
-        ))
+        FrameScanState::Header(bytes::BytesMut::with_capacity(GRPC_FRAME_HEADER_LEN))
     }
 }
 
@@ -227,12 +225,12 @@ fn scan_for_oversized_messages(
     while pos < data.len() {
         match state {
             FrameScanState::Header(buf) => {
-                let need = crate::middleware::GRPC_FRAME_HEADER_LEN - buf.len();
+                let need = GRPC_FRAME_HEADER_LEN - buf.len();
                 let take = need.min(data.len() - pos);
                 buf.extend_from_slice(&data[pos..pos + take]);
                 pos += take;
-                if buf.len() == crate::middleware::GRPC_FRAME_HEADER_LEN {
-                    let (_, len) = crate::middleware::read_frame_header(buf)
+                if buf.len() == GRPC_FRAME_HEADER_LEN {
+                    let (_, len) = read_frame_header(buf)
                         .expect("buffered exactly GRPC_FRAME_HEADER_LEN bytes");
                     if len > max_recv_message_size {
                         return Err(tonic::Status::resource_exhausted(format!(
@@ -248,7 +246,7 @@ fn scan_for_oversized_messages(
                 *remaining -= take;
                 if *remaining == 0 {
                     *state = FrameScanState::Header(bytes::BytesMut::with_capacity(
-                        crate::middleware::GRPC_FRAME_HEADER_LEN,
+                        GRPC_FRAME_HEADER_LEN,
                     ));
                 }
             }
@@ -310,7 +308,22 @@ where
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        self.rest.size_hint()
+        // Account for the bytes still queued in `buffered` (already read from
+        // the inner body but not yet replayed) on top of whatever `rest` has
+        // left to yield — otherwise callers under-count the remaining body by
+        // exactly the prefetched prefix.
+        let buffered: u64 = self
+            .buffered
+            .iter()
+            .filter_map(|f| f.data_ref().map(|d| d.len() as u64))
+            .sum();
+        let rest = self.rest.size_hint();
+        let mut hint = http_body::SizeHint::new();
+        hint.set_lower(rest.lower().saturating_add(buffered));
+        if let Some(upper) = rest.upper() {
+            hint.set_upper(upper.saturating_add(buffered));
+        }
+        hint
     }
 }
 
@@ -378,22 +391,25 @@ where
 
             let (parts, mut body) = req.into_parts();
 
-            // Accumulate leading frames (and the data bytes within them)
-            // until we have the full 5-byte gRPC length-prefix (1
-            // compression-flag byte + 4 big-endian length bytes) or the body
-            // ends. A short first DATA frame does NOT mean "not oversized" —
-            // an attacker can fragment the length-prefix itself across
-            // several small frames to bypass a check that only inspects the
-            // first frame; this loop closes that bypass by not deciding
-            // anything until enough bytes have actually been seen.
+            // Accumulate leading frames until we have seen the full
+            // GRPC_FRAME_HEADER_LEN-byte gRPC length-prefix (1 compression-flag
+            // byte + 4 big-endian length bytes) or the body ends. A short first
+            // DATA frame does NOT mean "not oversized" — an attacker can
+            // fragment the length-prefix itself across several small frames to
+            // bypass a check that only inspects the first frame; this loop
+            // closes that bypass by not deciding anything until enough bytes
+            // have actually been seen. We only need to *count* the header bytes
+            // seen so far (the actual scan/validation happens below over the
+            // buffered frames), so a running length suffices — no second copy
+            // of the bytes into a scratch buffer.
             let mut buffered: VecDeque<http_body::Frame<bytes::Bytes>> = VecDeque::new();
-            let mut prefix = bytes::BytesMut::with_capacity(5);
+            let mut prefix_len = 0usize;
 
-            while prefix.len() < 5 {
+            while prefix_len < GRPC_FRAME_HEADER_LEN {
                 match body.frame().await {
                     Some(Ok(frame)) => {
                         if let Some(data) = frame.data_ref() {
-                            prefix.extend_from_slice(data);
+                            prefix_len += data.len();
                         }
                         buffered.push_back(frame);
                     }

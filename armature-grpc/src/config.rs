@@ -34,6 +34,16 @@ impl std::fmt::Debug for GrpcServerTlsConfig {
 
 impl GrpcServerTlsConfig {
     /// Create a new server TLS configuration from PEM-encoded certificate and key.
+    ///
+    /// ```
+    /// use armature_grpc::GrpcServerTlsConfig;
+    ///
+    /// let tls = GrpcServerTlsConfig::new(b"cert-pem".to_vec(), b"key-pem".to_vec())
+    ///     .client_ca(b"ca-pem".to_vec())
+    ///     .client_auth_optional(true);
+    /// assert!(tls.client_ca_cert_pem.is_some());
+    /// assert!(tls.client_auth_optional);
+    /// ```
     pub fn new(cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
         Self {
             cert_pem: cert_pem.into(),
@@ -85,6 +95,19 @@ impl std::fmt::Debug for GrpcClientTlsConfig {
 
 impl GrpcClientTlsConfig {
     /// Create a new, empty client TLS configuration.
+    ///
+    /// ```
+    /// use armature_grpc::GrpcClientTlsConfig;
+    ///
+    /// let tls = GrpcClientTlsConfig::new()
+    ///     .ca_certificate(b"ca-pem".to_vec())
+    ///     .domain_name("example.com")
+    ///     .identity(b"client-cert".to_vec(), b"client-key".to_vec());
+    /// assert!(tls.ca_cert_pem.is_some());
+    /// assert_eq!(tls.domain_name.as_deref(), Some("example.com"));
+    /// assert!(tls.client_cert_pem.is_some());
+    /// assert!(tls.client_key_pem.is_some());
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -190,7 +213,12 @@ impl GrpcServerConfigBuilder {
     /// is called (returning `Err(GrpcError::Config(..))`) rather than panicking.
     pub fn bind_address(mut self, addr: impl Into<String>) -> Self {
         match addr.into().parse() {
-            Ok(parsed) => self.config.bind_address = parsed,
+            Ok(parsed) => {
+                self.config.bind_address = parsed;
+                // Clear any error from a prior malformed call: the final,
+                // valid address wins.
+                self.bind_address_error = None;
+            }
             Err(e) => self.bind_address_error = Some(e.to_string()),
         }
         self
@@ -199,6 +227,9 @@ impl GrpcServerConfigBuilder {
     /// Set the bind address from a SocketAddr.
     pub fn bind_socket_addr(mut self, addr: SocketAddr) -> Self {
         self.config.bind_address = addr;
+        // A `SocketAddr` is always valid, so this clears any error left by a
+        // prior malformed `bind_address` call.
+        self.bind_address_error = None;
         self
     }
 
@@ -435,5 +466,26 @@ mod tests {
             .build()
             .expect("valid address should build");
         assert_eq!(config.bind_address, "127.0.0.1:12345".parse().unwrap());
+    }
+
+    #[test]
+    fn later_valid_bind_address_clears_earlier_parse_error() {
+        let config = GrpcServerConfig::builder()
+            .bind_address("not an address")
+            .bind_address("127.0.0.1:1")
+            .build()
+            .expect("a later valid address should clear the earlier error");
+        assert_eq!(config.bind_address, "127.0.0.1:1".parse().unwrap());
+    }
+
+    #[test]
+    fn bind_socket_addr_clears_earlier_parse_error() {
+        let addr: SocketAddr = "127.0.0.1:2".parse().unwrap();
+        let config = GrpcServerConfig::builder()
+            .bind_address("not an address")
+            .bind_socket_addr(addr)
+            .build()
+            .expect("bind_socket_addr should clear the earlier error");
+        assert_eq!(config.bind_address, addr);
     }
 }
