@@ -1,6 +1,6 @@
 //! WebSocket server implementation.
 
-use crate::connection::{Connection, ConnectionWriter};
+use crate::connection::{Connection, ConnectionState, ConnectionWriter};
 use crate::error::{WebSocketError, WebSocketResult};
 use crate::handler::WebSocketHandler;
 use crate::message::Message;
@@ -288,11 +288,18 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
             }
         }
 
-        // Close connection
+        // Close connection (moves state to `Closing`)
         connection.close();
 
         // Wait for writer to finish
         let _ = writer_handle.await;
+
+        // Read/write tasks have terminated and teardown is complete: advance
+        // the state machine to `Closed` so `state()` reflects the fully-closed
+        // connection (any surviving `Connection` clone observes this via the
+        // shared state). Done before unregistering so observers can still hold
+        // a handle to the terminal state.
+        connection.set_state(ConnectionState::Closed);
 
         // Notify handler of disconnection
         handler.on_disconnect(&connection_id).await;
@@ -355,6 +362,17 @@ mod tests {
     async fn spawn_test_server(
         configure: impl FnOnce(&mut WebSocketServerConfig),
     ) -> (SocketAddr, RecordingHandler) {
+        let (addr, handler, _rooms) = spawn_test_server_with_rooms(configure).await;
+        (addr, handler)
+    }
+
+    /// Like [`spawn_test_server`] but also hands back a clone of the server's
+    /// [`RoomManager`], so a test can look up a live [`Connection`] and observe
+    /// its state (e.g. the transition to [`ConnectionState::Closed`] after
+    /// teardown) via the shared state handle.
+    async fn spawn_test_server_with_rooms(
+        configure: impl FnOnce(&mut WebSocketServerConfig),
+    ) -> (SocketAddr, RecordingHandler, Arc<RoomManager>) {
         let mut config = WebSocketServerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             ..Default::default()
@@ -368,12 +386,13 @@ mod tests {
         let handler = RecordingHandler::default();
         let handler_for_asserts = handler.clone();
         let server = WebSocketServer::new(config, handler);
+        let rooms = Arc::clone(server.room_manager());
 
         tokio::spawn(async move {
             let _ = server.serve(listener).await;
         });
 
-        (addr, handler_for_asserts)
+        (addr, handler_for_asserts, rooms)
     }
 
     #[tokio::test]
@@ -637,5 +656,65 @@ mod tests {
         );
 
         reader.abort();
+    }
+
+    /// After a connection is fully torn down (client closes, read/write tasks
+    /// terminate), the server advances the state machine to
+    /// [`ConnectionState::Closed`]. A `Connection` clone obtained from the
+    /// [`RoomManager`] shares the underlying state, so it must observe that
+    /// terminal transition — proving `Closed` is actually reachable rather than
+    /// a dead variant.
+    #[tokio::test]
+    async fn connection_state_reaches_closed_after_teardown() {
+        let (addr, _handler, rooms) = spawn_test_server_with_rooms(|c| {
+            c.max_message_size = 1024 * 1024;
+            // Keep the heartbeat/idle machinery from interfering; the client
+            // itself drives the close in this test.
+            c.heartbeat_interval = Duration::from_secs(3600);
+            c.connection_timeout = Duration::from_secs(3600);
+        })
+        .await;
+
+        let url = format!("ws://{}", addr);
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+
+        // Wait for the server to register the connection, then grab a clone
+        // that shares its state handle.
+        let mut conn = None;
+        for _ in 0..50 {
+            if let Some(id) = rooms.connection_ids().into_iter().next() {
+                conn = rooms.get_connection(&id);
+                if conn.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let conn = conn.expect("server never registered the connection");
+        assert_eq!(
+            conn.state(),
+            ConnectionState::Open,
+            "connection should be Open while the client is still connected"
+        );
+
+        // Client initiates the close; the server's read loop breaks, the writer
+        // finishes, and teardown sets the state to Closed.
+        ws.close(None).await.unwrap();
+        drop(ws);
+
+        let mut reached_closed = false;
+        for _ in 0..100 {
+            if conn.state() == ConnectionState::Closed {
+                reached_closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            reached_closed,
+            "connection state should reach Closed after full teardown, got {:?}",
+            conn.state()
+        );
     }
 }

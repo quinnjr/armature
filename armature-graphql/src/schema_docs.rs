@@ -400,6 +400,17 @@ query TypeInfo {{
             const schemaContent = document.getElementById('schema-content');
             let html = schemaContent.textContent;
 
+            // Re-escape HTML special characters BEFORE injecting any highlight
+            // markup. `textContent` decodes the server-escaped SDL back to raw
+            // `<`/`>`/`&`; without re-escaping, assigning `innerHTML` below
+            // would re-parse SDL text as HTML and defeat the server-side
+            // escaping (XSS if the SDL contains HTML-like text). The highlight
+            // <span> tags are added AFTER this step, so they survive intact.
+            html = html
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+
             // Highlight keywords
             html = html.replace(/\b(type|interface|union|enum|input|scalar|schema|query|mutation|subscription|implements|extend)\b/g,
                 '<span class="keyword">$1</span>');

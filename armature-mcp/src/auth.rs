@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 /// Authentication method for MCP access
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum McpAuthMethod {
     /// No authentication required (not recommended for production)
     None,

@@ -330,8 +330,33 @@ impl GraphQLClient {
             .await
             .map_err(|e| GraphQLError::WebSocket(e.to_string()))?;
 
+        // Share the write half: the stream needs it to answer server pings, and
+        // a client-initiated unsubscribe needs it to send `complete`.
+        let write = Arc::new(tokio::sync::Mutex::new(write));
+
+        // Build the unsubscribe action: send a graphql-ws `complete` for this
+        // subscription's id so the server stops producing events when the client
+        // unsubscribes or drops the stream. Runs on the current runtime because
+        // it may be invoked from a synchronous `Drop`.
+        let unsubscribe: Arc<dyn Fn() + Send + Sync> = {
+            let write = write.clone();
+            let id = subscription_id.clone();
+            Arc::new(move || {
+                let write = write.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    let Ok(complete) = serde_json::to_string(&ClientMessage::Complete { id })
+                    else {
+                        return;
+                    };
+                    let mut write = write.lock().await;
+                    let _ = write.send(Message::Text(complete.into())).await;
+                });
+            })
+        };
+
         // Create the stream
-        let stream = futures::stream::unfold((read, write), |(mut read, mut write)| async move {
+        let stream = futures::stream::unfold((read, write), |(mut read, write)| async move {
             loop {
                 match read.next().await {
                     Some(Ok(Message::Text(text))) => {
@@ -365,7 +390,11 @@ impl GraphQLClient {
                                         return Some((Err(GraphQLError::Json(e)), (read, write)));
                                     }
                                 };
-                                if let Err(e) = write.send(Message::Text(pong.into())).await {
+                                let send_result = {
+                                    let mut guard = write.lock().await;
+                                    guard.send(Message::Text(pong.into())).await
+                                };
+                                if let Err(e) = send_result {
                                     return Some((
                                         Err(GraphQLError::WebSocket(e.to_string())),
                                         (read, write),
@@ -391,7 +420,10 @@ impl GraphQLClient {
             }
         });
 
-        Ok(SubscriptionStream::new(stream))
+        Ok(SubscriptionStream::with_subscription(
+            stream,
+            crate::Subscription::bound(subscription_id, unsubscribe),
+        ))
     }
 }
 

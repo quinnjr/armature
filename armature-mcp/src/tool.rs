@@ -63,7 +63,13 @@ impl McpToolEntry {
         }
     }
 
-    /// Convert to a ToolDefinition for the protocol
+    /// Convert to a ToolDefinition for the protocol.
+    ///
+    /// Note: this re-parses the `&'static str` schema on each call. Callers
+    /// that serve definitions repeatedly (e.g. `tools/list` per request)
+    /// should go through [`McpToolRegistry::list_tools`] /
+    /// [`McpToolRegistry::list_tools_page`], which parse each entry at most
+    /// once and cache the result (see `McpToolRegistry::definitions`).
     pub fn to_definition(&self) -> ToolDefinition {
         let schema: Value = serde_json::from_str(self.input_schema)
             .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
@@ -101,6 +107,13 @@ pub struct McpToolRegistry {
     /// call — stays valid for the registry's whole lifetime and avoids
     /// re-sorting the full key set on every `list_tools_page` call.
     sorted_names: OnceLock<Vec<String>>,
+    /// Lazily-computed cache of parsed `ToolDefinition`s keyed by tool name.
+    /// Each entry's schema is an immutable `&'static str`, so it only needs
+    /// to be parsed once; without this every `list_tools`/`list_tools_page`
+    /// call (one per HTTP request on the list endpoints) would re-run
+    /// `serde_json::from_str` over every tool's schema. Built once and reused
+    /// for the registry's whole (append-only-at-startup) lifetime.
+    definitions: OnceLock<HashMap<String, ToolDefinition>>,
 }
 
 impl McpToolRegistry {
@@ -115,15 +128,25 @@ impl McpToolRegistry {
         Self {
             tools,
             sorted_names: OnceLock::new(),
+            definitions: OnceLock::new(),
         }
+    }
+
+    /// Parsed tool definitions keyed by name, parsed once and cached (see the
+    /// `definitions` field). Shared by `list_tools` and `list_tools_page` so
+    /// neither re-parses schemas on repeated calls.
+    fn definitions(&self) -> &HashMap<String, ToolDefinition> {
+        self.definitions.get_or_init(|| {
+            self.tools
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry.to_definition()))
+                .collect()
+        })
     }
 
     /// Get all registered tool definitions
     pub fn list_tools(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|entry| entry.to_definition())
-            .collect()
+        self.definitions().values().cloned().collect()
     }
 
     /// Get a page of registered tool definitions, ordered deterministically
@@ -150,9 +173,10 @@ impl McpToolRegistry {
         let (page_names, next_cursor) =
             crate::service::paginate_by(names, cursor, limit, |name| name.as_str());
 
+        let definitions = self.definitions();
         let defs = page_names
             .iter()
-            .map(|name| self.tools[name.as_str()].to_definition())
+            .map(|name| definitions[name.as_str()].clone())
             .collect();
 
         (defs, next_cursor)
@@ -321,6 +345,7 @@ mod tests {
         McpToolRegistry {
             tools,
             sorted_names: OnceLock::new(),
+            definitions: OnceLock::new(),
         }
     }
 

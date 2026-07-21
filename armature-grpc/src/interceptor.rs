@@ -13,9 +13,25 @@ pub type AuthValidatorFn =
 pub type MetricsCallbackFn = Arc<dyn Fn(&str, u64, bool) + Send + Sync>;
 
 /// Interceptor trait for gRPC requests.
+///
+/// **This trait is a standalone helper, NOT an automatically-applied
+/// pipeline.** Implementing it does not wire the interceptor into any request
+/// path — the crate's server/client code never calls
+/// [`Interceptor::intercept`]. To use an implementation you must invoke
+/// `.intercept(request).await` yourself at the point you want it to run
+/// (typically inside your own service method or client wrapper). The
+/// [`LoggingInterceptor`], [`MetricsInterceptor`] and [`RequestIdInterceptor`]
+/// impls below are inert until called this way.
+///
+/// The one interceptor that IS wired into a request path is
+/// [`AuthInterceptor::server_interceptor`], which returns a
+/// `tonic::service::Interceptor` closure you can hand to
+/// `InterceptedService`/`with_interceptor`; that is a separate mechanism from
+/// this trait.
 #[async_trait]
 pub trait Interceptor: Send + Sync {
-    /// Intercept an incoming request.
+    /// Intercept an incoming request. Call this manually — see the trait-level
+    /// note: nothing invokes it for you.
     async fn intercept<T>(&self, request: Request<T>) -> Result<Request<T>, Status>
     where
         T: Send;
@@ -38,6 +54,10 @@ pub trait ResponseInterceptor: Send + Sync {
 }
 
 /// Logging interceptor that logs requests.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] on it yourself. It is not part of any
+/// automatically-applied request pipeline (see the [`Interceptor`] trait note).
 pub struct LoggingInterceptor {
     log_metadata: bool,
 }
@@ -246,6 +266,11 @@ impl Interceptor for AuthInterceptor {
 }
 
 /// Metrics interceptor that records request timing.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] (or [`MetricsInterceptor::record`]) on it
+/// yourself. It is not part of any automatically-applied request pipeline (see
+/// the [`Interceptor`] trait note).
 pub struct MetricsInterceptor {
     on_complete: MetricsCallbackFn,
 }
@@ -281,6 +306,10 @@ impl Interceptor for MetricsInterceptor {
 }
 
 /// Request ID interceptor that adds/propagates request IDs.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] on it yourself. It is not part of any
+/// automatically-applied request pipeline (see the [`Interceptor`] trait note).
 pub struct RequestIdInterceptor {
     header_name: String,
 }

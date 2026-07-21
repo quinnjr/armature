@@ -11,7 +11,11 @@ gRPC server and client support for the Armature framework.
   generated types together with `armature-grpc`'s server/client/interceptor
   helpers.
 - **Streaming** - Unary, server, client, and bidirectional streaming
-- **Interceptors** - Request/response middleware
+- **Interceptors** - Standalone request/response helpers (logging, metrics,
+  request IDs, auth). Except for `AuthInterceptor::server_interceptor` (wired in
+  via tonic's `InterceptedService`/`with_interceptor`), these are *not* an
+  automatically-applied pipeline — call `Interceptor::intercept` yourself where
+  you want them to run.
 - **TLS** - Secure client and server connections with rustls (`tonic`'s
   `tls-ring` feature), configured via `GrpcClientTlsConfig` / `GrpcServerTlsConfig`
 - **Retry** - *Opt-in*: `GrpcClientConfig::retry_enabled` / `max_retry_attempts`
@@ -24,7 +28,7 @@ gRPC server and client support for the Armature framework.
 
 ```toml
 [dependencies]
-armature-grpc = "0.1"
+armature-grpc = "0.2"
 ```
 
 ## Quick Start

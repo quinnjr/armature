@@ -117,6 +117,7 @@ impl RetryConfig {
 
 /// Backoff strategy for retries.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BackoffStrategy {
     /// No delay between retries.
     None,

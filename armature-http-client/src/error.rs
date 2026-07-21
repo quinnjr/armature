@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, HttpClientError>;
 
 /// HTTP client errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum HttpClientError {
     /// Request failed after all retries exhausted.
     #[error("Request failed after {attempts} attempts: {message}")]

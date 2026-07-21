@@ -14,7 +14,14 @@
 //!   retry — retry does not happen automatically; every call must be
 //!   explicitly wrapped via [`GrpcChannel::call_with_retry`](client::GrpcChannel::call_with_retry).
 //!   See "Retry" below.
-//! - **Interceptors**: Request/response interceptors for auth, logging, etc.
+//! - **Interceptors**: Standalone request/response interceptor helpers for
+//!   auth, logging, request IDs, and metrics. With the exception of
+//!   [`AuthInterceptor::server_interceptor`](interceptor::AuthInterceptor::server_interceptor)
+//!   (a `tonic::service::Interceptor` closure you wire in via
+//!   `InterceptedService`/`with_interceptor`), these are *not* an
+//!   automatically-applied pipeline — you must call
+//!   [`Interceptor::intercept`](interceptor::Interceptor::intercept) yourself
+//!   where you want them to run.
 //! - **Health Checking**: Built-in gRPC health checking service
 //! - **Reflection**: Server reflection for tools like grpcurl
 //! - **Compression**: gzip and zstd compression support, via
@@ -104,8 +111,8 @@ pub use config::{
 };
 pub use error::{GrpcError, Result};
 pub use interceptor::{
-    AuthInterceptor, Interceptor, LoggingInterceptor, MetricsInterceptor, RequestInterceptor,
-    ResponseInterceptor,
+    AuthInterceptor, Interceptor, LoggingInterceptor, MetricsInterceptor, RequestIdInterceptor,
+    RequestInterceptor, ResponseInterceptor,
 };
 pub use middleware::{
     CompressionClientService, CompressionEncoding, CompressionMiddleware, CompressionService,

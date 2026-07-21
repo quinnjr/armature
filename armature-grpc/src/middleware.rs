@@ -421,10 +421,6 @@ impl<S: tonic::server::NamedService> tonic::server::NamedService for RateLimitSe
 /// can't be safely replayed): see [`RetryMiddleware::call_with_retry`], which
 /// is what [`crate::client::GrpcChannel::call_with_retry`] and
 /// `GrpcClientConfig::retry_enabled` / `max_retry_attempts` are wired to.
-///
-/// A [`GrpcMiddleware`] impl is also provided for services whose request body
-/// is `Clone` (e.g. buffered/decoded requests), for composability with the
-/// rest of this module.
 #[derive(Clone)]
 pub struct RetryMiddleware {
     max_attempts: u32,
@@ -516,13 +512,20 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 /// Default cap on how many bytes a single gRPC message may expand to during
 /// decompression when no explicit limit has been configured via
-/// [`CompressionMiddleware::max_decompressed_size`]. Chosen well above the
-/// crate's default `max_recv_message_size` (4 MiB, see
-/// `GrpcServerConfig::default`) to avoid surprising legitimate large
-/// messages, while still bounding a decompression-bomb payload to a fixed,
-/// finite amount of memory instead of the unbounded growth
+/// [`CompressionMiddleware::with_max_decompressed_size`]. Deliberately set
+/// *equal* to the crate's default `max_recv_message_size` (4 MiB, see
+/// `GrpcServerConfig::default`) so that, out of the box, a
+/// compression-enabled server never silently admits more decompressed memory
+/// per message than its configured receive limit: because the recv-limit
+/// check only ever sees the *compressed* frame, a larger default here would
+/// let decompression amplify a request well past the recv cap (a 64 MiB
+/// default was a silent 16x amplification). A caller who genuinely needs
+/// larger decompressed messages opts in explicitly via
+/// [`CompressionMiddleware::with_max_decompressed_size`] (see its note on the
+/// memory trade-off). The cap also bounds a decompression-bomb payload to a
+/// fixed, finite amount of memory instead of the unbounded growth
 /// `GzDecoder::read_to_end`/`zstd::stream::decode_all` previously allowed.
-pub const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+pub const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Compression middleware configuration.
 #[derive(Clone)]
@@ -566,14 +569,26 @@ impl CompressionMiddleware {
         Self::new(CompressionEncoding::Zstd)
     }
 
-    /// Set the maximum number of bytes a gRPC body may expand to while being
-    /// decompressed. Enforced *during* decompression (the decompressor is
-    /// never allowed to produce more than this many bytes), not merely checked
-    /// afterward — this is what actually bounds a decompression-bomb payload's
-    /// memory usage — and applied both per-message and against the running
-    /// total across the whole (possibly streaming) body. Requests/responses
-    /// whose decompressed size would exceed this limit are rejected with
-    /// `Status::resource_exhausted` rather than being allocated in full.
+    /// Set the maximum number of bytes a *single* gRPC message may expand to
+    /// while being decompressed. Enforced *during* decompression (the
+    /// decompressor is never allowed to produce more than this many bytes), not
+    /// merely checked afterward — this is what actually bounds a
+    /// decompression-bomb payload's memory usage. The bound is per-message
+    /// (peak): each message is decompressed, emitted, and freed as it streams
+    /// through, so this caps concurrent memory without terminating a long-lived
+    /// or streaming body that delivers more than this many bytes in total over
+    /// its lifetime. A single message whose decompressed size would exceed this
+    /// limit is rejected with `Status::resource_exhausted` rather than being
+    /// allocated in full.
+    ///
+    /// The default ([`DEFAULT_MAX_DECOMPRESSED_SIZE`]) is aligned with the
+    /// crate's default `max_recv_message_size` (4 MiB) so that decompression
+    /// cannot silently amplify a request past the server's configured receive
+    /// limit. Raising this above the server's `max_recv_message_size` is an
+    /// explicit opt-in to allowing more decompressed memory per message than
+    /// the recv limit would otherwise permit — worthwhile when you legitimately
+    /// exchange large, compressible messages, but understand it as a conscious
+    /// per-message memory trade-off, not a free win.
     pub fn with_max_decompressed_size(mut self, max_decompressed_size: usize) -> Self {
         self.max_decompressed_size = max_decompressed_size;
         self
@@ -624,6 +639,23 @@ impl CompressionMiddleware {
     }
 }
 
+/// The zstd `windowLog` appropriate for a buffer of `size` bytes: the bit
+/// length of `size` — i.e. `floor(log2(size)) + 1`, the number of bits needed
+/// to represent `size` — clamped to zstd's valid window range `[10, 27]`.
+/// (Note this is a bit length, *not* `ceil(log2)`: for an exact power of two
+/// such as 1024 it yields 11, not 10.)
+///
+/// Shared by BOTH sides of the zstd codec so their window arithmetic stays in
+/// lockstep: the encoder ([`CompressionEncoding::compress_bytes`]) right-sizes
+/// each frame's declared window to its payload, and the decoder
+/// ([`CompressionEncoding::decompress_bytes`]) uses this as the base for its
+/// cap-derived window ceiling. Keeping the computation in one place preserves
+/// the security invariant that a frame our own encoder produces (whose window
+/// is `window_log_for(payload_len)`) is always within the decoder's ceiling.
+fn window_log_for(size: usize) -> u32 {
+    (usize::BITS - size.max(1).leading_zeros()).clamp(10, 27)
+}
+
 impl CompressionEncoding {
     /// The `grpc-encoding` / `grpc-accept-encoding` wire value for this
     /// encoding, or `None` for [`CompressionEncoding::None`] (which never
@@ -646,7 +678,25 @@ impl CompressionEncoding {
                 encoder.write_all(data)?;
                 encoder.finish()
             }
-            CompressionEncoding::Zstd => zstd::stream::encode_all(data, 0),
+            CompressionEncoding::Zstd => {
+                use std::io::Write;
+                // Right-size the compression window to the payload rather than
+                // emitting zstd's flat default (windowLog 21 regardless of
+                // content size). A frame that declares a window no larger than
+                // it needs can be decoded under a small
+                // `max_decompressed_size` cap, because the decoder derives its
+                // `window_log_max` from that cap (see `decompress_bytes`); a
+                // default-windowed frame would otherwise be rejected up-front
+                // whenever the cap is below ~2 MiB, even though its actual
+                // output is tiny. The window is the bit length of the payload
+                // size (see `window_log_for`), clamped to zstd's valid range
+                // [10, 27].
+                let wl = window_log_for(data.len());
+                let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 0)?;
+                encoder.set_parameter(zstd::zstd_safe::CParameter::WindowLog(wl))?;
+                encoder.write_all(data)?;
+                encoder.finish()
+            }
             CompressionEncoding::None => Ok(data.to_vec()),
         }
     }
@@ -677,12 +727,28 @@ impl CompressionEncoding {
             }
             CompressionEncoding::Zstd => {
                 let mut decoder = zstd::stream::Decoder::new(data)?;
-                // Bound the decoder's internal window allocation independently
-                // of the output cap: a crafted zstd frame can request a very
-                // large window (and thus a large up-front buffer) even before
-                // producing output. 27 == 128 MiB, matching zstd's own
-                // conservative default ceiling.
-                decoder.window_log_max(27)?;
+                // Bound the decoder's internal window allocation, but derive the
+                // ceiling from the effective output cap rather than fixing it at
+                // a flat 27 (128 MiB). A crafted few-byte zstd frame can declare
+                // a large windowLog and force a correspondingly large up-front
+                // window buffer even before producing any output; a flat
+                // `window_log_max(27)` would let a caller who set a low
+                // `max_decompressed_size` still be forced to allocate ~128 MiB.
+                //
+                // The base is `window_log_for(max)` (shared with the encoder),
+                // but we add 3 bits of HEADROOM (capped at zstd's max of 27).
+                // The ceiling is a DoS backstop on the window buffer, not the
+                // authoritative output bound — `read_bounded` below is what
+                // actually caps produced memory at `max`. Without headroom we
+                // would reject legitimate frames from third-party zstd encoders
+                // that declare zstd's default window (often 21, up to 27) even
+                // when their decompressed output is comfortably within `max`.
+                // The 3-bit band lets those foreign-default-window frames decode
+                // while still tracking the cap for genuine DoS protection (a
+                // grossly-over-window frame is still rejected up-front). e.g. a
+                // 1 MiB cap yields a base windowLog ~20 and a ceiling ~23.
+                let wl = (window_log_for(max_decompressed_size) + 3).min(27);
+                decoder.window_log_max(wl)?;
                 read_bounded(decoder, max_decompressed_size, "zstd")
             }
             CompressionEncoding::None => Ok(data.to_vec()),
@@ -725,7 +791,10 @@ fn read_bounded(
     codec: &'static str,
 ) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    let mut limited = reader.take(max as u64 + 1);
+    // `saturating_add` so a caller who sets `with_max_decompressed_size(usize::MAX)`
+    // doesn't overflow `max as u64 + 1` (debug panic / release silent-empty).
+    let limit = (max as u64).saturating_add(1);
+    let mut limited = reader.take(limit);
     let mut out = Vec::new();
     limited.read_to_end(&mut out)?;
     if out.len() > max {
@@ -740,7 +809,7 @@ fn read_bounded(
 /// Length, in bytes, of a gRPC length-prefixed message frame header: 1
 /// compressed-flag byte followed by 4 big-endian payload-length bytes. Shared
 /// by every place in this crate that parses gRPC frame headers by hand (this
-/// module's [`transform_grpc_frames`] and `server.rs`'s
+/// module's [`CompressionBody`] and `server.rs`'s
 /// `MaxRecvMessageSizeService`) so the "1 flag byte + 4 length bytes" layout
 /// is defined once instead of being re-encoded as the magic number `5` (and
 /// raw `[1..5]` slices) in multiple independent parsers.
@@ -810,12 +879,15 @@ fn reframe(flag: u8, payload: &[u8]) -> Result<Bytes, tonic::Status> {
 ///   compressed response reached a real gRPC client with no status and the RPC
 ///   failed ("stream closed without grpc-status"). Here, a
 ///   [`http_body::Frame::trailers`] frame is forwarded untouched.
-/// * **Aggregate memory is bounded.** A per-message cap alone doesn't bound a
-///   body of *many* small compressed frames each expanding to the cap. This
-///   adapter enforces `max_decompressed_size` against the running total across
-///   the whole body (not just per message), rejecting with
-///   `Status::resource_exhausted` once cumulative decompressed output would
-///   exceed it.
+/// * **Per-message memory is bounded.** Each message is decompressed under the
+///   configured `max_decompressed_size` cap (enforced *during* decompression by
+///   [`CompressionEncoding::decompress_bytes`]), rejecting a decompression bomb
+///   with `Status::resource_exhausted` before it can be materialized. The bound
+///   is deliberately per-message (peak), not a running aggregate: every message
+///   is emitted and freed as it flows through, so concurrent memory never
+///   exceeds the largest single message, and a legitimate long-lived/streaming
+///   RPC that delivers more than the cap *in total* over its lifetime is not
+///   wrongly terminated.
 /// * **Streaming flows incrementally.** Each message is emitted as soon as it
 ///   is complete, so a server-streaming / `Watch` / subscribe RPC delivers
 ///   messages as they arrive instead of stalling until the stream ends (an
@@ -823,17 +895,13 @@ fn reframe(flag: u8, payload: &[u8]) -> Result<Bytes, tonic::Status> {
 ///
 /// Because the middleware is generic over the server-builder path and cannot
 /// observe the server's `max_recv_message_size`, the decompressed-size check is
-/// enforced here — per message *and* in aggregate — rather than by defaulting
-/// the cap to `max_recv_message_size` at compose time.
+/// enforced here (per message) rather than by defaulting the cap to
+/// `max_recv_message_size` at compose time.
 struct CompressionBody<B> {
     inner: B,
     encoding: CompressionEncoding,
     direction: Direction,
     max_decompressed_size: usize,
-    /// Running total of bytes produced by decompression so far, used to bound
-    /// the whole body (not just any single message). Unused for
-    /// [`Direction::Compress`], which only ever shrinks its input.
-    decompressed_total: usize,
     /// Undelivered input bytes accumulated across inner frames until a full
     /// gRPC message can be cut out and transformed.
     buf: BytesMut,
@@ -853,7 +921,6 @@ impl<B> CompressionBody<B> {
             encoding,
             direction,
             max_decompressed_size,
-            decompressed_total: 0,
             buf: BytesMut::new(),
             inner_done: false,
         }
@@ -874,22 +941,18 @@ impl<B> CompressionBody<B> {
                 tonic::Status::internal(format!("failed to compress gRPC message: {e}"))
             })?,
             Direction::Decompress => {
-                if self.decompressed_total >= self.max_decompressed_size {
-                    return Err(tonic::Status::resource_exhausted(format!(
-                        "decompressed gRPC body exceeds max_decompressed_size of {} bytes",
-                        self.max_decompressed_size
-                    )));
-                }
-                // Cap this message at the remaining aggregate budget so neither
-                // a single bomb nor many messages summing past the cap can
-                // allocate more than `max_decompressed_size` total.
-                let remaining = self.max_decompressed_size - self.decompressed_total;
-                let decompressed = self
-                    .encoding
-                    .decompress_bytes(payload, remaining)
-                    .map_err(|e| decompress_error_to_status(&e))?;
-                self.decompressed_total += decompressed.len();
-                decompressed
+                // Bound each message independently at the full configured cap.
+                // The memory bound that matters for a streaming body is
+                // per-message (peak): every message is emitted (`Frame::data`)
+                // and freed as it flows through, so concurrent memory never
+                // exceeds the largest single message. A running aggregate total
+                // would add no safety here (each message is already freed) while
+                // wrongly terminating a well-behaved streaming RPC that delivers
+                // more than the cap in total over its lifetime — and would make
+                // any legitimate infinite/long-lived stream guaranteed to fail.
+                self.encoding
+                    .decompress_bytes(payload, self.max_decompressed_size)
+                    .map_err(|e| decompress_error_to_status(&e))?
             }
         };
         reframe(1 - matching, &transformed)
@@ -924,6 +987,35 @@ where
         loop {
             // Emit one complete transformed message if the buffer holds one.
             if let Some((flag, len)) = read_frame_header(&this.buf) {
+                // Pre-buffering DoS BACKSTOP (not the exact bound): reject a
+                // clearly-abusive frame as soon as its declared length is known,
+                // BEFORE buffering the (attacker-controlled, up to 4 GiB)
+                // payload. `len` is the u32 frame length straight off the wire;
+                // a grossly-oversized declared length would grow `buf` to `len`
+                // bytes just to reject it later in `transform_one`, so we cut it
+                // off here. But this guard has HEADROOM and is deliberately NOT
+                // the exact `len <= max` boundary: an incompressible or
+                // already-compressed payload can have a compressed `len`
+                // slightly ABOVE its decompressed size (codec framing
+                // overhead), so a legitimate message that decompresses to
+                // within the cap can arrive with `len` a hair over it — most
+                // reachably in the recommended "cap == recv limit" config.
+                // Rejecting on the nose would wrongly drop those. We therefore
+                // only reject when `len` exceeds the cap by more than a ~1.5% +
+                // 64B compression-overhead band, leaving `read_bounded` /
+                // `decompress_bytes` as the authoritative output boundary.
+                // (Only meaningful in the decompress direction; a
+                // compress-direction frame is plaintext already bounded by the
+                // sender, but the guard is harmless there.)
+                if matches!(this.direction, Direction::Decompress)
+                    && len.saturating_sub(this.max_decompressed_size)
+                        > this.max_decompressed_size / 64 + 64
+                {
+                    return Poll::Ready(Some(Err(tonic::Status::resource_exhausted(format!(
+                        "compressed gRPC frame length {len} exceeds max_decompressed_size of {} bytes (with headroom)",
+                        this.max_decompressed_size
+                    )))));
+                }
                 let total = GRPC_FRAME_HEADER_LEN + len;
                 if this.buf.len() >= total {
                     let frame = this.buf.split_to(total);
@@ -1218,7 +1310,7 @@ impl<S: tonic::server::NamedService> tonic::server::NamedService for Compression
 mod tests {
     use super::*;
     use http_body_util::{BodyExt, Full};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
     use tokio::sync::Barrier;
     use tower::Service as _;
 
@@ -1725,6 +1817,51 @@ mod tests {
         );
     }
 
+    /// Security regression test (zstd window cap tied to the output cap): a
+    /// low `max_decompressed_size` must derive a correspondingly low
+    /// `window_log_max`, so a crafted frame declaring a large window
+    /// (windowLog 21 == 2 MiB here) is rejected up-front — before its window
+    /// buffer is allocated — instead of being allowed the flat 128 MiB the old
+    /// hard-coded `window_log_max(27)` permitted. A right-sized frame whose
+    /// window fits the cap must still decode.
+    #[tokio::test]
+    async fn zstd_window_cap_tracks_output_cap() {
+        use std::io::Write;
+
+        // A tiny payload, but forced to declare a large (2 MiB) window.
+        let payload = vec![3u8; 256];
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 0).unwrap();
+        enc.set_parameter(zstd::zstd_safe::CParameter::WindowLog(21))
+            .unwrap();
+        enc.write_all(&payload).unwrap();
+        let big_window = enc.finish().unwrap();
+
+        // Cap ~100 KiB => window_log_max ~17, below the frame's declared 21, so
+        // the frame is rejected purely on its window declaration.
+        let err = CompressionEncoding::Zstd
+            .decompress_bytes(&big_window, 100_000)
+            .expect_err("a frame declaring a window larger than the cap allows must be rejected");
+        // Rejected by zstd's window check, not our size cap: it's a plain io
+        // error, not a DecompressedSizeExceeded marker.
+        assert!(
+            err.get_ref()
+                .map(|e| !e.is::<DecompressedSizeExceeded>())
+                .unwrap_or(true),
+            "rejection must come from the window-log ceiling, before any output is produced"
+        );
+
+        // A right-sized frame (our own encoder declares a content-sized window)
+        // of the same small payload decodes fine under the same low cap.
+        let right_sized = CompressionEncoding::Zstd.compress_bytes(&payload).unwrap();
+        assert_eq!(
+            CompressionEncoding::Zstd
+                .decompress_bytes(&right_sized, 100_000)
+                .unwrap(),
+            payload,
+            "a frame whose declared window fits the cap must still decode"
+        );
+    }
+
     /// Regression test: `CompressionMiddleware::new(CompressionEncoding::None)`
     /// must pass request and response bodies through completely untouched —
     /// against the pre-fix code, `incoming_encoding.as_deref() ==
@@ -1899,30 +2036,22 @@ mod tests {
         );
     }
 
-    /// Primary regression test (bugs 2 & 3): the adapter emits each message as
-    /// soon as it is complete (so streaming RPCs flow incrementally rather than
-    /// stalling until end-of-stream), and it enforces `max_decompressed_size`
-    /// against the running total across the whole body (not just per message),
-    /// rejecting with `resource_exhausted` once cumulative output would exceed
-    /// the cap. Three 1000-byte messages under a 2500-byte aggregate cap: the
-    /// first two decode and are delivered incrementally, the third pushes the
-    /// running total past the cap and is rejected.
+    /// Primary regression test (per-message bound): a *single* message whose
+    /// decompressed size exceeds `max_decompressed_size` must be rejected with
+    /// `resource_exhausted` — the per-message (peak) bound that provides
+    /// decompression-bomb protection.
     #[tokio::test]
-    async fn compression_body_streams_incrementally_and_bounds_aggregate_size() {
-        let payload = vec![0u8; 1000];
+    async fn compression_body_rejects_single_oversized_message() {
+        let payload = vec![0u8; 4000];
         let one = CompressionEncoding::Gzip.compress_bytes(&payload).unwrap();
 
-        // Three compressed messages back-to-back in a single inner data frame.
-        let mut all = BytesMut::new();
-        for _ in 0..3 {
-            all.extend_from_slice(&frame(1, &one));
-        }
-
         let inner = QueuedBody {
-            frames: [http_body::Frame::data(all.freeze())].into_iter().collect(),
+            frames: [http_body::Frame::data(frame(1, &one))]
+                .into_iter()
+                .collect(),
         };
 
-        // Aggregate cap admits two 1000-byte messages (2000) but not a third.
+        // Cap below the single message's decompressed size (4000).
         let mut body = CompressionBody::new(
             inner,
             CompressionEncoding::Gzip,
@@ -1930,12 +2059,104 @@ mod tests {
             2500,
         );
 
-        for i in 0..2 {
+        let err = body
+            .frame()
+            .await
+            .expect("a frame poll is expected")
+            .expect_err("an oversized single message must be rejected");
+        assert_eq!(
+            err.code(),
+            tonic::Code::ResourceExhausted,
+            "exceeding the per-message decompressed-size cap must yield resource_exhausted"
+        );
+    }
+
+    /// Security regression test (early frame-length rejection): a decompress
+    /// frame whose *declared* length is GROSSLY over `max_decompressed_size`
+    /// (well beyond the guard's compression-overhead headroom) must be rejected
+    /// as soon as the header is parsed — before the (attacker-declared, up to
+    /// 4 GiB) payload is buffered. We send only the 5-byte header (flag=1, len =
+    /// 64 MiB against a 1 KiB cap) with no payload at all; the guard must fire on
+    /// the header alone rather than waiting to accumulate `len` bytes. (The
+    /// near-boundary behavior — that a frame only slightly over the cap is
+    /// admitted so `read_bounded` can be the authoritative bound — is covered by
+    /// `compression_body_early_guard_headroom_boundary`.)
+    #[tokio::test]
+    async fn compression_body_rejects_oversized_declared_frame_length_before_buffering() {
+        let cap = 1024usize;
+        // A header declaring a payload grossly over the cap (far past the
+        // headroom band), with NO payload bytes following it — the guard must
+        // not wait for them.
+        let header = frame(1, &[]); // 5-byte header, len field = 0
+        let mut hdr = BytesMut::from(&header[..]);
+        // Overwrite the length field (bytes 1..5) with a clearly-abusive length.
+        let big = (64u32 * 1024 * 1024).to_be_bytes();
+        hdr[1..5].copy_from_slice(&big);
+
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(hdr.freeze())].into_iter().collect(),
+        };
+        let mut body =
+            CompressionBody::new(inner, CompressionEncoding::Gzip, Direction::Decompress, cap);
+
+        let err = body
+            .frame()
+            .await
+            .expect("a frame poll is expected")
+            .expect_err("an over-cap declared frame length must be rejected on the header alone");
+        assert_eq!(
+            err.code(),
+            tonic::Code::ResourceExhausted,
+            "an over-large declared frame length must yield resource_exhausted early"
+        );
+    }
+
+    /// Primary regression test (no aggregate termination): a multi-message
+    /// stream whose messages are each comfortably under the cap but whose
+    /// decompressed sizes *sum* to well over it must be delivered IN FULL. The
+    /// bound is per-message (peak), not a running aggregate, so a well-behaved
+    /// (or long-lived/infinite) streaming RPC is never wrongly terminated
+    /// mid-stream just because its cumulative output exceeds the cap. The
+    /// adapter also emits each message as soon as it is complete, so streaming
+    /// flows incrementally rather than stalling until end-of-stream.
+    #[tokio::test]
+    async fn compression_body_delivers_stream_whose_messages_sum_over_cap() {
+        let payload = vec![0u8; 1000];
+        let one = CompressionEncoding::Gzip.compress_bytes(&payload).unwrap();
+
+        // Five compressed messages back-to-back in a single inner data frame.
+        // Each decompresses to 1000 bytes (well under the 2500 cap) but they
+        // sum to 5000 — over twice the cap.
+        const N: usize = 5;
+        let mut all = BytesMut::new();
+        for _ in 0..N {
+            all.extend_from_slice(&frame(1, &one));
+        }
+
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(all.freeze())].into_iter().collect(),
+        };
+
+        // Per-message cap admits each 1000-byte message; the 5000-byte total
+        // must NOT cause termination.
+        let mut body = CompressionBody::new(
+            inner,
+            CompressionEncoding::Gzip,
+            Direction::Decompress,
+            2500,
+        );
+
+        for i in 0..N {
             let f = body
                 .frame()
                 .await
                 .unwrap_or_else(|| panic!("message {i} should be delivered incrementally"))
-                .unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "message {i} must be delivered in full (no aggregate termination), \
+                         got error: {e}"
+                    )
+                });
             let Ok(d) = f.into_data() else {
                 panic!("expected a data frame");
             };
@@ -1943,18 +2164,308 @@ mod tests {
             assert_eq!(&d[GRPC_FRAME_HEADER_LEN..], &payload[..]);
         }
 
-        // The third message pushes the cumulative decompressed total over the
-        // cap and must be rejected — proving the bound is aggregate, not
-        // per-message.
+        // After all N messages the stream ends cleanly (no error).
+        assert!(
+            body.frame().await.is_none(),
+            "the stream must end cleanly after all messages are delivered"
+        );
+    }
+
+    /// Correctness regression (item 1, early-guard headroom): an incompressible
+    /// / already-compressed payload can have a *compressed* frame length
+    /// slightly ABOVE its decompressed size (codec framing overhead). Under the
+    /// recommended "cap == recv limit" config, a legitimate message that
+    /// decompresses to exactly the cap can arrive with `len` a hair over it. The
+    /// early declared-length guard must NOT reject such a frame on the nose —
+    /// its headroom band admits it, and `read_bounded` (whose bound the output
+    /// actually satisfies) lets it through. Proven end-to-end here: a real gzip
+    /// frame of incompressible data whose compressed len exceeds the cap but
+    /// whose output equals the cap is accepted and decompresses correctly.
+    #[tokio::test]
+    async fn compression_body_accepts_incompressible_frame_whose_compressed_len_exceeds_cap() {
+        // Pseudo-random, incompressible bytes: gzip cannot shrink these, so the
+        // compressed length lands just above the decompressed length.
+        let cap = 4000usize;
+        let mut payload = vec![0u8; cap];
+        for (i, b) in payload.iter_mut().enumerate() {
+            // splitmix64 finalizer: a well-avalanched hash of the index, so the
+            // bytes are high-entropy (incompressible) rather than following a
+            // pattern deflate could exploit.
+            let mut z = (i as u64).wrapping_mul(0x9e3779b97f4a7c15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            *b = (z ^ (z >> 31)) as u8;
+        }
+        let compressed = CompressionEncoding::Gzip.compress_bytes(&payload).unwrap();
+        assert!(
+            compressed.len() > cap,
+            "test premise: an incompressible payload must compress to just over \
+             the cap (got compressed len {} vs cap {cap})",
+            compressed.len()
+        );
+        // ...but only *slightly* over — within the guard's headroom band.
+        assert!(
+            compressed.len() - cap <= cap / 64 + 64,
+            "test premise: overhead must sit inside the headroom band"
+        );
+
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(frame(1, &compressed))]
+                .into_iter()
+                .collect(),
+        };
+        // cap == output size: `read_bounded` admits output of exactly `cap`.
+        let mut body =
+            CompressionBody::new(inner, CompressionEncoding::Gzip, Direction::Decompress, cap);
+
+        let f = body
+            .frame()
+            .await
+            .expect("a frame is expected")
+            .expect("an incompressible frame within the output cap must be accepted");
+        let d = f.into_data().expect("data frame");
+        assert_eq!(d[0], 0, "decompressed frame must carry flag=0");
+        assert_eq!(
+            &d[GRPC_FRAME_HEADER_LEN..],
+            &payload[..],
+            "the incompressible payload must round-trip intact"
+        );
+    }
+
+    /// Exact-boundary pair for the early declared-length guard (items 1 & 9). The
+    /// guard rejects only when `len - cap > cap/64 + 64`. A frame declaring a
+    /// length exactly at the headroom boundary must NOT be rejected by the guard
+    /// (it proceeds to buffering — and, with no payload following, surfaces a
+    /// *truncated* internal error, definitively not the guard's
+    /// `resource_exhausted`); one byte past the boundary must be rejected early
+    /// with `resource_exhausted`.
+    #[tokio::test]
+    async fn compression_body_early_guard_headroom_boundary() {
+        let cap = 4096usize;
+        let headroom = cap / 64 + 64; // 64 + 64 = 128
+        let at_boundary = cap + headroom; // largest len the guard still admits
+        let over_boundary = at_boundary + 1; // first len the guard rejects
+
+        // Header-only frame declaring `len`, no payload bytes following.
+        let header_with_len = |len: u32| -> Bytes {
+            let base = frame(1, &[]);
+            let mut hdr = BytesMut::from(&base[..]);
+            hdr[1..5].copy_from_slice(&len.to_be_bytes());
+            hdr.freeze()
+        };
+
+        // At the boundary: the guard must NOT fire. With no payload, the body
+        // ends mid-frame, so we get a truncated *internal* error — proving the
+        // guard let it through rather than short-circuiting.
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(header_with_len(at_boundary as u32))]
+                .into_iter()
+                .collect(),
+        };
+        let mut body =
+            CompressionBody::new(inner, CompressionEncoding::Gzip, Direction::Decompress, cap);
         let err = body
             .frame()
             .await
-            .expect("a third frame poll is expected")
-            .expect_err("the aggregate cap must reject the third message");
+            .expect("a frame poll is expected")
+            .expect_err("a truncated body must error");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "a frame at the headroom boundary must pass the guard (truncation, not \
+             resource_exhausted)"
+        );
+
+        // One byte past the boundary: the guard must reject early.
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(header_with_len(
+                over_boundary as u32,
+            ))]
+            .into_iter()
+            .collect(),
+        };
+        let mut body =
+            CompressionBody::new(inner, CompressionEncoding::Gzip, Direction::Decompress, cap);
+        let err = body
+            .frame()
+            .await
+            .expect("a frame poll is expected")
+            .expect_err("a frame past the headroom boundary must be rejected");
         assert_eq!(
             err.code(),
             tonic::Code::ResourceExhausted,
-            "exceeding the aggregate decompressed-size cap must yield resource_exhausted"
+            "a declared length past the headroom band must be rejected early"
+        );
+    }
+
+    /// Item 2 companion: a frame from a third-party zstd encoder that declares
+    /// zstd's *default* window (windowLog 21) but whose decompressed output is
+    /// well within the cap must now DECODE, thanks to the decoder's window-log
+    /// headroom. With a ~586 KiB cap the base window-log is 20 (which the old
+    /// exact-derivation would have used, rejecting a windowLog-21 frame); the
+    /// +3-bit headroom lifts the ceiling to 23, admitting the foreign frame
+    /// while `read_bounded` still bounds actual output at the cap.
+    #[tokio::test]
+    async fn zstd_foreign_default_window_within_cap_decodes() {
+        use std::io::Write;
+
+        // Tiny payload, but declaring zstd's common default window (21 == 2 MiB).
+        let payload = vec![5u8; 256];
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 0).unwrap();
+        enc.set_parameter(zstd::zstd_safe::CParameter::WindowLog(21))
+            .unwrap();
+        enc.write_all(&payload).unwrap();
+        let foreign = enc.finish().unwrap();
+
+        // Cap 600_000 => base window_log_for == 20, ceiling 20+3 == 23 >= 21.
+        let cap = 600_000usize;
+        assert_eq!(
+            window_log_for(cap),
+            20,
+            "test premise: cap must sit where the base window-log is below 21"
+        );
+        assert_eq!(
+            (window_log_for(cap) + 3).min(27),
+            23,
+            "test premise: headroom must lift the ceiling to at least 21"
+        );
+        let out = CompressionEncoding::Zstd
+            .decompress_bytes(&foreign, cap)
+            .expect(
+                "a foreign frame declaring the default window (21), within the output cap, \
+                 must decode under the decoder window headroom",
+            );
+        assert_eq!(out, payload, "the foreign-window payload must round-trip");
+    }
+
+    /// Item 9: a zstd instance driven through the `CompressionBody` adapter (the
+    /// oversized-single-message rejection, previously only covered for gzip).
+    #[tokio::test]
+    async fn compression_body_rejects_single_oversized_message_zstd() {
+        let payload = vec![0u8; 4000];
+        let one = CompressionEncoding::Zstd.compress_bytes(&payload).unwrap();
+
+        let inner = QueuedBody {
+            frames: [http_body::Frame::data(frame(1, &one))]
+                .into_iter()
+                .collect(),
+        };
+        // Cap below the single message's decompressed size (4000).
+        let mut body = CompressionBody::new(
+            inner,
+            CompressionEncoding::Zstd,
+            Direction::Decompress,
+            2500,
+        );
+
+        let err = body
+            .frame()
+            .await
+            .expect("a frame poll is expected")
+            .expect_err("an oversized single zstd message must be rejected");
+        assert_eq!(
+            err.code(),
+            tonic::Code::ResourceExhausted,
+            "exceeding the per-message decompressed-size cap must yield resource_exhausted"
+        );
+    }
+
+    /// A test `http_body::Body` that yields message 1's frame immediately, then
+    /// parks on `Poll::Pending` until a `oneshot` gate is released, then yields
+    /// message 2. Used to prove the streaming adapter emits INCREMENTALLY.
+    struct GatedBody {
+        first: Option<Bytes>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        second: Option<Bytes>,
+    }
+
+    impl http_body::Body for GatedBody {
+        type Data = Bytes;
+        type Error = tonic::Status;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+            let this = self.get_mut();
+            if let Some(f) = this.first.take() {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(f))));
+            }
+            if let Some(rx) = this.gate.as_mut() {
+                match Pin::new(rx).poll(cx) {
+                    Poll::Ready(_) => this.gate = None,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            if let Some(f) = this.second.take() {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(f))));
+            }
+            Poll::Ready(None)
+        }
+    }
+
+    /// Item 8 (the streaming rewrite's headline property): the adapter emits
+    /// each message BEFORE the stream ends, rather than buffering everything
+    /// first. The inner body yields message 1, then returns `Poll::Pending`
+    /// (parked on a `oneshot`) until we signal it, then message 2. We `await`
+    /// message 1 *before* releasing the gate: a buffer-everything implementation
+    /// would deadlock here (it would keep polling the inner body until
+    /// end-of-stream before emitting anything, and the gate is still closed), so
+    /// obtaining message 1 proves incremental emission. Only after we have
+    /// message 1 do we release the gate and confirm message 2 flows.
+    #[tokio::test]
+    async fn compression_body_emits_first_message_before_second_is_available() {
+        let payload1 = vec![b'x'; 100];
+        let payload2 = vec![b'y'; 100];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let inner = GatedBody {
+            first: Some(frame(0, &payload1)),
+            gate: Some(rx),
+            second: Some(frame(0, &payload2)),
+        };
+        let mut body = CompressionBody::new(
+            inner,
+            CompressionEncoding::Gzip,
+            Direction::Compress,
+            DEFAULT_MAX_DECOMPRESSED_SIZE,
+        );
+
+        // Message 1 is delivered while message 2's data is still gated shut.
+        let f1 = body
+            .frame()
+            .await
+            .expect("first frame must arrive")
+            .expect("first frame must be Ok");
+        let d1 = f1.into_data().expect("data frame");
+        assert_eq!(d1[0], 1, "message 1 must be compressed (flag=1)");
+        let out1 = CompressionEncoding::Gzip
+            .decompress_bytes(&d1[GRPC_FRAME_HEADER_LEN..], 10_000)
+            .unwrap();
+        assert_eq!(
+            out1, payload1,
+            "the first emitted message must be message 1"
+        );
+
+        // Now release the gate; message 2 must follow.
+        tx.send(()).expect("gate receiver still alive");
+        let f2 = body
+            .frame()
+            .await
+            .expect("second frame must arrive")
+            .expect("second frame must be Ok");
+        let d2 = f2.into_data().expect("data frame");
+        let out2 = CompressionEncoding::Gzip
+            .decompress_bytes(&d2[GRPC_FRAME_HEADER_LEN..], 10_000)
+            .unwrap();
+        assert_eq!(
+            out2, payload2,
+            "the second emitted message must be message 2"
+        );
+
+        assert!(
+            body.frame().await.is_none(),
+            "the stream must end cleanly after both messages"
         );
     }
 
@@ -1998,7 +2509,17 @@ mod tests {
             .connect()
             .await
             .unwrap();
-        let compressed = CompressionMiddleware::gzip().wrap_channel(channel);
+        // Tap the raw channel *below* the client-side decompression wrapper so
+        // we observe the server's response headers before `wrap_channel` strips
+        // `grpc-encoding`. This lets us assert compression actually happened on
+        // the wire (the test would otherwise pass even if compression silently
+        // degraded to a no-op).
+        let saw_gzip = Arc::new(AtomicBool::new(false));
+        let tap = EncodingTap {
+            inner: channel,
+            saw_gzip: saw_gzip.clone(),
+        };
+        let compressed = CompressionMiddleware::gzip().wrap_channel(tap);
         let mut client = tonic_health::pb::health_client::HealthClient::new(compressed);
 
         let resp = client
@@ -2019,5 +2540,55 @@ mod tests {
             status,
             tonic_health::pb::health_check_response::ServingStatus::Serving
         );
+        assert!(
+            saw_gzip.load(AtomicOrdering::SeqCst),
+            "the server's response must have been gzip-compressed on the wire \
+             (grpc-encoding: gzip) — a passing RPC alone doesn't prove compression \
+             happened rather than degrading to a no-op"
+        );
+    }
+
+    /// Tower service that records whether a response carried
+    /// `grpc-encoding: gzip`, used to prove compression actually happened on
+    /// the wire in the end-to-end round-trip test.
+    #[derive(Clone)]
+    struct EncodingTap<S> {
+        inner: S,
+        saw_gzip: Arc<AtomicBool>,
+    }
+
+    impl<S> tower::Service<http::Request<TonicBody>> for EncodingTap<S>
+    where
+        S: tower::Service<http::Request<TonicBody>, Response = http::Response<TonicBody>>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        type Response = http::Response<TonicBody>;
+        type Error = S::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.inner.poll_ready(cx)
+        }
+
+        fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+            let clone = self.inner.clone();
+            let mut inner = std::mem::replace(&mut self.inner, clone);
+            let saw_gzip = self.saw_gzip.clone();
+            Box::pin(async move {
+                let resp = inner.call(req).await?;
+                if resp
+                    .headers()
+                    .get("grpc-encoding")
+                    .is_some_and(|v| v == "gzip")
+                {
+                    saw_gzip.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(resp)
+            })
+        }
     }
 }

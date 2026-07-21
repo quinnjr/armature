@@ -51,7 +51,13 @@ impl SwaggerConfig {
 /// Content-Security-Policy that blocks that origin.
 pub fn swagger_ui_response(config: &SwaggerConfig) -> Result<HttpResponse, Error> {
     let spec_json = config.spec_json()?;
-    let spec_json_escaped = spec_json.replace('\\', "\\\\").replace('`', "\\`");
+    // JSON is already valid JS object-literal syntax, so it can be injected
+    // as-is. The only hazard is a literal `</script>` (or any `</`) inside a
+    // string value breaking out of the enclosing <script> block, since serde
+    // does not escape `/`. Escaping `</` to `<\/` is a JSON/JS-safe transform
+    // that renders identically. We must NOT double backslashes: that would
+    // corrupt data (e.g. a `\d+` pattern would render as `\\d+`).
+    let spec_json_safe = spec_json.replace("</", "<\\/");
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -93,7 +99,7 @@ pub fn swagger_ui_response(config: &SwaggerConfig) -> Result<HttpResponse, Error
 </body>
 </html>"#,
         title = config.title,
-        spec = spec_json_escaped
+        spec = spec_json_safe
     );
 
     Ok(HttpResponse::ok()

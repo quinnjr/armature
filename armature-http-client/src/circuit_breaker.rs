@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 
 /// Circuit breaker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CircuitState {
     /// Circuit is closed, requests are allowed.
     Closed,

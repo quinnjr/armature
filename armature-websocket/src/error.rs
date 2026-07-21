@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// WebSocket error type.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum WebSocketError {
     /// Connection error
     #[error("Connection error: {0}")]

@@ -557,10 +557,31 @@ mod gateway {
 
             let result = execute_query(&self.client, config, &query, Some(variables)).await?;
 
-            result["data"]["_entities"]
-                .as_array()
-                .cloned()
-                .ok_or_else(|| FederationError::EntityResolutionError("Invalid response".into()))
+            if let Some(entities) = result["data"]["_entities"].as_array() {
+                return Ok(entities.clone());
+            }
+
+            // No `_entities` array in `data`. Before collapsing to a generic
+            // error, inspect the GraphQL `errors` array (a subgraph reporting
+            // a resolution failure returns `{"errors":[...]}` with null/absent
+            // data) and surface the real server messages rather than swallow
+            // them.
+            if let Some(errors) = result["errors"].as_array() {
+                let messages: Vec<String> = errors
+                    .iter()
+                    .filter_map(|e| e["message"].as_str().map(str::to_string))
+                    .collect();
+                if !messages.is_empty() {
+                    return Err(FederationError::EntityResolutionError(format!(
+                        "subgraph returned errors: {}",
+                        messages.join("; ")
+                    )));
+                }
+            }
+
+            Err(FederationError::EntityResolutionError(
+                "Invalid response".into(),
+            ))
         }
     }
 
@@ -1349,5 +1370,57 @@ mod gateway_tests {
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0]["__typename"], "User");
         assert_eq!(entities[0]["name"], "Ada");
+    }
+
+    // -------------------------------------------------------------------
+    // Error path: when the subgraph responds with a GraphQL `errors`
+    // array and no `_entities`, the real server messages must be surfaced
+    // in the `EntityResolutionError` rather than collapsed to the generic
+    // "Invalid response".
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_entities_surfaces_subgraph_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            if let Some(mut stream) = listener.incoming().flatten().next() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let json =
+                    r#"{"data":null,"errors":[{"message":"entity not found"},{"message":"boom"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                use std::io::Write;
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let gateway = FederationGateway::builder()
+            .subgraph("users", format!("http://{}/graphql", addr))
+            .build()
+            .expect("build gateway");
+
+        let reps = vec![EntityReference::new("User").with_key("id", serde_json::json!("1"))];
+
+        let err = gateway
+            .resolve_entities("users", reps, "id name")
+            .await
+            .expect_err("subgraph error response should surface as an error");
+
+        match err {
+            FederationError::EntityResolutionError(msg) => {
+                assert!(
+                    msg.contains("entity not found") && msg.contains("boom"),
+                    "expected subgraph error messages to be surfaced, got: {msg}"
+                );
+            }
+            other => panic!("expected EntityResolutionError, got: {other:?}"),
+        }
     }
 }

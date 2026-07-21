@@ -199,7 +199,21 @@ impl GrpcServerConfig {
     }
 }
 
-/// Builder for gRPC server configuration.
+/// Builder for [`GrpcServerConfig`].
+///
+/// Construct one with [`GrpcServerConfig::builder`], chain the setter methods,
+/// then call [`GrpcServerConfigBuilder::build`] (which validates the bind
+/// address).
+///
+/// ```
+/// use armature_grpc::GrpcServerConfig;
+///
+/// let config = GrpcServerConfig::builder()
+///     .bind_address("0.0.0.0:50051")
+///     .max_recv_message_size(8 * 1024 * 1024)
+///     .build()
+///     .expect("valid bind address");
+/// ```
 #[derive(Debug, Default)]
 pub struct GrpcServerConfigBuilder {
     config: GrpcServerConfig,
@@ -367,7 +381,20 @@ impl GrpcClientConfig {
     }
 }
 
-/// Builder for gRPC client configuration.
+/// Builder for [`GrpcClientConfig`].
+///
+/// Construct one with [`GrpcClientConfig::builder`], chain the setter methods,
+/// then call [`GrpcClientConfigBuilder::build`]. Note that `retry`/
+/// `max_retry_attempts` are opt-in and are only honored when calls are wrapped
+/// in `GrpcChannel::call_with_retry` (see the crate docs).
+///
+/// ```
+/// use armature_grpc::GrpcClientConfig;
+///
+/// let config = GrpcClientConfig::builder()
+///     .endpoint("http://localhost:50051")
+///     .build();
+/// ```
 #[derive(Debug, Default)]
 pub struct GrpcClientConfigBuilder {
     config: GrpcClientConfig,

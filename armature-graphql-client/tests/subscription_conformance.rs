@@ -86,6 +86,132 @@ async fn spawn_test_server(
     format!("ws://{addr}")
 }
 
+/// Spawn a minimal graphql-ws test server that performs the
+/// `connection_init`/`connection_ack` exchange, reads the client's `subscribe`
+/// message, and then records whether the *next* client message is a
+/// client-initiated `complete` (an unsubscribe). It never sends its own
+/// `complete`, so any `complete` observed must have come from the client.
+async fn spawn_unsubscribe_server(complete_id: Arc<Mutex<Option<String>>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (mut write, mut read) = ws_stream.split();
+
+            // connection_init -> connection_ack
+            if let Some(Ok(Message::Text(_))) = read.next().await {
+                let ack = serde_json::json!({"type": "connection_ack"}).to_string();
+                let _ = write.send(Message::Text(ack.into())).await;
+            } else {
+                return;
+            }
+
+            // Read the `subscribe` message.
+            let _ = read.next().await;
+
+            // The next client message should be a client-initiated `complete`.
+            while let Some(Ok(msg)) = read.next().await {
+                if let Message::Text(text) = msg
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+                    && value.get("type").and_then(|t| t.as_str()) == Some("complete")
+                {
+                    let id = value
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string());
+                    *complete_id.lock().unwrap() = id;
+                    break;
+                }
+            }
+        }
+    });
+
+    format!("ws://{addr}")
+}
+
+#[tokio::test]
+async fn explicit_unsubscribe_sends_complete() {
+    let complete_id = Arc::new(Mutex::new(None));
+    let ws_url = spawn_unsubscribe_server(complete_id.clone()).await;
+
+    let config = GraphQLClientConfig::builder()
+        .endpoint("http://127.0.0.1:1/graphql")
+        .ws_endpoint(ws_url)
+        .build();
+    let client = GraphQLClient::with_config(config);
+
+    let mut subscription = client
+        .subscribe("subscription { messageAdded { id } }")
+        .send()
+        .await
+        .expect("subscription should connect");
+
+    let sub_id = subscription
+        .subscription()
+        .map(|s| s.id.clone())
+        .expect("a live subscription carries a handle with its id");
+    assert!(subscription.is_active());
+
+    subscription.unsubscribe();
+    assert!(
+        !subscription.is_active(),
+        "handle should be inactive after unsubscribe"
+    );
+
+    // Keep the stream alive so the write half is not torn down before the
+    // spawned `complete`-send task runs.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let received = complete_id.lock().unwrap().clone();
+    assert_eq!(
+        received.as_deref(),
+        Some(sub_id.as_str()),
+        "client should have sent a `complete` carrying the subscription id"
+    );
+
+    drop(subscription);
+}
+
+#[tokio::test]
+async fn dropping_stream_sends_complete() {
+    let complete_id = Arc::new(Mutex::new(None));
+    let ws_url = spawn_unsubscribe_server(complete_id.clone()).await;
+
+    let config = GraphQLClientConfig::builder()
+        .endpoint("http://127.0.0.1:1/graphql")
+        .ws_endpoint(ws_url)
+        .build();
+    let client = GraphQLClient::with_config(config);
+
+    let subscription = client
+        .subscribe("subscription { messageAdded { id } }")
+        .send()
+        .await
+        .expect("subscription should connect");
+
+    let sub_id = subscription
+        .subscription()
+        .map(|s| s.id.clone())
+        .expect("a live subscription carries a handle with its id");
+
+    // Dropping the stream is an implicit client-initiated unsubscribe.
+    drop(subscription);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let received = complete_id.lock().unwrap().clone();
+    assert_eq!(
+        received.as_deref(),
+        Some(sub_id.as_str()),
+        "dropping the stream should send a `complete` carrying the subscription id"
+    );
+}
+
 #[tokio::test]
 async fn subscription_header_reaches_server() {
     let captured_headers = Arc::new(Mutex::new(Vec::new()));
