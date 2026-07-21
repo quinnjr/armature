@@ -355,7 +355,10 @@ impl RateLimiter {
                 reset_at,
             ))
         } else {
-            let retry_after = Duration::from_secs(1);
+            // Retry after the configured window (the worst-case time until the
+            // oldest logged request falls out of the sliding window), not a
+            // hardcoded 1s.
+            let retry_after = window;
             warn!(key = %key, retry_after = ?retry_after, "Sliding window: request denied");
             Ok(RateLimitCheckResult::denied(
                 max_requests,
@@ -377,12 +380,17 @@ impl RateLimiter {
             .fixed_window_check(key, max_requests, window)
             .await?;
 
-        let now = std::time::SystemTime::now()
+        // Compute the window boundary in milliseconds so sub-second windows
+        // (e.g. 500ms) never trigger an integer divide-by-zero: `window.as_secs()`
+        // truncates to 0 for any window under a second, and `now / 0` panics.
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        let window_secs = window.as_secs();
-        let reset_at = ((now / window_secs) + 1) * window_secs;
+            .as_millis();
+        let window_ms = window.as_millis().max(1);
+        let reset_at_ms = ((now_ms / window_ms) + 1) * window_ms;
+        // X-RateLimit-Reset is a Unix timestamp in seconds.
+        let reset_at = (reset_at_ms / 1000) as u64;
 
         if result.0 {
             debug!(key = %key, remaining = result.1, "Fixed window: request allowed");
@@ -392,7 +400,9 @@ impl RateLimiter {
                 reset_at,
             ))
         } else {
-            let retry_after = Duration::from_secs(reset_at - now);
+            // Time until the current window rolls over. Millisecond-precise so
+            // sub-second windows report a real (non-zero, non-panicking) delay.
+            let retry_after = Duration::from_millis((reset_at_ms - now_ms) as u64);
             warn!(key = %key, retry_after = ?retry_after, "Fixed window: request denied");
             Ok(RateLimitCheckResult::denied(
                 max_requests,
@@ -588,6 +598,30 @@ mod tests {
             .build()
             .await;
         assert!(result.is_err(), "build should reject NaN refill_rate");
+    }
+
+    /// Regression: a sub-second fixed window (e.g. 500ms) used to panic with an
+    /// integer divide-by-zero in `check_fixed_window` because `window.as_secs()`
+    /// truncated to 0 and `now / 0` panicked. It must now return a decision.
+    #[tokio::test]
+    async fn test_fixed_window_sub_second_does_not_panic() {
+        let limiter = RateLimiter::builder()
+            .fixed_window(2, Duration::from_millis(500))
+            .build()
+            .await
+            .unwrap();
+
+        // First two allowed, third denied — and crucially no panic on the
+        // sub-second window arithmetic.
+        let r1 = limiter.check("k").await.unwrap();
+        assert!(r1.allowed);
+        let r2 = limiter.check("k").await.unwrap();
+        assert!(r2.allowed);
+        let r3 = limiter.check("k").await.unwrap();
+        assert!(!r3.allowed);
+        // A denied sub-second window reports a real, bounded retry delay.
+        let retry = r3.retry_after.expect("denied result carries retry_after");
+        assert!(retry <= Duration::from_millis(500));
     }
 
     /// Boundary: a tiny but finite positive rate should still build

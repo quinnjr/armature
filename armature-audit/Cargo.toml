@@ -1,6 +1,6 @@
 [package]
 name = "armature-audit"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,6 +13,9 @@ categories = ["web-programming", "development-tools::debugging"]
 
 [dependencies]
 armature-core = { path = "../armature-core", version = "0.2.1" }
+# Read the VERIFIED principal (UserContext) that JwtAuthMiddleware attaches to
+# request extensions, so the audit trail never trusts an unverified token.
+armature-auth = { path = "../armature-auth", version = "0.1.2" }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -20,6 +23,7 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }
 regex = "1.12"
+base64 = "0.22"
 tracing = "0.1"
 once_cell = "1.21"
 thiserror = "2.0"

@@ -1,6 +1,6 @@
 [package]
 name = "armature-cache"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -40,4 +40,11 @@ memcached-tls = ["memcache/tls"]  # Requires openssl
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
+
+# Docker-gated container helpers for integration tests. The tests self-skip when
+# no Docker daemon is reachable, so the default `cargo test` never needs Docker.
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
+# Used by the memcached increment integration test to spin a throwaway
+# `memcached` container (testcontainers-modules has no memcached module).
+testcontainers = "0.27.3"
 

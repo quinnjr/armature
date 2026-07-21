@@ -48,6 +48,7 @@ fn test_cache_error_display() {
 // Note: These tests would require Redis/Memcached running
 // They are disabled by default but can be run with: cargo test -- --ignored
 
+#[cfg(feature = "redis")]
 #[tokio::test]
 #[ignore]
 async fn test_redis_cache_set_get() {
@@ -68,6 +69,7 @@ async fn test_redis_cache_set_get() {
     cache.delete("test_key").await.unwrap();
 }
 
+#[cfg(feature = "redis")]
 #[tokio::test]
 #[ignore]
 async fn test_redis_cache_with_ttl() {
@@ -117,6 +119,7 @@ async fn test_memcached_cache_set_get() {
     cache.delete("test_key").await.unwrap();
 }
 
+#[cfg(feature = "redis")]
 #[tokio::test]
 #[ignore]
 async fn test_cache_manager() {

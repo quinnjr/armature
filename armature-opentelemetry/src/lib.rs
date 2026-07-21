@@ -3,9 +3,12 @@
 //! This crate provides observability features for Armature applications including:
 //! - Distributed tracing with automatic span creation
 //! - Metrics collection (counters, gauges, histograms)
-//! - Logging integration
-//! - Multiple exporters (OTLP, Jaeger, Zipkin, Prometheus)
+//! - W3C Trace Context propagation for distributed traces
+//! - OTLP (default) and Zipkin (`zipkin` feature) exporters
 //! - Middleware for automatic instrumentation
+//!
+//! Note: the legacy Jaeger and Prometheus exporters were discontinued upstream
+//! for OpenTelemetry 0.32; export to a Collector via OTLP instead.
 //!
 //! # Examples
 //!

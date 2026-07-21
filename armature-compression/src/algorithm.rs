@@ -1,6 +1,7 @@
 //! Compression algorithm implementations
 
 use crate::{CompressionError, Result};
+#[cfg(any(feature = "gzip", feature = "brotli", feature = "zstd"))]
 use std::io::Write;
 
 /// Supported compression algorithms
@@ -57,6 +58,10 @@ impl CompressionAlgorithm {
     }
 
     /// Select the best algorithm based on Accept-Encoding header
+    #[cfg_attr(
+        not(any(feature = "gzip", feature = "brotli", feature = "zstd")),
+        allow(unused_variables)
+    )]
     pub fn select_from_accept_encoding(accept_encoding: &str) -> Self {
         let encodings: Vec<&str> = accept_encoding
             .split(',')
@@ -122,6 +127,10 @@ impl CompressionAlgorithm {
     }
 
     /// Compress data using this algorithm
+    #[cfg_attr(
+        not(any(feature = "gzip", feature = "brotli", feature = "zstd")),
+        allow(unused_variables)
+    )]
     pub fn compress(&self, data: &[u8], level: u32) -> Result<Vec<u8>> {
         match self {
             #[cfg(feature = "gzip")]
@@ -130,7 +139,18 @@ impl CompressionAlgorithm {
             Self::Brotli => compress_brotli(data, level),
             #[cfg(feature = "zstd")]
             Self::Zstd => compress_zstd(data, level),
-            Self::None | Self::Auto => Ok(data.to_vec()),
+            // `None` is an explicit pass-through and legitimately returns the
+            // input unchanged.
+            Self::None => Ok(data.to_vec()),
+            // `Auto` is not a concrete algorithm: it must be resolved to one
+            // (via `select_from_accept_encoding`) before compressing. Silently
+            // returning uncompressed bytes with `Ok` and no encoding signal
+            // would be a lie, so surface it as an error instead.
+            Self::Auto => Err(CompressionError::UnsupportedAlgorithm(
+                "Auto must be resolved to a concrete algorithm via \
+                 select_from_accept_encoding before compressing"
+                    .to_string(),
+            )),
             #[allow(unreachable_patterns)]
             _ => Err(CompressionError::UnsupportedAlgorithm(format!(
                 "{:?}",
@@ -230,6 +250,29 @@ mod tests {
 
         #[cfg(feature = "zstd")]
         assert_eq!(CompressionAlgorithm::Zstd.encoding_name(), Some("zstd"));
+    }
+
+    /// Regression: `Auto` is not a concrete algorithm, so `compress` must not
+    /// silently return uncompressed bytes with `Ok`. Against the pre-fix code
+    /// this fails because `Auto` returned `Ok(data.to_vec())`.
+    #[test]
+    fn test_auto_compress_is_not_a_silent_noop() {
+        let data = b"some data that a caller expects to be compressed";
+        let result = CompressionAlgorithm::Auto.compress(data, 6);
+        assert!(
+            result.is_err(),
+            "Auto must signal it cannot compress, not pass data through as Ok"
+        );
+    }
+
+    /// `None` remains a legitimate explicit pass-through.
+    #[test]
+    fn test_none_compress_passes_through() {
+        let data = b"unchanged";
+        assert_eq!(
+            CompressionAlgorithm::None.compress(data, 6).unwrap(),
+            data.to_vec()
+        );
     }
 
     #[test]

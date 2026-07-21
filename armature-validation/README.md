@@ -37,7 +37,7 @@ struct CreateUser {
     age: u8,
 }
 
-fn create_user(data: CreateUser) -> Result<(), ValidationError> {
+fn create_user(data: CreateUser) -> Result<(), Vec<ValidationError>> {
     data.validate()?;
     // Process valid data
     Ok(())
@@ -61,7 +61,7 @@ fn create_user(data: CreateUser) -> Result<(), ValidationError> {
 ```rust
 fn validate_username(username: &str) -> Result<(), ValidationError> {
     if username.contains(' ') {
-        return Err(ValidationError::new("No spaces allowed"));
+        return Err(ValidationError::new("username", "No spaces allowed"));
     }
     Ok(())
 }

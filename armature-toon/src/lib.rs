@@ -80,7 +80,7 @@ pub type Result<T> = std::result::Result<T, ToonError>;
 
 /// Serialize a value to a TOON byte vector.
 pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let s = to_string(value)?;
+    let s = to_string(value).map_err(ToonError::from_serialize)?;
     Ok(s.into_bytes())
 }
 
@@ -90,10 +90,20 @@ pub fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     from_str(s).map_err(ToonError::from)
 }
 
+/// Two-space indentation is TOON's baseline; pretty output widens nested
+/// structures for readability while remaining parseable by [`from_str`].
+const PRETTY_INDENT: usize = 4;
+
 /// Serialize a value to a pretty-printed TOON string.
+///
+/// Unlike [`to_string`], which emits TOON's compact 2-space-indented form, this
+/// widens nested-structure indentation (4 spaces) for readability. `serde_toon`'s
+/// own `pretty` flag is a no-op for plain structs/maps, so the wider indent is
+/// what makes the output genuinely distinct from [`to_string`]. The result still
+/// round-trips through [`from_str`].
 pub fn to_string_pretty<T: Serialize>(value: &T) -> Result<String> {
-    // TOON is already compact, but we can add some formatting
-    to_string(value).map_err(ToonError::from)
+    let options = serde_toon::ToonOptions::pretty().with_indent(PRETTY_INDENT);
+    serde_toon::to_string_with_options(value, options).map_err(ToonError::from_serialize)
 }
 
 /// Format comparison result.
@@ -129,7 +139,7 @@ pub struct FormatComparison {
 pub fn compare_formats<T: Serialize>(value: &T) -> Result<FormatComparison> {
     let json_string =
         serde_json::to_string(value).map_err(|e| ToonError::SerializeError(e.to_string()))?;
-    let toon_string = to_string(value)?;
+    let toon_string = to_string(value).map_err(ToonError::from_serialize)?;
 
     let json_chars = json_string.len();
     let toon_chars = toon_string.len();
@@ -168,7 +178,7 @@ impl TokenCounter {
 
     /// Add a serialized value to the counter.
     pub fn add<T: Serialize>(&mut self, value: &T) -> Result<()> {
-        let toon = to_string(value)?;
+        let toon = to_string(value).map_err(ToonError::from_serialize)?;
         self.total_chars += toon.len();
         self.total_tokens_estimate += toon.len().div_ceil(4);
         Ok(())
@@ -234,13 +244,25 @@ impl ToonSerializer {
     }
 
     /// Serialize a value to TOON string.
+    ///
+    /// Applies the configured knobs: `pretty` (non-compact) emits newlines and
+    /// indentation, and `include_type_hints` annotates array lengths with a `#`
+    /// length marker (e.g. `[#3]:` instead of `[3]:`).
     pub fn serialize<T: Serialize>(&self, value: &T) -> Result<String> {
-        to_string(value).map_err(ToonError::from)
+        let mut options = if self.compact {
+            serde_toon::ToonOptions::new()
+        } else {
+            serde_toon::ToonOptions::pretty().with_indent(PRETTY_INDENT)
+        };
+        if self.include_type_hints {
+            options = options.with_length_marker('#');
+        }
+        serde_toon::to_string_with_options(value, options).map_err(ToonError::from_serialize)
     }
 
-    /// Serialize a value to TOON bytes.
+    /// Serialize a value to TOON bytes, honoring the configured knobs.
     pub fn serialize_bytes<T: Serialize>(&self, value: &T) -> Result<Vec<u8>> {
-        to_vec(value)
+        Ok(self.serialize(value)?.into_bytes())
     }
 }
 
@@ -264,13 +286,54 @@ impl ToonDeserializer {
     }
 
     /// Deserialize from TOON string.
-    pub fn deserialize<T: DeserializeOwned>(&self, s: &str) -> Result<T> {
-        from_str(s).map_err(ToonError::from)
+    ///
+    /// When [`strict`](Self::strict) is enabled, any field present in the input
+    /// that is not represented by the target type `T` is rejected with a
+    /// [`ToonError::DeserializeError`]. Strict mode re-serializes the parsed
+    /// value to compare structures, so `T` must also implement [`Serialize`].
+    pub fn deserialize<T: DeserializeOwned + Serialize>(&self, s: &str) -> Result<T> {
+        let value: T = from_str(s).map_err(ToonError::from)?;
+        if self.strict {
+            let input: serde_toon::Value = from_str(s).map_err(ToonError::from)?;
+            let roundtrip = serde_toon::to_value(&value).map_err(ToonError::from)?;
+            check_no_unknown_fields(&input, &roundtrip)?;
+        }
+        Ok(value)
     }
 
-    /// Deserialize from TOON bytes.
-    pub fn deserialize_bytes<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
-        from_slice(bytes)
+    /// Deserialize from TOON bytes, honoring strict mode.
+    pub fn deserialize_bytes<T: DeserializeOwned + Serialize>(&self, bytes: &[u8]) -> Result<T> {
+        let s = std::str::from_utf8(bytes).map_err(|e| ToonError::Utf8Error(e.to_string()))?;
+        self.deserialize(s)
+    }
+}
+
+/// Verify that every field present in `input` is also present in the value
+/// reconstructed from the deserialized target (`roundtrip`). A key that exists
+/// in the input but not in the round-tripped structure is an unknown field.
+fn check_no_unknown_fields(input: &serde_toon::Value, roundtrip: &serde_toon::Value) -> Result<()> {
+    use serde_toon::Value;
+    match (input, roundtrip) {
+        (Value::Object(in_obj), Value::Object(rt_obj)) => {
+            for (key, in_val) in in_obj.iter() {
+                match rt_obj.get(key) {
+                    Some(rt_val) => check_no_unknown_fields(in_val, rt_val)?,
+                    None => {
+                        return Err(ToonError::DeserializeError(format!(
+                            "unknown field `{key}`"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        (Value::Array(in_arr), Value::Array(rt_arr)) => {
+            for (in_val, rt_val) in in_arr.iter().zip(rt_arr.iter()) {
+                check_no_unknown_fields(in_val, rt_val)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -282,7 +345,7 @@ impl BatchConverter {
     pub fn json_to_toon(json: &str) -> Result<String> {
         let value: serde_json::Value =
             serde_json::from_str(json).map_err(|e| ToonError::DeserializeError(e.to_string()))?;
-        to_string(&value).map_err(ToonError::from)
+        to_string(&value).map_err(ToonError::from_serialize)
     }
 
     /// Convert TOON string to JSON string.
@@ -413,6 +476,161 @@ mod tests {
         let deserializer = ToonDeserializer::new();
         let parsed: TestUser = deserializer.deserialize(&toon).unwrap();
         assert_eq!(user, parsed);
+    }
+
+    #[test]
+    fn test_pretty_differs_and_roundtrips() {
+        // Regression: `to_string_pretty` must produce a distinct, multi-line
+        // rendering from the compact `to_string`, and still round-trip.
+        let data = TestData {
+            users: vec![
+                TestUser {
+                    id: 1,
+                    name: "Alice".to_string(),
+                    active: true,
+                },
+                TestUser {
+                    id: 2,
+                    name: "Bob".to_string(),
+                    active: false,
+                },
+            ],
+            total: 2,
+        };
+
+        let compact = to_string(&data).unwrap();
+        let pretty = to_string_pretty(&data).unwrap();
+
+        // Pretty output must be genuinely different formatting, not identical.
+        assert_ne!(
+            compact, pretty,
+            "pretty output must differ from compact output"
+        );
+        // Pretty adds newlines/indentation for the nested structure.
+        assert!(
+            pretty.contains('\n'),
+            "pretty output should contain newlines"
+        );
+
+        // And it must still round-trip back to the original value.
+        let parsed: TestData = from_str(&pretty).unwrap();
+        assert_eq!(data, parsed);
+    }
+
+    #[test]
+    fn test_serializer_pretty_and_type_hints_applied() {
+        // Regression: the ToonSerializer knobs must actually affect output.
+        let data = TestData {
+            users: vec![TestUser {
+                id: 1,
+                name: "Alice".to_string(),
+                active: true,
+            }],
+            total: 1,
+        };
+
+        let compact = ToonSerializer::new().serialize(&data).unwrap();
+        let pretty = ToonSerializer::new().pretty().serialize(&data).unwrap();
+        assert_ne!(
+            compact, pretty,
+            "pretty() knob must change serializer output"
+        );
+        assert!(pretty.contains('\n'));
+
+        // Type hints add a `#` array length marker.
+        let hinted = ToonSerializer::new()
+            .with_type_hints()
+            .serialize(&data)
+            .unwrap();
+        assert_ne!(
+            compact, hinted,
+            "with_type_hints() knob must change serializer output"
+        );
+        assert!(
+            hinted.contains("[#"),
+            "type hints should emit a `#` length marker, got: {hinted}"
+        );
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct TestUserPlus {
+        id: u32,
+        name: String,
+        active: bool,
+        role: String,
+    }
+
+    #[test]
+    fn test_strict_rejects_unknown_fields() {
+        // Input carries an extra `role` field not present on TestUser.
+        let plus = TestUserPlus {
+            id: 7,
+            name: "Alice".to_string(),
+            active: true,
+            role: "admin".to_string(),
+        };
+        let toon = to_string(&plus).unwrap();
+
+        // Non-strict: unknown fields are ignored (serde default).
+        let lenient: TestUser = ToonDeserializer::new().deserialize(&toon).unwrap();
+        assert_eq!(
+            lenient,
+            TestUser {
+                id: 7,
+                name: "Alice".to_string(),
+                active: true,
+            }
+        );
+
+        // Strict: the extra `role` field must be rejected.
+        let strict_result: Result<TestUser> = ToonDeserializer::new().strict().deserialize(&toon);
+        match strict_result {
+            Err(ToonError::DeserializeError(msg)) => {
+                assert!(msg.contains("role"), "error should name the field: {msg}");
+            }
+            other => panic!("strict mode should reject unknown field, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_classified_as_deserialize() {
+        // A malformed / type-mismatched parse must classify as a
+        // deserialization error, never a serialization error.
+        let bad = "id: not_a_number\nname: Alice\nactive: true";
+        let result: Result<TestUser> = ToonDeserializer::new().deserialize(bad);
+        match result {
+            Err(ToonError::DeserializeError(_)) => {}
+            Err(ToonError::SerializeError(msg)) => {
+                panic!("parse failure misclassified as SerializeError: {msg}")
+            }
+            other => panic!("expected DeserializeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_error_classified_as_serialize() {
+        // Regression: a failure on the serialize path must classify as a
+        // SerializeError, never a DeserializeError. serde's direction-agnostic
+        // `Custom`/`Message` variants used to funnel through the
+        // deserialize-biased `From` impl and mislabel serialize failures.
+        //
+        // A map with non-string keys cannot be encoded as TOON, so `to_string`
+        // fails on the serialize side.
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+        map.insert(vec![1, 2, 3], 42);
+
+        match to_vec(&map) {
+            Err(ToonError::SerializeError(_)) => {}
+            Err(ToonError::DeserializeError(msg)) => {
+                panic!("serialize failure misclassified as DeserializeError: {msg}")
+            }
+            Ok(_) => {
+                // If this serde_toon version happens to accept the value, the
+                // classification bug simply cannot be exercised here; skip.
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 
     #[test]

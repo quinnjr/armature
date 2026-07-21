@@ -16,7 +16,7 @@ impl<T: Serialize> Toon<T> {
 
     /// Convert to HTTP response.
     pub fn into_response(self) -> Result<HttpResponse, ToonError> {
-        let body = to_string(&self.0)?;
+        let body = to_string(&self.0).map_err(ToonError::from_serialize)?;
         let mut response = HttpResponse::new(200).with_bytes_body(Bytes::from(body));
         response
             .headers
@@ -36,7 +36,7 @@ pub trait ToonResponseExt {
 
 impl ToonResponseExt for HttpResponse {
     fn toon<T: Serialize>(value: T) -> Result<HttpResponse, ToonError> {
-        let body = to_string(&value)?;
+        let body = to_string(&value).map_err(ToonError::from_serialize)?;
         let mut response = HttpResponse::new(200).with_bytes_body(Bytes::from(body));
         response
             .headers
@@ -45,7 +45,7 @@ impl ToonResponseExt for HttpResponse {
     }
 
     fn toon_with_status<T: Serialize>(status: u16, value: T) -> Result<HttpResponse, ToonError> {
-        let body = to_string(&value)?;
+        let body = to_string(&value).map_err(ToonError::from_serialize)?;
         let mut response = HttpResponse::new(status).with_bytes_body(Bytes::from(body));
         response
             .headers

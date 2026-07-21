@@ -35,6 +35,9 @@ pub enum SyncMessage {
         op_id: Uuid,
         /// Operation data (serialized)
         data: Vec<u8>,
+        /// Causal dependencies: operation ids that must be applied first
+        #[serde(default)]
+        deps: Vec<Uuid>,
         /// Vector clock after operation
         vclock: VectorClock,
     },
@@ -120,8 +123,15 @@ pub enum SyncState {
 pub struct OperationBuffer {
     /// Pending operations (waiting for dependencies)
     pending: Vec<PendingOp>,
-    /// Acknowledged operation IDs
+    /// Operation IDs acknowledged by a *peer* (delivery receipt only).
+    ///
+    /// A peer ack does NOT mean the op has been applied locally, so this set
+    /// must never be used to decide whether a causal dependency is satisfied.
     acked: std::collections::HashSet<Uuid>,
+    /// Operation IDs that have been *applied locally* (returned from
+    /// [`ready`](Self::ready) or marked via [`mark_applied`](Self::mark_applied)).
+    /// Causal dependencies are satisfied only from this set.
+    applied: std::collections::HashSet<Uuid>,
     /// Maximum buffer size
     max_size: usize,
 }
@@ -145,6 +155,7 @@ impl OperationBuffer {
         Self {
             pending: Vec::new(),
             acked: std::collections::HashSet::new(),
+            applied: std::collections::HashSet::new(),
             max_size,
         }
     }
@@ -152,13 +163,19 @@ impl OperationBuffer {
     /// Add an operation to the buffer
     pub fn add(&mut self, op: PendingOp) -> bool {
         if self.pending.len() >= self.max_size {
-            // Remove oldest operations
+            // Evict the OLDEST operations to make room, keeping the most recent
+            // half. (The previous implementation sorted ascending and then
+            // `truncate`d, which kept the oldest half and discarded the newest
+            // arrivals — the exact opposite of "remove oldest".)
             self.pending.sort_by_key(|a| a.received_at);
-            self.pending.truncate(self.max_size / 2);
+            let keep = (self.max_size / 2).max(1).min(self.pending.len());
+            let drop = self.pending.len() - keep;
+            self.pending.drain(0..drop);
         }
 
-        // Check if already processed
-        if self.acked.contains(&op.id) {
+        // Check if already applied locally (dedup); a peer ack alone is not
+        // enough to consider an op processed.
+        if self.applied.contains(&op.id) {
             return false;
         }
 
@@ -166,32 +183,61 @@ impl OperationBuffer {
         true
     }
 
-    /// Get operations ready to be applied
+    /// Check whether an operation with the given id is currently buffered.
+    pub fn contains(&self, id: &Uuid) -> bool {
+        self.pending.iter().any(|op| op.id == *id)
+    }
+
+    /// Get operations ready to be applied.
+    ///
+    /// A dependency is satisfied only when the dep op has been **applied
+    /// locally** (`applied` set) — a peer ack is not sufficient, as that would
+    /// let an op be released before the op it causally depends on has actually
+    /// been applied here. The scan loops to a fixpoint so a chain buffered in
+    /// reverse order (`B` added before its dep `A`) is fully released in a
+    /// single call rather than one op per call.
     pub fn ready(&mut self) -> Vec<PendingOp> {
         let mut ready = Vec::new();
-        let mut i = 0;
 
-        while i < self.pending.len() {
-            let deps_satisfied = self.pending[i]
-                .deps
-                .iter()
-                .all(|dep| self.acked.contains(dep));
+        loop {
+            let mut released_this_pass = false;
+            let mut i = 0;
+            while i < self.pending.len() {
+                let deps_satisfied = self.pending[i]
+                    .deps
+                    .iter()
+                    .all(|dep| self.applied.contains(dep));
 
-            if deps_satisfied {
-                let op = self.pending.remove(i);
-                self.acked.insert(op.id);
-                ready.push(op);
-            } else {
-                i += 1;
+                if deps_satisfied {
+                    let op = self.pending.remove(i);
+                    self.applied.insert(op.id);
+                    ready.push(op);
+                    released_this_pass = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if !released_this_pass {
+                break;
             }
         }
 
         ready
     }
 
-    /// Mark an operation as acknowledged
+    /// Mark an operation as acknowledged by a peer (delivery receipt).
+    ///
+    /// This records a peer's receipt only; it does NOT satisfy a local causal
+    /// dependency — use [`mark_applied`](Self::mark_applied) for that.
     pub fn ack(&mut self, op_id: Uuid) {
         self.acked.insert(op_id);
+    }
+
+    /// Mark an operation as applied locally, so ops depending on it become
+    /// eligible. Use this for dependencies applied outside this buffer (e.g.
+    /// prior to it being constructed or via a state-based sync).
+    pub fn mark_applied(&mut self, op_id: Uuid) {
+        self.applied.insert(op_id);
     }
 
     /// Get pending count
@@ -228,6 +274,8 @@ pub struct SyncProtocol {
     buffer: OperationBuffer,
     /// Pending sync requests
     pending_syncs: std::collections::HashMap<String, VectorClock>,
+    /// Accumulated sync statistics
+    stats: SyncStats,
 }
 
 impl SyncProtocol {
@@ -239,6 +287,7 @@ impl SyncProtocol {
             vclock: VectorClock::new(),
             buffer: OperationBuffer::new(10000),
             pending_syncs: std::collections::HashMap::new(),
+            stats: SyncStats::default(),
         }
     }
 
@@ -277,6 +326,8 @@ impl SyncProtocol {
     /// Handle incoming sync message
     pub fn handle_message(&mut self, msg: SyncMessage) -> CollabResult<Vec<SyncMessage>> {
         let mut responses = Vec::new();
+        self.stats.messages_received += 1;
+        self.stats.last_sync = Some(chrono::Utc::now());
 
         match msg {
             SyncMessage::SyncRequest {
@@ -296,14 +347,16 @@ impl SyncProtocol {
                 replica_id: _,
                 op_id,
                 data,
+                deps,
                 vclock,
             } => {
                 self.vclock.merge(&vclock);
+                self.stats.operations_synced += 1;
 
                 let pending = PendingOp {
                     id: op_id,
                     data,
-                    deps: Vec::new(), // Deps would come from operation
+                    deps, // real causal dependencies carried by the message
                     received_at: chrono::Utc::now(),
                 };
 
@@ -330,19 +383,39 @@ impl SyncProtocol {
             _ => {}
         }
 
+        self.stats.messages_sent += responses.len() as u64;
         Ok(responses)
     }
 
-    /// Create an operation message
+    /// Create an operation message with no causal dependencies.
     pub fn create_operation(&mut self, op_id: Uuid, data: Vec<u8>) -> SyncMessage {
+        self.create_operation_with_deps(op_id, data, Vec::new())
+    }
+
+    /// Create an operation message carrying explicit causal dependencies.
+    pub fn create_operation_with_deps(
+        &mut self,
+        op_id: Uuid,
+        data: Vec<u8>,
+        deps: Vec<Uuid>,
+    ) -> SyncMessage {
         self.vclock.increment(self.replica_id);
+        self.stats.messages_sent += 1;
+        self.stats.operations_synced += 1;
+        self.stats.last_sync = Some(chrono::Utc::now());
 
         SyncMessage::Operation {
             replica_id: self.replica_id,
             op_id,
             data,
+            deps,
             vclock: self.vclock.clone(),
         }
+    }
+
+    /// Access sync statistics accumulated by this protocol handler.
+    pub fn stats(&self) -> &SyncStats {
+        &self.stats
     }
 
     /// Create a heartbeat message
@@ -418,6 +491,151 @@ mod tests {
 
         let sync_req = protocol.request_sync("doc1".to_string());
         assert!(matches!(sync_req, SyncMessage::SyncRequest { .. }));
+    }
+
+    /// Overflow must evict the OLDEST operations, not the newest arrivals.
+    #[test]
+    fn test_operation_buffer_evicts_oldest() {
+        let mut buffer = OperationBuffer::new(4);
+        let base = chrono::Utc::now();
+
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            buffer.add(PendingOp {
+                id,
+                data: vec![],
+                deps: vec![],
+                received_at: base + chrono::Duration::seconds(i),
+            });
+        }
+        assert_eq!(buffer.pending_count(), 4);
+
+        // A newer arrival triggers eviction.
+        let newest = Uuid::new_v4();
+        buffer.add(PendingOp {
+            id: newest,
+            data: vec![],
+            deps: vec![],
+            received_at: base + chrono::Duration::seconds(100),
+        });
+
+        // The two oldest must be gone; the newest arrival must be retained.
+        assert!(!buffer.contains(&ids[0]), "oldest op was not evicted");
+        assert!(
+            !buffer.contains(&ids[1]),
+            "second-oldest op was not evicted"
+        );
+        assert!(buffer.contains(&newest), "newest arrival was discarded");
+    }
+
+    /// A buffered op with unmet deps must not be ready until its deps are acked.
+    #[test]
+    fn test_operation_buffer_honors_deps() {
+        let mut buffer = OperationBuffer::new(100);
+        let dep = Uuid::new_v4();
+        let op = PendingOp {
+            id: Uuid::new_v4(),
+            data: vec![],
+            deps: vec![dep],
+            received_at: chrono::Utc::now(),
+        };
+        buffer.add(op.clone());
+
+        // Dependency not yet satisfied -> not ready.
+        assert!(buffer.ready().is_empty());
+        assert_eq!(buffer.pending_count(), 1);
+
+        // Satisfy the dependency by marking it locally applied; now ready.
+        buffer.mark_applied(dep);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, op.id);
+    }
+
+    /// A peer `Ack` must NOT satisfy a local causal dependency — only local
+    /// application does. (Fails against the old code, where `ack` released the
+    /// dependent, a causal-order violation.)
+    #[test]
+    fn test_peer_ack_does_not_satisfy_local_dep() {
+        let mut buffer = OperationBuffer::new(100);
+        let dep = Uuid::new_v4();
+        let op = PendingOp {
+            id: Uuid::new_v4(),
+            data: vec![],
+            deps: vec![dep],
+            received_at: chrono::Utc::now(),
+        };
+        buffer.add(op.clone());
+
+        // A peer acked the dep, but we have not applied it locally.
+        buffer.ack(dep);
+        assert!(
+            buffer.ready().is_empty(),
+            "peer ack must not release a causally-dependent op"
+        );
+        assert_eq!(buffer.pending_count(), 1);
+
+        // Now it is actually applied locally -> the dependent is released.
+        buffer.mark_applied(dep);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, op.id);
+    }
+
+    /// A chain buffered in reverse order (dependent added before its dep) must
+    /// be fully released in a single `ready()` call, dep before dependent.
+    #[test]
+    fn test_ready_releases_reordered_chain_in_one_pass() {
+        let mut buffer = OperationBuffer::new(100);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        // B depends on A, but B is added FIRST.
+        buffer.add(PendingOp {
+            id: b,
+            data: vec![],
+            deps: vec![a],
+            received_at: now,
+        });
+        buffer.add(PendingOp {
+            id: a,
+            data: vec![],
+            deps: vec![],
+            received_at: now,
+        });
+
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 2, "reordered chain not fully released");
+        assert_eq!(ready[0].id, a, "dep must be released before dependent");
+        assert_eq!(ready[1].id, b);
+        assert_eq!(buffer.pending_count(), 0);
+    }
+
+    /// Operation messages carry real deps through to the buffer.
+    #[test]
+    fn test_create_operation_with_deps_threads_deps() {
+        let replica = ReplicaId::new();
+        let mut sender = SyncProtocol::new(replica);
+        let dep = Uuid::new_v4();
+        let op_id = Uuid::new_v4();
+
+        let msg = sender.create_operation_with_deps(op_id, vec![1, 2, 3], vec![dep]);
+        match &msg {
+            SyncMessage::Operation { deps, .. } => assert_eq!(deps, &vec![dep]),
+            _ => panic!("expected Operation"),
+        }
+
+        let mut receiver = SyncProtocol::new(ReplicaId::new());
+        receiver.handle_message(msg).unwrap();
+        // The op is buffered with an unmet dep, so nothing is ready yet.
+        assert_eq!(receiver.pending_count(), 1);
+        assert!(receiver.ready_operations().is_empty());
+        // ops_sent / messages accounting is tracked.
+        assert!(sender.stats().messages_sent >= 1);
+        assert!(receiver.stats().messages_received >= 1);
     }
 
     #[test]
