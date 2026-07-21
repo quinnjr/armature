@@ -16,18 +16,22 @@ pub struct Response {
 
 impl Response {
     /// Create a response from a reqwest response.
-    pub(crate) async fn from_reqwest(response: reqwest::Response) -> Self {
+    ///
+    /// Returns an error if the response body cannot be fully read (e.g. the
+    /// connection is reset mid-body) instead of silently substituting an
+    /// empty body on an otherwise-successful status.
+    pub(crate) async fn from_reqwest(response: reqwest::Response) -> Result<Self> {
         let status = response.status();
         let headers = response.headers().clone();
         let url = response.url().clone();
-        let body = response.bytes().await.unwrap_or_default();
+        let body = response.bytes().await.map_err(HttpClientError::Http)?;
 
-        Self {
+        Ok(Self {
             status,
             headers,
             body,
             url,
-        }
+        })
     }
 
     /// Get the status code.

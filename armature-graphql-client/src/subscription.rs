@@ -4,23 +4,88 @@ use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use crate::{GraphQLResponse, Result};
 
 /// A GraphQL subscription stream.
+///
+/// ## Lifecycle
+///
+/// The stream is driven by polling it (e.g. with [`futures::StreamExt::next`]).
+/// It ends when the server sends a `complete`/`close` frame, when the transport
+/// errors, or when the client unsubscribes.
+///
+/// A subscription can be cancelled by the client at any time, either explicitly
+/// via [`SubscriptionStream::unsubscribe`] or implicitly by dropping the stream.
+/// In both cases a graphql-ws `complete` message carrying this subscription's id
+/// is sent to the server so it can stop producing events, rather than the
+/// connection just going away. The `complete` is sent at most once.
 pub struct SubscriptionStream<T = Value> {
     inner: Pin<Box<dyn Stream<Item = Result<GraphQLResponse<T>>> + Send>>,
+    subscription: Option<Subscription>,
 }
 
 impl<T> SubscriptionStream<T> {
-    /// Create a new subscription stream.
+    /// Create a new subscription stream with no client-initiated unsubscribe
+    /// wiring (the stream ends only when the server or transport ends it).
     pub fn new<S>(stream: S) -> Self
     where
         S: Stream<Item = Result<GraphQLResponse<T>>> + Send + 'static,
     {
         Self {
             inner: Box::pin(stream),
+            subscription: None,
+        }
+    }
+
+    /// Create a subscription stream bound to a [`Subscription`] handle so the
+    /// client can initiate an unsubscribe (sending a graphql-ws `complete`).
+    pub(crate) fn with_subscription<S>(stream: S, subscription: Subscription) -> Self
+    where
+        S: Stream<Item = Result<GraphQLResponse<T>>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+            subscription: Some(subscription),
+        }
+    }
+
+    /// The handle for this stream's subscription, if it was created with one.
+    pub fn subscription(&self) -> Option<&Subscription> {
+        self.subscription.as_ref()
+    }
+
+    /// Whether this subscription is still active (has not been unsubscribed).
+    ///
+    /// Streams created without a [`Subscription`] handle are always considered
+    /// active until they end.
+    pub fn is_active(&self) -> bool {
+        self.subscription
+            .as_ref()
+            .is_none_or(Subscription::is_active)
+    }
+
+    /// Explicitly unsubscribe: send a graphql-ws `complete` for this
+    /// subscription's id (at most once). No-op if the stream has no handle or
+    /// has already been unsubscribed.
+    pub fn unsubscribe(&mut self) {
+        if let Some(subscription) = self.subscription.as_mut() {
+            subscription.deactivate();
+        }
+    }
+}
+
+impl<T> Drop for SubscriptionStream<T> {
+    fn drop(&mut self) {
+        // Dropping the stream is an implicit client-initiated unsubscribe: tell
+        // the server to stop producing events instead of just tearing down the
+        // socket. `deactivate` is idempotent, so an explicit `unsubscribe()`
+        // before drop means nothing is sent here.
+        if let Some(subscription) = self.subscription.as_mut() {
+            subscription.deactivate();
         }
     }
 }
@@ -38,32 +103,76 @@ impl<T: DeserializeOwned + Unpin> Stream for SubscriptionStream<T> {
     }
 }
 
-/// Subscription state for graphql-ws protocol.
-#[derive(Debug, Clone)]
+/// A handle to an active graphql-ws subscription.
+///
+/// Beyond tracking the subscription id and whether it is still active, a handle
+/// obtained from a live [`SubscriptionStream`] carries the wiring needed to
+/// send a client-initiated `complete` message: calling [`deactivate`] tells the
+/// server to stop producing events for this subscription. The `complete` is
+/// sent at most once, whether triggered by [`deactivate`], by
+/// [`SubscriptionStream::unsubscribe`], or by dropping the stream.
+///
+/// [`deactivate`]: Subscription::deactivate
+#[derive(Clone)]
 pub struct Subscription {
     /// Subscription ID.
     pub id: String,
-    /// Whether the subscription is active.
-    pub active: bool,
+    /// Whether the subscription is still active. Shared so that a handle and the
+    /// stream it belongs to agree on state and only ever send one `complete`.
+    active: Arc<AtomicBool>,
+    /// Sends the graphql-ws `complete` for [`id`](Self::id). `None` for handles
+    /// not bound to a live transport (e.g. constructed via [`Subscription::new`]).
+    unsubscribe: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subscription")
+            .field("id", &self.id)
+            .field("active", &self.is_active())
+            .field("bound", &self.unsubscribe.is_some())
+            .finish()
+    }
 }
 
 impl Subscription {
-    /// Create a new subscription.
+    /// Create a new, unbound subscription handle. Such a handle tracks active
+    /// state but has no transport wiring, so [`deactivate`](Self::deactivate)
+    /// only flips the flag.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            active: true,
+            active: Arc::new(AtomicBool::new(true)),
+            unsubscribe: None,
+        }
+    }
+
+    /// Create a subscription handle bound to a transport-level unsubscribe
+    /// action that emits the graphql-ws `complete` message for `id`.
+    pub(crate) fn bound(id: impl Into<String>, unsubscribe: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            id: id.into(),
+            active: Arc::new(AtomicBool::new(true)),
+            unsubscribe: Some(unsubscribe),
         }
     }
 
     /// Check if the subscription is active.
     pub fn is_active(&self) -> bool {
-        self.active
+        self.active.load(Ordering::SeqCst)
     }
 
-    /// Mark the subscription as inactive.
+    /// Unsubscribe: mark the subscription inactive and, if this handle is bound
+    /// to a live transport, send the graphql-ws `complete` message for its id.
+    /// Idempotent — the `complete` is emitted only on the first call.
     pub fn deactivate(&mut self) {
-        self.active = false;
+        // `swap` returning the previous value guarantees exactly one caller
+        // wins the transition from active→inactive and sends `complete`.
+        if self.active.swap(false, Ordering::SeqCst)
+            && let Some(unsubscribe) = self.unsubscribe.as_ref()
+        {
+            unsubscribe();
+        }
     }
 }
 

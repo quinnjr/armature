@@ -117,6 +117,7 @@ impl RetryConfig {
 
 /// Backoff strategy for retries.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BackoffStrategy {
     /// No delay between retries.
     None,
@@ -163,7 +164,15 @@ impl BackoffStrategy {
     }
 }
 
-/// Retry strategy trait for custom retry logic.
+/// Retry decision logic, implemented by [`RetryConfig`].
+///
+/// This trait exists to separate the "should this be retried, and after
+/// what delay" decision from `RetryConfig`'s data, but it is not currently
+/// pluggable end-to-end: [`crate::HttpClientConfig::retry`] is concretely
+/// typed as `Option<RetryConfig>`, so there is no way for a caller to
+/// configure `HttpClient` with a custom `RetryStrategy` implementation
+/// today. Treat this as an internal seam (and a hook for possible future
+/// pluggability), not a supported extension point.
 pub trait RetryStrategy: Send + Sync {
     /// Check if the request should be retried.
     fn should_retry(&self, attempt: u32, error: &crate::HttpClientError) -> bool;

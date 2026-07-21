@@ -431,6 +431,24 @@ impl McpService {
         serde_json::to_value(result).map_err(McpError::from)
     }
 
+    /// Full, merged list of tool definitions: the compile-time inventory
+    /// registry plus every dynamically-registered provider, deduped by name
+    /// (registry precedence) and sorted. This is the SAME view served by the
+    /// `tools/list` JSON-RPC method, so the HTTP `GET /mcp/tools` handler and
+    /// `GET /mcp` info counts agree with it. Prefer this over
+    /// `self.tools().list_tools()`, which sees only the registry.
+    pub fn list_tools(&self) -> Vec<ToolDefinition> {
+        self.merged_tools().to_vec()
+    }
+
+    /// Full, merged list of resource definitions: the compile-time inventory
+    /// registry plus every dynamically-registered provider, deduped by uri
+    /// (registry precedence) and sorted. Mirrors the `resources/list`
+    /// JSON-RPC view; used by the HTTP GET handlers.
+    pub fn list_resources(&self) -> Vec<ResourceDefinition> {
+        self.merged_resources().to_vec()
+    }
+
     /// Get the tool registry
     pub fn tools(&self) -> &McpToolRegistry {
         &self.tool_registry

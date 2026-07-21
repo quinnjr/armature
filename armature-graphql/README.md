@@ -19,44 +19,63 @@ armature-graphql = "0.1"
 
 ## Quick Start
 
+`armature_graphql` re-exports `async_graphql`, so the resolver macros
+(`#[async_graphql::Object]`, `Object`, `SimpleObject`, …) come from this crate
+directly. Define your resolver roots, then assemble a schema with
+`ProgrammaticSchemaBuilder` (DI-aware) or the plain `SchemaBuilder`.
+
 ```rust
-use armature_graphql::{GraphQLSchema, Query, Mutation};
+use armature_graphql::{
+    async_graphql, graphql_playground_html, EmptyMutation, EmptySubscription,
+    ProgrammaticSchemaBuilder,
+};
 
 struct QueryRoot;
 
-#[Query]
+#[async_graphql::Object]
 impl QueryRoot {
     async fn hello(&self) -> &str {
         "Hello, World!"
-    }
-
-    async fn user(&self, id: ID) -> Option<User> {
-        User::find(id).await
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let schema = GraphQLSchema::build(QueryRoot, MutationRoot, EmptySubscription)
-        .finish();
+    // Build a schema programmatically. `.add_service(..)` injects values into
+    // the resolver `Context`; `.config(GraphQLConfig::default())` applies the
+    // introspection / depth / complexity limits.
+    let schema = ProgrammaticSchemaBuilder::new()
+        .query(QueryRoot)
+        .mutation(EmptyMutation)
+        .subscription(EmptySubscription)
+        .build();
 
-    let app = Application::new()
-        .post("/graphql", graphql_handler(schema))
-        .get("/playground", playground_handler());
+    // Execute a query directly against the schema.
+    let response = schema.execute("{ hello }").await;
+    println!("{}", serde_json::to_string(&response).unwrap());
 
-    app.listen("0.0.0.0:3000").await.unwrap();
+    // Serve the built-in Playground IDE pointed at your `/graphql` endpoint.
+    let _playground = graphql_playground_html("/graphql");
+    // (Wire `schema` and `_playground` into your Armature HTTP routes.)
 }
 ```
+
+To wrap a finished schema for sharing across handlers, use
+`GraphQLSchema::new(schema)` and clone the `Arc` it holds via `.schema()`.
 
 ## Subscriptions
 
 ```rust
+use armature_graphql::async_graphql;
+use async_graphql::futures_util::{stream, Stream};
+
 struct SubscriptionRoot;
 
-#[Subscription]
+#[async_graphql::Subscription]
 impl SubscriptionRoot {
-    async fn messages(&self) -> impl Stream<Item = Message> {
-        // Return a stream of messages
+    async fn messages(&self) -> impl Stream<Item = String> {
+        // Return a stream of messages.
+        stream::iter(vec!["hello".to_string()])
     }
 }
 ```

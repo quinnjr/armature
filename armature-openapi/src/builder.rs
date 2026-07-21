@@ -144,6 +144,20 @@ impl OpenApiBuilder {
             },
         )
     }
+
+    /// Add OpenID Connect authentication
+    pub fn add_openid_connect_auth(
+        self,
+        name: impl Into<String>,
+        open_id_connect_url: impl Into<String>,
+    ) -> Self {
+        self.security_scheme(
+            name,
+            SecurityScheme::OpenIdConnect {
+                open_id_connect_url: open_id_connect_url.into(),
+            },
+        )
+    }
 }
 
 /// Builder for path items
@@ -419,5 +433,28 @@ mod tests {
         let builder = OperationBuilder::default();
         let operation = builder.build();
         assert!(operation.summary.is_none());
+    }
+
+    #[test]
+    fn test_add_openid_connect_auth() {
+        let spec = OpenApiBuilder::new("Test API", "1.0.0")
+            .add_openid_connect_auth(
+                "oidc",
+                "https://example.com/.well-known/openid-configuration",
+            )
+            .build();
+
+        let components = spec.components.unwrap();
+        match components.security_schemes.get("oidc").unwrap() {
+            SecurityScheme::OpenIdConnect {
+                open_id_connect_url,
+            } => {
+                assert_eq!(
+                    open_id_connect_url,
+                    "https://example.com/.well-known/openid-configuration"
+                );
+            }
+            _ => panic!("expected OpenIdConnect variant"),
+        }
     }
 }

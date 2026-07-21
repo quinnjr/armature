@@ -1,6 +1,6 @@
 [package]
 name = "armature-websocket"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -50,17 +50,13 @@ dashmap = "6.2"
 uuid = { version = "1.23", features = ["v4"] }
 url = "2.5"
 
-# Optional: TLS support
-tokio-native-tls = { version = "0.3", optional = true }
-native-tls = { version = "0.2", optional = true }
-
 # Optional: Rustls support
+# TLS is rustls-only per AGENTS.md; no native-tls path is offered.
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true }
 
 [features]
 default = ["rustls-tls"]
-native-tls = ["dep:tokio-native-tls", "dep:native-tls", "tokio-tungstenite/native-tls"]
 rustls-tls = ["dep:tokio-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
 
 [dev-dependencies]

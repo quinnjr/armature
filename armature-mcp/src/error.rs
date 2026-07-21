@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// MCP-specific errors
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum McpError {
     #[error("Tool not found: {0}")]
     ToolNotFound(String),

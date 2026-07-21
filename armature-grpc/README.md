@@ -5,24 +5,38 @@ gRPC server and client support for the Armature framework.
 ## Features
 
 - **Tonic Integration** - Built on the Tonic gRPC library
-- **Code Generation** - Protobuf compilation support
+- **Protobuf compilation** - Not performed by this crate. Depend on
+  [`tonic-build`](https://docs.rs/tonic-build) directly in your own crate's
+  `build.rs` to generate service code from `.proto` files, then use the
+  generated types together with `armature-grpc`'s server/client/interceptor
+  helpers.
 - **Streaming** - Unary, server, client, and bidirectional streaming
-- **Interceptors** - Request/response middleware
-- **TLS** - Secure connections with rustls
+- **Interceptors** - Standalone request/response helpers (logging, metrics,
+  request IDs, auth). Except for `AuthInterceptor::server_interceptor` (wired in
+  via tonic's `InterceptedService`/`with_interceptor`), these are *not* an
+  automatically-applied pipeline — call `Interceptor::intercept` yourself where
+  you want them to run.
+- **TLS** - Secure client and server connections with rustls (`tonic`'s
+  `tls-ring` feature), configured via `GrpcClientTlsConfig` / `GrpcServerTlsConfig`
+- **Retry** - *Opt-in*: `GrpcClientConfig::retry_enabled` / `max_retry_attempts`
+  do nothing on their own. Retry only happens for calls explicitly wrapped in
+  `GrpcChannel::call_with_retry` (see below) — there is no automatic retry.
+- **Compression** - gzip/zstd, applied via `CompressionMiddleware::wrap_server`
+  (server) / `CompressionMiddleware::wrap_channel` (client)
 
 ## Installation
 
 ```toml
 [dependencies]
-armature-grpc = "0.1"
+armature-grpc = "0.2"
 ```
 
 ## Quick Start
 
 ### Server
 
-```rust
-use armature_grpc::{GrpcServer, Request, Response, Status};
+```rust,ignore
+use armature_grpc::{GrpcServer, GrpcServerConfig, Request, Response, Status};
 
 pub struct MyService;
 
@@ -40,23 +54,53 @@ impl Greeter for MyService {
 }
 
 #[tokio::main]
-async fn main() {
-    GrpcServer::builder()
-        .add_service(GreeterServer::new(MyService))
-        .serve("0.0.0.0:50051")
-        .await
-        .unwrap();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = GrpcServerConfig::builder()
+        .bind_address("0.0.0.0:50051")
+        .build()?;
+
+    GrpcServer::builder(config)
+        .serve(GreeterServer::new(MyService))
+        .await?;
+
+    Ok(())
 }
 ```
 
 ### Client
 
-```rust
-use armature_grpc::GrpcClient;
+```rust,ignore
+use armature_grpc::{GrpcClient, GrpcClientConfig};
 
-let client = GreeterClient::connect("http://localhost:50051").await?;
+let config = GrpcClientConfig::builder()
+    .endpoint("http://localhost:50051")
+    .build();
+let channel = GrpcClient::connect(config).await?;
+let mut client = GreeterClient::new(channel.inner().clone());
 let response = client.say_hello(HelloRequest { name: "World".into() }).await?;
 println!("Response: {}", response.into_inner().message);
+```
+
+### Retry
+
+`retry_enabled` / `max_retry_attempts` on `GrpcClientConfig` are not applied
+automatically. To actually retry, wrap each call in `GrpcChannel::call_with_retry`:
+
+```rust,ignore
+let config = GrpcClientConfig::builder()
+    .endpoint("http://localhost:50051")
+    .retry(true)
+    .max_retry_attempts(3)
+    .build();
+let channel = GrpcClient::connect(config).await?;
+
+let response = channel
+    .call_with_retry(|| {
+        let mut client = GreeterClient::new(channel.inner().clone());
+        let request = HelloRequest { name: "World".into() };
+        async move { client.say_hello(request).await }
+    })
+    .await?;
 ```
 
 ## License

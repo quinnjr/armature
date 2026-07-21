@@ -13,16 +13,13 @@ pub struct GraphQLClientConfig {
     pub timeout: Duration,
     /// Default headers for all requests.
     pub default_headers: Vec<(String, String)>,
-    /// Enable request batching.
-    pub batching: bool,
-    /// Maximum batch size.
-    pub max_batch_size: usize,
-    /// Batch delay (wait time to collect queries).
-    pub batch_delay: Duration,
     /// Enable response caching.
     pub caching: bool,
     /// Cache TTL.
     pub cache_ttl: Duration,
+    /// Maximum number of entries retained in the response cache before the
+    /// least-recently-used entry is evicted to make room for a new one.
+    pub max_cache_entries: usize,
     /// User agent string.
     pub user_agent: String,
     /// Retry failed requests.
@@ -38,11 +35,9 @@ impl Default for GraphQLClientConfig {
             ws_endpoint: None,
             timeout: Duration::from_secs(30),
             default_headers: Vec::new(),
-            batching: false,
-            max_batch_size: 10,
-            batch_delay: Duration::from_millis(10),
             caching: false,
             cache_ttl: Duration::from_secs(300),
+            max_cache_entries: 1000,
             user_agent: format!("armature-graphql-client/{}", env!("CARGO_PKG_VERSION")),
             retry_enabled: true,
             max_retries: 3,
@@ -107,24 +102,6 @@ impl GraphQLClientConfigBuilder {
         self
     }
 
-    /// Enable request batching.
-    pub fn batching(mut self, enabled: bool) -> Self {
-        self.config.batching = enabled;
-        self
-    }
-
-    /// Set maximum batch size.
-    pub fn max_batch_size(mut self, size: usize) -> Self {
-        self.config.max_batch_size = size;
-        self
-    }
-
-    /// Set batch delay.
-    pub fn batch_delay(mut self, delay: Duration) -> Self {
-        self.config.batch_delay = delay;
-        self
-    }
-
     /// Enable response caching.
     pub fn caching(mut self, enabled: bool) -> Self {
         self.config.caching = enabled;
@@ -134,6 +111,31 @@ impl GraphQLClientConfigBuilder {
     /// Set cache TTL.
     pub fn cache_ttl(mut self, ttl: Duration) -> Self {
         self.config.cache_ttl = ttl;
+        self
+    }
+
+    /// Set the maximum number of entries retained in the response cache
+    /// before the least-recently-used entry is evicted. Must be greater than
+    /// zero; a value of `0` is coerced to `1`.
+    ///
+    /// ```
+    /// use armature_graphql_client::GraphQLClientConfig;
+    ///
+    /// let config = GraphQLClientConfig::builder()
+    ///     .endpoint("https://api.example.com/graphql")
+    ///     .max_cache_entries(500)
+    ///     .build();
+    /// assert_eq!(config.max_cache_entries, 500);
+    ///
+    /// // Zero is coerced to one.
+    /// let config = GraphQLClientConfig::builder()
+    ///     .endpoint("https://api.example.com/graphql")
+    ///     .max_cache_entries(0)
+    ///     .build();
+    /// assert_eq!(config.max_cache_entries, 1);
+    /// ```
+    pub fn max_cache_entries(mut self, max_entries: usize) -> Self {
+        self.config.max_cache_entries = max_entries.max(1);
         self
     }
 

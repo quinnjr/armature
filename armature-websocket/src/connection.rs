@@ -16,6 +16,7 @@ pub type ConnectionId = String;
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// Connection is being established
     Connecting,
@@ -97,7 +98,11 @@ impl Connection {
     }
 
     /// Set the connection state (internal use).
-    #[allow(dead_code)]
+    ///
+    /// `close()` moves the state to `Closing`; the server's connection loop
+    /// calls this with `ConnectionState::Closed` once the read/write tasks
+    /// have terminated and teardown is complete, so the state machine actually
+    /// reaches `Closed`.
     pub(crate) fn set_state(&self, state: ConnectionState) {
         *self.state.write() = state;
     }

@@ -176,6 +176,7 @@ pub struct Components {
 /// Security scheme
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SecurityScheme {
     #[serde(rename = "http")]
     Http {
@@ -191,6 +192,11 @@ pub enum SecurityScheme {
     },
     #[serde(rename = "oauth2")]
     OAuth2 { flows: Box<OAuthFlows> },
+    #[serde(rename = "openIdConnect")]
+    OpenIdConnect {
+        #[serde(rename = "openIdConnectUrl")]
+        open_id_connect_url: String,
+    },
 }
 
 /// API key location
@@ -449,5 +455,32 @@ mod tests {
         assert!(schema.schema_type.is_none());
         assert!(schema.format.is_none());
         assert!(schema.properties.is_none());
+    }
+
+    #[test]
+    fn test_security_scheme_open_id_connect_serialization() {
+        let scheme = SecurityScheme::OpenIdConnect {
+            open_id_connect_url: "https://example.com/.well-known/openid-configuration".to_string(),
+        };
+
+        let json = serde_json::to_value(&scheme).unwrap();
+        assert_eq!(json["type"], "openIdConnect");
+        assert_eq!(
+            json["openIdConnectUrl"],
+            "https://example.com/.well-known/openid-configuration"
+        );
+
+        let deserialized: SecurityScheme = serde_json::from_value(json).unwrap();
+        match deserialized {
+            SecurityScheme::OpenIdConnect {
+                open_id_connect_url,
+            } => {
+                assert_eq!(
+                    open_id_connect_url,
+                    "https://example.com/.well-known/openid-configuration"
+                );
+            }
+            _ => panic!("expected OpenIdConnect variant"),
+        }
     }
 }

@@ -248,3 +248,114 @@ impl Default for RoomManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn make_connection(id: &str) -> (Connection, mpsc::UnboundedReceiver<Message>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Connection::new(id.to_string(), None, tx), rx)
+    }
+
+    #[test]
+    fn broadcast_sent_count_reflects_actual_deliveries() {
+        let manager = RoomManager::new();
+        let (conn_a, mut rx_a) = make_connection("a");
+        let (conn_b, rx_b) = make_connection("b");
+        let (conn_c, mut rx_c) = make_connection("c");
+
+        manager.register_connection(conn_a);
+        manager.register_connection(conn_b);
+        manager.register_connection(conn_c);
+
+        manager.join_room("a", "room1").unwrap();
+        manager.join_room("b", "room1").unwrap();
+        manager.join_room("c", "room1").unwrap();
+
+        // Simulate a dead connection: drop its receiver so the underlying
+        // channel is closed and Connection::send() fails for "b".
+        drop(rx_b);
+
+        let sent = manager
+            .broadcast_to_room("room1", Message::text("hi"))
+            .unwrap();
+
+        assert_eq!(
+            sent, 2,
+            "sent_count must reflect only the connections that actually received the message"
+        );
+        assert!(rx_a.try_recv().is_ok());
+        assert!(rx_c.try_recv().is_ok());
+    }
+
+    #[test]
+    fn broadcast_except_excludes_sender_and_dead_connections() {
+        let manager = RoomManager::new();
+        let (conn_a, mut rx_a) = make_connection("a");
+        let (conn_b, rx_b) = make_connection("b");
+        let (conn_c, mut rx_c) = make_connection("c");
+
+        manager.register_connection(conn_a);
+        manager.register_connection(conn_b);
+        manager.register_connection(conn_c);
+
+        manager.join_room("a", "room1").unwrap();
+        manager.join_room("b", "room1").unwrap();
+        manager.join_room("c", "room1").unwrap();
+
+        drop(rx_b);
+
+        let sent = manager
+            .broadcast_to_room_except("room1", Message::text("hi"), "a")
+            .unwrap();
+
+        assert_eq!(sent, 1, "only 'c' should receive: 'a' excluded, 'b' dead");
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_c.try_recv().is_ok());
+    }
+
+    #[test]
+    fn room_persists_while_a_member_remains_and_is_removed_once_empty() {
+        let manager = RoomManager::new();
+        let (conn_a, _rx_a) = make_connection("a");
+        let (conn_b, _rx_b) = make_connection("b");
+        manager.register_connection(conn_a);
+        manager.register_connection(conn_b);
+
+        manager.join_room("a", "room1").unwrap();
+        manager.join_room("b", "room1").unwrap();
+
+        assert!(manager.get_room("room1").is_some());
+
+        manager.leave_room("a", "room1").unwrap();
+        assert!(
+            manager.get_room("room1").is_some(),
+            "room must not be removed while a member remains"
+        );
+
+        manager.leave_room("b", "room1").unwrap();
+        assert!(
+            manager.get_room("room1").is_none(),
+            "room should be removed once its last member leaves"
+        );
+    }
+
+    #[test]
+    fn room_removed_when_last_connection_is_unregistered() {
+        let manager = RoomManager::new();
+        let (conn_a, _rx_a) = make_connection("a");
+        manager.register_connection(conn_a);
+        manager.join_room("a", "room1").unwrap();
+
+        assert!(manager.get_room("room1").is_some());
+
+        manager.unregister_connection("a");
+
+        assert!(
+            manager.get_room("room1").is_none(),
+            "room should be cleaned up once its last connection is unregistered"
+        );
+    }
+}

@@ -86,7 +86,10 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Set the request body as JSON.
-    pub fn json<T: Serialize>(mut self, json: &T) -> Self {
+    ///
+    /// Returns an error rather than silently producing a bodyless request if
+    /// serialization fails.
+    pub fn json<T: Serialize>(mut self, json: &T) -> Result<Self> {
         match serde_json::to_vec(json) {
             Ok(bytes) => {
                 self.headers.insert(
@@ -94,16 +97,20 @@ impl<'a> RequestBuilder<'a> {
                     HeaderValue::from_static("application/json"),
                 );
                 self.body = Some(bytes);
+                Ok(self)
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to serialize JSON body");
+                Err(HttpClientError::Json(e.to_string()))
             }
         }
-        self
     }
 
     /// Set the request body as form data.
-    pub fn form<T: Serialize>(mut self, form: &T) -> Self {
+    ///
+    /// Returns an error rather than silently producing a bodyless request if
+    /// encoding fails.
+    pub fn form<T: Serialize>(mut self, form: &T) -> Result<Self> {
         match serde_urlencoded::to_string(form) {
             Ok(encoded) => {
                 self.headers.insert(
@@ -111,12 +118,13 @@ impl<'a> RequestBuilder<'a> {
                     HeaderValue::from_static("application/x-www-form-urlencoded"),
                 );
                 self.body = Some(encoded.into_bytes());
+                Ok(self)
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to encode form data");
+                Err(HttpClientError::RequestBuild(e.to_string()))
             }
         }
-        self
     }
 
     /// Set a custom timeout for this request.
@@ -168,31 +176,131 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Send the request.
+    ///
+    /// The request is captured as a [`crate::client::RequestSpec`] (method,
+    /// URL, headers, body bytes, and per-request timeout) rather than a
+    /// single `reqwest::Request`, so that retries can rebuild a complete,
+    /// non-empty request for every attempt.
     pub async fn send(self) -> Result<Response> {
         let url = self.build_url()?;
 
-        let mut request = self.client.inner().request(self.method.clone(), url);
+        let mut headers = HeaderMap::new();
 
         // Add default headers from config
         for (name, value) in &self.client.config().default_headers {
-            request = request.header(name.as_str(), value.as_str());
+            match (
+                HeaderName::try_from(name.as_str()),
+                HeaderValue::try_from(value.as_str()),
+            ) {
+                (Ok(name), Ok(value)) => {
+                    headers.insert(name, value);
+                }
+                _ => {
+                    tracing::warn!(
+                        name = %name,
+                        value = %value,
+                        "skipping malformed default header"
+                    );
+                }
+            }
         }
 
-        // Add request-specific headers
-        for (name, value) in &self.headers {
-            request = request.header(name, value);
-        }
+        // Add request-specific headers (these take precedence)
+        headers.extend(self.headers);
 
-        // Add body
-        if let Some(body) = self.body {
-            request = request.body(body);
-        }
+        let spec = crate::client::RequestSpec {
+            method: self.method,
+            url,
+            headers,
+            body: self.body,
+            timeout: self.timeout,
+        };
 
-        // Set timeout
-        if let Some(timeout) = self.timeout {
-            request = request.timeout(timeout);
-        }
+        self.client.execute(spec).await
+    }
+}
 
-        self.client.execute(request.build()?).await
+#[cfg(test)]
+mod tests {
+    use crate::{HttpClient, HttpClientConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    /// Minimal hand-rolled `tracing::Subscriber` that records whether any
+    /// event's `message` field contains `needle`. Avoids pulling in a full
+    /// `tracing-subscriber` dev-dependency just to assert a warning fired.
+    struct RecordingSubscriber {
+        saw_needle: Arc<AtomicBool>,
+        needle: &'static str,
+    }
+
+    struct MessageVisitor<'a> {
+        needle: &'a str,
+        found: &'a mut bool,
+    }
+
+    impl Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" && format!("{value:?}").contains(self.needle) {
+                *self.found = true;
+            }
+        }
+    }
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut found = false;
+            event.record(&mut MessageVisitor {
+                needle: self.needle,
+                found: &mut found,
+            });
+            if found {
+                self.saw_needle.store(true, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Regression test: previously, a malformed default header (one whose
+    /// name or value cannot be parsed into a valid `HeaderName`/
+    /// `HeaderValue`) was silently skipped with no diagnostic at all. Now it
+    /// must emit a `tracing::warn!` so the misconfiguration is observable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_default_header_is_warned_not_silently_dropped() {
+        let saw_needle = Arc::new(AtomicBool::new(false));
+        let subscriber = RecordingSubscriber {
+            saw_needle: saw_needle.clone(),
+            needle: "malformed default header",
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let config = HttpClientConfig::builder()
+            // A header value containing a raw newline is not a valid
+            // `HeaderValue`, forcing the malformed path.
+            .default_header("X-Bad", "bad\nvalue")
+            .build();
+        let client = HttpClient::new(config);
+
+        // The target is unreachable; we only care that header construction
+        // (which happens synchronously before the network call) emitted the
+        // warning, not whether the request itself succeeds.
+        let _ = client.get("http://127.0.0.1:1/unreachable").send().await;
+
+        assert!(
+            saw_needle.load(Ordering::SeqCst),
+            "expected a tracing::warn! about the malformed default header"
+        );
     }
 }
