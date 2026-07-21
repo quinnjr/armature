@@ -219,15 +219,19 @@ fn build_dependencies(template: &str, opts: &NewProjectOptions) -> (String, Stri
     armature_features.sort();
     armature_features.dedup();
 
+    // Kept in sync with the `armature` facade crate's current minor version
+    // (see `[package] version` for `armature-framework` in the workspace
+    // root Cargo.toml, currently 0.2.x) and with `repl_init_script()` in
+    // `commands/repl.rs`, which pins the same `"0.2"` for `:dep armature`.
     let armature_dep = if armature_features.is_empty() {
-        "armature = \"0.1\"".to_string()
+        "armature = \"0.2\"".to_string()
     } else {
         let quoted: Vec<String> = armature_features
             .iter()
             .map(|f| format!("\"{}\"", f))
             .collect();
         format!(
-            "armature = {{ version = \"0.1\", features = [{}] }}",
+            "armature = {{ version = \"0.2\", features = [{}] }}",
             quoted.join(", ")
         )
     };
@@ -854,6 +858,35 @@ mod tests {
         assert!(validate_template("").is_err());
     }
 
+    // `armature new --template bogus` never reaches this code (clap's
+    // `ValueEnum` on `ProjectTemplate` rejects it first — see
+    // `clap_rejects_unknown_template_before_new_runs` in
+    // `armature-cli/tests/cli.rs`). This test instead exercises `run()`'s own
+    // fn-level ordering guarantee directly: `validate_template` is called
+    // before any directory is created, so an unknown template string passed
+    // straight to `run` (bypassing clap entirely) must fail *and* must not
+    // create the project directory.
+    #[tokio::test]
+    async fn run_rejects_unknown_template_before_creating_directory() {
+        let name = "armature_cli_test_run_rejects_unknown_template_ordering";
+        let project_dir = std::path::PathBuf::from(name);
+        // Paranoia: make sure a stale directory from a previous failed run
+        // doesn't make this test pass for the wrong reason.
+        let _ = std::fs::remove_dir_all(&project_dir);
+
+        let opts = NewProjectOptions::default();
+        let result = run(name, "bogus", true, true, &opts).await;
+
+        assert!(
+            result.is_err(),
+            "run() must reject an unknown template before doing any work"
+        );
+        assert!(
+            !project_dir.exists(),
+            "no project directory must be created when template validation fails first"
+        );
+    }
+
     #[test]
     fn database_dependency_maps_backends() {
         assert!(
@@ -913,7 +946,7 @@ mod tests {
     fn build_dependencies_plain_when_no_features() {
         let opts = NewProjectOptions::default();
         let (armature_dep, extra) = build_dependencies("minimal", &opts);
-        assert_eq!(armature_dep, "armature = \"0.1\"");
+        assert_eq!(armature_dep, "armature = \"0.2\"");
         assert!(extra.is_empty());
     }
 
@@ -925,7 +958,7 @@ mod tests {
         };
         let (armature_dep, extra) = build_dependencies("minimal", &opts);
         // storage/mail are separate crates, not armature feature flags.
-        assert_eq!(armature_dep, "armature = \"0.1\"");
+        assert_eq!(armature_dep, "armature = \"0.2\"");
         assert!(extra.contains("armature-storage"));
         assert!(extra.contains("armature-mail"));
     }

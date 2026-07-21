@@ -191,8 +191,15 @@ fn new_cloudrun_produces_tree() {
 }
 
 #[test]
-fn invalid_template_creates_nothing() {
-    // clap rejects an unknown --template value before any work happens.
+fn clap_rejects_unknown_template_before_new_runs() {
+    // `--template` is a clap `ValueEnum` (`ProjectTemplate`), so an unknown
+    // value like "bogus" is rejected by clap's own arg parsing before
+    // `armature new` ever dispatches into `new::run`/`validate_template`.
+    // This test only proves that the CLI-level parse failure has no
+    // filesystem side effects; it does NOT exercise `validate_template`'s
+    // before-write guarantee (see
+    // `commands::new::tests::run_rejects_unknown_template_before_creating_directory`
+    // in `src/commands/new.rs` for that).
     let tmp = tempfile::tempdir().unwrap();
     armature_in(tmp.path())
         .args(["new", "acme", "--template", "bogus", "--skip-git"])
@@ -371,7 +378,15 @@ fn validate_fails_on_missing_src() {
     armature_in(tmp.path())
         .args(["validate", "--config-only"])
         .assert()
-        .failure();
+        .failure()
+        // stdout carries the specific check that failed, proving this is a real
+        // validation finding and not e.g. a clap arg-parse failure.
+        .stdout(predicate::str::contains("Missing src directory"))
+        // stderr carries the top-level error surfaced by `main`, which
+        // distinguishes an exit-from-validation (`CliError::Validation`) from
+        // an exit caused by argument parsing (clap prints its own
+        // "error: unexpected argument"/usage text instead of this message).
+        .stderr(predicate::str::contains("Validation error"));
 }
 
 // =============================================================================

@@ -428,6 +428,7 @@ mod tests {
 const GUARD_TEMPLATE: &str = r#"//! {{name_pascal}} guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard for route protection.
@@ -450,10 +451,10 @@ impl {{name_pascal}}Guard {
     }
 
     /// Check if the request is authorized.
-    fn is_authorized(&self, req: &HttpRequest) -> bool {
+    fn is_authorized(&self, context: &GuardContext) -> bool {
         // TODO: Implement authorization logic
         // Example: Check for a valid API key or JWT token
-        req.headers.contains_key("authorization")
+        context.get_header("authorization").is_some()
     }
 }
 
@@ -465,8 +466,8 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        if self.is_authorized(req) {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        if self.is_authorized(context) {
             Ok(true)
         } else {
             Err(Error::Unauthorized("Access denied".to_string()))
@@ -486,19 +487,21 @@ mod tests {
     #[tokio::test]
     async fn test_guard_denies_unauthorized() {
         let guard = {{name_pascal}}Guard::new();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_guard_allows_authorized() {
         let guard = {{name_pascal}}Guard::new();
-        let mut req = HttpRequest::default();
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
         req.headers.insert("authorization".to_string(), "Bearer token".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -508,6 +511,7 @@ mod tests {
 const GUARD_AUTH_TEMPLATE: &str = r#"//! {{name_pascal}} authentication guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard: requires a valid `Authorization: Bearer <token>` header.
@@ -520,17 +524,17 @@ impl {{name_pascal}}Guard {
         Self
     }
 
-    fn extract_bearer<'a>(&self, req: &'a HttpRequest) -> Option<&'a str> {
-        req.headers
-            .get("authorization")
+    fn extract_bearer<'a>(&self, context: &'a GuardContext) -> Option<&'a str> {
+        context
+            .get_header("authorization")
             .and_then(|h| h.strip_prefix("Bearer "))
     }
 }
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        match self.extract_bearer(req) {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        match self.extract_bearer(context) {
             // TODO: verify the JWT / session token here.
             Some(token) if !token.is_empty() => Ok(true),
             _ => Err(Error::Unauthorized("Missing bearer token".to_string())),
@@ -542,6 +546,7 @@ impl Guard for {{name_pascal}}Guard {
 const GUARD_ROLE_TEMPLATE: &str = r#"//! {{name_pascal}} role-based guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard: allows requests only from users holding a required role.
@@ -566,9 +571,9 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
         // TODO: source the role from your authenticated principal.
-        let role = req.headers.get("x-user-role").map(|s| s.as_str()).unwrap_or("");
+        let role = context.get_header("x-user-role").map(|s| s.as_str()).unwrap_or("");
         if role == self.required_role {
             Ok(true)
         } else {
@@ -584,6 +589,7 @@ impl Guard for {{name_pascal}}Guard {
 const GUARD_PERMISSION_TEMPLATE: &str = r#"//! {{name_pascal}} permission-based guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard: checks that the caller holds a required permission.
@@ -608,11 +614,10 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
         // TODO: source granted permissions from your authenticated principal.
-        let granted = req
-            .headers
-            .get("x-user-permissions")
+        let granted = context
+            .get_header("x-user-permissions")
             .map(|s| s.split(',').any(|p| p.trim() == self.required_permission))
             .unwrap_or(false);
         if granted {
@@ -630,6 +635,7 @@ impl Guard for {{name_pascal}}Guard {
 const GUARD_APIKEY_TEMPLATE: &str = r#"//! {{name_pascal}} API-key guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard: requires a matching `X-API-Key` header.
@@ -655,8 +661,8 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        let provided = req.headers.get("x-api-key").map(|s| s.as_str());
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let provided = context.get_header("x-api-key").map(|s| s.as_str());
         if !self.expected_key.is_empty() && provided == Some(self.expected_key.as_str()) {
             Ok(true)
         } else {
@@ -669,6 +675,7 @@ impl Guard for {{name_pascal}}Guard {
 const GUARD_RATELIMIT_TEMPLATE: &str = r#"//! {{name_pascal}} rate-limiting guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -700,10 +707,9 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        let key = req
-            .headers
-            .get("x-forwarded-for")
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let key = context
+            .get_header("x-forwarded-for")
             .cloned()
             .unwrap_or_else(|| "anonymous".to_string());
 
@@ -1528,15 +1534,20 @@ mod tests {
 "#;
 
 const JOB_SCHEDULED_TEMPLATE: &str = r#"//! {{name_pascal}} scheduled job (runs at a fixed cron time).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
 
-use armature::prelude::*;
-use armature_cron::{CronJob, Schedule};
-use async_trait::async_trait;
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
 
 /// {{name_pascal}} scheduled job.
 ///
-/// Runs on a cron schedule. Register it with your scheduler at startup.
-#[derive(Clone)]
+/// Runs on a fixed cron schedule. Register it with a [`CronScheduler`] at startup,
+/// e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
 pub struct {{name_pascal}}Job;
 
 impl {{name_pascal}}Job {
@@ -1545,8 +1556,31 @@ impl {{name_pascal}}Job {
         Self
     }
 
-    /// Cron expression controlling when this job fires (default: every day at midnight).
-    pub const CRON: &'static str = "0 0 * * *";
+    /// 6-field cron expression (seconds minutes hours day-of-month month
+    /// day-of-week) controlling when this job fires. Default: every day at
+    /// midnight.
+    pub const CRON: &'static str = "0 0 0 * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running scheduled {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement scheduled work.
+        Ok(())
+    }
 }
 
 impl Default for {{name_pascal}}Job {
@@ -1554,60 +1588,62 @@ impl Default for {{name_pascal}}Job {
         Self::new()
     }
 }
-
-#[async_trait]
-impl CronJob for {{name_pascal}}Job {
-    fn schedule(&self) -> Schedule {
-        Schedule::from_cron(Self::CRON)
-    }
-
-    async fn run(&self) -> Result<(), Error> {
-        tracing::info!("Running scheduled {{name_pascal}}Job");
-        // TODO: implement scheduled work.
-        Ok(())
-    }
-}
 "#;
 
-const JOB_RECURRING_TEMPLATE: &str = r#"//! {{name_pascal}} recurring job (runs on a fixed interval).
+const JOB_RECURRING_TEMPLATE: &str = r#"//! {{name_pascal}} recurring job (runs on a fixed cron cadence).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
 
-use armature::prelude::*;
-use armature_cron::{CronJob, Schedule};
-use async_trait::async_trait;
-use std::time::Duration;
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
 
 /// {{name_pascal}} recurring job.
 ///
-/// Runs repeatedly on a fixed interval.
-#[derive(Clone)]
-pub struct {{name_pascal}}Job {
-    interval: Duration,
-}
+/// `armature-cron` schedules jobs by 6-field cron expression rather than a
+/// raw [`std::time::Duration`], so the recurrence is expressed as a cron
+/// cadence (e.g. `"0 */5 * * * *"` for every 5 minutes). Register it with a
+/// [`CronScheduler`] at startup, e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
+pub struct {{name_pascal}}Job;
 
 impl {{name_pascal}}Job {
-    /// Create a new recurring job with the given interval.
-    pub fn new(interval: Duration) -> Self {
-        Self { interval }
+    /// Create a new recurring job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 6-field cron expression controlling the recurrence cadence.
+    /// Default: every 5 minutes.
+    pub const CRON: &'static str = "0 */5 * * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running recurring {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement recurring work.
+        Ok(())
     }
 }
 
 impl Default for {{name_pascal}}Job {
     fn default() -> Self {
-        // Default: run every 5 minutes.
-        Self::new(Duration::from_secs(300))
-    }
-}
-
-#[async_trait]
-impl CronJob for {{name_pascal}}Job {
-    fn schedule(&self) -> Schedule {
-        Schedule::every(self.interval)
-    }
-
-    async fn run(&self) -> Result<(), Error> {
-        tracing::info!("Running recurring {{name_pascal}}Job (every {:?})", self.interval);
-        // TODO: implement recurring work.
-        Ok(())
+        Self::new()
     }
 }
 "#;
@@ -3997,7 +4033,9 @@ impl ProjectData {
             description,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
-            armature_dep: "armature = \"0.1\"".to_string(),
+            // Kept in sync with the `armature` facade crate's current minor
+            // version and with `repl_init_script()` in `commands/repl.rs`.
+            armature_dep: "armature = \"0.2\"".to_string(),
             extra_deps: String::new(),
         }
     }
@@ -4075,6 +4113,128 @@ impl DevOpsData {
             name_kebab,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
+        }
+    }
+}
+
+// =============================================================================
+// GENERATE-JOB / GUARD-GENERATION API REGRESSION TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod job_and_guard_template_api_tests {
+    //! Regression coverage for a review finding: `job_scheduled` /
+    //! `job_recurring` used to generate code against a fabricated
+    //! `armature-cron` API (`use armature_cron::{CronJob, Schedule}`, `impl
+    //! CronJob`, `Schedule::from_cron`/`Schedule::every` — none of which
+    //! exist), and every guard template implemented
+    //! `can_activate(&self, req: &HttpRequest)` instead of the real
+    //! `Guard::can_activate(&self, context: &GuardContext)`
+    //! (`armature-core/src/guard.rs:27-30`). These tests render each
+    //! template through the real `TemplateRegistry` (the same path
+    //! `armature generate job|guard` uses) and assert on tokens from the
+    //! *real* `armature-cron`/`armature-core` APIs, so a regression back to
+    //! the fabricated API is caught here rather than only surfacing as a
+    //! compile failure inside a generated project.
+    use super::*;
+
+    fn data() -> ComponentData {
+        ComponentData {
+            name_pascal: "FooBar".to_string(),
+            name_snake: "foo_bar".to_string(),
+            name_kebab: "foo-bar".to_string(),
+        }
+    }
+
+    #[test]
+    fn job_scheduled_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_scheduled", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_scheduled", &content);
+    }
+
+    #[test]
+    fn job_recurring_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_recurring", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_recurring", &content);
+    }
+
+    fn assert_job_template_uses_real_cron_api(name: &str, content: &str) {
+        for token in ["CronExpression", "CronScheduler", "CronResult", "JobContext"] {
+            assert!(
+                content.contains(token),
+                "{name} template must reference the real armature-cron `{token}`, got:\n{content}"
+            );
+        }
+        for fabricated in [
+            "CronJob",
+            "Schedule::from_cron",
+            "Schedule::every",
+            "impl CronJob",
+            "use armature_cron::{CronJob",
+        ] {
+            assert!(
+                !content.contains(fabricated),
+                "{name} template must not reference the fabricated `{fabricated}` API, got:\n{content}"
+            );
+        }
+        // The generated file lives in an existing project via a single-file
+        // generator, so the extra `armature-cron` dependency it needs is
+        // called out as a header-comment hint (mirroring how a Cargo.toml
+        // `[dependencies]` line would read) rather than edited in.
+        assert!(
+            content.contains("armature-cron") && content.contains("[dependencies]"),
+            "{name} template must hint at the armature-cron dependency it requires, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn all_guard_templates_reference_real_guard_context() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+            "guard_test",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains("GuardContext"),
+                "{name} template must reference the real `GuardContext`, got:\n{content}"
+            );
+            assert!(
+                !content.contains("req: &HttpRequest"),
+                "{name} template must not use the fabricated `can_activate(&self, req: &HttpRequest)` signature, got:\n{content}"
+            );
+            assert!(
+                !content.contains("HttpRequest::default()"),
+                "{name} template must not call the nonexistent `HttpRequest::default()`, got:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_impl_templates_declare_real_can_activate_signature() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains(
+                    "async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error>"
+                ),
+                "{name} template must declare the real `Guard::can_activate` signature, got:\n{content}"
+            );
         }
     }
 }

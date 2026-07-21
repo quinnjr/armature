@@ -100,7 +100,9 @@ fn is_evcxr_installed() -> bool {
 /// available in the REPL (adds the dependency and imports the prelude).
 fn repl_init_script() -> String {
     let mut script = String::new();
-    // Add the armature dependency and pull in the prelude.
+    // Add the armature dependency and pull in the prelude. Kept in sync with
+    // the `armature = "0.2"` pin used for generated projects in
+    // `commands/new.rs::build_dependencies` / `templates.rs::ProjectData::new`.
     script.push_str(":dep armature = \"0.2\"\n");
     script.push_str("use armature::prelude::*;\n");
     script
