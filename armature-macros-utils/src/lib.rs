@@ -27,8 +27,10 @@
 //! ## Model Macros
 //!
 //! Database model helpers:
-//! - `#[derive(Model)]` - Common model traits
-//! - `#[derive(ApiModel)]` - API serialization
+//! - `#[derive(Model)]` - field-wise `Debug` + `Clone` and a `Default`-bounded
+//!   `new()` (add serde derives yourself)
+//! - `#[derive(ApiModel)]` - `to_json`/`from_json`, honoring `#[api(skip)]`
+//! - `#[derive(Resource)]` - table metadata (`table_name()`/`primary_key()`)
 //!
 //! ## Error Handling
 //!
@@ -48,19 +50,26 @@ mod validation;
 // Response Macros
 // ============================================================================
 
-/// Create a JSON response with automatic serialization
+/// Create a JSON response with automatic serialization.
+///
+/// The value is any `serde::Serialize` expression. An optional leading status
+/// (numeric literal, `u16` expression, or the `ok` alias) selects the response
+/// status; it defaults to `200`. Expands to `Result<HttpResponse, Error>`.
+///
+/// Requires the caller to depend on `armature-core` (and `serde_json` if you
+/// build the value with `serde_json::json!`).
 ///
 /// # Examples
 ///
 /// ```ignore
-/// // Simple JSON response
-/// json!(200, { "message": "Success", "id": 123 })
+/// // Defaults to 200 OK.
+/// json!(serde_json::json!({ "items": items }))
 ///
-/// // With status helper
-/// json!(ok, { "user": user_data })
+/// // Explicit numeric status.
+/// json!(201, serde_json::json!({ "id": 123 }))
 ///
-/// // Just data (defaults to 200 OK)
-/// json!({ "items": vec })
+/// // `ok` status alias.
+/// json!(ok, user_data)
 /// ```
 #[proc_macro]
 pub fn json(input: TokenStream) -> TokenStream {
@@ -113,14 +122,22 @@ pub fn redirect(input: TokenStream) -> TokenStream {
 // Validation Macros
 // ============================================================================
 
-/// Validate a field with a custom validation function
+/// Validate a condition, returning `Error::Validation` with the caller's
+/// message when it fails.
+///
+/// Supported forms:
+/// - `validate!(condition)` — generic message.
+/// - `validate!(condition, "message")` — custom message.
+/// - `validate!(value, validator_fn, "message")` — calls `validator_fn(&value)`.
+///
+/// Used inside a function returning `Result<_, armature_core::Error>`.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// validate!(email, is_valid_email, "Invalid email format");
 /// validate!(age >= 18, "Must be 18 or older");
 /// validate!(password.len() >= 8, "Password too short");
+/// validate!(email, is_valid_email, "Invalid email format");
 /// ```
 #[proc_macro]
 pub fn validate(input: TokenStream) -> TokenStream {
@@ -139,7 +156,14 @@ pub fn validate_required(input: TokenStream) -> TokenStream {
     validation::validate_required_impl(input)
 }
 
-/// Validate email format
+/// Validate email format against a compiled-once regex.
+///
+/// Returns `Error::Validation` when the value does not match. The regex is
+/// stored in a `static LazyLock`, so it is compiled a single time rather than
+/// on every call.
+///
+/// **Dependency:** the expansion references `regex::Regex`, so the calling
+/// crate must depend on the `regex` crate.
 ///
 /// # Examples
 ///
@@ -159,9 +183,12 @@ pub fn validate_email(input: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
+/// The body (when present) is serialized to JSON via `serde_json`, and the
+/// `Content-Type` defaults to `application/json` (overridable via `headers`).
+///
 /// ```ignore
 /// let req = test_request!(GET "/users");
-/// let req = test_request!(POST "/users", json!({ "name": "Alice" }));
+/// let req = test_request!(POST "/users", serde_json::json!({ "name": "Alice" }));
 /// let req = test_request!(GET "/users/123", headers: { "Authorization": "Bearer token" });
 /// ```
 #[proc_macro]
@@ -228,19 +255,26 @@ pub fn ensure(input: TokenStream) -> TokenStream {
 // Model Derive Macros
 // ============================================================================
 
-/// Derive common model traits
+/// Derive common model traits.
 ///
-/// Automatically implements: Debug, Clone, Serialize, Deserialize
+/// Implements `Debug` and `Clone` field-wise, and adds a `new()` constructor
+/// bounded on `Self: Default`.
 ///
-/// # Examples
+/// This macro does **not** implement `Serialize`/`Deserialize` — a derive
+/// macro cannot make a type derive *other* traits. Add those derives yourself:
 ///
 /// ```ignore
-/// #[derive(Model)]
+/// use serde::{Serialize, Deserialize};
+///
+/// // `Model` supplies Debug + Clone + new(); you add Default + serde.
+/// #[derive(Model, Default, Serialize, Deserialize)]
 /// pub struct User {
 ///     pub id: i64,
 ///     pub name: String,
 ///     pub email: String,
 /// }
+///
+/// let user = User::new(); // requires Default
 /// ```
 #[proc_macro_derive(Model, attributes(model))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -265,7 +299,14 @@ pub fn derive_api_model(input: TokenStream) -> TokenStream {
     model::derive_api_model_impl(input)
 }
 
-/// Derive resource model with CRUD operations
+/// Derive resource table metadata.
+///
+/// Parses `#[resource(table = "..")]` and `#[resource(primary_key)]` and
+/// exposes `table_name()` (falling back to the snake_case struct name) and
+/// `primary_key()` (falling back to `"id"`).
+///
+/// This macro provides table metadata only — it does **not** generate CRUD
+/// query methods.
 ///
 /// # Examples
 ///
@@ -277,6 +318,9 @@ pub fn derive_api_model(input: TokenStream) -> TokenStream {
 ///     pub id: i64,
 ///     pub name: String,
 /// }
+///
+/// assert_eq!(User::table_name(), "users");
+/// assert_eq!(User::primary_key(), "id");
 /// ```
 #[proc_macro_derive(Resource, attributes(resource))]
 pub fn derive_resource(input: TokenStream) -> TokenStream {

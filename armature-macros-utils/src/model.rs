@@ -1,57 +1,244 @@
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
-use syn::{DeriveInput, parse_macro_input};
+use syn::{Data, DeriveInput, Field, Fields, Ident, LitStr, parse_macro_input};
 
+/// `#[derive(Model)]` — emit field-wise `Debug` + `Clone` impls plus a
+/// `Default`-bounded `new()`.
+///
+/// Note: this cannot attach `Serialize`/`Deserialize` (a derive macro cannot
+/// make the type derive *other* traits); callers add those derives themselves.
 pub fn derive_model_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let data = match &input.data {
+        Data::Struct(s) => s,
+        _ => {
+            return syn::Error::new_spanned(
+                &input.ident,
+                "#[derive(Model)] can only be applied to structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let (debug_body, clone_body) = match &data.fields {
+        Fields::Named(named) => {
+            let idents: Vec<&Ident> = named
+                .named
+                .iter()
+                .map(|f| f.ident.as_ref().expect("named field has an ident"))
+                .collect();
+            let debug = quote! {
+                f.debug_struct(stringify!(#name))
+                    #(.field(stringify!(#idents), &self.#idents))*
+                    .finish()
+            };
+            let clone = quote! {
+                Self {
+                    #(#idents: ::core::clone::Clone::clone(&self.#idents),)*
+                }
+            };
+            (debug, clone)
+        }
+        Fields::Unnamed(unnamed) => {
+            let indices: Vec<syn::Index> =
+                (0..unnamed.unnamed.len()).map(syn::Index::from).collect();
+            let debug = quote! {
+                f.debug_tuple(stringify!(#name))
+                    #(.field(&self.#indices))*
+                    .finish()
+            };
+            let clone = quote! {
+                Self(
+                    #(::core::clone::Clone::clone(&self.#indices),)*
+                )
+            };
+            (debug, clone)
+        }
+        Fields::Unit => (
+            quote! { f.write_str(stringify!(#name)) },
+            quote! { Self },
+        ),
+    };
 
     let expanded = quote! {
-        impl #name {
-            /// Create a new instance
-            pub fn new() -> Self {
-                Self::default()
+        impl #impl_generics ::core::fmt::Debug for #name #ty_generics #where_clause {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                #debug_body
+            }
+        }
+
+        impl #impl_generics ::core::clone::Clone for #name #ty_generics #where_clause {
+            fn clone(&self) -> Self {
+                #clone_body
+            }
+        }
+
+        impl #impl_generics #name #ty_generics #where_clause {
+            /// Create a new instance using the type's `Default` implementation.
+            ///
+            /// Bounded on `Self: Default` — add `#[derive(Default)]` (or an
+            /// explicit `Default` impl) to use it.
+            #[allow(clippy::new_without_default)]
+            pub fn new() -> Self
+            where
+                Self: ::core::default::Default,
+            {
+                <Self as ::core::default::Default>::default()
             }
         }
     };
 
-    TokenStream::from(expanded)
+    expanded.into()
 }
 
+/// Does this field carry `#[api(skip)]`?
+fn has_api_skip(field: &Field) -> bool {
+    let mut skip = false;
+    for attr in &field.attrs {
+        if attr.path().is_ident("api") {
+            // Ignore parse errors from unrelated `api(..)` shapes.
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("skip") {
+                    skip = true;
+                }
+                Ok(())
+            });
+        }
+    }
+    skip
+}
+
+/// `#[derive(ApiModel)]` — `to_json`/`from_json`, honoring `#[api(skip)]`.
 pub fn derive_api_model_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let mut skip_fields: Vec<&Ident> = Vec::new();
+    if let Data::Struct(s) = &input.data
+        && let Fields::Named(named) = &s.fields
+    {
+        for field in &named.named {
+            if has_api_skip(field)
+                && let Some(ident) = field.ident.as_ref()
+            {
+                skip_fields.push(ident);
+            }
+        }
+    }
+
+    let removals = skip_fields.iter().map(|ident| {
+        quote! { __map.remove(stringify!(#ident)); }
+    });
 
     let expanded = quote! {
-        impl #name {
-            /// Convert to JSON value
+        impl #impl_generics #name #ty_generics #where_clause {
+            /// Convert to a JSON value, excluding any `#[api(skip)]` fields.
             pub fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
-                serde_json::to_value(self)
+                let mut __value = serde_json::to_value(self)?;
+                if let serde_json::Value::Object(ref mut __map) = __value {
+                    #(#removals)*
+                }
+                Ok(__value)
             }
 
-            /// Convert from JSON value
+            /// Convert from a JSON value.
             pub fn from_json(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
                 serde_json::from_value(value.clone())
             }
         }
     };
 
-    TokenStream::from(expanded)
+    expanded.into()
 }
 
+/// Convert a PascalCase struct name to snake_case for the default table name.
+fn to_snake_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 4);
+    for (i, ch) in input.char_indices() {
+        if ch.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// `#[derive(Resource)]` — expose the configured table metadata.
+///
+/// Narrowed from the old "CRUD operations" claim: this parses
+/// `#[resource(table = "..")]` and `#[resource(primary_key)]` and exposes
+/// `table_name()` / `primary_key()`. No queries are generated.
 pub fn derive_resource_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
 
+    // Container attribute: #[resource(table = "..")]
+    let mut table_name: Option<String> = None;
+    for attr in &input.attrs {
+        if attr.path().is_ident("resource") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("table") {
+                    let value = meta.value()?;
+                    let lit: LitStr = value.parse()?;
+                    table_name = Some(lit.value());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    // Field attribute: #[resource(primary_key)]
+    let mut primary_key: Option<String> = None;
+    if let Data::Struct(s) = &input.data
+        && let Fields::Named(named) = &s.fields
+    {
+        for field in &named.named {
+            for attr in &field.attrs {
+                if attr.path().is_ident("resource") {
+                    let _ = attr.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("primary_key")
+                            && let Some(ident) = field.ident.as_ref()
+                        {
+                            primary_key = Some(ident.to_string());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+    }
+
+    let table = table_name.unwrap_or_else(|| to_snake_case(&name.to_string()));
+    let primary = primary_key.unwrap_or_else(|| "id".to_string());
+
+    let table_lit = LitStr::new(&table, Span::call_site());
+    let primary_lit = LitStr::new(&primary, Span::call_site());
+
     let expanded = quote! {
         impl #name {
-            /// Get the table name for this resource
+            /// The configured table name, or the snake_case struct name if
+            /// `#[resource(table = "..")]` was not provided.
             pub fn table_name() -> &'static str {
-                // Default table name based on struct name
-                stringify!(#name)
+                #table_lit
+            }
+
+            /// The primary-key column name from `#[resource(primary_key)]`,
+            /// defaulting to `"id"`.
+            pub fn primary_key() -> &'static str {
+                #primary_lit
             }
         }
     };
 
-    TokenStream::from(expanded)
+    expanded.into()
 }
