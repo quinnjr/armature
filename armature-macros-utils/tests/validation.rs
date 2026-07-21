@@ -56,14 +56,7 @@ fn require_all(
 
 #[test]
 fn validate_required_passes_when_all_present() {
-    assert!(
-        require_all(
-            Some("a".into()),
-            Some("b".into()),
-            Some("c".into())
-        )
-        .is_ok()
-    );
+    assert!(require_all(Some("a".into()), Some("b".into()), Some("c".into())).is_ok());
 }
 
 #[test]

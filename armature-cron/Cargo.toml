@@ -13,7 +13,7 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Logging
-armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
 
 # Core dependencies
 async-trait = "0.1"
@@ -23,7 +23,7 @@ chrono = "0.4"
 cron = "0.17"
 
 # DI integration
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }

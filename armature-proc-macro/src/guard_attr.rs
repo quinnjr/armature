@@ -176,8 +176,10 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .iter()
                 .enumerate()
                 .map(|(i, guard)| {
-                    let factory_name =
-                        syn::Ident::new(&format!("__guard_factory_{i}"), proc_macro2::Span::call_site());
+                    let factory_name = syn::Ident::new(
+                        &format!("__guard_factory_{i}"),
+                        proc_macro2::Span::call_site(),
+                    );
                     quote! {
                         fn #factory_name() -> Box<dyn armature_core::guard::Guard> {
                             Box::new(<#guard as Default>::default())
@@ -187,7 +189,12 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .collect();
 
             let factory_names: Vec<_> = (0..guards.len())
-                .map(|i| syn::Ident::new(&format!("__guard_factory_{i}"), proc_macro2::Span::call_site()))
+                .map(|i| {
+                    syn::Ident::new(
+                        &format!("__guard_factory_{i}"),
+                        proc_macro2::Span::call_site(),
+                    )
+                })
                 .collect();
 
             let guard_count = guards.len();

@@ -4161,7 +4161,12 @@ mod job_and_guard_template_api_tests {
     }
 
     fn assert_job_template_uses_real_cron_api(name: &str, content: &str) {
-        for token in ["CronExpression", "CronScheduler", "CronResult", "JobContext"] {
+        for token in [
+            "CronExpression",
+            "CronScheduler",
+            "CronResult",
+            "JobContext",
+        ] {
             assert!(
                 content.contains(token),
                 "{name} template must reference the real armature-cron `{token}`, got:\n{content}"

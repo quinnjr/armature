@@ -24,10 +24,7 @@ fn test_request_builds_post_with_body() {
     assert_eq!(req.path, "/users");
     let v: serde_json::Value = serde_json::from_slice(req.body_ref()).unwrap();
     assert_eq!(v["name"], "Alice");
-    assert_eq!(
-        req.headers.get("Content-Type").unwrap(),
-        "application/json"
-    );
+    assert_eq!(req.headers.get("Content-Type").unwrap(), "application/json");
 }
 
 #[test]
@@ -36,10 +33,7 @@ fn test_request_builds_with_headers() {
     assert_eq!(req.method, "GET");
     assert_eq!(req.path, "/users/123");
     // HeaderMap lookup is case-insensitive.
-    assert_eq!(
-        req.headers.get("authorization").unwrap(),
-        "Bearer token"
-    );
+    assert_eq!(req.headers.get("authorization").unwrap(), "Bearer token");
 }
 
 #[test]

@@ -59,10 +59,7 @@ pub fn derive_model_impl(input: TokenStream) -> TokenStream {
             };
             (debug, clone)
         }
-        Fields::Unit => (
-            quote! { f.write_str(stringify!(#name)) },
-            quote! { Self },
-        ),
+        Fields::Unit => (quote! { f.write_str(stringify!(#name)) }, quote! { Self }),
     };
 
     let expanded = quote! {

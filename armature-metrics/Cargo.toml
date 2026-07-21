@@ -12,7 +12,7 @@ keywords = ["metrics", "prometheus", "monitoring", "observability"]
 categories = ["web-programming", "development-tools::profiling"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 prometheus = { version = "0.14", features = ["process"] }

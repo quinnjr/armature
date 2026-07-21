@@ -12,7 +12,7 @@ keywords = ["opentelemetry", "tracing", "metrics", "observability"]
 categories = ["development-tools::profiling", "web-programming"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 
 # OpenTelemetry core (all versions must match)
 opentelemetry = "0.32"

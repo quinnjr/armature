@@ -13,8 +13,8 @@ categories = ["web-programming", "network-programming"]
 
 [dependencies]
 # Armature core for Middleware trait
-armature-core = { path = "../armature-core", version = "0.2.1" }
-armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
 
 # Core dependencies
 async-trait = "0.1"

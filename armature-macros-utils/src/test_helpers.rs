@@ -144,12 +144,11 @@ fn expected_status_tokens(expr: &Expr) -> TokenStream2 {
 }
 
 pub fn assert_status_impl(input: TokenStream) -> TokenStream {
-    let args = match Punctuated::<Expr, Token![,]>::parse_terminated
-        .parse2(TokenStream2::from(input))
-    {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
+    let args =
+        match Punctuated::<Expr, Token![,]>::parse_terminated.parse2(TokenStream2::from(input)) {
+            Ok(a) => a,
+            Err(e) => return e.to_compile_error().into(),
+        };
     let items: Vec<Expr> = args.into_iter().collect();
     let (response, expected) = match items.as_slice() {
         [response, expected] => (response, expected),

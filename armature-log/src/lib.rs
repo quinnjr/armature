@@ -1385,8 +1385,8 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn render_json_is_valid_parseable_json() {
-        let json = render_json(Level::Warn, "svc::mod", "boom")
-            .expect("render_json should succeed");
+        let json =
+            render_json(Level::Warn, "svc::mod", "boom").expect("render_json should succeed");
 
         let value: serde_json::Value =
             serde_json::from_str(&json).expect("render_json output must be valid JSON");
@@ -1422,15 +1422,7 @@ mod tests {
     #[test]
     fn write_pretty_includes_timestamp_when_enabled() {
         let mut buf: Vec<u8> = Vec::new();
-        write_pretty(
-            &mut buf,
-            Level::Info,
-            "",
-            "started",
-            false,
-            true,
-            true,
-        );
+        write_pretty(&mut buf, Level::Info, "", "started", false, true, true);
         let out = String::from_utf8(buf).unwrap();
 
         // "YYYY-MM-DD HH:MM:SS.mmm " prefix before the level.

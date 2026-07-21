@@ -42,7 +42,10 @@ fn request_with(
 fn json_response_sets_given_status_and_body() {
     let resp = json_response!(202, serde_json::json!({ "status": "processing" })).unwrap();
     assert_eq!(resp.status, 202);
-    assert_eq!(json_body(&resp), serde_json::json!({ "status": "processing" }));
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({ "status": "processing" })
+    );
 }
 
 #[test]

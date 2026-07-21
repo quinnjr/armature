@@ -25,7 +25,9 @@ async fn typed_filter_reports_its_types_and_catches() {
     assert_eq!(filter.handles(), Some(vec!["NotFound", "RouteNotFound"]));
     assert_eq!(filter.priority(), 0);
 
-    let resp = filter.catch(&Error::NotFound("x".to_string()), &ctx()).await;
+    let resp = filter
+        .catch(&Error::NotFound("x".to_string()), &ctx())
+        .await;
     assert_eq!(resp.expect("must handle").status, 404);
 }
 
