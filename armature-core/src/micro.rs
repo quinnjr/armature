@@ -802,9 +802,14 @@ impl Middleware for Cors {
     }
 }
 
-/// Compression middleware
+/// Gzip-compression middleware.
+///
+/// When the client's `Accept-Encoding` permits gzip, the response body is
+/// compressed with the configured [`CompressionLevel`], `Content-Encoding:
+/// gzip` is set, and `Vary: Accept-Encoding` is added so downstream caches key
+/// on the negotiated encoding. Responses that already carry a `Content-Encoding`
+/// or have an empty body are passed through untouched (but still gain `Vary`).
 pub struct Compress {
-    #[allow(dead_code)]
     level: CompressionLevel,
 }
 
@@ -815,6 +820,52 @@ pub enum CompressionLevel {
     #[default]
     Default,
     Best,
+}
+
+impl CompressionLevel {
+    /// Map to the corresponding `flate2` compression level.
+    fn to_flate2(self) -> flate2::Compression {
+        match self {
+            CompressionLevel::Fast => flate2::Compression::fast(),
+            CompressionLevel::Default => flate2::Compression::default(),
+            CompressionLevel::Best => flate2::Compression::best(),
+        }
+    }
+}
+
+/// Whether a request's `Accept-Encoding` header permits gzip.
+///
+/// Recognises an explicit `gzip` token (or the `*` wildcard) and honours an
+/// explicit `q=0`, which disables the encoding.
+pub(crate) fn accepts_gzip(req: &HttpRequest) -> bool {
+    let Some(value) = req.headers.get("accept-encoding") else {
+        return false;
+    };
+    let value = value.to_ascii_lowercase();
+    value.split(',').any(|part| {
+        let mut segs = part.split(';').map(str::trim);
+        let coding = segs.next().unwrap_or("");
+        if coding != "gzip" && coding != "*" {
+            return false;
+        }
+        // Reject `q=0`(.0…); any other q (or none) permits the encoding.
+        !segs.any(|p| {
+            p.strip_prefix("q=")
+                .and_then(|q| q.parse::<f32>().ok())
+                .map(|q| q == 0.0)
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Gzip-encode `data` at the given level, returning `None` if encoding fails.
+pub(crate) fn gzip_encode(data: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2 + 32), level.to_flate2());
+    encoder.write_all(data).ok()?;
+    encoder.finish().ok()
 }
 
 impl Default for Compress {
@@ -838,13 +889,39 @@ impl Middleware for Compress {
         req: HttpRequest,
         next: Next,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
+        let level = self.level;
+        // Negotiate before `req` is consumed by the handler.
+        let client_accepts_gzip = accepts_gzip(&req);
         Box::pin(async move {
             let mut response = next(req).await?;
-            // Add Vary header for proper caching
+
+            // Advertise that the representation varies by Accept-Encoding, even
+            // when we ultimately do not compress (so shared caches stay correct).
             response
                 .headers
                 .insert("Vary".to_string(), "Accept-Encoding".to_string());
-            // Note: Actual compression would be done at the transport layer
+
+            // Only compress when the client accepts gzip, the body is non-empty,
+            // and it is not already content-encoded.
+            let already_encoded = response.headers.contains_key("Content-Encoding");
+            if client_accepts_gzip
+                && !already_encoded
+                && !response.body_ref().is_empty()
+                && let Some(compressed) = gzip_encode(response.body_ref(), level)
+            {
+                let had_content_length = response.headers.contains_key("Content-Length");
+                response = response.with_body(compressed);
+                response
+                    .headers
+                    .insert("Content-Encoding".to_string(), "gzip".to_string());
+                if had_content_length {
+                    response.headers.insert(
+                        "Content-Length".to_string(),
+                        response.body_len().to_string(),
+                    );
+                }
+            }
+
             Ok(response)
         })
     }
@@ -1141,5 +1218,66 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["error"], "Internal Server Error");
+    }
+
+    fn body_next(body: Vec<u8>) -> Next {
+        Box::new(move |_req: HttpRequest| {
+            Box::pin(async move {
+                let mut resp = HttpResponse::ok();
+                resp.body = body;
+                Ok(resp)
+            })
+        })
+    }
+
+    fn gunzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).expect("valid gzip stream");
+        out
+    }
+
+    /// Regression: `Compress` must actually gzip the body (and advertise it via
+    /// `Content-Encoding: gzip`) when the client accepts gzip. The old stub
+    /// returned the body untouched and never set `Content-Encoding`.
+    #[tokio::test]
+    async fn test_compress_gzips_when_accepted() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip, deflate, br");
+
+        let original = vec![b'a'; 8192];
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(
+            resp.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
+        // Highly compressible payload must actually shrink.
+        assert!(resp.body_ref().len() < original.len());
+        assert_eq!(gunzip(resp.body_ref()), original);
+    }
+
+    /// Without `Accept-Encoding: gzip` the body must pass through uncompressed,
+    /// but `Vary: Accept-Encoding` is still set for correct downstream caching.
+    #[tokio::test]
+    async fn test_compress_skips_without_accept_encoding() {
+        let mw = Compress::default();
+        let req = HttpRequest::new("GET".into(), "/".into());
+
+        let original = vec![b'b'; 8192];
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert!(resp.headers.get("Content-Encoding").is_none());
+        assert_eq!(resp.body_ref(), original.as_slice());
+        assert_eq!(
+            resp.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
     }
 }

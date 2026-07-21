@@ -708,8 +708,36 @@ impl Application {
     ///
     /// app.listen(8080).await?;
     /// ```
+    ///
+    /// This binds to all interfaces (`0.0.0.0`) on the given port. To bind to a
+    /// specific address (e.g. loopback only, or an ephemeral `:0` port), use
+    /// [`Application::listen_on`].
     pub async fn listen(self, port: u16) -> Result<(), Error> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        self.listen_on((std::net::Ipv4Addr::UNSPECIFIED, port))
+            .await
+    }
+
+    /// Start the HTTP server on the specified socket address.
+    ///
+    /// This is the address-accepting counterpart to [`Application::listen`],
+    /// which binds to all interfaces on a port. `listen_on` accepts anything
+    /// convertible into a [`SocketAddr`], allowing binds to a specific
+    /// interface, IPv6, or an OS-assigned ephemeral port (`:0`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use armature_core::Application;
+    /// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    ///
+    /// # async fn example(app: Application) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Loopback only, port 8080
+    /// app.listen_on(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn listen_on(self, addr: impl Into<SocketAddr>) -> Result<(), Error> {
+        let addr = addr.into();
 
         debug!(address = %addr, "Binding to address");
         let listener = TcpListener::bind(addr).await?;

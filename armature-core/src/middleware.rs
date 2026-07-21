@@ -376,18 +376,34 @@ impl Middleware for SecurityHeadersMiddleware {
     }
 }
 
-/// Compression middleware (stub - would need compression crate)
+/// Gzip-compression middleware.
+///
+/// Compresses response bodies larger than `min_size` with gzip when the client's
+/// `Accept-Encoding` permits it, setting `Content-Encoding: gzip` and
+/// `Vary: Accept-Encoding`. Small bodies, bodies that are already
+/// content-encoded, and clients that do not accept gzip are passed through
+/// unchanged (but still gain `Vary`).
 pub struct CompressionMiddleware {
     min_size: usize,
+    level: crate::micro::CompressionLevel,
 }
 
 impl CompressionMiddleware {
     pub fn new() -> Self {
-        Self { min_size: 1024 } // Only compress responses > 1KB
+        Self {
+            min_size: 1024, // Only compress responses > 1KB
+            level: crate::micro::CompressionLevel::Default,
+        }
     }
 
     pub fn with_min_size(mut self, size: usize) -> Self {
         self.min_size = size;
+        self
+    }
+
+    /// Set the gzip compression level.
+    pub fn with_level(mut self, level: crate::micro::CompressionLevel) -> Self {
+        self.level = level;
         self
     }
 }
@@ -401,14 +417,33 @@ impl Default for CompressionMiddleware {
 #[async_trait]
 impl Middleware for CompressionMiddleware {
     async fn handle(&self, req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
+        // Negotiate before `req` is consumed by the handler.
+        let client_accepts_gzip = crate::micro::accepts_gzip(&req);
         let mut response = next(req).await?;
 
-        // Check if response is large enough to compress
-        if response.body.len() > self.min_size {
+        // Advertise Accept-Encoding as a cache-varying dimension regardless of
+        // whether we compress this particular response.
+        response
+            .headers
+            .insert("Vary".to_string(), "Accept-Encoding".to_string());
+
+        let already_encoded = response.headers.contains_key("Content-Encoding");
+        if client_accepts_gzip
+            && !already_encoded
+            && response.body_ref().len() > self.min_size
+            && let Some(compressed) = crate::micro::gzip_encode(response.body_ref(), self.level)
+        {
+            let had_content_length = response.headers.contains_key("Content-Length");
+            response = response.with_body(compressed);
             response
                 .headers
-                .insert("X-Compression-Eligible".to_string(), "true".to_string());
-            // In production: compress response.body here
+                .insert("Content-Encoding".to_string(), "gzip".to_string());
+            if had_content_length {
+                response.headers.insert(
+                    "Content-Length".to_string(),
+                    response.body_len().to_string(),
+                );
+            }
         }
 
         Ok(response)
@@ -723,6 +758,93 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    fn gunzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).expect("valid gzip stream");
+        out
+    }
+
+    /// Regression: a body above `min_size` is actually gzip-compressed (not just
+    /// flagged) when the client accepts gzip. The old stub only set an
+    /// `X-Compression-Eligible` header and never compressed.
+    #[tokio::test]
+    async fn test_compression_middleware_gzips_large_body() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'z'; 4096];
+        let expected = original.clone();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(
+            response.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
+        assert!(response.body_ref().len() < expected.len());
+        assert_eq!(gunzip(response.body_ref()), expected);
+        // The stale eligibility-flag header must be gone.
+        assert!(response.headers.get("X-Compression-Eligible").is_none());
+    }
+
+    /// Below `min_size`, the body must pass through uncompressed.
+    #[tokio::test]
+    async fn test_compression_middleware_respects_min_size() {
+        let middleware = CompressionMiddleware::new().with_min_size(1024);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let small = b"tiny".to_vec();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(small)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers.get("Content-Encoding").is_none());
+        assert_eq!(response.body_ref(), b"tiny");
+    }
+
+    /// Without `Accept-Encoding: gzip`, a large body is left uncompressed.
+    #[tokio::test]
+    async fn test_compression_middleware_skips_without_accept_encoding() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+
+        let original = vec![b'q'; 4096];
+        let expected = original.clone();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers.get("Content-Encoding").is_none());
+        assert_eq!(response.body_ref(), expected.as_slice());
     }
 
     #[tokio::test]

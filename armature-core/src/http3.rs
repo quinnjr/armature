@@ -461,36 +461,24 @@ mod server {
             &self,
             tls_config: Arc<rustls::ServerConfig>,
         ) -> Result<quinn::ServerConfig, Error> {
-            // Create QUIC crypto config from TLS config
-            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
-                .map_err(|e| Error::Internal(format!("Failed to create QUIC crypto: {}", e)))?;
+            // Create QUIC crypto config from TLS config.
+            //
+            // 0-RTT (early data) is enabled by advertising a non-zero
+            // `max_early_data_size` on the rustls server config. The caller's
+            // `tls_config` is shared behind an `Arc`, so clone it before
+            // mutating to avoid affecting other consumers (e.g. the HTTP/2
+            // listener sharing the same certificates).
+            let crypto = if self.config.enable_0rtt {
+                let mut tls = (*tls_config).clone();
+                tls.max_early_data_size = u32::MAX;
+                quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls))
+            } else {
+                quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+            }
+            .map_err(|e| Error::Internal(format!("Failed to create QUIC crypto: {}", e)))?;
 
             let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-
-            // Configure transport
-            let mut transport = quinn::TransportConfig::default();
-
-            transport
-                .max_concurrent_bidi_streams(self.config.max_concurrent_bidi_streams.into())
-                .max_concurrent_uni_streams(self.config.max_concurrent_uni_streams.into())
-                .initial_mtu(self.config.max_udp_payload_size)
-                .max_idle_timeout(Some(
-                    self.config
-                        .max_idle_timeout
-                        .try_into()
-                        .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
-                ));
-
-            if let Some(interval) = self.config.keep_alive_interval {
-                transport.keep_alive_interval(Some(interval));
-            }
-
-            if self.config.enable_datagram {
-                transport.datagram_receive_buffer_size(Some(65536));
-                transport.datagram_send_buffer_size(65536);
-            }
-
-            server_config.transport_config(Arc::new(transport));
+            server_config.transport_config(Arc::new(build_transport(&self.config)));
 
             Ok(server_config)
         }
@@ -527,6 +515,43 @@ mod server {
         }
     }
 
+    /// Build the quinn transport config from an [`Http3Config`], applying every
+    /// advertised knob (stream/connection flow-control windows, concurrency
+    /// limits, idle timeout, keep-alive, and DATAGRAM buffers).
+    ///
+    /// Split out from [`Http3Server::configure_quinn`] so the mapping from
+    /// config to transport parameters is unit-testable without a TLS
+    /// certificate.
+    pub(super) fn build_transport(config: &Http3Config) -> quinn::TransportConfig {
+        let mut transport = quinn::TransportConfig::default();
+
+        transport
+            .max_concurrent_bidi_streams(config.max_concurrent_bidi_streams.into())
+            .max_concurrent_uni_streams(config.max_concurrent_uni_streams.into())
+            // Apply the advertised flow-control windows so large transfers are
+            // not throttled by quinn's conservative defaults.
+            .stream_receive_window(config.initial_stream_receive_window.into())
+            .receive_window(config.initial_connection_receive_window.into())
+            .initial_mtu(config.max_udp_payload_size)
+            .max_idle_timeout(Some(
+                config
+                    .max_idle_timeout
+                    .try_into()
+                    .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
+            ));
+
+        if let Some(interval) = config.keep_alive_interval {
+            transport.keep_alive_interval(Some(interval));
+        }
+
+        if config.enable_datagram {
+            transport.datagram_receive_buffer_size(Some(65536));
+            transport.datagram_send_buffer_size(65536);
+        }
+
+        transport
+    }
+
     /// Handle a single QUIC connection
     async fn handle_connection(
         incoming: quinn::Incoming,
@@ -534,9 +559,29 @@ mod server {
         stats: Arc<Http3Stats>,
         max_request_body_size: usize,
     ) -> Result<(), Error> {
-        let conn = incoming
-            .await
-            .map_err(|e| Error::Internal(format!("Connection failed: {}", e)))?;
+        // Accept the connection. When the server config advertises early data
+        // (0-RTT enabled), `into_0rtt` succeeds and lets the peer send early
+        // data before the handshake completes; the returned future resolves to
+        // whether that early data was ultimately accepted (not replay-rejected),
+        // which is what we count. When 0-RTT is disabled, `into_0rtt` returns
+        // the `Connecting` back and we complete the handshake normally.
+        let connecting = incoming
+            .accept()
+            .map_err(|e| Error::Internal(format!("Accept failed: {}", e)))?;
+        let conn = match connecting.into_0rtt() {
+            Ok((conn, zero_rtt_accepted)) => {
+                let stats_0rtt = Arc::clone(&stats);
+                tokio::spawn(async move {
+                    if zero_rtt_accepted.await {
+                        stats_0rtt.zero_rtt_accepted();
+                    }
+                });
+                conn
+            }
+            Err(connecting) => connecting
+                .await
+                .map_err(|e| Error::Internal(format!("Connection failed: {}", e)))?,
+        };
 
         stats.connection_opened();
         let remote_addr = conn.remote_address();
@@ -839,5 +884,36 @@ mod tests {
 
         let header = alt_svc_header_full(443, 86400, false);
         assert!(!header.contains("h3-29"));
+    }
+
+    /// Regression: the advertised flow-control windows must actually be applied
+    /// to the quinn transport config. Two configs that differ only in their
+    /// stream/connection receive windows must produce different transport
+    /// parameters; before the fix the knobs were dead and both were identical.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_configure_quinn_applies_flow_control_windows() {
+        let base = Http3Config::default();
+        // Same as `base` except for the two flow-control windows.
+        let widened = Http3Config::builder()
+            .initial_stream_receive_window(base.initial_stream_receive_window * 3 + 1)
+            .initial_connection_receive_window(base.initial_connection_receive_window * 3 + 1)
+            .build();
+
+        let base_transport = format!("{:?}", super::server::build_transport(&base));
+        let widened_transport = format!("{:?}", super::server::build_transport(&widened));
+
+        assert_ne!(
+            base_transport, widened_transport,
+            "flow-control windows must be reflected in the quinn transport config"
+        );
+        assert!(
+            widened_transport.contains(&widened.initial_stream_receive_window.to_string()),
+            "stream receive window must appear in the applied transport config"
+        );
+        assert!(
+            widened_transport.contains(&widened.initial_connection_receive_window.to_string()),
+            "connection receive window must appear in the applied transport config"
+        );
     }
 }

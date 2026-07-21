@@ -42,9 +42,9 @@
 //! ```
 
 use crate::{HttpRequest, HttpResponse};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
@@ -653,6 +653,66 @@ pub struct ResponseCache {
     /// stored response was keyed with, so `get` can rebuild the full key
     /// from a request and `invalidate` can find all variants.
     vary_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Insertion-order eviction bookkeeping, guarded independently but only ever
+    /// mutated while holding the `entries` write lock (so the two stay
+    /// consistent). See [`EvictionIndex`].
+    eviction: Mutex<EvictionIndex>,
+}
+
+/// Insertion-order eviction bookkeeping kept in lockstep with `entries`.
+///
+/// `order` holds variant cache keys oldest-first. It is maintained *lazily*:
+/// keys removed by invalidation or TTL purging are left in place and skipped
+/// when they surface during eviction, so finding the oldest live entry is O(1)
+/// amortized instead of an O(n) `min_by_key` scan of the whole map on every
+/// insert once the cache is full.
+///
+/// `base_key_counts` tracks how many live variants share each base key. It lets
+/// eviction decide in O(1) whether a base key's `vary_index` record is now dead
+/// (its last variant was just evicted) instead of a second O(n) scan over every
+/// entry's `base_key`.
+#[derive(Debug, Default)]
+struct EvictionIndex {
+    order: VecDeque<String>,
+    base_key_counts: HashMap<String, usize>,
+}
+
+impl EvictionIndex {
+    /// Record a freshly inserted variant key. `replaced` is true when an entry
+    /// already existed under `key`, so its base key must not be double-counted.
+    fn record_insert(&mut self, key: &str, base_key: &str, replaced: bool) {
+        self.order.push_back(key.to_string());
+        if !replaced {
+            *self
+                .base_key_counts
+                .entry(base_key.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Record removal of one variant with the given base key. Returns true when
+    /// that was the last live variant for the base key (its `vary_index` record
+    /// is now dead and should be pruned).
+    fn record_remove(&mut self, base_key: &str) -> bool {
+        if let Some(count) = self.base_key_counts.get_mut(base_key) {
+            *count -= 1;
+            if *count == 0 {
+                self.base_key_counts.remove(base_key);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether any live variant still references `base_key`.
+    fn base_key_live(&self, base_key: &str) -> bool {
+        self.base_key_counts.contains_key(base_key)
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.base_key_counts.clear();
+    }
 }
 
 /// Configuration for the response cache.
@@ -725,6 +785,7 @@ impl ResponseCache {
             config,
             entries: Arc::new(RwLock::new(HashMap::new())),
             vary_index: Arc::new(RwLock::new(HashMap::new())),
+            eviction: Mutex::new(EvictionIndex::default()),
         }
     }
 
@@ -814,7 +875,13 @@ impl ResponseCache {
                 evicted_base_key = self.evict_oldest(&mut entries);
             }
 
-            entries.insert(key_str, cached);
+            let replaced = entries.insert(key_str.clone(), cached).is_some();
+            // Track insertion order and base-key multiplicity so eviction stays
+            // O(1) amortized (see `EvictionIndex`).
+            self.eviction
+                .lock()
+                .unwrap()
+                .record_insert(&key_str, &base_key, replaced);
         }
 
         // Keep `vary_index` in lockstep with `entries`.
@@ -905,20 +972,23 @@ impl ResponseCache {
     /// `None` when the base key is still in use (another Vary variant remains)
     /// or the entry carried no tracked base key.
     fn evict_oldest(&self, entries: &mut HashMap<String, CachedResponse>) -> Option<String> {
-        // Find the oldest entry
-        let (oldest_key, oldest_base_key) = entries
-            .iter()
-            .min_by_key(|(_, v)| v.cached_at)
-            .map(|(k, v)| (k.clone(), v.base_key.clone()))?;
+        let mut index = self.eviction.lock().unwrap();
 
-        entries.remove(&oldest_key);
-
-        // Only report the base key as dead once its last variant is gone.
-        let base_key = oldest_base_key?;
-        let still_referenced = entries
-            .values()
-            .any(|v| v.base_key.as_deref() == Some(base_key.as_str()));
-        (!still_referenced).then_some(base_key)
+        // Pop insertion-ordered keys, skipping any already removed by
+        // invalidation or TTL purging, until we reach the oldest live entry.
+        // This replaces the previous O(n) `min_by_key` scan on the insert path.
+        while let Some(oldest_key) = index.order.pop_front() {
+            if let Some(removed) = entries.remove(&oldest_key) {
+                // Report the base key as dead only once its last variant is gone,
+                // decided in O(1) from the tracked counts rather than a second
+                // O(n) scan of every entry.
+                return match removed.base_key {
+                    Some(base_key) => index.record_remove(&base_key).then_some(base_key),
+                    None => None,
+                };
+            }
+        }
+        None
     }
 
     /// Remove a specific entry from the cache, including all Vary variants.
@@ -931,6 +1001,12 @@ impl ResponseCache {
         {
             let mut entries = self.entries.write().await;
             entries.retain(|key, _| key != &base_key && !key.starts_with(&variant_prefix));
+            // Every removed variant shared this base key, so drop its count.
+            self.eviction
+                .lock()
+                .unwrap()
+                .base_key_counts
+                .remove(&base_key);
         }
 
         let mut vary_index = self.vary_index.write().await;
@@ -939,8 +1015,19 @@ impl ResponseCache {
 
     /// Remove all entries matching a path prefix.
     pub async fn invalidate_prefix(&self, path_prefix: &str) {
+        let needle = format!(":{}", path_prefix);
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| !key.contains(&format!(":{}", path_prefix)));
+        let mut index = self.eviction.lock().unwrap();
+        entries.retain(|key, v| {
+            if key.contains(&needle) {
+                if let Some(bk) = &v.base_key {
+                    index.record_remove(bk);
+                }
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Clear all cached responses.
@@ -948,6 +1035,7 @@ impl ResponseCache {
         {
             let mut entries = self.entries.write().await;
             entries.clear();
+            self.eviction.lock().unwrap().clear();
         }
         let mut vary_index = self.vary_index.write().await;
         vary_index.clear();
@@ -961,8 +1049,10 @@ impl ResponseCache {
     pub async fn purge_stale(&self) {
         let dead_base_keys = {
             let mut entries = self.entries.write().await;
+            let mut index = self.eviction.lock().unwrap();
 
-            // Collect base keys of the stale entries being removed.
+            // Collect base keys of the stale entries being removed, decrementing
+            // their live-variant counts as we go.
             let mut removed_base_keys: Vec<String> = Vec::new();
             entries.retain(|_, v| {
                 if v.is_fresh() {
@@ -970,17 +1060,16 @@ impl ResponseCache {
                 } else {
                     if let Some(bk) = &v.base_key {
                         removed_base_keys.push(bk.clone());
+                        index.record_remove(bk);
                     }
                     false
                 }
             });
 
-            // Keep only base keys that no surviving entry still references.
-            removed_base_keys.retain(|bk| {
-                !entries
-                    .values()
-                    .any(|v| v.base_key.as_deref() == Some(bk.as_str()))
-            });
+            // Keep only base keys that no surviving entry still references —
+            // decided in O(1) from the tracked counts instead of scanning every
+            // remaining entry.
+            removed_base_keys.retain(|bk| !index.base_key_live(bk));
             removed_base_keys
         };
 
@@ -1501,6 +1590,43 @@ mod tests {
             vary_len,
             entries_len,
         );
+    }
+
+    /// Eviction removes entries in insertion order: once at capacity, the
+    /// oldest-inserted entry is the one dropped to make room, and newer entries
+    /// survive.
+    #[tokio::test]
+    async fn test_evicts_in_insertion_order() {
+        let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(3));
+
+        for i in 0..3 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            cache.store(&req, &HttpResponse::ok()).await;
+        }
+        for i in 0..3 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            assert!(cache.get(&req).await.is_some(), "/p{} should be cached", i);
+        }
+
+        // A fourth insert must evict the oldest (/p0), not any newer entry.
+        let req = HttpRequest::new("GET".to_string(), "/p3".to_string());
+        cache.store(&req, &HttpResponse::ok()).await;
+
+        let p0 = HttpRequest::new("GET".to_string(), "/p0".to_string());
+        assert!(
+            cache.get(&p0).await.is_none(),
+            "oldest entry (/p0) must be evicted first"
+        );
+        for i in 1..4 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            assert!(cache.get(&req).await.is_some(), "/p{} must remain", i);
+        }
+
+        // vary_index must not outgrow the live entry set after eviction.
+        let entries_len = cache.entries.read().await.len();
+        let vary_len = cache.vary_index.read().await.len();
+        assert!(entries_len <= 3);
+        assert!(vary_len <= entries_len);
     }
 
     /// Regression: TTL purging must also prune `vary_index` so expired entries
