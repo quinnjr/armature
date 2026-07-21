@@ -136,6 +136,86 @@ fn api_model_excludes_skipped_field_with_field_level_rename() {
     assert_eq!(json.get("id").unwrap(), 1);
 }
 
+// Regression coverage (fix round 2, finding 1): `apply_rename_all`'s
+// `"lowercase"`/`"UPPERCASE"` arms used to `words.concat()` before casing,
+// which strips underscores. serde's real `RenameRule::apply_to_field`
+// PRESERVES underscores for these two styles: `lowercase` is
+// `ident.to_lowercase()` (a no-op for an already-snake_case ident) and
+// `UPPERCASE` is `ident.to_ascii_uppercase()`. Against the old code, a
+// multi-word skipped field like `api_secret_key` computed a removal key of
+// `"apisecretkey"` / `"APISECRETKEY"`, which never matches the real wire key
+// (`"api_secret_key"` / `"API_SECRET_KEY"`), so the secret leaked.
+#[derive(ApiModel, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+struct LowercaseSecret {
+    id: i64,
+    #[api(skip)]
+    api_secret_key: String,
+}
+
+#[test]
+fn api_model_excludes_skipped_field_under_lowercase_rename_all() {
+    let s = LowercaseSecret {
+        id: 1,
+        api_secret_key: "shh".into(),
+    };
+    let json = s.to_json().unwrap();
+    assert!(
+        json.get("api_secret_key").is_none(),
+        "skipped field leaked under #[serde(rename_all = \"lowercase\")]: {json}"
+    );
+    assert_eq!(json.get("id").unwrap(), 1);
+}
+
+#[derive(ApiModel, Serialize, Deserialize, Default)]
+#[serde(rename_all = "UPPERCASE")]
+struct UppercaseSecret {
+    id: i64,
+    #[api(skip)]
+    api_secret_key: String,
+}
+
+#[test]
+fn api_model_excludes_skipped_field_under_uppercase_rename_all() {
+    let s = UppercaseSecret {
+        id: 1,
+        api_secret_key: "shh".into(),
+    };
+    let json = s.to_json().unwrap();
+    assert!(
+        json.get("API_SECRET_KEY").is_none(),
+        "skipped field leaked under #[serde(rename_all = \"UPPERCASE\")]: {json}"
+    );
+    assert_eq!(json.get("ID").unwrap(), 1);
+}
+
+// Regression coverage (fix round 2, finding 2): `serde_field_rename` used to
+// parse only the plain `rename = "x"` shape. The split
+// `rename(serialize = "..", deserialize = "..")` form fell through silently,
+// so a skipped field renamed that way leaked under its real (serialize-side)
+// wire key.
+#[derive(ApiModel, Serialize, Deserialize, Default)]
+struct SplitRenameSecret {
+    id: i64,
+    #[serde(rename(serialize = "secretKey", deserialize = "secret_key"))]
+    #[api(skip)]
+    secret: String,
+}
+
+#[test]
+fn api_model_excludes_skipped_field_with_split_rename() {
+    let t = SplitRenameSecret {
+        id: 1,
+        secret: "shh".into(),
+    };
+    let json = t.to_json().unwrap();
+    assert!(
+        json.get("secretKey").is_none(),
+        "skipped field leaked under #[serde(rename(serialize = ..))]: {json}"
+    );
+    assert_eq!(json.get("id").unwrap(), 1);
+}
+
 #[derive(Resource, Default)]
 #[resource(table = "users")]
 struct UserEntity {

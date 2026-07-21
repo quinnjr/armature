@@ -115,19 +115,32 @@ fn has_api_skip(field: &Field) -> bool {
 
 /// Extract a field-level `#[serde(rename = "...")]` value, if present.
 ///
-/// Only the plain `rename = "x"` shape is handled (not the
-/// `rename(serialize = "..", deserialize = "..")` split form), matching what
-/// `#[api(skip)]` needs to counteract: the key `serde_json::to_value` (via
-/// `Serialize`) actually emits.
+/// Handles both the plain `rename = "x"` shape and the split
+/// `rename(serialize = "..", deserialize = "..")` form — for the latter, the
+/// `serialize = ".."` value is used, since that's the key `serde_json::to_value`
+/// (via `Serialize`) actually emits (`to_json` is serialize-side; `#[api(skip)]`
+/// must counteract whatever key serialization produces, and `deserialize` never
+/// affects that).
 fn serde_field_rename(attrs: &[Attribute]) -> Option<String> {
     let mut renamed = None;
     for attr in attrs {
         if attr.path().is_ident("serde") {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename") {
-                    let value = meta.value()?;
-                    let lit: LitStr = value.parse()?;
-                    renamed = Some(lit.value());
+                    if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|nested| {
+                            let value = nested.value()?;
+                            let lit: LitStr = value.parse()?;
+                            if nested.path.is_ident("serialize") {
+                                renamed = Some(lit.value());
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let value = meta.value()?;
+                        let lit: LitStr = value.parse()?;
+                        renamed = Some(lit.value());
+                    }
                 }
                 Ok(())
             });
@@ -137,15 +150,31 @@ fn serde_field_rename(attrs: &[Attribute]) -> Option<String> {
 }
 
 /// Extract a struct-level `#[serde(rename_all = "...")]` value, if present.
+///
+/// Handles both the plain `rename_all = "x"` shape and the split
+/// `rename_all(serialize = "..", deserialize = "..")` form (serde supports
+/// this at the container level too), using the `serialize = ".."` value for
+/// the same reason as `serde_field_rename`.
 fn serde_container_rename_all(attrs: &[Attribute]) -> Option<String> {
     let mut style = None;
     for attr in attrs {
         if attr.path().is_ident("serde") {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename_all") {
-                    let value = meta.value()?;
-                    let lit: LitStr = value.parse()?;
-                    style = Some(lit.value());
+                    if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|nested| {
+                            let value = nested.value()?;
+                            let lit: LitStr = value.parse()?;
+                            if nested.path.is_ident("serialize") {
+                                style = Some(lit.value());
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let value = meta.value()?;
+                        let lit: LitStr = value.parse()?;
+                        style = Some(lit.value());
+                    }
                 }
                 Ok(())
             });
@@ -176,8 +205,15 @@ fn apply_rename_all(ident: &str, style: &str) -> String {
     }
 
     match style {
-        "lowercase" => words.concat().to_lowercase(),
-        "UPPERCASE" => words.concat().to_uppercase(),
+        // serde's real `RenameRule::apply_to_field` operates on the whole
+        // ident string for these two styles, PRESERVING underscores
+        // (`lowercase` -> `ident.to_lowercase()`, a no-op for an
+        // already-snake_case ident; `UPPERCASE` ->
+        // `ident.to_ascii_uppercase()`). Concatenating the split words (the
+        // old behavior) strips underscores and produces a removal key that
+        // never matches the real wire key for multi-word fields.
+        "lowercase" => ident.to_lowercase(),
+        "UPPERCASE" => ident.to_ascii_uppercase(),
         "PascalCase" => words.iter().map(|w| capitalize(w)).collect(),
         "camelCase" => words
             .iter()
