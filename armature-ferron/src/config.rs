@@ -421,8 +421,8 @@ impl ProxyRoute {
 pub struct FerronConfig {
     /// Domain name(s) for this server block
     pub domains: Vec<String>,
-    /// Default backend URL
-    pub backend: Option<String>,
+    /// Default backend (used when no load balancer is configured)
+    pub backend: Option<Backend>,
     /// Load balancer configuration (for multiple backends)
     pub load_balancer: Option<LoadBalancer>,
     /// Location blocks for path-based routing
@@ -496,7 +496,7 @@ impl FerronConfig {
         }
 
         if let Some(ref backend) = self.backend {
-            Url::parse(backend)?;
+            backend.validate()?;
         }
 
         if let Some(ref lb) = self.load_balancer {
@@ -521,8 +521,27 @@ impl FerronConfig {
         self.validate()?;
         let mut output = String::new();
 
-        // Domain block
-        let domains = self.domains.join(" ");
+        // Domain block. Ferron encodes a non-default listen port for a virtual
+        // host via `host:port` (see https://ferron.sh/docs/configuration/fundamentals),
+        // so a custom http_port/https_port is rendered as a suffix on each domain
+        // rather than as a separate directive. The HTTPS port applies when TLS is
+        // configured for this block, otherwise the HTTP port applies; Ferron's
+        // single-listener-per-block model can't express independently customized
+        // HTTP *and* HTTPS ports for the same block.
+        let port_suffix = match &self.tls {
+            Some(_) if self.https_port != 443 => Some(self.https_port),
+            None if self.http_port != 80 => Some(self.http_port),
+            _ => None,
+        };
+        let domains = self
+            .domains
+            .iter()
+            .map(|d| match port_suffix {
+                Some(port) => format!("{}:{}", d, port),
+                None => d.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         writeln!(output, "{} {{", domains).map_err(|e| FerronError::config(e.to_string()))?;
 
         // TLS configuration
@@ -559,9 +578,18 @@ impl FerronConfig {
             }
         }
 
-        // Logging
-        if let Some(ref access_log) = self.access_log {
+        // Logging. Access logging is gated on the `logging` toggle; error
+        // logging (a separate concern in Ferron - see `error_log` directive)
+        // is always emitted when a path is configured.
+        if self.logging
+            && let Some(ref access_log) = self.access_log
+        {
             writeln!(output, "    log \"{}\"", access_log)
+                .map_err(|e| FerronError::config(e.to_string()))?;
+        }
+
+        if let Some(ref error_log) = self.error_log {
+            writeln!(output, "    error_log \"{}\"", error_log)
                 .map_err(|e| FerronError::config(e.to_string()))?;
         }
 
@@ -591,18 +619,7 @@ impl FerronConfig {
             .map_err(|e| FerronError::config(e.to_string()))?;
 
             for backend in &lb.backends {
-                let mut proxy_line = format!("    proxy \"{}\"", backend.url);
-                if backend.weight != 1 {
-                    proxy_line.push_str(&format!(" weight={}", backend.weight));
-                }
-                if backend.backup {
-                    proxy_line.push_str(" backup");
-                }
-                if let Some(max_conn) = backend.max_connections {
-                    proxy_line.push_str(&format!(" max_conn={}", max_conn));
-                }
-                writeln!(output, "{}", proxy_line)
-                    .map_err(|e| FerronError::config(e.to_string()))?;
+                write_backend_proxy(&mut output, "    ", backend)?;
             }
 
             if let Some(interval) = lb.health_check_interval {
@@ -616,8 +633,7 @@ impl FerronConfig {
                 writeln!(output, "{}", hc_line).map_err(|e| FerronError::config(e.to_string()))?;
             }
         } else if let Some(ref backend) = self.backend {
-            writeln!(output, "    proxy \"{}\"", backend)
-                .map_err(|e| FerronError::config(e.to_string()))?;
+            write_backend_proxy(&mut output, "    ", backend)?;
         }
 
         // Location blocks
@@ -671,6 +687,16 @@ impl FerronConfig {
             writeln!(output, "    location \"{}\"{}  {{", route.path, attrs)
                 .map_err(|e| FerronError::config(e.to_string()))?;
 
+            // Rewrite the path (prepending the prefix) before proxying, using
+            // Ferron's real `rewrite <regex> <replacement>` directive
+            // (https://ferron.sh/docs/configuration/routing-url-processing):
+            // matching `^` (the empty string at the start) and replacing it
+            // with the prefix inserts it at the beginning of the path.
+            if let Some(ref prefix) = route.add_prefix {
+                writeln!(output, "        rewrite \"^\" \"{}\"", prefix)
+                    .map_err(|e| FerronError::config(e.to_string()))?;
+            }
+
             writeln!(output, "        proxy \"{}\"", route.backend)
                 .map_err(|e| FerronError::config(e.to_string()))?;
 
@@ -700,6 +726,47 @@ impl FerronConfig {
     }
 }
 
+/// Render a single `proxy` directive for `backend`, including its weight,
+/// backup, max_connections, and timeout attributes, plus a nested block of
+/// `header` directives when the backend declares custom headers. Shared by
+/// both the load-balanced (multi-backend) and single-backend `to_kdl()`
+/// paths so neither one silently drops backend options.
+fn write_backend_proxy(output: &mut String, indent: &str, backend: &Backend) -> Result<()> {
+    let mut proxy_line = format!("{}proxy \"{}\"", indent, backend.url);
+    if backend.weight != 1 {
+        proxy_line.push_str(&format!(" weight={}", backend.weight));
+    }
+    if backend.backup {
+        proxy_line.push_str(" backup");
+    }
+    if let Some(max_conn) = backend.max_connections {
+        proxy_line.push_str(&format!(" max_conn={}", max_conn));
+    }
+    if let Some(timeout) = backend.timeout {
+        proxy_line.push_str(&format!(" timeout={}", timeout));
+    }
+
+    if backend.headers.is_empty() {
+        writeln!(output, "{}", proxy_line).map_err(|e| FerronError::config(e.to_string()))?;
+    } else {
+        writeln!(output, "{} {{", proxy_line).map_err(|e| FerronError::config(e.to_string()))?;
+        // Sort header names for deterministic output.
+        let mut names: Vec<&String> = backend.headers.keys().collect();
+        names.sort();
+        for name in names {
+            writeln!(
+                output,
+                "{}    header \"{}\" \"{}\"",
+                indent, name, backend.headers[name]
+            )
+            .map_err(|e| FerronError::config(e.to_string()))?;
+        }
+        writeln!(output, "{}}}", indent).map_err(|e| FerronError::config(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
 /// Builder for FerronConfig
 #[derive(Debug, Clone, Default)]
 pub struct FerronConfigBuilder {
@@ -721,15 +788,16 @@ impl FerronConfigBuilder {
         self
     }
 
-    /// Set the default backend
+    /// Set the default backend, preserving its weight/timeout/headers/
+    /// max_connections/backup so they reach the generated KDL.
     pub fn backend(mut self, backend: Backend) -> Self {
-        self.config.backend = Some(backend.url);
+        self.config.backend = Some(backend);
         self
     }
 
     /// Set the default backend URL
     pub fn backend_url(mut self, url: impl Into<String>) -> Self {
-        self.config.backend = Some(url.into());
+        self.config.backend = Some(Backend::new(url));
         self
     }
 
@@ -862,7 +930,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.domains, vec!["api.example.com"]);
-        assert_eq!(config.backend, Some("http://localhost:3000".to_string()));
+        assert_eq!(
+            config.backend.as_ref().map(|b| b.url.as_str()),
+            Some("http://localhost:3000")
+        );
         assert!(config.tls.is_some());
         assert!(config.gzip);
     }
@@ -910,5 +981,160 @@ mod tests {
         let result = FerronConfig::builder().domain("example.com").build();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_kdl_lb_backend_emits_timeout_and_headers() {
+        let lb = LoadBalancer::new().backend(
+            Backend::new("http://backend1:3000")
+                .weight(5)
+                .max_connections(50)
+                .timeout(45)
+                .backup()
+                .header("X-Backend-Auth", "secret"),
+        );
+
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .load_balancer(lb)
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(kdl.contains("weight=5"), "kdl:\n{kdl}");
+        assert!(kdl.contains("max_conn=50"), "kdl:\n{kdl}");
+        assert!(kdl.contains("timeout=45"), "kdl:\n{kdl}");
+        assert!(kdl.contains("backup"), "kdl:\n{kdl}");
+        assert!(
+            kdl.contains("header \"X-Backend-Auth\" \"secret\""),
+            "kdl:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn test_kdl_single_backend_emits_all_backend_options() {
+        // FerronConfigBuilder::backend() must retain the full Backend (not
+        // just its URL) so weight/timeout/headers/max_connections/backup
+        // reach the generated KDL for the single-backend path too.
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend(
+                Backend::new("http://localhost:3000")
+                    .weight(7)
+                    .max_connections(20)
+                    .timeout(15)
+                    .backup()
+                    .header("X-Single-Backend", "yes"),
+            )
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(
+            kdl.contains("proxy \"http://localhost:3000\""),
+            "kdl:\n{kdl}"
+        );
+        assert!(kdl.contains("weight=7"), "kdl:\n{kdl}");
+        assert!(kdl.contains("max_conn=20"), "kdl:\n{kdl}");
+        assert!(kdl.contains("timeout=15"), "kdl:\n{kdl}");
+        assert!(kdl.contains("backup"), "kdl:\n{kdl}");
+        assert!(
+            kdl.contains("header \"X-Single-Backend\" \"yes\""),
+            "kdl:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn test_kdl_emits_custom_http_port() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .http_port(8080)
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(kdl.contains("api.example.com:8080"), "kdl:\n{kdl}");
+    }
+
+    #[test]
+    fn test_kdl_emits_custom_https_port() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .tls_auto(true)
+            .https_port(8443)
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(kdl.contains("api.example.com:8443"), "kdl:\n{kdl}");
+    }
+
+    #[test]
+    fn test_kdl_default_ports_omit_suffix() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        // No custom ports configured, so the domain line must not carry a
+        // ":80"/":443" suffix.
+        let domain_line = kdl.lines().next().unwrap();
+        assert_eq!(domain_line, "api.example.com {");
+    }
+
+    #[test]
+    fn test_kdl_error_log_emitted_and_access_log_gated_on_logging() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .access_log("/var/log/ferron/access.log")
+            .error_log("/var/log/ferron/error.log")
+            .logging(false)
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(
+            kdl.contains("error_log \"/var/log/ferron/error.log\""),
+            "kdl:\n{kdl}"
+        );
+        assert!(
+            !kdl.contains("log \"/var/log/ferron/access.log\""),
+            "access log should be gated off when logging=false; kdl:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn test_kdl_access_log_emitted_when_logging_enabled() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .access_log("/var/log/ferron/access.log")
+            .logging(true)
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(
+            kdl.contains("log \"/var/log/ferron/access.log\""),
+            "kdl:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn test_kdl_add_prefix_emits_rewrite_directive() {
+        let config = FerronConfig::builder()
+            .domain("api.example.com")
+            .backend_url("http://localhost:3000")
+            .route(ProxyRoute::new("/legacy", "http://localhost:4000").add_prefix("/v2"))
+            .build()
+            .unwrap();
+
+        let kdl = config.to_kdl().unwrap();
+        assert!(kdl.contains("rewrite \"^\" \"/v2\""), "kdl:\n{kdl}");
     }
 }

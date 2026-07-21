@@ -11,7 +11,7 @@ use crate::registry::ServiceRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Ferron manager for complete proxy lifecycle management
 pub struct FerronManager {
@@ -27,9 +27,10 @@ pub struct FerronManager {
     health_state: Option<Arc<HealthState>>,
     /// Auto-reload on config changes
     auto_reload: bool,
-    /// Watch handle for config file changes
-    #[allow(dead_code)]
-    watch_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Watch handle for the background config-file watcher task, populated
+    /// by `build()` when `auto_reload` is enabled and a Tokio runtime is
+    /// available to run it on.
+    watch_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl FerronManager {
@@ -46,6 +47,13 @@ impl FerronManager {
     /// Get process ID if running
     pub async fn pid(&self) -> Option<u32> {
         self.process.pid().await
+    }
+
+    /// Whether a background config-file watcher task is currently running
+    /// for this manager (populated by `build()` when `auto_reload` is
+    /// enabled).
+    pub async fn is_watching(&self) -> bool {
+        self.watch_handle.read().await.is_some()
     }
 
     /// Start Ferron with the current configuration
@@ -267,8 +275,14 @@ impl FerronManagerBuilder {
         self
     }
 
-    /// Build the FerronManager
-    pub fn build(self) -> Result<FerronManager> {
+    /// Build the FerronManager.
+    ///
+    /// Returns an `Arc<FerronManager>` (rather than a bare `FerronManager`)
+    /// because when `auto_reload` is enabled, `build()` spawns a background
+    /// task that watches `config_path` for changes and calls back into the
+    /// manager to reload -- that task needs a shared, cloneable handle to
+    /// the manager it's watching on behalf of.
+    pub fn build(self) -> Result<Arc<FerronManager>> {
         let config_path = self
             .config_path
             .unwrap_or_else(|| PathBuf::from("/etc/ferron/ferron.conf"));
@@ -295,16 +309,131 @@ impl FerronManagerBuilder {
             std::fs::write(&config_path, kdl)?;
         }
 
-        Ok(FerronManager {
+        let auto_reload = self.auto_reload;
+        let manager = Arc::new(FerronManager {
             config_path,
             config: Arc::new(RwLock::new(self.config)),
             process: Arc::new(FerronProcess::new(process_config)),
             registry: self.registry,
             health_state,
-            auto_reload: self.auto_reload,
-            watch_handle: None,
-        })
+            auto_reload,
+            watch_handle: Arc::new(RwLock::new(None)),
+        });
+
+        if auto_reload {
+            match spawn_config_watcher(Arc::clone(&manager)) {
+                Ok(Some(join)) => {
+                    // `build()` is synchronous, so populate the freshly
+                    // constructed (and therefore uncontended) lock via
+                    // `try_write()` rather than requiring an async context.
+                    if let Ok(mut guard) = manager.watch_handle.try_write() {
+                        *guard = Some(join);
+                    }
+                }
+                Ok(None) => {
+                    // No Tokio runtime available (e.g. built outside an
+                    // async context); skip watching rather than panicking.
+                }
+                Err(e) => {
+                    warn!("Failed to start Ferron config file watcher: {}", e);
+                }
+            }
+        }
+
+        Ok(manager)
     }
+}
+
+/// Spawn a background task that watches `manager.config_path` for changes
+/// using `notify`, reloading the manager (regenerating config from the
+/// service registry, then signalling the Ferron process) whenever the file
+/// is modified or (re)created -- covering both in-place writes and
+/// atomic-replace-via-rename editors.
+///
+/// Returns `Ok(None)` (rather than spawning anything) if no Tokio runtime
+/// handle is currently available, so this can safely be called from
+/// synchronous contexts like `build()`.
+fn spawn_config_watcher(
+    manager: Arc<FerronManager>,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+
+    let rt = match tokio::runtime::Handle::try_current() {
+        Ok(rt) => rt,
+        Err(_) => {
+            warn!(
+                "No active Tokio runtime; skipping config file watcher for {}",
+                manager.config_path.display()
+            );
+            return Ok(None);
+        }
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Result<Event>>();
+
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+        // The receiver only goes away when the watcher task itself exits,
+        // at which point `watcher` (held by that same task) has already
+        // been dropped, so sends can't race a live watcher.
+        let _ = tx.send(res);
+    })
+    .map_err(|e| FerronError::Watch(e.to_string()))?;
+
+    // Watch the parent directory (not the file directly): this tolerates
+    // the config file not existing yet, and also covers editors/writers
+    // that replace the file via rename rather than in-place write.
+    let watch_target = manager
+        .config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    watcher
+        .watch(&watch_target, RecursiveMode::NonRecursive)
+        .map_err(|e| FerronError::Watch(e.to_string()))?;
+
+    let watch_path = manager.config_path.clone();
+    let watch_file_name = watch_path.file_name().map(|n| n.to_owned());
+
+    let join = rt.spawn(async move {
+        // Keep the watcher alive for the lifetime of this task; dropping it
+        // would stop delivery of further events.
+        let _watcher = watcher;
+
+        while let Some(res) = rx.recv().await {
+            let event = match res {
+                Ok(event) => event,
+                Err(e) => {
+                    warn!("Config file watch error: {}", e);
+                    continue;
+                }
+            };
+
+            let is_relevant = event
+                .paths
+                .iter()
+                .any(|p| p.file_name() == watch_file_name.as_deref())
+                && (event.kind.is_modify() || event.kind.is_create());
+            if !is_relevant {
+                continue;
+            }
+
+            if !manager.auto_reload {
+                continue;
+            }
+
+            info!(
+                "Detected change to {}, reloading Ferron",
+                watch_path.display()
+            );
+            if let Err(e) = manager.reload().await {
+                warn!("Failed to reload Ferron after config change: {}", e);
+            }
+        }
+    });
+
+    Ok(Some(join))
 }
 
 /// Convenience functions for common Ferron operations
@@ -381,7 +510,10 @@ mod tests {
         let config = helpers::reverse_proxy_config("example.com", "http://localhost:3000").unwrap();
 
         assert_eq!(config.domains, vec!["example.com"]);
-        assert_eq!(config.backend, Some("http://localhost:3000".to_string()));
+        assert_eq!(
+            config.backend.as_ref().map(|b| b.url.as_str()),
+            Some("http://localhost:3000")
+        );
         assert!(config.tls.is_some());
     }
 
@@ -416,7 +548,10 @@ mod tests {
             .build()
             .unwrap();
 
-        // Builder should work even without Ferron installed
+        // Builder should work even without Ferron installed. This is a
+        // plain (non-tokio) #[test] intentionally: build() must not panic
+        // even when there's no active Tokio runtime to spawn the watcher
+        // task on (it should just skip watching and log a warning).
         let result = FerronManager::builder()
             .binary_path("/nonexistent/ferron")
             .config_path("/tmp/test_ferron.conf")
@@ -426,5 +561,108 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_spawns_watcher_when_auto_reload_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        let config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(config)
+            .auto_reload(true)
+            .build()
+            .unwrap();
+
+        assert!(
+            manager.is_watching().await,
+            "watch_handle must be populated when auto_reload is enabled and \
+             a Tokio runtime is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_does_not_spawn_watcher_without_auto_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        let config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(config)
+            .auto_reload(false)
+            .build()
+            .unwrap();
+
+        assert!(!manager.is_watching().await);
+    }
+
+    #[tokio::test]
+    async fn test_watcher_reloads_config_from_registry_on_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+
+        let base_config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let registry = ServiceRegistry::new();
+        registry
+            .register("svc", "http://127.0.0.1:9999")
+            .await
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(base_config)
+            .service_registry(registry)
+            .auto_reload(true)
+            .build()
+            .unwrap();
+
+        assert!(manager.is_watching().await);
+
+        // Simulate an external edit to the config file.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::fs::write(&config_path, "// externally modified\n")
+            .await
+            .unwrap();
+
+        // The watcher should notice the change and call reload(), which
+        // regenerates the config from the service registry (and writes it
+        // back out) before attempting -- and failing, since no real Ferron
+        // process is running -- to signal the process. The regenerated
+        // file content is therefore observable proof the watcher fired.
+        let mut saw_reload = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let contents = tokio::fs::read_to_string(&config_path)
+                .await
+                .unwrap_or_default();
+            if contents.contains("127.0.0.1:9999") {
+                saw_reload = true;
+                break;
+            }
+        }
+
+        assert!(
+            saw_reload,
+            "expected the config file watcher to trigger a registry-backed reload"
+        );
     }
 }

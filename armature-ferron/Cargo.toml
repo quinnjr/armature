@@ -20,9 +20,6 @@ thiserror = "2.0"
 tracing = "0.1"
 async-trait = "0.1"
 
-# Configuration generation
-kdl = "6.5"
-
 # Process management
 nix = { version = "0.31", features = ["signal", "process"] }
 
@@ -31,9 +28,6 @@ reqwest = { version = "0.13", features = ["json"], default-features = false }
 
 # File watching for config reload
 notify = "8.2"
-
-# Template rendering
-handlebars = "6.4"
 
 # URL parsing
 url = "2.5"

@@ -164,6 +164,25 @@ impl ProcessConfig {
     }
 }
 
+/// Open a log file for append, once, ahead of a stdout/stderr forwarding
+/// loop. Returns `None` if no path is configured, or if the file could not
+/// be opened (the failure is logged so it isn't silently swallowed).
+async fn open_forward_log(path: Option<&Path>, stream_name: &str) -> Option<tokio::fs::File> {
+    let path = path?;
+    match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("Failed to open {} log file {:?}: {}", stream_name, path, e);
+            None
+        }
+    }
+}
+
 /// Ferron process handle
 #[derive(Debug)]
 pub struct FerronProcess {
@@ -235,10 +254,13 @@ impl FerronProcess {
         cmd.stderr(Stdio::piped());
 
         // Start the process
-        let mut child = cmd.spawn().map_err(|e| {
-            *futures::executor::block_on(self.status.write()) = ProcessStatus::Error;
-            FerronError::StartFailed(e.to_string())
-        })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                *self.status.write().await = ProcessStatus::Error;
+                return Err(FerronError::StartFailed(e.to_string()));
+            }
+        };
 
         let pid = child.id();
         *self.pid.write().await = pid;
@@ -251,28 +273,24 @@ impl FerronProcess {
             warn!("Failed to write PID file: {}", e);
         }
 
-        // Spawn stdout/stderr handlers
+        // Spawn stdout/stderr handlers. Each log file (if configured) is
+        // opened once before the read loop and reused for every line, and
+        // writes are `.await`ed directly rather than blocking the tokio
+        // worker thread via `futures::executor::block_on`.
         if let Some(stdout) = child.stdout.take() {
             let stdout_log = self.config.stdout_log.clone();
             tokio::spawn(async move {
+                let mut log_file = open_forward_log(stdout_log.as_deref(), "stdout").await;
+
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     debug!("[ferron] {}", line);
-                    if let Some(ref log_path) = stdout_log
-                        && let Err(e) = tokio::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(log_path)
-                            .await
-                            .and_then(|mut f| {
-                                use tokio::io::AsyncWriteExt;
-                                futures::executor::block_on(
-                                    f.write_all(format!("{}\n", line).as_bytes()),
-                                )
-                            })
-                    {
-                        warn!("Failed to write to stdout log: {}", e);
+                    if let Some(ref mut f) = log_file {
+                        use tokio::io::AsyncWriteExt;
+                        if let Err(e) = f.write_all(format!("{}\n", line).as_bytes()).await {
+                            warn!("Failed to write to stdout log: {}", e);
+                        }
                     }
                 }
             });
@@ -281,24 +299,17 @@ impl FerronProcess {
         if let Some(stderr) = child.stderr.take() {
             let stderr_log = self.config.stderr_log.clone();
             tokio::spawn(async move {
+                let mut log_file = open_forward_log(stderr_log.as_deref(), "stderr").await;
+
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     warn!("[ferron] {}", line);
-                    if let Some(ref log_path) = stderr_log
-                        && let Err(e) = tokio::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(log_path)
-                            .await
-                            .and_then(|mut f| {
-                                use tokio::io::AsyncWriteExt;
-                                futures::executor::block_on(
-                                    f.write_all(format!("{}\n", line).as_bytes()),
-                                )
-                            })
-                    {
-                        warn!("Failed to write to stderr log: {}", e);
+                    if let Some(ref mut f) = log_file {
+                        use tokio::io::AsyncWriteExt;
+                        if let Err(e) = f.write_all(format!("{}\n", line).as_bytes()).await {
+                            warn!("Failed to write to stderr log: {}", e);
+                        }
                     }
                 }
             });
@@ -423,25 +434,44 @@ impl FerronProcess {
     }
 
     /// Check if the process is still running
+    ///
+    /// This combines two checks so an exited-but-unreaped zombie child isn't
+    /// misreported as running:
+    ///
+    /// 1. `try_wait()` performs a non-blocking `waitpid`, which reaps the
+    ///    child if it has already exited. Since a zombie remains visible to
+    ///    signal-based existence probes until reaped, this must run first.
+    /// 2. A signal-0 (`None`) probe confirms the process still exists in the
+    ///    kernel's process table; sending signal `None` never actually
+    ///    delivers a signal, it only checks for existence/permission.
     pub async fn is_running(&self) -> bool {
-        let child_guard = self.child.read().await;
-        if child_guard.is_some() {
-            // Check if process is still alive
-            if let Some(pid) = *self.pid.read().await {
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{self, Signal};
-                    use nix::unistd::Pid;
-                    // Signal 0 just checks if process exists
-                    return signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok();
-                }
-                #[cfg(not(unix))]
-                {
-                    return true; // Assume running on non-Unix
-                }
-            }
+        let mut child_guard = self.child.write().await;
+        let Some(child) = child_guard.as_mut() else {
+            return false;
+        };
+
+        // Reap the child if it has already exited (handles zombies).
+        if !matches!(child.try_wait(), Ok(None)) {
+            return false;
         }
-        false
+
+        let Some(pid) = *self.pid.read().await else {
+            return false;
+        };
+
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{self, Signal};
+            use nix::unistd::Pid;
+            // `None` sends signal 0: it only checks whether the process
+            // exists (and is signalable), without actually delivering a
+            // signal.
+            signal::kill(Pid::from_raw(pid as i32), None::<Signal>).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            true // Assume running on non-Unix
+        }
     }
 
     /// Start with auto-restart on crash
@@ -552,5 +582,74 @@ mod tests {
 
         assert_eq!(process.status().await, ProcessStatus::Stopped);
         assert!(process.pid().await.is_none());
+    }
+
+    // The following tests spawn `/bin/sh` as the "ferron binary". `start()`
+    // always invokes it as `<binary> -c <config_path> ...extra_args`, and
+    // since `/bin/sh -c <string>` interprets `<string>` as a shell command,
+    // setting `config_path` to a shell command (e.g. "sleep 5") gives us a
+    // real, short-lived, offline child process without needing an actual
+    // Ferron binary or any network/Docker dependency.
+
+    #[tokio::test]
+    async fn test_is_running_true_while_child_is_alive() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let config = ProcessConfig::new("/bin/sh", "sleep 5").pid_file(pid_file.path());
+        let process = FerronProcess::new(config);
+
+        process.start().await.unwrap();
+        assert!(
+            process.is_running().await,
+            "a freshly started, still-sleeping child must report running"
+        );
+
+        // Clean up the still-sleeping child rather than leaving it orphaned
+        // for the remainder of its 5-second sleep.
+        process.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_is_running_false_for_exited_unreaped_zombie() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        // `true` exits (almost) immediately on its own. Crucially, the test
+        // never calls stop()/wait() itself, so the child is never reaped by
+        // our own code before is_running() is asked about it -- exactly the
+        // "exited but unreaped" zombie scenario from the audit.
+        let config = ProcessConfig::new("/bin/sh", "true").pid_file(pid_file.path());
+        let process = FerronProcess::new(config);
+
+        process.start().await.unwrap();
+
+        // Give the child a moment to actually exit at the OS level.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        assert!(
+            !process.is_running().await,
+            "an exited-but-unreaped (zombie) child must not be reported as running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stdout_log_forwarding_writes_all_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("stdout.log");
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+
+        let config = ProcessConfig::new("/bin/sh", "printf 'line1\\nline2\\nline3\\n'")
+            .pid_file(pid_file.path())
+            .stdout_log(log_path.clone());
+
+        let process = FerronProcess::new(config);
+        process.start().await.unwrap();
+
+        // Wait for the (fast-exiting) child to finish.
+        let _ = process.wait().await;
+        // Give the forwarding task a brief moment to flush its final write.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let contents = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(contents.contains("line1"), "contents:\n{contents}");
+        assert!(contents.contains("line2"), "contents:\n{contents}");
+        assert!(contents.contains("line3"), "contents:\n{contents}");
     }
 }
