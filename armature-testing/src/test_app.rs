@@ -90,6 +90,14 @@ pub struct TestAppBuilder {
     router: Router,
 }
 
+/// Maximum `imports()`/`re_exports()` nesting depth `wire_module` will
+/// recurse through before panicking. Guards against a self-importing or
+/// mutually-cyclic module graph recursing unboundedly and overflowing the
+/// stack (which would abort the whole test binary rather than fail a single
+/// test). 64 levels is far beyond any real module hierarchy while still
+/// panicking well before the stack is at risk.
+const WIRE_MODULE_MAX_DEPTH: usize = 64;
+
 impl TestAppBuilder {
     /// Create a new test app builder
     pub fn new() -> Self {
@@ -136,12 +144,16 @@ impl TestAppBuilder {
     ///
     /// Panics if a controller factory or route registrar returns an error —
     /// a misconfigured module should fail the test loudly rather than
-    /// silently register nothing. Also panics (stack overflow) on a
-    /// self-importing module cycle; `Application::create`'s own
-    /// `type_name_of_val`-keyed visited-set cannot reliably guard against
-    /// that either (see above), so this is not a regression.
+    /// silently register nothing. Also panics if the import graph nests
+    /// deeper than `WIRE_MODULE_MAX_DEPTH` levels — a self-importing or
+    /// mutually-cyclic module graph would otherwise recurse unboundedly and
+    /// overflow the stack, aborting the whole test binary; panicking with a
+    /// clear message is the fail-loud alternative. `Application::create`'s
+    /// own `type_name_of_val`-keyed visited-set cannot reliably guard
+    /// against cycles either (see above), so the depth cap is not a
+    /// regression relative to it.
     pub fn add_module<M: Module>(mut self, module: M) -> Self {
-        Self::wire_module(&self.container, &mut self.router, &module);
+        Self::wire_module(&self.container, &mut self.router, &module, 0);
         self
     }
 
@@ -149,12 +161,22 @@ impl TestAppBuilder {
     /// `container`/`router`. Mirrors `armature_core::Application`'s private
     /// `register_module` wiring (minus guard scoping and diamond dedup; see
     /// `add_module`'s doc comment for why).
-    fn wire_module(container: &Container, router: &mut Router, module: &dyn Module) {
+    ///
+    /// `depth` counts levels of `imports()`/`re_exports()` nesting below the
+    /// module passed to `add_module` (which is depth 0). It exists solely to
+    /// cap unbounded recursion on cyclic import graphs — see
+    /// `WIRE_MODULE_MAX_DEPTH`.
+    fn wire_module(container: &Container, router: &mut Router, module: &dyn Module, depth: usize) {
+        if depth >= WIRE_MODULE_MAX_DEPTH {
+            panic!(
+                "module import graph exceeds depth {WIRE_MODULE_MAX_DEPTH} — cyclic imports?"
+            );
+        }
         for imported in module.imports() {
-            Self::wire_module(container, router, imported.as_ref());
+            Self::wire_module(container, router, imported.as_ref(), depth + 1);
         }
         for re_exported in module.re_exports() {
-            Self::wire_module(container, router, re_exported.as_ref());
+            Self::wire_module(container, router, re_exported.as_ref(), depth + 1);
         }
 
         for provider_reg in module.providers() {
@@ -457,5 +479,33 @@ mod tests {
         let ping_response = app.client().get("/ping").await;
         assert_eq!(ping_response.status(), Some(200));
         assert_eq!(ping_response.body_string(), Some("pong".to_string()));
+    }
+
+    // -- wire_module: cyclic import graphs must not overflow the stack ---
+
+    /// A module that imports itself. Without a recursion-depth guard,
+    /// wiring this in would recurse `wire_module` unboundedly and overflow
+    /// the stack, aborting the whole test binary rather than failing this
+    /// one test.
+    struct SelfImportingModule;
+    impl Module for SelfImportingModule {
+        fn providers(&self) -> Vec<ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(SelfImportingModule)]
+        }
+        fn exports(&self) -> Vec<TypeId> {
+            vec![]
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "module import graph exceeds depth 64 — cyclic imports?")]
+    fn add_module_panics_on_self_importing_cycle_instead_of_overflowing_stack() {
+        let _ = TestAppBuilder::new().add_module(SelfImportingModule);
     }
 }
