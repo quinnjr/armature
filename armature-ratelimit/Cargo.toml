@@ -1,6 +1,6 @@
 [package]
 name = "armature-ratelimit"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -44,4 +44,8 @@ full = ["redis"]
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
+# Docker-backed Redis for the Redis-store regression tests. Self-skips when
+# Docker is unavailable (see `skip_if_no_docker!`), so the default `cargo test`
+# never requires a container.
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 

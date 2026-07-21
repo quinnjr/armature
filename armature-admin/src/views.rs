@@ -2,9 +2,11 @@
 
 use crate::{
     ListParams,
-    field::FieldDefinition,
+    config::AdminConfig,
+    data::value_to_plain_string,
+    field::{FieldDefinition, FieldType},
     model::ModelDefinition,
-    ui::{Breadcrumb, FilterDef, Pagination, TableColumn, TableRow},
+    ui::{Breadcrumb, CellType, FilterDef, Pagination, TableCell, TableColumn, TableRow},
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,8 +48,12 @@ pub struct ListView {
 }
 
 impl ListView {
-    /// Create a new list view
-    pub fn new(model: &ModelDefinition, params: ListParams) -> Self {
+    /// Create a new list view.
+    ///
+    /// `per_page` is the already-resolved page size (see
+    /// [`ListParams::resolve_per_page`]); rows are filled in separately from a
+    /// [`crate::data::DataSource`] via [`ListView::with_json_rows`].
+    pub fn new(model: &ModelDefinition, params: ListParams, per_page: usize) -> Self {
         let columns = model
             .display_fields()
             .iter()
@@ -109,8 +115,8 @@ impl ListView {
                 Breadcrumb::new(&model.verbose_name),
             ],
             columns,
-            rows: Vec::new(), // Would be populated from database
-            pagination: Pagination::new(params.page(), 25, 0),
+            rows: Vec::new(), // Populated from the data source via `with_json_rows`.
+            pagination: Pagination::new(params.page(), per_page.max(1), 0),
             filters,
             search_query: params.search,
             can_add: model.can_add,
@@ -123,11 +129,94 @@ impl ListView {
         }
     }
 
-    /// Set rows (from database query)
+    /// Set pre-built rows (from a data source), recomputing pagination.
     pub fn with_rows(mut self, rows: Vec<TableRow>, total: usize) -> Self {
         self.rows = rows;
         self.pagination = Pagination::new(self.pagination.page, self.pagination.per_page, total);
         self
+    }
+
+    /// Populate rows from raw JSON records returned by a
+    /// [`crate::data::DataSource`], rendering each display column's cell and
+    /// honoring the configured date/datetime formats.
+    pub fn with_json_rows(
+        self,
+        model: &ModelDefinition,
+        config: &AdminConfig,
+        records: &[serde_json::Value],
+        total: usize,
+    ) -> Self {
+        let rows = records
+            .iter()
+            .map(|record| build_table_row(model, config, record))
+            .collect();
+        self.with_rows(rows, total)
+    }
+}
+
+/// Build a [`TableRow`] for one record, one cell per display field.
+fn build_table_row(
+    model: &ModelDefinition,
+    config: &AdminConfig,
+    record: &serde_json::Value,
+) -> TableRow {
+    let id = record
+        .get(&model.primary_key)
+        .map(value_to_plain_string)
+        .unwrap_or_default();
+
+    let cells = model
+        .display_fields()
+        .iter()
+        .map(|field| {
+            let value = record
+                .get(&field.name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let (rendered, cell_type) = render_cell(field, config, &value);
+            TableCell {
+                field: field.name.clone(),
+                value,
+                rendered,
+                cell_type,
+            }
+        })
+        .collect();
+
+    TableRow {
+        id,
+        cells,
+        selected: false,
+        css_class: None,
+    }
+}
+
+/// Render a single cell's HTML + classify its cell type, applying the
+/// configured date/datetime formats for temporal fields.
+fn render_cell(
+    field: &FieldDefinition,
+    config: &AdminConfig,
+    value: &serde_json::Value,
+) -> (String, CellType) {
+    match field.field_type {
+        FieldType::Date => {
+            let raw = value_to_plain_string(value);
+            (html_escape(&config.format_date(&raw)), CellType::Date)
+        }
+        FieldType::DateTime => {
+            let raw = value_to_plain_string(value);
+            (
+                html_escape(&config.format_datetime(&raw)),
+                CellType::DateTime,
+            )
+        }
+        FieldType::Boolean => (render_value(value), CellType::Boolean),
+        FieldType::Integer | FieldType::BigInteger | FieldType::Float | FieldType::Decimal => {
+            (render_value(value), CellType::Number)
+        }
+        FieldType::Email => (html_escape(&value_to_plain_string(value)), CellType::Email),
+        FieldType::Url => (html_escape(&value_to_plain_string(value)), CellType::Url),
+        _ => (render_value(value), CellType::Text),
     }
 }
 
@@ -281,6 +370,49 @@ pub struct EditView {
     pub can_delete: bool,
     /// Inlines
     pub inlines: Vec<InlineView>,
+}
+
+impl EditView {
+    /// Create a new edit view (form fields default to empty values).
+    pub fn new(model: &ModelDefinition, id: String) -> Self {
+        let fields = model
+            .form_fields()
+            .iter()
+            .map(|f| FormField::from_definition(f))
+            .collect();
+
+        Self {
+            model_name: model.name.clone(),
+            verbose_name: model.verbose_name_singular.clone(),
+            title: format!("Edit {} #{}", model.verbose_name_singular, id),
+            breadcrumbs: vec![
+                Breadcrumb::new("Dashboard").url("/admin"),
+                Breadcrumb::new(&model.verbose_name).url(format!("/admin/{}", model.name)),
+                Breadcrumb::new(&id).url(format!("/admin/{}/{}", model.name, id)),
+                Breadcrumb::new("Edit"),
+            ],
+            id: id.clone(),
+            fields,
+            fieldsets: Vec::new(),
+            submit_url: format!("/admin/{}/{}/edit", model.name, id),
+            cancel_url: format!("/admin/{}/{}", model.name, id),
+            delete_url: format!("/admin/{}/{}/delete", model.name, id),
+            can_delete: model.can_delete,
+            inlines: Vec::new(),
+        }
+    }
+
+    /// Populate the form fields with the current record's values.
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        if let Some(obj) = data.as_object() {
+            for field in &mut self.fields {
+                if let Some(v) = obj.get(&field.name) {
+                    field.value = v.clone();
+                }
+            }
+        }
+        self
+    }
 }
 
 /// Field value for display
@@ -460,11 +592,52 @@ mod tests {
             .search_fields(["name", "email"])
             .build();
 
-        let view = ListView::new(&model, ListParams::default());
+        let view = ListView::new(&model, ListParams::default(), 25);
 
         assert_eq!(view.model_name, "user");
         assert_eq!(view.columns.len(), 3);
         assert!(view.has_search);
+        assert_eq!(view.pagination.per_page, 25);
+    }
+
+    #[test]
+    fn test_list_view_json_rows() {
+        let model = ModelDefinition::builder("user")
+            .id_field()
+            .field(FieldDefinition::new("name", FieldType::String))
+            .list_display(["id", "name"])
+            .build();
+
+        let records = vec![
+            serde_json::json!({ "id": 1, "name": "Alice" }),
+            serde_json::json!({ "id": 2, "name": "Bob" }),
+        ];
+        let view = ListView::new(&model, ListParams::default(), 25).with_json_rows(
+            &model,
+            &AdminConfig::default(),
+            &records,
+            2,
+        );
+
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(view.rows[0].id, "1");
+        assert_eq!(view.rows[0].cells[1].rendered, "Alice");
+        assert_eq!(view.pagination.total_items, 2);
+    }
+
+    #[test]
+    fn test_edit_view_with_data() {
+        let model = ModelDefinition::builder("user")
+            .id_field()
+            .field(FieldDefinition::new("name", FieldType::String))
+            .build();
+
+        let view = EditView::new(&model, "5".to_string())
+            .with_data(serde_json::json!({ "name": "Carol" }));
+
+        assert_eq!(view.id, "5");
+        let name = view.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name.value, serde_json::json!("Carol"));
     }
 
     #[test]

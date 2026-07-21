@@ -146,10 +146,15 @@ impl RateLimitStore for RedisStore {
         let script = redis::Script::new(
             r#"
             local key = KEYS[1]
+            local maxkey = KEYS[2]
             local max_requests = tonumber(ARGV[1])
             local now = tonumber(ARGV[2])
             local cutoff = tonumber(ARGV[3])
             local window_secs = tonumber(ARGV[4])
+            local ttl = window_secs + 10
+
+            -- Record the configured limit so `remaining` can report limit-count.
+            redis.call('SET', maxkey, max_requests, 'EX', ttl)
 
             -- Remove old entries
             redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
@@ -160,7 +165,7 @@ impl RateLimitStore for RedisStore {
             if count < max_requests then
                 -- Add new entry
                 redis.call('ZADD', key, now, now)
-                redis.call('EXPIRE', key, window_secs + 10)
+                redis.call('EXPIRE', key, ttl)
                 return {1, max_requests - count - 1}
             else
                 return {0, 0}
@@ -168,9 +173,11 @@ impl RateLimitStore for RedisStore {
             "#,
         );
 
+        let swmax_key = self.key(&format!("swmax:{}", key));
         let mut conn = self.conn.clone();
         let result: (i32, i64) = script
             .key(&full_key)
+            .key(&swmax_key)
             .arg(max_requests)
             .arg(now)
             .arg(cutoff)
@@ -199,13 +206,18 @@ impl RateLimitStore for RedisStore {
     ) -> RateLimitResult<(bool, u64)> {
         trace!(key = %key, max_requests = max_requests, window = ?window, "Redis fixed window check");
 
-        let window_secs = window.as_secs();
-        let now = std::time::SystemTime::now()
+        // Compute the window bucket in milliseconds so sub-second windows
+        // (e.g. 500ms) never divide by zero: `window.as_secs()` truncates to 0
+        // for any window under a second and `now / 0` panics.
+        let window_ms = (window.as_millis() as u64).max(1);
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        let window_id = now / window_secs;
+            .as_millis() as u64;
+        let window_id = now_ms / window_ms;
         let full_key = self.key(&format!("fw:{}:{}", key, window_id));
+        // TTL must outlive the window; ceil to whole seconds (min 1s) + slack.
+        let ttl_secs = (window_ms.div_ceil(1000).max(1) + 10) as i64;
 
         let mut conn = self.conn.clone();
 
@@ -215,10 +227,27 @@ impl RateLimitStore for RedisStore {
             .await
             .map_err(|e| RateLimitError::store(e.to_string()))?;
 
-        // Set expiry on first request
+        // Set expiry on first request, and record companion metadata so
+        // `remaining` can locate the live window bucket and its limit.
         if count == 1 {
             let _: () = conn
-                .expire(&full_key, window_secs as i64 + 10)
+                .expire(&full_key, ttl_secs)
+                .await
+                .map_err(|e| RateLimitError::store(e.to_string()))?;
+            let _: () = conn
+                .set_ex(
+                    self.key(&format!("fwmax:{}", key)),
+                    max_requests,
+                    ttl_secs as u64,
+                )
+                .await
+                .map_err(|e| RateLimitError::store(e.to_string()))?;
+            let _: () = conn
+                .set_ex(
+                    self.key(&format!("fwcur:{}", key)),
+                    window_id,
+                    ttl_secs as u64,
+                )
                 .await
                 .map_err(|e| RateLimitError::store(e.to_string()))?;
         }
@@ -244,6 +273,9 @@ impl RateLimitStore for RedisStore {
         let patterns = [
             self.key(&format!("tb:{}", key)),
             self.key(&format!("sw:{}", key)),
+            self.key(&format!("swmax:{}", key)),
+            self.key(&format!("fwmax:{}", key)),
+            self.key(&format!("fwcur:{}", key)),
             self.key(&format!("fw:{}:*", key)),
         ];
 
@@ -297,7 +329,7 @@ impl RateLimitStore for RedisStore {
     async fn remaining(&self, key: &str) -> RateLimitResult<u64> {
         let mut conn = self.conn.clone();
 
-        // Try token bucket first
+        // Token bucket: remaining == floor(tokens).
         let tb_key = self.key(&format!("tb:{}", key));
         let tokens: Option<f64> = conn
             .hget(&tb_key, "tokens")
@@ -305,19 +337,41 @@ impl RateLimitStore for RedisStore {
             .map_err(|e| RateLimitError::store(e.to_string()))?;
 
         if let Some(t) = tokens {
-            return Ok(t as u64);
+            return Ok(t.max(0.0) as u64);
         }
 
-        // Try sliding window
-        let sw_key = self.key(&format!("sw:{}", key));
-        let count: i64 = conn
-            .zcard(&sw_key)
+        // Fixed window: locate the live window bucket via the companion pointer
+        // and its recorded limit, then report limit - count.
+        let fwcur: Option<u64> = conn
+            .get(self.key(&format!("fwcur:{}", key)))
             .await
             .map_err(|e| RateLimitError::store(e.to_string()))?;
+        if let Some(window_id) = fwcur {
+            let fwmax: Option<u64> = conn
+                .get(self.key(&format!("fwmax:{}", key)))
+                .await
+                .map_err(|e| RateLimitError::store(e.to_string()))?;
+            if let Some(max) = fwmax {
+                let count: Option<u64> = conn
+                    .get(self.key(&format!("fw:{}:{}", key, window_id)))
+                    .await
+                    .map_err(|e| RateLimitError::store(e.to_string()))?;
+                return Ok(max.saturating_sub(count.unwrap_or(0)));
+            }
+        }
 
-        if count > 0 {
-            // Can't determine max without knowing the config
-            return Ok(0);
+        // Sliding window: remaining == limit - live entries.
+        let swmax: Option<u64> = conn
+            .get(self.key(&format!("swmax:{}", key)))
+            .await
+            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        if let Some(max) = swmax {
+            let sw_key = self.key(&format!("sw:{}", key));
+            let count: i64 = conn
+                .zcard(&sw_key)
+                .await
+                .map_err(|e| RateLimitError::store(e.to_string()))?;
+            return Ok(max.saturating_sub(count as u64));
         }
 
         Ok(0)

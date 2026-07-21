@@ -35,6 +35,9 @@ pub enum SyncMessage {
         op_id: Uuid,
         /// Operation data (serialized)
         data: Vec<u8>,
+        /// Causal dependencies: operation ids that must be applied first
+        #[serde(default)]
+        deps: Vec<Uuid>,
         /// Vector clock after operation
         vclock: VectorClock,
     },
@@ -152,9 +155,14 @@ impl OperationBuffer {
     /// Add an operation to the buffer
     pub fn add(&mut self, op: PendingOp) -> bool {
         if self.pending.len() >= self.max_size {
-            // Remove oldest operations
+            // Evict the OLDEST operations to make room, keeping the most recent
+            // half. (The previous implementation sorted ascending and then
+            // `truncate`d, which kept the oldest half and discarded the newest
+            // arrivals — the exact opposite of "remove oldest".)
             self.pending.sort_by_key(|a| a.received_at);
-            self.pending.truncate(self.max_size / 2);
+            let keep = (self.max_size / 2).max(1).min(self.pending.len());
+            let drop = self.pending.len() - keep;
+            self.pending.drain(0..drop);
         }
 
         // Check if already processed
@@ -164,6 +172,11 @@ impl OperationBuffer {
 
         self.pending.push(op);
         true
+    }
+
+    /// Check whether an operation with the given id is currently buffered.
+    pub fn contains(&self, id: &Uuid) -> bool {
+        self.pending.iter().any(|op| op.id == *id)
     }
 
     /// Get operations ready to be applied
@@ -228,6 +241,8 @@ pub struct SyncProtocol {
     buffer: OperationBuffer,
     /// Pending sync requests
     pending_syncs: std::collections::HashMap<String, VectorClock>,
+    /// Accumulated sync statistics
+    stats: SyncStats,
 }
 
 impl SyncProtocol {
@@ -239,6 +254,7 @@ impl SyncProtocol {
             vclock: VectorClock::new(),
             buffer: OperationBuffer::new(10000),
             pending_syncs: std::collections::HashMap::new(),
+            stats: SyncStats::default(),
         }
     }
 
@@ -277,6 +293,8 @@ impl SyncProtocol {
     /// Handle incoming sync message
     pub fn handle_message(&mut self, msg: SyncMessage) -> CollabResult<Vec<SyncMessage>> {
         let mut responses = Vec::new();
+        self.stats.messages_received += 1;
+        self.stats.last_sync = Some(chrono::Utc::now());
 
         match msg {
             SyncMessage::SyncRequest {
@@ -296,14 +314,16 @@ impl SyncProtocol {
                 replica_id: _,
                 op_id,
                 data,
+                deps,
                 vclock,
             } => {
                 self.vclock.merge(&vclock);
+                self.stats.operations_synced += 1;
 
                 let pending = PendingOp {
                     id: op_id,
                     data,
-                    deps: Vec::new(), // Deps would come from operation
+                    deps, // real causal dependencies carried by the message
                     received_at: chrono::Utc::now(),
                 };
 
@@ -330,19 +350,39 @@ impl SyncProtocol {
             _ => {}
         }
 
+        self.stats.messages_sent += responses.len() as u64;
         Ok(responses)
     }
 
-    /// Create an operation message
+    /// Create an operation message with no causal dependencies.
     pub fn create_operation(&mut self, op_id: Uuid, data: Vec<u8>) -> SyncMessage {
+        self.create_operation_with_deps(op_id, data, Vec::new())
+    }
+
+    /// Create an operation message carrying explicit causal dependencies.
+    pub fn create_operation_with_deps(
+        &mut self,
+        op_id: Uuid,
+        data: Vec<u8>,
+        deps: Vec<Uuid>,
+    ) -> SyncMessage {
         self.vclock.increment(self.replica_id);
+        self.stats.messages_sent += 1;
+        self.stats.operations_synced += 1;
+        self.stats.last_sync = Some(chrono::Utc::now());
 
         SyncMessage::Operation {
             replica_id: self.replica_id,
             op_id,
             data,
+            deps,
             vclock: self.vclock.clone(),
         }
+    }
+
+    /// Access sync statistics accumulated by this protocol handler.
+    pub fn stats(&self) -> &SyncStats {
+        &self.stats
     }
 
     /// Create a heartbeat message
@@ -418,6 +458,91 @@ mod tests {
 
         let sync_req = protocol.request_sync("doc1".to_string());
         assert!(matches!(sync_req, SyncMessage::SyncRequest { .. }));
+    }
+
+    /// Overflow must evict the OLDEST operations, not the newest arrivals.
+    #[test]
+    fn test_operation_buffer_evicts_oldest() {
+        let mut buffer = OperationBuffer::new(4);
+        let base = chrono::Utc::now();
+
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            buffer.add(PendingOp {
+                id,
+                data: vec![],
+                deps: vec![],
+                received_at: base + chrono::Duration::seconds(i),
+            });
+        }
+        assert_eq!(buffer.pending_count(), 4);
+
+        // A newer arrival triggers eviction.
+        let newest = Uuid::new_v4();
+        buffer.add(PendingOp {
+            id: newest,
+            data: vec![],
+            deps: vec![],
+            received_at: base + chrono::Duration::seconds(100),
+        });
+
+        // The two oldest must be gone; the newest arrival must be retained.
+        assert!(!buffer.contains(&ids[0]), "oldest op was not evicted");
+        assert!(
+            !buffer.contains(&ids[1]),
+            "second-oldest op was not evicted"
+        );
+        assert!(buffer.contains(&newest), "newest arrival was discarded");
+    }
+
+    /// A buffered op with unmet deps must not be ready until its deps are acked.
+    #[test]
+    fn test_operation_buffer_honors_deps() {
+        let mut buffer = OperationBuffer::new(100);
+        let dep = Uuid::new_v4();
+        let op = PendingOp {
+            id: Uuid::new_v4(),
+            data: vec![],
+            deps: vec![dep],
+            received_at: chrono::Utc::now(),
+        };
+        buffer.add(op.clone());
+
+        // Dependency not yet satisfied -> not ready.
+        assert!(buffer.ready().is_empty());
+        assert_eq!(buffer.pending_count(), 1);
+
+        // Satisfy the dependency; now it becomes ready.
+        buffer.ack(dep);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, op.id);
+    }
+
+    /// Operation messages carry real deps through to the buffer.
+    #[test]
+    fn test_create_operation_with_deps_threads_deps() {
+        let replica = ReplicaId::new();
+        let mut sender = SyncProtocol::new(replica);
+        let dep = Uuid::new_v4();
+        let op_id = Uuid::new_v4();
+
+        let msg = sender.create_operation_with_deps(op_id, vec![1, 2, 3], vec![dep]);
+        match &msg {
+            SyncMessage::Operation { deps, .. } => assert_eq!(deps, &vec![dep]),
+            _ => panic!("expected Operation"),
+        }
+
+        let mut receiver = SyncProtocol::new(ReplicaId::new());
+        receiver.handle_message(msg).unwrap();
+        // The op is buffered with an unmet dep, so nothing is ready yet.
+        assert_eq!(receiver.pending_count(), 1);
+        assert!(receiver.ready_operations().is_empty());
+        // ops_sent / messages accounting is tracked.
+        assert!(sender.stats().messages_sent >= 1);
+        assert!(receiver.stats().messages_received >= 1);
     }
 
     #[test]

@@ -152,8 +152,13 @@ impl CacheStore for MemcachedCache {
     }
 
     async fn ttl(&self, key: &str) -> CacheResult<Option<Duration>> {
-        // Memcached doesn't support TTL retrieval
-        // This is a limitation of the protocol
+        // Protocol limitation, stated honestly: the memcached text/binary
+        // protocols expose no way to read an item's remaining TTL. `GET`
+        // returns only the value (and flags/CAS), never the expiry, and there
+        // is no `TTL`/`PTTL` equivalent. We therefore always return `Ok(None)`
+        // — "no known expiration" — rather than pretending to have queried it.
+        // Callers needing TTL visibility must track expirations out-of-band or
+        // use a backend (e.g. Redis) that supports `TTL`.
         let _ = key;
         Ok(None)
     }
@@ -173,35 +178,62 @@ impl CacheStore for MemcachedCache {
 
     async fn increment(&self, key: &str, delta: i64) -> CacheResult<i64> {
         let key = self.build_key(key);
-        let key_clone = key.clone();
         let client = self.client.clone();
+        // Apply the configured default TTL to keys we create at zero, matching
+        // `set_json`'s expiry semantics.
+        let expiration = Self::duration_to_expiration(self.config.default_ttl);
+        let magnitude = delta.unsigned_abs();
+        let is_increment = delta >= 0;
 
-        if delta >= 0 {
-            let delta = delta as u64;
-            tokio::task::spawn_blocking(move || {
+        // Perform the whole read-modify-write on the memcached server via its
+        // native atomic `incr`/`decr`, returning the authoritative new value
+        // directly — no lossy second `GET`, and crucially no `delta.abs()`
+        // fabrication when a re-read fails to parse.
+        //
+        // memcached's create-at-zero semantics: the binary protocol
+        // auto-creates a missing counter at 0 (the delta is not applied on
+        // creation) and returns 0. The ASCII protocol instead returns
+        // `KeyNotFound`; we mirror the binary behaviour there by adding the key
+        // at 0 and returning 0, retrying once if we lose the create race.
+        let new_value =
+            tokio::task::spawn_blocking(move || -> Result<u64, memcache::MemcacheError> {
                 let client = client.blocking_lock();
-                client.increment(&key, delta)
+
+                let apply = |client: &memcache::Client| -> Result<u64, memcache::MemcacheError> {
+                    if is_increment {
+                        client.increment(&key, magnitude)
+                    } else {
+                        client.decrement(&key, magnitude)
+                    }
+                };
+
+                match apply(&client) {
+                    Ok(value) => Ok(value),
+                    Err(memcache::MemcacheError::CommandError(
+                        memcache::CommandError::KeyNotFound,
+                    )) => {
+                        // Create the counter at zero (matching the binary protocol),
+                        // returning 0.
+                        match client.add(&key, 0u64, expiration) {
+                            Ok(()) => Ok(0),
+                            // Lost the create race: another client added it first.
+                            // Retry the atomic op against the now-present key.
+                            Err(memcache::MemcacheError::CommandError(
+                                memcache::CommandError::KeyExists,
+                            )) => apply(&client),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .await
             .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
-        } else {
-            let delta = (-delta) as u64;
-            tokio::task::spawn_blocking(move || {
-                let client = client.blocking_lock();
-                client.decrement(&key, delta)
-            })
-            .await
-            .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
-        }
 
-        // Get the new value
-        let new_value = self
-            .get_json(&key_clone)
-            .await?
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(delta.abs());
-
-        Ok(new_value)
+        // Preserve the exact server value across the u64 -> i64 boundary. Note
+        // this is a lossless bit-cast: counters above `i64::MAX` become
+        // negative, but never the old `delta.abs()` fabrication.
+        Ok(new_value as i64)
     }
 
     async fn decrement(&self, key: &str, delta: i64) -> CacheResult<i64> {

@@ -145,9 +145,43 @@ impl<C: CacheStore> TaggedCache<C> {
     /// tagged.invalidate_tags(&["users", "sessions"]).await?;
     /// ```
     pub async fn invalidate_tags(&self, tags: &[&str]) -> CacheResult<()> {
+        // Coalesce into a single acquisition of each lock and a single backend
+        // round-trip, instead of re-locking and issuing a separate `delete_many`
+        // per tag (the old per-tag `invalidate_tag` loop). Keys shared across
+        // several of the requested tags are deleted exactly once.
+        let mut tags_map = self.tags.write().await;
+        let mut key_tags_map = self.key_tags.write().await;
+
+        // Gather the union of keys across all requested tags, removing those
+        // tags from the tag->keys index as we go.
+        let mut victims: HashSet<String> = HashSet::new();
         for tag in tags {
-            self.invalidate_tag(tag).await?;
+            if let Some(keys) = tags_map.remove(*tag) {
+                victims.extend(keys);
+            }
         }
+
+        if victims.is_empty() {
+            return Ok(());
+        }
+
+        // One batch delete for the whole union.
+        let key_refs: Vec<&str> = victims.iter().map(|s| s.as_str()).collect();
+        self.cache.delete_many(&key_refs).await?;
+
+        // Update the reverse index once. A key may carry tags beyond those being
+        // invalidated; drop only the invalidated tags, and remove the key entry
+        // entirely once it has no tags left.
+        let removed: HashSet<&str> = tags.iter().copied().collect();
+        for key in &victims {
+            if let Some(tag_set) = key_tags_map.get_mut(key) {
+                tag_set.retain(|t| !removed.contains(t.as_str()));
+                if tag_set.is_empty() {
+                    key_tags_map.remove(key);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -192,17 +226,26 @@ mod tests {
     use crate::error::CacheResult;
     use async_trait::async_trait;
 
-    // Mock cache for testing
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Mock cache for testing. Counts batch-delete round-trips so tests can
+    // assert that `invalidate_tags` coalesces into a single backend call.
     #[derive(Clone)]
     struct MockCache {
         data: Arc<RwLock<HashMap<String, String>>>,
+        mdel_calls: Arc<AtomicUsize>,
     }
 
     impl MockCache {
         fn new() -> Self {
             Self {
                 data: Arc::new(RwLock::new(HashMap::new())),
+                mdel_calls: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn mdel_calls(&self) -> usize {
+            self.mdel_calls.load(Ordering::Relaxed)
         }
     }
 
@@ -233,6 +276,15 @@ mod tests {
 
         async fn clear(&self) -> CacheResult<()> {
             self.data.write().await.clear();
+            Ok(())
+        }
+
+        async fn mdel(&self, keys: &[&str]) -> CacheResult<()> {
+            self.mdel_calls.fetch_add(1, Ordering::Relaxed);
+            let mut data = self.data.write().await;
+            for key in keys {
+                data.remove(*key);
+            }
             Ok(())
         }
 
@@ -302,5 +354,46 @@ mod tests {
 
         let value = tagged.get("key1").await.unwrap();
         assert_eq!(value, None);
+    }
+
+    /// Regression: `invalidate_tags` must coalesce into a single backend batch
+    /// delete instead of one `delete_many` round-trip per tag.
+    #[tokio::test]
+    async fn test_invalidate_tags_coalesces_into_single_roundtrip() {
+        let cache = Arc::new(MockCache::new());
+        let tagged = TaggedCache::new(cache.clone());
+
+        // Distinct keys across three tags; "shared" carries two of them so we
+        // also verify a shared key is deleted exactly once.
+        tagged
+            .set_with_tags("k1", "a".to_string(), &["t1"], None)
+            .await
+            .unwrap();
+        tagged
+            .set_with_tags("k2", "b".to_string(), &["t2"], None)
+            .await
+            .unwrap();
+        tagged
+            .set_with_tags("shared", "c".to_string(), &["t1", "t3"], None)
+            .await
+            .unwrap();
+
+        tagged.invalidate_tags(&["t1", "t2", "t3"]).await.unwrap();
+
+        // All matching keys gone.
+        assert_eq!(tagged.get("k1").await.unwrap(), None);
+        assert_eq!(tagged.get("k2").await.unwrap(), None);
+        assert_eq!(tagged.get("shared").await.unwrap(), None);
+
+        // Exactly one batch delete round-trip, regardless of tag count.
+        assert_eq!(
+            cache.mdel_calls(),
+            1,
+            "invalidate_tags must issue a single coalesced batch delete"
+        );
+
+        // Reverse index fully cleaned up.
+        assert!(tagged.list_tags().await.is_empty());
+        assert!(tagged.get_tags_for_key("shared").await.is_empty());
     }
 }

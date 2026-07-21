@@ -24,6 +24,22 @@ pub enum ToonError {
 
 impl From<serde_toon::Error> for ToonError {
     fn from(err: serde_toon::Error) -> Self {
-        ToonError::SerializeError(err.to_string())
+        use serde_toon::Error as E;
+        let msg = err.to_string();
+        match err {
+            // Serialization-only failure: a Rust type could not be encoded.
+            E::UnsupportedType(_) => ToonError::SerializeError(msg),
+            // Parse / deserialization failures — reading TOON text into a value.
+            // These are produced by the deserializer and must not be
+            // mislabelled as serialization errors.
+            E::Syntax { .. }
+            | E::TypeMismatch { .. }
+            | E::IndentationError { .. }
+            | E::InvalidFormat { .. }
+            | E::UnexpectedEof { .. }
+            | E::Io(_)
+            | E::Custom(_)
+            | E::Message(_) => ToonError::DeserializeError(msg),
+        }
     }
 }

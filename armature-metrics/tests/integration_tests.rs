@@ -264,6 +264,35 @@ async fn test_metrics_handler() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_export_contains_process_metrics() {
+    // The `ProcessCollector` must be registered into the *local* default
+    // registry (the one `export_metrics` reads), not the global prometheus
+    // registry, or process cpu/memory series never appear in the output.
+    let metrics = export_metrics();
+    assert!(
+        metrics.contains("process_cpu_seconds_total")
+            || metrics.contains("process_resident_memory_bytes")
+            || metrics.contains("process_start_time_seconds"),
+        "expected process metrics in export, got:\n{metrics}"
+    );
+}
+
+#[test]
+fn test_register_summary_exports() {
+    let summary = register_summary("test_summary_integration", "Integration summary").unwrap();
+    summary.observe(0.5);
+    summary.observe(1.0);
+    summary.observe(1.5);
+
+    assert_eq!(summary.get_sample_count(), 3);
+    assert_eq!(summary.quantile(0.5), Some(1.0));
+
+    let metrics = export_metrics();
+    assert!(metrics.contains("test_summary_integration"));
+}
+
 #[test]
 fn test_request_metrics_middleware_new() {
     let _middleware = RequestMetricsMiddleware::new();

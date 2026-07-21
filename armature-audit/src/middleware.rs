@@ -13,6 +13,8 @@ pub struct AuditMiddleware {
     log_request_body: bool,
     log_response_body: bool,
     max_body_size: usize,
+    /// JWT claim to read the principal from (defaults to `sub`).
+    subject_claim: String,
 }
 
 impl AuditMiddleware {
@@ -36,7 +38,14 @@ impl AuditMiddleware {
             log_request_body: true,
             log_response_body: true,
             max_body_size: 10_000, // 10KB default
+            subject_claim: "sub".to_string(),
         }
+    }
+
+    /// Set which JWT claim identifies the principal (defaults to `sub`).
+    pub fn subject_claim(mut self, claim: impl Into<String>) -> Self {
+        self.subject_claim = claim.into();
+        self
     }
 
     /// Set whether to log request bodies
@@ -57,16 +66,35 @@ impl AuditMiddleware {
         self
     }
 
-    /// Extract user ID from request (can be customized)
+    /// Extract the real principal from the request's bearer token.
+    ///
+    /// Reads the subject claim (default `sub`) out of the JWT carried in the
+    /// `Authorization: Bearer …` header, so the audit trail records the actual
+    /// user rather than a constant placeholder. The token's signature is
+    /// expected to have already been verified by an upstream authentication
+    /// layer; this only reads the already-present identity claim.
     fn extract_user_id(&self, request: &HttpRequest) -> Option<String> {
-        // Try to get from Authorization header
-        request.headers.get("authorization").and_then(|auth| {
-            if auth.starts_with("Bearer ") {
-                Some("authenticated_user".to_string())
-            } else {
-                None
-            }
-        })
+        let auth = request.headers.get("authorization")?;
+        let token = auth.strip_prefix("Bearer ").map(str::trim)?;
+        Self::subject_from_jwt(token, &self.subject_claim)
+    }
+
+    /// Decode a JWT's payload segment and pull out the named subject claim.
+    fn subject_from_jwt(token: &str, subject_claim: &str) -> Option<String> {
+        use base64::Engine;
+
+        // header.payload.signature — the claims live in the middle segment.
+        let payload_b64 = token.split('.').nth(1)?;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+        claims
+            .get(subject_claim)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// Extract IP address from request
@@ -260,6 +288,62 @@ mod tests {
         assert!(!middleware.log_request_body);
         assert!(!middleware.log_response_body);
         assert_eq!(middleware.max_body_size, 5000);
+    }
+
+    #[test]
+    fn test_extract_user_id_reads_jwt_subject() {
+        use base64::Engine;
+
+        let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
+        let middleware = AuditMiddleware::new(logger);
+
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = engine.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = engine.encode(br#"{"sub":"alice-42","role":"admin"}"#);
+        let token = format!("{header}.{payload}.signature");
+
+        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        req.headers
+            .insert("authorization", format!("Bearer {token}"));
+
+        // The recorded principal must be the token's real subject, not a
+        // constant placeholder.
+        assert_eq!(
+            middleware.extract_user_id(&req),
+            Some("alice-42".to_string())
+        );
+        assert_ne!(
+            middleware.extract_user_id(&req),
+            Some("authenticated_user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_user_id_custom_subject_claim() {
+        use base64::Engine;
+
+        let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
+        let middleware = AuditMiddleware::new(logger).subject_claim("user_id");
+
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = engine.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = engine.encode(br#"{"user_id":"bob-7"}"#);
+        let token = format!("{header}.{payload}.sig");
+
+        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        req.headers
+            .insert("authorization", format!("Bearer {token}"));
+
+        assert_eq!(middleware.extract_user_id(&req), Some("bob-7".to_string()));
+    }
+
+    #[test]
+    fn test_extract_user_id_no_bearer() {
+        let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
+        let middleware = AuditMiddleware::new(logger);
+
+        let req = HttpRequest::new("GET".to_string(), "/".to_string());
+        assert_eq!(middleware.extract_user_id(&req), None);
     }
 
     #[test]

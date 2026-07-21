@@ -239,7 +239,12 @@ impl RateLimiterBuilder {
                 let url = self.redis_url.ok_or_else(|| {
                     RateLimitError::config("Redis URL must be specified for Redis store")
                 })?;
-                Arc::new(crate::stores::RedisStore::new(&url).await?)
+                // Honor the configured key_prefix instead of the hardcoded
+                // "ratelimit" default so multiple limiters can share a Redis
+                // instance without colliding.
+                Arc::new(
+                    crate::stores::RedisStore::with_prefix(&url, self.key_prefix.clone()).await?,
+                )
             }
             #[cfg(not(feature = "redis"))]
             StoreType::Redis => {

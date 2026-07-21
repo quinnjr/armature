@@ -60,10 +60,18 @@ impl Ord for CharId {
 pub struct CharNode {
     /// Character ID
     pub id: CharId,
-    /// The character value (None if deleted)
+    /// The character value.
+    ///
+    /// This is `None` only for the synthetic root node. Deleting a character
+    /// sets the [`deleted`](Self::deleted) tombstone flag but *preserves* the
+    /// original value so it can be replayed faithfully during sync — a deleted
+    /// character must never be exported as `Insert '\0'`.
     pub value: Option<char>,
     /// ID of the character this was inserted after
     pub after: CharId,
+    /// Tombstone flag: `true` once the character has been deleted.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 impl CharNode {
@@ -73,17 +81,24 @@ impl CharNode {
             id,
             value: Some(value),
             after,
+            deleted: false,
         }
     }
 
-    /// Check if this node is deleted
+    /// Check if this node is deleted (tombstoned)
     pub fn is_deleted(&self) -> bool {
-        self.value.is_none()
+        self.deleted
     }
 
-    /// Delete this node (tombstone)
+    /// Check if this node is visible (has content and is not tombstoned)
+    pub fn is_visible(&self) -> bool {
+        !self.deleted && self.value.is_some()
+    }
+
+    /// Delete this node (tombstone). The original value is preserved so the
+    /// deletion can be replayed as a real `Delete` op rather than losing data.
     pub fn delete(&mut self) {
-        self.value = None;
+        self.deleted = true;
     }
 }
 
@@ -148,6 +163,7 @@ impl RgaText {
             id: CharId::root(),
             value: None,
             after: CharId::root(),
+            deleted: false,
         };
         nodes.insert(CharId::root(), root);
 
@@ -164,7 +180,12 @@ impl RgaText {
     pub fn to_string(&self) -> String {
         self.sequence
             .iter()
-            .filter_map(|id| self.nodes.get(id).and_then(|n| n.value))
+            .filter_map(|id| {
+                self.nodes
+                    .get(id)
+                    .filter(|n| n.is_visible())
+                    .and_then(|n| n.value)
+            })
             .collect()
     }
 
@@ -172,12 +193,7 @@ impl RgaText {
     pub fn len(&self) -> usize {
         self.sequence
             .iter()
-            .filter(|id| {
-                self.nodes
-                    .get(id)
-                    .map(|n| n.value.is_some())
-                    .unwrap_or(false)
-            })
+            .filter(|id| self.nodes.get(id).map(|n| n.is_visible()).unwrap_or(false))
             .count()
     }
 
@@ -205,14 +221,49 @@ impl RgaText {
         }
     }
 
-    /// Insert a string at a position
+    /// Insert a string at a position.
+    ///
+    /// Rather than calling [`insert`](Self::insert) per character — which would
+    /// re-scan the sequence by visible position on every codepoint (quadratic in
+    /// the string length) — this resolves the anchor once and threads each new
+    /// character directly after the previous one, since the run is contiguous.
     pub fn insert_str(&mut self, pos: usize, s: &str) -> Vec<TextOp> {
-        let mut ops = Vec::new();
-        let mut current_pos = pos;
+        let mut ops = Vec::with_capacity(s.len());
+        if s.is_empty() {
+            return ops;
+        }
 
-        for ch in s.chars() {
-            ops.push(self.insert(current_pos, ch));
-            current_pos += 1;
+        // Resolve the anchor character and its index in the sequence exactly
+        // once; subsequent inserts chain off the previously inserted node.
+        let mut after_id = self.id_at_position(pos);
+        let mut seq_idx = self
+            .sequence
+            .iter()
+            .position(|&id| id == after_id)
+            .unwrap_or(0);
+
+        for (i, ch) in s.chars().enumerate() {
+            let id = CharId::new(self.clock.tick());
+            self.nodes.insert(id, CharNode::new(id, ch, after_id));
+
+            // The first character honors concurrent-sibling tie-breaking; every
+            // following character in the run goes immediately after its
+            // predecessor (no other node shares that `after` yet).
+            let insert_pos = if i == 0 {
+                self.find_insert_position(after_id, id)
+            } else {
+                seq_idx + 1
+            };
+            self.sequence.insert(insert_pos, id);
+
+            ops.push(TextOp::Insert {
+                id,
+                value: ch,
+                after: after_id,
+            });
+
+            after_id = id;
+            seq_idx = insert_pos;
         }
 
         ops
@@ -259,9 +310,9 @@ impl RgaText {
                 let node = CharNode::new(id, value, after);
                 self.nodes.insert(id, node);
 
-                // Find correct position
-                let insert_pos = self.find_insert_position(after, id);
-                self.sequence.insert(insert_pos, id);
+                // Recompute the order deterministically so remote inserts land
+                // in the same place on every replica regardless of arrival order.
+                self.rebuild_sequence();
             }
             TextOp::Delete { id } => {
                 if let Some(node) = self.nodes.get_mut(&id) {
@@ -280,7 +331,7 @@ impl RgaText {
         let mut visible_count = 0;
         for id in &self.sequence {
             if let Some(node) = self.nodes.get(id)
-                && node.value.is_some()
+                && node.is_visible()
             {
                 visible_count += 1;
                 if visible_count == pos {
@@ -292,7 +343,7 @@ impl RgaText {
         // If position is past the end, return the last visible ID
         for id in self.sequence.iter().rev() {
             if let Some(node) = self.nodes.get(id)
-                && node.value.is_some()
+                && node.is_visible()
             {
                 return *id;
             }
@@ -306,7 +357,7 @@ impl RgaText {
         let mut visible_count = 0;
         for id in &self.sequence {
             if let Some(node) = self.nodes.get(id)
-                && node.value.is_some()
+                && node.is_visible()
             {
                 if visible_count == pos {
                     return Some(*id);
@@ -315,6 +366,56 @@ impl RgaText {
             }
         }
         None
+    }
+
+    /// Rebuild the ordered `sequence` deterministically from the node set.
+    ///
+    /// The RGA linearization is a pre-order walk of the insertion tree (each
+    /// node is a child of its `after` anchor) with siblings ordered by
+    /// descending [`CharId`] ("higher id wins"). Because this is a pure function
+    /// of the node set, two replicas that hold the same nodes always produce the
+    /// identical sequence — the property incremental placement failed to
+    /// guarantee across concurrent multi-character runs.
+    fn rebuild_sequence(&mut self) {
+        let mut children: HashMap<CharId, Vec<CharId>> = HashMap::new();
+        for node in self.nodes.values() {
+            if node.id.is_root() {
+                continue;
+            }
+            children.entry(node.after).or_default().push(node.id);
+        }
+        for kids in children.values_mut() {
+            // Descending: higher id first (preorder precedence).
+            kids.sort_unstable_by(|a, b| b.cmp(a));
+        }
+
+        let mut sequence = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![CharId::root()];
+        while let Some(id) = stack.pop() {
+            sequence.push(id);
+            if let Some(kids) = children.get(&id) {
+                // Push ascending so the highest child is popped (visited) first.
+                for &child in kids.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+
+        // Defensive: place any orphaned nodes (anchor unreachable from root)
+        // deterministically so nothing is silently dropped.
+        if sequence.len() < self.nodes.len() {
+            let present: std::collections::HashSet<CharId> = sequence.iter().copied().collect();
+            let mut orphans: Vec<CharId> = self
+                .nodes
+                .keys()
+                .copied()
+                .filter(|id| !present.contains(id))
+                .collect();
+            orphans.sort_unstable();
+            sequence.extend(orphans);
+        }
+
+        self.sequence = sequence;
     }
 
     /// Find the correct insert position for a new character
@@ -349,52 +450,87 @@ impl RgaText {
         insert_pos
     }
 
-    /// Get all operations (for sync)
+    /// Get all operations (for sync).
+    ///
+    /// Emits an `Insert` for every non-root character in sequence order carrying
+    /// its *real* value (never a `'\0'` placeholder), followed by a `Delete` for
+    /// each tombstoned character. A replaying peer therefore reconstructs the
+    /// exact document — a deleted character replays as a delete, not as a
+    /// resurrected NUL character.
     pub fn operations(&self) -> Vec<TextOp> {
-        self.sequence
-            .iter()
-            .filter_map(|id| {
-                self.nodes.get(id).and_then(|node| {
-                    if node.id.is_root() {
-                        None
-                    } else {
-                        Some(TextOp::Insert {
-                            id: node.id,
-                            value: node.value.unwrap_or('\0'),
-                            after: node.after,
-                        })
-                    }
-                })
-            })
-            .collect()
+        let mut ops = Vec::with_capacity(self.sequence.len());
+
+        // Inserts first, in sequence order, so every `after` anchor precedes its
+        // dependents.
+        for id in &self.sequence {
+            if let Some(node) = self.nodes.get(id)
+                && !node.id.is_root()
+                && let Some(value) = node.value
+            {
+                ops.push(TextOp::Insert {
+                    id: node.id,
+                    value,
+                    after: node.after,
+                });
+            }
+        }
+
+        // Then a real Delete for every tombstone.
+        for id in &self.sequence {
+            if let Some(node) = self.nodes.get(id)
+                && !node.id.is_root()
+                && node.is_deleted()
+            {
+                ops.push(TextOp::Delete { id: node.id });
+            }
+        }
+
+        ops
     }
 
     /// Get character at position
     pub fn char_at(&self, pos: usize) -> Option<char> {
         let id = self.visible_id_at_position(pos)?;
-        self.nodes.get(&id).and_then(|n| n.value)
+        self.nodes
+            .get(&id)
+            .filter(|n| n.is_visible())
+            .and_then(|n| n.value)
     }
 }
 
 impl Crdt for RgaText {
     fn merge(&mut self, other: &Self) {
-        // Apply all operations from other that we don't have
-        for (id, node) in &other.nodes {
-            if !self.nodes.contains_key(id) {
-                self.apply(TextOp::Insert {
-                    id: *id,
-                    value: node.value.unwrap_or('\0'),
-                    after: node.after,
-                });
-            }
+        // Iterating `other.nodes` (a HashMap) in its arbitrary order and placing
+        // each node incrementally is non-deterministic and, worse, incorrect:
+        // incremental placement fails to skip an anchor's whole subtree, so two
+        // replicas with the same nodes can diverge (e.g. concurrent multi-char
+        // runs interleave differently).
+        //
+        // Instead we merge the node sets — taking every missing node and
+        // propagating tombstones — then recompute the sequence with a single
+        // deterministic tree walk. Identical node sets therefore always yield an
+        // identical document, independent of merge direction or HashMap order.
+        self.clock.merge(&other.clock);
 
-            // Apply tombstones
+        for (id, node) in &other.nodes {
+            if node.id.is_root() {
+                continue;
+            }
+            self.nodes.entry(*id).or_insert_with(|| CharNode {
+                id: node.id,
+                value: node.value,
+                after: node.after,
+                deleted: node.deleted,
+            });
+            // Propagate the tombstone for nodes we already held.
             if node.is_deleted()
                 && let Some(our_node) = self.nodes.get_mut(id)
             {
-                our_node.delete();
+                our_node.deleted = true;
             }
         }
+
+        self.rebuild_sequence();
     }
 }
 
@@ -589,5 +725,107 @@ mod tests {
         assert_eq!(sel.end(), 5);
         assert_eq!(sel.len(), 3);
         assert!(!sel.is_collapsed());
+    }
+
+    // --- Regression tests (Workflow 8 · A10) ---
+
+    /// A tombstoned character must replay as a real `Delete`, never as an
+    /// `Insert '\0'` that resurrects deleted text on a peer.
+    #[test]
+    fn test_operations_delete_replays_as_delete() {
+        let replica = ReplicaId::new();
+        let mut text = RgaText::new(replica);
+        text.insert_str(0, "Hello");
+        text.delete(1); // delete 'e' -> "Hllo"
+        assert_eq!(text.to_string(), "Hllo");
+
+        // Replay the exported operation log onto a fresh peer.
+        let ops = text.operations();
+        // No insert in the log may carry a NUL placeholder.
+        for op in &ops {
+            if let TextOp::Insert { value, .. } = op {
+                assert_ne!(*value, '\0', "tombstone exported as Insert '\\0'");
+            }
+        }
+        // A real Delete must be present.
+        assert!(
+            ops.iter().any(|op| matches!(op, TextOp::Delete { .. })),
+            "no Delete op emitted for the tombstone"
+        );
+
+        let mut peer = RgaText::new(ReplicaId::new());
+        for op in ops {
+            peer.apply(op);
+        }
+        assert_eq!(peer.to_string(), "Hllo");
+        assert!(!peer.to_string().contains('\0'));
+    }
+
+    /// Two replicas applying a multi-character interleave concurrently must
+    /// converge to an identical document regardless of merge direction.
+    #[test]
+    fn test_merge_converges_multichar_interleave() {
+        let r1 = ReplicaId::new();
+        let r2 = ReplicaId::new();
+        let mut a = RgaText::new(r1);
+        let mut b = RgaText::new(r2);
+
+        // Concurrent multi-character edits at the same position.
+        a.insert_str(0, "abc");
+        b.insert_str(0, "xyz");
+
+        // Merge both directions; both must reach the same state.
+        let a_before = a.clone();
+        a.merge(&b);
+        b.merge(&a_before);
+
+        assert_eq!(
+            a.to_string(),
+            b.to_string(),
+            "replicas diverged after interleaved merge"
+        );
+        assert_eq!(a.len(), 6);
+    }
+
+    /// Merge must be deterministic: shuffling HashMap iteration order (by
+    /// building the peer's nodes via different insertion sequences) yields the
+    /// same converged result every time.
+    #[test]
+    fn test_merge_is_deterministic() {
+        let r1 = ReplicaId::new();
+        let r2 = ReplicaId::new();
+
+        let mut base = RgaText::new(r1);
+        base.insert_str(0, "Hello");
+
+        let mut peer = RgaText::new(r2);
+        peer.insert_str(0, "World");
+
+        // Merge into several independent clones; every result must be identical.
+        let mut results = Vec::new();
+        for _ in 0..8 {
+            let mut lhs = base.clone();
+            lhs.merge(&peer);
+            results.push(lhs.to_string());
+        }
+        let first = &results[0];
+        for r in &results {
+            assert_eq!(r, first, "merge produced non-deterministic output");
+        }
+    }
+
+    /// Deleting then merging must keep the deletion (tombstone) on both peers.
+    #[test]
+    fn test_merge_preserves_deletes() {
+        let r1 = ReplicaId::new();
+        let r2 = ReplicaId::new();
+        let mut a = RgaText::new(r1);
+        a.insert_str(0, "Hello");
+        a.delete(0); // -> "ello"
+
+        let mut b = RgaText::new(r2);
+        b.merge(&a);
+        assert_eq!(b.to_string(), "ello");
+        assert!(!b.to_string().contains('\0'));
     }
 }

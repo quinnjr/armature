@@ -22,6 +22,20 @@ pub struct RateLimitMiddleware {
     error_message: String,
     /// Keys that bypass rate limiting
     bypass_keys: Vec<String>,
+    /// When the store errors: `true` fails open (allow the request), `false`
+    /// fails closed (deny). Mirrors `RateLimitConfig::skip_on_error`.
+    skip_on_error: bool,
+}
+
+/// Parse only the **first hop** of an `X-Forwarded-For` value.
+///
+/// `X-Forwarded-For` is a comma-separated list `client, proxy1, proxy2, ...`;
+/// the originating client is the first entry. Parsing the whole header string
+/// as a single `IpAddr` always fails on multi-hop traffic, which previously
+/// collapsed the extracted key to `None` and silently **disabled IP rate
+/// limiting for all proxied requests** (a fail-open security gap).
+fn first_forwarded_ip(xff: &str) -> Option<IpAddr> {
+    xff.split(',').next()?.trim().parse().ok()
 }
 
 impl RateLimitMiddleware {
@@ -32,6 +46,7 @@ impl RateLimitMiddleware {
             limiter,
             key_extractor: KeyExtractor::Ip,
             include_headers: config.include_headers,
+            skip_on_error: config.skip_on_error,
             error_message: config
                 .error_message
                 .unwrap_or_else(|| "Rate limit exceeded".to_string()),
@@ -119,8 +134,19 @@ impl RateLimitMiddleware {
             }
             Err(e) => {
                 warn!(error = %e, "Rate limit check failed");
-                // On error, allow the request (fail open)
-                RateLimitCheckResponse::Allowed { headers: None }
+                if self.skip_on_error {
+                    // Fail open: the store is unavailable but the deployment has
+                    // opted to let traffic through rather than reject it.
+                    RateLimitCheckResponse::Allowed { headers: None }
+                } else {
+                    // Fail closed: `skip_on_error(false)` means a store error
+                    // must deny the request, not silently disable rate limiting.
+                    RateLimitCheckResponse::Limited {
+                        headers: None,
+                        message: self.error_message.clone(),
+                        retry_after: None,
+                    }
+                }
             }
         }
     }
@@ -340,11 +366,19 @@ impl armature_core::Middleware for RateLimitMiddleware {
         >,
     ) -> Result<armature_core::HttpResponse, armature_core::Error> {
         // Extract request info
+        // Prefer the first hop of X-Forwarded-For (the originating client);
+        // fall back to X-Real-IP. Parsing the whole comma-separated XFF as one
+        // IpAddr fails on any multi-hop chain, which used to disable IP rate
+        // limiting for all proxied traffic.
         let ip = req
             .headers
             .get("x-forwarded-for")
-            .or_else(|| req.headers.get("x-real-ip"))
-            .and_then(|s| s.parse().ok());
+            .and_then(|s| first_forwarded_ip(s))
+            .or_else(|| {
+                req.headers
+                    .get("x-real-ip")
+                    .and_then(|s| s.trim().parse().ok())
+            });
 
         let user_id = req.headers.get("x-user-id").map(|s| s.as_str());
 
@@ -549,6 +583,166 @@ mod tests {
         assert_eq!(info.method, "POST");
         assert_eq!(info.user_id, Some("user_123".to_string()));
         assert_eq!(info.api_key, Some("test_key".to_string()));
+    }
+
+    #[test]
+    fn test_first_forwarded_ip_parses_first_hop() {
+        // Multi-hop chain: the client is the first entry.
+        assert_eq!(
+            first_forwarded_ip("203.0.113.5, 70.41.3.18, 150.172.238.178"),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)))
+        );
+        // Single hop, no whitespace.
+        assert_eq!(
+            first_forwarded_ip("198.51.100.7"),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+        );
+        // Garbage first hop yields None (not a silent pass-through).
+        assert_eq!(first_forwarded_ip("not-an-ip, 10.0.0.1"), None);
+    }
+
+    /// Regression: a multi-hop `X-Forwarded-For` used to be parsed as a single
+    /// `IpAddr`, fail, drop the key to `None`, and fail **open** — proxied IP
+    /// rate limiting was silently disabled. The middleware must now key on the
+    /// first hop and actually enforce the limit (429 once exhausted).
+    #[tokio::test]
+    async fn test_multi_hop_xff_rate_limits_on_client() {
+        use armature_core::Middleware;
+
+        let limiter = Arc::new(
+            RateLimiter::builder()
+                .token_bucket(1, f64::EPSILON)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let middleware = RateLimitMiddleware::new(limiter);
+
+        let make_req = || {
+            let mut req =
+                armature_core::HttpRequest::new("GET".to_string(), "/api/test".to_string());
+            req.headers.insert(
+                "x-forwarded-for",
+                "203.0.113.5, 70.41.3.18, 150.172.238.178",
+            );
+            req
+        };
+
+        // First request consumes the single token -> allowed.
+        let r1 = middleware
+            .handle(
+                make_req(),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status, 200);
+
+        // Second request must be rate limited on the client's first hop.
+        let r2 = middleware
+            .handle(
+                make_req(),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r2.status, 429,
+            "proxied client must be rate limited, not failed open"
+        );
+    }
+
+    /// A store that always errors, used to exercise the fail-open/closed path.
+    struct ErrorStore;
+
+    #[async_trait::async_trait]
+    impl crate::stores::RateLimitStore for ErrorStore {
+        async fn token_bucket_check(
+            &self,
+            _key: &str,
+            _capacity: u64,
+            _refill_rate: f64,
+        ) -> crate::error::RateLimitResult<(bool, u64)> {
+            Err(crate::error::RateLimitError::store("store down"))
+        }
+        async fn sliding_window_check(
+            &self,
+            _key: &str,
+            _max_requests: u64,
+            _window: std::time::Duration,
+        ) -> crate::error::RateLimitResult<(bool, u64)> {
+            Err(crate::error::RateLimitError::store("store down"))
+        }
+        async fn fixed_window_check(
+            &self,
+            _key: &str,
+            _max_requests: u64,
+            _window: std::time::Duration,
+        ) -> crate::error::RateLimitResult<(bool, u64)> {
+            Err(crate::error::RateLimitError::store("store down"))
+        }
+        async fn reset(&self, _key: &str) -> crate::error::RateLimitResult<()> {
+            Ok(())
+        }
+        async fn remaining(&self, _key: &str) -> crate::error::RateLimitResult<u64> {
+            Ok(0)
+        }
+        fn store_type(&self) -> &'static str {
+            "error"
+        }
+    }
+
+    /// Regression: `skip_on_error(false)` must fail **closed** — a store error
+    /// denies the request. Previously the middleware always failed open.
+    #[tokio::test]
+    async fn test_skip_on_error_false_fails_closed() {
+        use crate::config::RateLimitConfig;
+
+        let config = RateLimitConfig {
+            skip_on_error: false,
+            ..Default::default()
+        };
+        let limiter = Arc::new(RateLimiter::new(
+            Arc::new(ErrorStore),
+            config.algorithm.clone(),
+            config,
+        ));
+        let middleware = RateLimitMiddleware::new(limiter);
+
+        let info =
+            RequestInfo::new("/api/test", "GET").with_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+        let response = middleware.check(&info).await;
+        assert!(
+            response.is_limited(),
+            "skip_on_error(false) must deny on store error"
+        );
+    }
+
+    /// Complement: `skip_on_error(true)` (the default) still fails open.
+    #[tokio::test]
+    async fn test_skip_on_error_true_fails_open() {
+        use crate::config::RateLimitConfig;
+
+        let config = RateLimitConfig {
+            skip_on_error: true,
+            ..Default::default()
+        };
+        let limiter = Arc::new(RateLimiter::new(
+            Arc::new(ErrorStore),
+            config.algorithm.clone(),
+            config,
+        ));
+        let middleware = RateLimitMiddleware::new(limiter);
+
+        let info =
+            RequestInfo::new("/api/test", "GET").with_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+        let response = middleware.check(&info).await;
+        assert!(
+            response.is_allowed(),
+            "skip_on_error(true) must allow on store error"
+        );
     }
 
     #[test]

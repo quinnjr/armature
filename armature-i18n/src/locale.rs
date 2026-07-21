@@ -425,17 +425,13 @@ pub fn negotiate_locale<'a>(
     available: &'a [Locale],
     default: &'a Locale,
 ) -> &'a Locale {
+    // Walk the requested locales in preference order. For each, pick the
+    // *highest-scoring* available locale rather than the first language match,
+    // so a regional/script-specific candidate wins over a coarser one
+    // regardless of its position in `available`.
     for req in requested {
-        // First try exact match
-        if let Some(locale) = available.iter().find(|a| *a == req) {
-            return locale;
-        }
-
-        // Then try language-only match
-        for avail in available {
-            if avail.match_score(req) > 0 {
-                return avail;
-            }
+        if let Some(best) = best_match(req, available) {
+            return best;
         }
     }
 
@@ -443,7 +439,6 @@ pub fn negotiate_locale<'a>(
 }
 
 /// Find the best matching locale using scores.
-#[allow(dead_code)] // Public API for advanced locale negotiation
 pub fn best_match<'a>(requested: &Locale, available: &'a [Locale]) -> Option<&'a Locale> {
     let mut best: Option<(&Locale, u32)> = None;
 
@@ -525,6 +520,20 @@ mod tests {
 
         let best = negotiate_locale(&requested, &available, &default);
         assert_eq!(best.tag(), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_locale_prefers_highest_score() {
+        // Regression: negotiation must choose the highest-scoring available
+        // locale, not merely the first with any language match. Here the
+        // script-specific `zh-Hant` is listed first but `zh-Hans` scores
+        // higher against a `zh-Hans-CN` request.
+        let available = vec![Locale::zh_hant(), Locale::zh_hans()];
+        let requested = vec![Locale::zh_cn()]; // zh-Hans-CN
+        let default = Locale::en_us();
+
+        let best = negotiate_locale(&requested, &available, &default);
+        assert_eq!(best.tag(), "zh-Hans");
     }
 
     #[test]

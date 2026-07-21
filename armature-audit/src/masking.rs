@@ -168,15 +168,20 @@ pub fn mask_string(input: &str, config: &MaskingConfig) -> String {
 /// assert_eq!(masked, "******123");
 /// ```
 pub fn mask_value(value: &str, mask_char: char, show_last: usize) -> String {
-    if value.len() <= show_last {
-        return mask_char.to_string().repeat(value.len());
+    // Count/slice by Unicode scalar values (chars), never by bytes, so a
+    // multibyte secret (emoji, accented text, CJK, …) can never be sliced at a
+    // mid-codepoint offset and panic.
+    let total_chars = value.chars().count();
+
+    if total_chars <= show_last {
+        return std::iter::repeat_n(mask_char, total_chars).collect();
     }
 
-    let masked_len = value.len() - show_last;
-    let masked_part = mask_char.to_string().repeat(masked_len);
-    let visible_part = &value[masked_len..];
+    let masked_len = total_chars - show_last;
+    let mut result: String = std::iter::repeat_n(mask_char, masked_len).collect();
+    result.extend(value.chars().skip(masked_len));
 
-    format!("{}{}", masked_part, visible_part)
+    result
 }
 
 /// Mask sensitive fields in JSON
@@ -255,6 +260,24 @@ mod tests {
         assert_eq!(mask_value("secret123", '*', 3), "******123");
         assert_eq!(mask_value("abc", '*', 3), "***");
         assert_eq!(mask_value("ab", '*', 3), "**");
+    }
+
+    #[test]
+    fn test_mask_value_multibyte_no_panic() {
+        // Each 🔒 is 4 bytes; a byte-based slice at masked_len would fall in the
+        // middle of a codepoint and panic. Char-based masking must not.
+        let masked = mask_value("🔒🔒🔒🔒🔒", '*', 2);
+        assert_eq!(masked, "***🔒🔒");
+        // 3 masked chars + 2 visible chars = 5 chars total.
+        assert_eq!(masked.chars().count(), 5);
+
+        // Mixed multibyte secret masked entirely except last char.
+        let masked = mask_value("café☕", '*', 1);
+        assert_eq!(masked, "****☕");
+
+        // show_last larger than the (char) length: fully masked, no panic.
+        let masked = mask_value("naïve", '*', 10);
+        assert_eq!(masked, "*****");
     }
 
     #[test]

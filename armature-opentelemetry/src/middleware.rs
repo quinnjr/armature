@@ -58,12 +58,35 @@ impl TelemetryMiddleware {
             KeyValue::new("http.response_content_length", res.body.len() as i64),
         ]
     }
+
+    /// Derive the `(method, route, status)` triple recorded for a completed
+    /// request.
+    ///
+    /// Both dimensions come from the real request (previously the middleware
+    /// recorded the literal strings `"method"`/`"path"`), and a value is
+    /// produced for the error path too (previously errors were never counted)
+    /// — a failed request is recorded with HTTP status 500.
+    fn recording(
+        method: &str,
+        route: &str,
+        result: &Result<HttpResponse, Error>,
+    ) -> (String, String, u16) {
+        let status = match result {
+            Ok(res) => res.status,
+            Err(_) => 500,
+        };
+        (method.to_string(), route.to_string(), status)
+    }
 }
 
 #[async_trait]
 impl Middleware for TelemetryMiddleware {
     async fn handle(&self, req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
         let start_time = Instant::now();
+
+        // Capture the real request dimensions before `req` is consumed by `next`.
+        let method = req.method.clone();
+        let route = req.path.clone();
 
         // Increment active requests
         if let Some(ref metrics) = self.metrics {
@@ -124,14 +147,10 @@ impl Middleware for TelemetryMiddleware {
         if let Some(ref metrics) = self.metrics {
             metrics.decrement_active();
 
-            if let Ok(ref res) = result {
-                metrics.record_request(
-                    result.as_ref().ok().map(|_| "method").unwrap_or("UNKNOWN"),
-                    "path",
-                    res.status,
-                    duration,
-                );
-            }
+            // Record every request — success *and* error — with the real
+            // request method and route as dimensions.
+            let (method, route, status) = Self::recording(&method, &route, &result);
+            metrics.record_request(&method, &route, status, duration);
         }
 
         result
@@ -221,6 +240,32 @@ mod tests {
         let middleware = TelemetryMiddleware::new("test-service");
         assert_eq!(middleware.service_name, "test-service");
         assert!(middleware.metrics.is_none());
+    }
+
+    #[test]
+    fn recording_uses_real_request_dimensions_not_literals() {
+        // Regression: the middleware used to record the literal strings
+        // "method"/"path" regardless of the actual request.
+        let res = Ok(HttpResponse::new(201));
+        let (method, route, status) = TelemetryMiddleware::recording("GET", "/users/42", &res);
+
+        assert_eq!(method, "GET");
+        assert_eq!(route, "/users/42");
+        assert_eq!(status, 201);
+        assert_ne!(method, "method");
+        assert_ne!(route, "path");
+    }
+
+    #[test]
+    fn recording_counts_error_path_requests() {
+        // Regression: recording used to live only inside the `Ok` branch, so
+        // failed requests were never counted. Errors are recorded as HTTP 500.
+        let res: Result<HttpResponse, Error> = Err(Error::internal("boom"));
+        let (method, route, status) = TelemetryMiddleware::recording("POST", "/checkout", &res);
+
+        assert_eq!(method, "POST");
+        assert_eq!(route, "/checkout");
+        assert_eq!(status, 500);
     }
 
     #[test]

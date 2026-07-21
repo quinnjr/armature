@@ -14,6 +14,7 @@ mod route_validation;
 mod routes;
 mod routes_impl;
 mod timeout_attr;
+mod validate_derive;
 
 /// Marks a struct as injectable, allowing it to be registered in the DI container
 #[proc_macro_attribute]
@@ -191,6 +192,40 @@ pub fn param_derive(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Query)]
 pub fn query_derive(input: TokenStream) -> TokenStream {
     params::query_derive_impl(input)
+}
+
+/// Derives an `armature_validation::Validate` implementation.
+///
+/// Field-level `#[validate(...)]` attributes drive the generated checks, which
+/// call the built-in validators in `armature-validation`:
+///
+/// - `length(min = N, max = M)` — string length bounds (character count)
+/// - `range(min = N, max = M)` — numeric range bounds
+/// - `email` / `url` — format validators
+/// - `regex(pattern = "...")` — pattern match
+/// - `required` — non-empty string
+/// - `custom = "path::to::fn"` — a `fn(&Field) -> Result<(), ValidationError>`
+/// - a bare `#[validate]` (or `#[validate(nested)]`) recurses into a nested
+///   field that also implements `Validate`
+///
+/// ```ignore
+/// use armature_validation::Validate;
+///
+/// #[derive(Validate)]
+/// struct CreateUser {
+///     #[validate(length(min = 3, max = 50))]
+///     username: String,
+///     #[validate(email)]
+///     email: String,
+///     #[validate(range(min = 13, max = 120))]
+///     age: u8,
+///     #[validate]
+///     profile: Profile,
+/// }
+/// ```
+#[proc_macro_derive(Validate, attributes(validate))]
+pub fn validate_derive(input: TokenStream) -> TokenStream {
+    validate_derive::validate_derive_impl(input)
 }
 
 /// Request timeout decorator

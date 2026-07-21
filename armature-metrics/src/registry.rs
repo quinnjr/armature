@@ -183,6 +183,54 @@ pub fn register_histogram_vec_with_buckets(
     Ok(histogram)
 }
 
+/// Register a summary metric
+///
+/// Summaries expose configurable φ-quantiles over a sliding window plus a
+/// cumulative sample count and sum.
+///
+/// # Examples
+///
+/// ```
+/// use armature_metrics::*;
+///
+/// let summary = register_summary(
+///     "request_latency_seconds",
+///     "Request latency in seconds"
+/// ).unwrap();
+///
+/// summary.observe(0.25);
+/// ```
+pub fn register_summary(name: &str, help: &str) -> Result<crate::Summary, prometheus::Error> {
+    let summary = crate::Summary::new(name, help)?;
+    crate::default_registry().register(Box::new(summary.clone()))?;
+    Ok(summary)
+}
+
+/// Register a summary metric with explicit options (quantiles, window, size)
+///
+/// # Examples
+///
+/// ```
+/// use armature_metrics::*;
+/// use std::time::Duration;
+///
+/// let summary = register_summary_with_opts(
+///     SummaryOpts::new("db_query_seconds", "DB query latency")
+///         .quantiles(vec![0.5, 0.95, 0.99])
+///         .max_age(Duration::from_secs(60)),
+/// )
+/// .unwrap();
+///
+/// summary.observe(0.01);
+/// ```
+pub fn register_summary_with_opts(
+    opts: crate::SummaryOpts,
+) -> Result<crate::Summary, prometheus::Error> {
+    let summary = crate::Summary::with_opts(opts)?;
+    crate::default_registry().register(Box::new(summary.clone()))?;
+    Ok(summary)
+}
+
 /// Register metrics with a custom registry
 ///
 /// # Examples
