@@ -644,10 +644,24 @@ mod tests {
 
         // Wait for the (fast-exiting) child to finish.
         let _ = process.wait().await;
-        // Give the forwarding task a brief moment to flush its final write.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let contents = tokio::fs::read_to_string(&log_path).await.unwrap();
+        // The stdout-forwarding task writes each line asynchronously, so
+        // its final write can land slightly after `wait()` returns. Rather
+        // than sleeping a fixed duration (flaky under load, and slower
+        // than necessary on a fast machine), bounded-poll for the expected
+        // final line to show up -- the same pattern used for the
+        // config-watcher tests in `manager.rs`.
+        let mut contents = String::new();
+        for _ in 0..40 {
+            contents = tokio::fs::read_to_string(&log_path)
+                .await
+                .unwrap_or_default();
+            if contents.contains("line3") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
         assert!(contents.contains("line1"), "contents:\n{contents}");
         assert!(contents.contains("line2"), "contents:\n{contents}");
         assert!(contents.contains("line3"), "contents:\n{contents}");

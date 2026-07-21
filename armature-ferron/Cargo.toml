@@ -35,9 +35,6 @@ url = "2.5"
 # UUID for unique identifiers
 uuid = { version = "1.23", features = ["v4"] }
 
-# Futures utilities
-futures = "0.3"
-
 # Time utilities
 chrono = { version = "0.4", features = ["serde"] }
 

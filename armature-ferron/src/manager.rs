@@ -10,6 +10,7 @@ use crate::process::{FerronProcess, ProcessConfig, ProcessStatus};
 use crate::registry::ServiceRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -31,6 +32,11 @@ pub struct FerronManager {
     /// by `build()` when `auto_reload` is enabled and a Tokio runtime is
     /// available to run it on.
     watch_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// Count of `reload()` invocations. Exposed via `reload_count()` both
+    /// as a genuinely useful operational stat and so tests can verify the
+    /// config-file watcher debounces a burst of filesystem events into a
+    /// single reload rather than one reload per raw event.
+    reload_count: AtomicU64,
 }
 
 impl FerronManager {
@@ -67,8 +73,43 @@ impl FerronManager {
         self.process.start().await
     }
 
-    /// Stop Ferron
+    /// Stop the background config-file watcher task, if one is running.
+    ///
+    /// This aborts the watcher task via its stored `JoinHandle` and awaits
+    /// its completion (discarding the resulting `Cancelled` `JoinError` --
+    /// that's the expected outcome of a deliberate abort, not a failure),
+    /// then clears `watch_handle` so `is_watching()` reflects the change.
+    /// A no-op if no watcher is currently running, and idempotent: calling
+    /// it more than once in a row is safe.
+    ///
+    /// ## Drop semantics
+    ///
+    /// The watcher task holds only a `Weak<FerronManager>` (not a strong
+    /// `Arc`), so it does *not* keep the manager alive on its own, and it
+    /// notices the manager has been dropped -- and exits on its own,
+    /// dropping its `notify::Watcher` and closing its channel -- the next
+    /// time a filesystem event wakes it up. However, if no further
+    /// filesystem activity ever occurs after the last external `Arc` is
+    /// dropped, the task could in principle remain parked on `recv()`
+    /// indefinitely (a much smaller, bounded leak than the original
+    /// strong-`Arc` version, but not instantaneous). Call `stop_watching()`
+    /// (or `stop()`, which calls it) for a deterministic, immediate
+    /// shutdown instead of relying on drop alone.
+    pub async fn stop_watching(&self) {
+        let handle = self.watch_handle.write().await.take();
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    /// Stop Ferron.
+    ///
+    /// Always tears down the background config-file watcher task first
+    /// (see `stop_watching()`), regardless of whether the underlying
+    /// process is currently running, and then stops the process itself.
     pub async fn stop(&self) -> Result<()> {
+        self.stop_watching().await;
         self.process.stop().await
     }
 
@@ -79,12 +120,25 @@ impl FerronManager {
 
     /// Reload Ferron configuration
     pub async fn reload(&self) -> Result<()> {
+        self.reload_count.fetch_add(1, Ordering::Relaxed);
+
         // Regenerate config if using registry
         if let Some(ref registry) = self.registry {
             self.regenerate_config_from_registry(registry).await?;
         }
 
         self.process.reload().await
+    }
+
+    /// Number of times `reload()` has been invoked so far.
+    ///
+    /// This is a genuinely useful operational stat (e.g. for dashboards or
+    /// alerting on unexpectedly frequent reloads), and also lets tests
+    /// verify that the config-file watcher debounces a burst of rapid
+    /// filesystem events into a single reload rather than firing once per
+    /// raw event.
+    pub fn reload_count(&self) -> u64 {
+        self.reload_count.load(Ordering::Relaxed)
     }
 
     /// Get the service registry if configured
@@ -318,6 +372,7 @@ impl FerronManagerBuilder {
             health_state,
             auto_reload,
             watch_handle: Arc::new(RwLock::new(None)),
+            reload_count: AtomicU64::new(0),
         });
 
         if auto_reload {
@@ -344,11 +399,33 @@ impl FerronManagerBuilder {
     }
 }
 
+/// How long the watcher waits for filesystem activity to go quiet before
+/// treating a burst of events as a single logical change and reloading.
+/// A single editor "save" (or a config-management tool applying a batch of
+/// changes) commonly produces several raw filesystem events in quick
+/// succession; without debouncing, each one would trigger its own real
+/// reload signal to the child process.
+const CONFIG_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Spawn a background task that watches `manager.config_path` for changes
 /// using `notify`, reloading the manager (regenerating config from the
 /// service registry, then signalling the Ferron process) whenever the file
 /// is modified or (re)created -- covering both in-place writes and
-/// atomic-replace-via-rename editors.
+/// atomic-replace-via-rename editors. Rapid successive events (e.g. from a
+/// single save) are debounced into a single reload; see
+/// `CONFIG_WATCH_DEBOUNCE`.
+///
+/// The task holds only a `Weak<FerronManager>`, not a strong `Arc`: it is
+/// otherwise the last thing keeping its own channel's sender alive (via the
+/// `notify::Watcher` it owns), so a strong `Arc` here would mean the task
+/// -- and therefore the manager -- could never be dropped for the life of
+/// the runtime once `auto_reload` has been used. On every received event
+/// the task attempts to `upgrade()` the weak reference; once that fails
+/// (the manager has been dropped), the task exits, which drops its
+/// `notify::Watcher` and closes the channel. For a deterministic,
+/// immediate shutdown that doesn't depend on another filesystem event
+/// arriving, use `FerronManager::stop_watching()` (or `stop()`), which
+/// aborts the task directly via its `JoinHandle`.
 ///
 /// Returns `Ok(None)` (rather than spawning anything) if no Tokio runtime
 /// handle is currently available, so this can safely be called from
@@ -396,12 +473,46 @@ fn spawn_config_watcher(
     let watch_path = manager.config_path.clone();
     let watch_file_name = watch_path.file_name().map(|n| n.to_owned());
 
+    // Hold only a `Weak` reference inside the spawned task; drop our own
+    // strong reference immediately so the caller's `Arc` (and any it was
+    // cloned from) is the only thing keeping the manager alive from here
+    // on. See the doc comment above for why this matters.
+    let manager_weak = Arc::downgrade(&manager);
+    drop(manager);
+
+    // Whether an event is one we actually care about: it names the watched
+    // config file, and is a modification or (re)creation of it. Anything
+    // else (e.g. `Access`/`Open`/`Close` events from something merely
+    // *reading* the file, or events for unrelated files in the same
+    // watched directory) is noise that must neither trigger a reload nor
+    // reset the debounce window below.
+    let is_relevant_event = move |event: &Event| -> bool {
+        event
+            .paths
+            .iter()
+            .any(|p| p.file_name() == watch_file_name.as_deref())
+            && (event.kind.is_modify() || event.kind.is_create())
+    };
+
     let join = rt.spawn(async move {
         // Keep the watcher alive for the lifetime of this task; dropping it
         // would stop delivery of further events.
         let _watcher = watcher;
 
-        while let Some(res) = rx.recv().await {
+        loop {
+            let res = match rx.recv().await {
+                Some(res) => res,
+                None => break, // Sender gone; nothing left to watch for.
+            };
+
+            // The manager going away is this task's real shutdown signal:
+            // once the last external `Arc<FerronManager>` is dropped,
+            // there's no one left to reload for, so stop watching (dropping
+            // `_watcher` below closes the channel and ends the task).
+            let Some(manager) = manager_weak.upgrade() else {
+                break;
+            };
+
             let event = match res {
                 Ok(event) => event,
                 Err(e) => {
@@ -410,17 +521,39 @@ fn spawn_config_watcher(
                 }
             };
 
-            let is_relevant = event
-                .paths
-                .iter()
-                .any(|p| p.file_name() == watch_file_name.as_deref())
-                && (event.kind.is_modify() || event.kind.is_create());
-            if !is_relevant {
+            if !is_relevant_event(&event) {
                 continue;
             }
 
             if !manager.auto_reload {
                 continue;
+            }
+
+            // Debounce: a single logical "save" (or a config-management
+            // tool applying a batch of changes) commonly produces several
+            // raw filesystem events in quick succession. Wait for a short
+            // quiet window with no further *relevant* events before
+            // reloading, so a burst collapses into a single reload rather
+            // than one per event. Irrelevant events (e.g. some other
+            // process merely reading the file, which itself generates
+            // `Access` events on the very same path) are drained without
+            // resetting the window, so they can't stall the reload
+            // indefinitely.
+            let mut deadline = tokio::time::Instant::now() + CONFIG_WATCH_DEBOUNCE;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break; // quiet window elapsed
+                }
+                match tokio::time::timeout(remaining, rx.recv()).await {
+                    Ok(Some(Ok(ev))) if is_relevant_event(&ev) => {
+                        // More real activity; push the window back out.
+                        deadline = tokio::time::Instant::now() + CONFIG_WATCH_DEBOUNCE;
+                    }
+                    Ok(Some(_)) => continue, // irrelevant event; keep waiting out the window
+                    Ok(None) => break,       // channel closed
+                    Err(_) => break,         // timed out waiting for the next event
+                }
             }
 
             info!(
@@ -663,6 +796,166 @@ mod tests {
         assert!(
             saw_reload,
             "expected the config file watcher to trigger a registry-backed reload"
+        );
+    }
+
+    /// Regression test for the watcher-task leak: the task spawned by
+    /// `spawn_config_watcher` must hold only a `Weak<FerronManager>`, so
+    /// once every external `Arc<FerronManager>` is dropped, the task
+    /// notices (via a failed `upgrade()`) and exits -- dropping its
+    /// `notify::Watcher`, which closes the channel. Against the original
+    /// code (a strong `Arc` captured in the task, `while let Some(..) =
+    /// rx.recv().await` with no other termination path), the task can
+    /// never observe the manager going away, so `handle.is_finished()`
+    /// never becomes true and this test times out / fails.
+    #[tokio::test]
+    async fn test_watcher_task_ends_when_manager_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        tokio::fs::write(&config_path, "// initial\n")
+            .await
+            .unwrap();
+
+        let base_config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        // Build with auto_reload(false) so `build()` itself doesn't also
+        // spawn a watcher -- we spawn our own directly below so we can
+        // retain the raw `JoinHandle` after dropping the manager.
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(base_config)
+            .auto_reload(false)
+            .build()
+            .unwrap();
+
+        let handle = spawn_config_watcher(Arc::clone(&manager))
+            .unwrap()
+            .expect("a Tokio runtime is available in this #[tokio::test]");
+
+        assert!(!handle.is_finished());
+
+        // Drop the only external strong reference to the manager. If the
+        // watcher task holds a `Weak` (as fixed), the manager is actually
+        // deallocated now; the task just hasn't noticed yet.
+        drop(manager);
+
+        // Nudge the watcher with a filesystem event so its `rx.recv()`
+        // wakes up and attempts to `upgrade()` the weak reference.
+        tokio::fs::write(&config_path, "// trigger\n")
+            .await
+            .unwrap();
+
+        let mut finished = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if handle.is_finished() {
+                finished = true;
+                break;
+            }
+        }
+
+        assert!(
+            finished,
+            "watcher task must terminate once the manager it watches for has been dropped"
+        );
+    }
+
+    /// Regression test for `stop()`/`stop_watching()`: they must provide an
+    /// explicit, deterministic shutdown path for the watcher task rather
+    /// than relying solely on the manager being dropped (which, absent
+    /// further filesystem activity, could leave the task parked on
+    /// `recv()` indefinitely even after the fix above).
+    #[tokio::test]
+    async fn test_stop_terminates_the_watcher_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        let config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(config)
+            .auto_reload(true)
+            .build()
+            .unwrap();
+
+        assert!(manager.is_watching().await);
+
+        // The process was never started, so `stop()`'s call into
+        // `self.process.stop()` will return `NotRunning` -- but tearing
+        // down the watcher task must happen regardless, and first.
+        let _ = manager.stop().await;
+
+        assert!(
+            !manager.is_watching().await,
+            "stop() must abort/join the watcher task and clear watch_handle"
+        );
+    }
+
+    /// Regression test for the reload-storm/thrash issue: every matching
+    /// filesystem event used to trigger an immediate `manager.reload()`
+    /// call, so several rapid writes to the config file (e.g. an editor's
+    /// save, or a config-management tool applying a batch of changes)
+    /// produced one real reload signal per raw event. The watcher must
+    /// instead debounce/coalesce a burst of events into a single reload.
+    #[tokio::test]
+    async fn test_watcher_debounces_rapid_successive_writes_into_one_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        tokio::fs::write(&config_path, "// initial\n")
+            .await
+            .unwrap();
+
+        let base_config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(base_config)
+            .auto_reload(true)
+            .build()
+            .unwrap();
+
+        assert!(manager.is_watching().await);
+
+        // Give the watcher a moment to be fully registered before we start
+        // writing (mirrors the warm-up sleep in the existing reload test).
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Write the config file several times in quick succession, well
+        // within the debounce window -- this should collapse into exactly
+        // one reload.
+        for i in 0..5 {
+            tokio::fs::write(&config_path, format!("// edit {}\n", i))
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Bounded poll: wait for the debounce window to close and the
+        // (single) reload to fire, then confirm the count is exactly one.
+        let mut last = manager.reload_count();
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            last = manager.reload_count();
+        }
+
+        assert_eq!(
+            last, 1,
+            "5 rapid successive writes within the debounce window must collapse into a single reload"
         );
     }
 }

@@ -689,11 +689,24 @@ impl FerronConfig {
 
             // Rewrite the path (prepending the prefix) before proxying, using
             // Ferron's real `rewrite <regex> <replacement>` directive
-            // (https://ferron.sh/docs/configuration/routing-url-processing):
-            // matching `^` (the empty string at the start) and replacing it
-            // with the prefix inserts it at the beginning of the path.
+            // (https://ferron.sh/docs/configuration/routing-url-processing).
+            //
+            // An earlier version of this emitted `rewrite "^" "<prefix>"`:
+            // matching `^`, the zero-width start-of-string, and replacing
+            // it with the prefix does insert it at the beginning of the
+            // path -- but it's a sed-style idiom that Ferron's own docs
+            // never demonstrate. Every example in the docs instead pairs a
+            // capturing group in the regex with a `$N` backreference in the
+            // replacement (e.g. `rewrite "^/old-path/(.*)" "/new-path/$1"`,
+            // `rewrite "^/api/v1/(.*)" "/api/v2/$1"`). Use that
+            // docs-demonstrated form here too: capture the whole path in
+            // group 1 and re-emit it right after the prefix. This assumes
+            // Ferron's regex engine supports `(.*)`/`$1` capture-group
+            // backreferences (it does -- that's exactly what the docs'
+            // examples use), and, like the old form, always matches (the
+            // whole remaining path, greedily) so it applies unconditionally.
             if let Some(ref prefix) = route.add_prefix {
-                writeln!(output, "        rewrite \"^\" \"{}\"", prefix)
+                writeln!(output, "        rewrite \"^(.*)\" \"{}$1\"", prefix)
                     .map_err(|e| FerronError::config(e.to_string()))?;
             }
 
@@ -1135,6 +1148,6 @@ mod tests {
             .unwrap();
 
         let kdl = config.to_kdl().unwrap();
-        assert!(kdl.contains("rewrite \"^\" \"/v2\""), "kdl:\n{kdl}");
+        assert!(kdl.contains("rewrite \"^(.*)\" \"/v2$1\""), "kdl:\n{kdl}");
     }
 }
