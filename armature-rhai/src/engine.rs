@@ -113,13 +113,19 @@ impl RhaiEngine {
         let full_path = self.loader.resolve_path(path);
 
         if self.config.hot_reload {
-            // In hot-reload mode, evict any cached scripts whose source file
-            // has changed since it was compiled (`CompiledScript::is_stale`
-            // via `ScriptCache::evict_stale`), so a stale AST is never
-            // served and a subsequent cache lookup below naturally falls
-            // through to a fresh recompilation. An unchanged file is left
-            // in the cache and served as normal.
-            self.cache.write().evict_stale();
+            // In hot-reload mode, evict the cached script for *this*
+            // request's path if its source file has changed since it was
+            // compiled (`CompiledScript::is_stale` via
+            // `ScriptCache::evict_if_stale`), so a stale AST is never
+            // served and the cache lookup below naturally falls through to
+            // a fresh recompilation. An unchanged file is left in the cache
+            // and served as normal.
+            //
+            // This only stats the one entry named by `full_path` — not
+            // every cached script (that's what `evict_stale()` does) — so
+            // it stays cheap even under load with a large cache, instead of
+            // doing a full filesystem stat sweep on every request.
+            self.cache.write().evict_if_stale(&full_path);
         }
 
         // Check cache first.

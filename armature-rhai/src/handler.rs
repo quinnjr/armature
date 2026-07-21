@@ -205,13 +205,32 @@ impl ScriptMiddleware {
             return Ok(new_response.into_http_response());
         }
 
-        // A script that mutated `response` in place amends the real
-        // response instead of discarding it.
+        // Otherwise, read back whatever is bound to `response` in scope.
+        // `ResponseBinding` mirrors every field of `HttpResponse` (status,
+        // headers, cookies, body), so `into_http_response()` is lossless —
+        // which means this single branch correctly covers *both* remaining
+        // cases:
+        //   - the script mutated `response` in place (e.g.
+        //     `response.header("x-served-by", "rhai");` with no explicit
+        //     return) — this serves back the amended copy;
+        //   - the script never touched `response` at all — `response` still
+        //     holds the untouched clone seeded from the real `HttpResponse`
+        //     before the script ran, so this serves it back unchanged, with
+        //     full fidelity.
+        // This is *not* the same as the old belief that the branch below
+        // (`Ok(response)`) was the "untouched" passthrough: that branch
+        // never fires for the untouched case, because `response` is always
+        // present in scope as a `ResponseBinding`. The lookup below can
+        // only fail if a script reassigns `response` to a non-`Response`
+        // value (e.g. `response = 42;`), which is a script bug, not a
+        // normal outcome — see the fallback below.
         if let Some(mutated) = scope.get_value::<ResponseBinding>("response") {
             return Ok(mutated.into_http_response());
         }
 
-        // Script didn't touch the response at all: pass it through unchanged.
+        // Defensive fallback: a script stomped `response` with something
+        // that isn't a `ResponseBinding`, so it can't be read back. Return
+        // the real original response rather than panicking or erroring.
         Ok(response)
     }
 }
@@ -232,6 +251,18 @@ pub type ScriptHandlerFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse> + Sen
 ///   the calling thread could deadlock the executor (or is simply
 ///   impossible), so the future is instead driven to completion on a
 ///   dedicated thread with its own minimal runtime.
+///
+/// Cost note: that dedicated-thread fallback is not free. Each call on the
+/// non-multi-thread path spawns a brand new OS thread and builds a fresh
+/// single-threaded Tokio runtime (`Builder::new_current_thread()`) just for
+/// that one invocation — neither the thread nor the runtime is pooled or
+/// reused across calls. That's fine for occasional use, but it is
+/// measurably more expensive per call than the multi-thread branch (which
+/// just reuses the existing runtime's worker pool via `block_in_place`).
+/// If a `ScriptHandlerFn` built by this function sits on a hot path, prefer
+/// running it from a multi-thread Tokio runtime; calling it repeatedly from
+/// a current-thread runtime (or with no runtime at all) will show up as
+/// real per-call thread-spawn/runtime-build overhead.
 pub fn script_handler(engine: Arc<RhaiEngine>, script_path: impl Into<PathBuf>) -> ScriptHandlerFn {
     let handler = Arc::new(ScriptHandler::new(engine, script_path));
 
@@ -333,6 +364,106 @@ mod tests {
             b"hello",
             "existing body must survive when the script only adds a header"
         );
+    }
+
+    #[tokio::test]
+    async fn test_call_after_preserves_cookies_on_noop_script() {
+        // A completely no-op after-script: it never references `response`
+        // or `original_response` at all, so this exercises the "script
+        // didn't touch the response" path end-to-end.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("after.rhai"), "()").unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let middleware = ScriptMiddleware::after(engine, "after.rhai");
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let real_response = HttpResponse::new(200).cookie("session", "abc123; HttpOnly");
+
+        let amended = middleware
+            .call_after(&request, real_response)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            amended.cookies,
+            vec!["session=abc123; HttpOnly".to_string()],
+            "Set-Cookie headers must survive a no-op after-script"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_after_mutated_response_in_place_without_explicit_return() {
+        // The doc comment on `call_after` advertises mutating `response` in
+        // place via method calls (no explicit `return`/final expression) as
+        // a supported mode. Exercise it directly: the script statement ends
+        // with `;`, so the script's own result is unit, and the mutation
+        // must be picked up from the `response` scope variable instead.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("after.rhai"),
+            r#"response.header("x-after", "1");"#,
+        )
+        .unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let middleware = ScriptMiddleware::after(engine, "after.rhai");
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let real_response = HttpResponse::new(200).with_body(b"unchanged".to_vec());
+
+        let amended = middleware
+            .call_after(&request, real_response)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            amended.headers.get("x-after"),
+            Some(&"1".to_string()),
+            "in-place mutation via response.header(...) must land on the final response"
+        );
+        assert_eq!(
+            amended.status, 200,
+            "in-place mutation must not clobber the original status"
+        );
+        assert_eq!(
+            amended.body_ref(),
+            b"unchanged",
+            "in-place mutation must not clobber the original body"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_after_falls_back_to_original_response_if_script_stomps_response_variable() {
+        // If a script reassigns `response` to something that isn't a
+        // ResponseBinding at all (a script bug, not a normal outcome), the
+        // `scope.get_value::<ResponseBinding>("response")` lookup fails.
+        // `call_after` must fall back to the real original response rather
+        // than panicking.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("after.rhai"), "response = 42;").unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let middleware = ScriptMiddleware::after(engine, "after.rhai");
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut real_response = HttpResponse::new(201);
+        real_response
+            .headers
+            .insert("x-real".to_string(), "yes".to_string());
+        let real_response = real_response.with_body(b"hello".to_vec());
+
+        let result = middleware
+            .call_after(&request, real_response)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.status, 201,
+            "must fall back to the real original response, not panic"
+        );
+        assert_eq!(result.headers.get("x-real"), Some(&"yes".to_string()));
+        assert_eq!(result.body_ref(), b"hello");
     }
 
     #[test]

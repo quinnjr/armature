@@ -217,6 +217,13 @@ impl ScriptRouter {
 
     /// Check if a pattern matches a path, returning the captured `:param`
     /// values (and the catch-all remainder under the `"*"` key) on match.
+    ///
+    /// Captured values are the raw path segment text, taken directly from
+    /// `path.split('/')` — they are **not** percent-decoded. Scripts
+    /// reading them via `request.param("id")` (see
+    /// `RequestBinding::param`) see e.g. `"john%20doe"` rather than
+    /// `"john doe"` for a segment that was percent-encoded in the request
+    /// URL.
     fn match_pattern(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
         // Handle catch-all pattern, matching on a segment boundary so that
         // `/api/*` matches `/api` and `/api/...` but not sibling paths like

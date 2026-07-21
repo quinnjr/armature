@@ -91,6 +91,13 @@ impl RequestBinding {
     }
 
     /// Get a path parameter.
+    ///
+    /// Values are the raw path segment text captured by the router (see
+    /// `ScriptRouter::match_pattern`) — they are **not** percent-decoded.
+    /// A route pattern like `/users/:id` matched against
+    /// `/users/john%20doe` yields `"john%20doe"`, not `"john doe"`; decode
+    /// it in the script yourself (e.g. via a registered helper) if you need
+    /// the decoded value.
     pub fn param(&mut self, name: &str) -> Dynamic {
         self.params
             .get(name)
@@ -152,6 +159,11 @@ impl RequestBinding {
 pub struct ResponseBinding {
     status: u16,
     headers: HashMap<String, String>,
+    /// Set-Cookie header values, mirroring `HttpResponse::cookies`. Carried
+    /// through `from_http_response`/`into_http_response` so that
+    /// round-tripping a response through a script (e.g. `call_after`) never
+    /// silently drops cookies.
+    cookies: Vec<String>,
     body: Option<Vec<u8>>,
 }
 
@@ -167,6 +179,7 @@ impl ResponseBinding {
         Self {
             status: 200,
             headers: HashMap::new(),
+            cookies: Vec::new(),
             body: None,
         }
     }
@@ -186,6 +199,7 @@ impl ResponseBinding {
         Self {
             status: response.status,
             headers,
+            cookies: response.cookies.clone(),
             body: Some(response.body_ref().to_vec()),
         }
     }
@@ -295,6 +309,8 @@ impl ResponseBinding {
         for (name, value) in self.headers {
             response.headers.insert(name, value);
         }
+
+        response.cookies = self.cookies;
 
         if let Some(body) = self.body {
             response = response.with_body(body);
