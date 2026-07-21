@@ -5,9 +5,12 @@ use proc_macro::TokenStream;
 
 mod body_limit_attr;
 mod cache_attr;
+mod catch_attr;
 mod controller;
+mod guard_attr;
 mod injectable;
 mod mcp;
+mod middleware_attr;
 mod module;
 mod params;
 mod route_validation;
@@ -402,4 +405,112 @@ pub fn mcp(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn mcp_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     mcp::mcp_resource_impl(attr, item)
+}
+
+/// Exception filter decorator.
+///
+/// Turns an `async fn(error: &Error, ctx: &ExceptionContext) -> HttpResponse`
+/// into an [`ExceptionFilter`](armature_core::exception_filter::ExceptionFilter)
+/// implementation plus a factory function of the same name.
+///
+/// # Usage
+///
+/// ```ignore
+/// use armature_proc_macro::catch;
+///
+/// // Catch all errors
+/// #[catch]
+/// async fn handle_all(error: &Error, ctx: &ExceptionContext) -> HttpResponse {
+///     HttpResponse::internal_server_error()
+/// }
+///
+/// // Catch specific error variants
+/// #[catch(NotFound, RouteNotFound)]
+/// async fn handle_not_found(error: &Error, ctx: &ExceptionContext) -> HttpResponse {
+///     HttpResponse::not_found()
+/// }
+///
+/// // With priority and an explicit name
+/// #[catch(Validation, priority = 100, name = "validation")]
+/// async fn handle_validation(error: &Error, ctx: &ExceptionContext) -> HttpResponse {
+///     HttpResponse::new(422)
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn catch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    catch_attr::catch_impl(attr, item)
+}
+
+/// Applies one or more guard *types* to a route handler.
+///
+/// Each guard type must implement [`Guard`](armature_core::guard::Guard) and
+/// `Default`. Before the handler runs, every guard's `can_activate` is checked;
+/// a `false` result short-circuits with `Error::Forbidden` and an `Err` is
+/// propagated.
+///
+/// ```ignore
+/// use armature_proc_macro::{get, use_guard};
+///
+/// #[use_guard(AuthenticationGuard)]
+/// #[get("/protected")]
+/// async fn protected(req: HttpRequest) -> Result<HttpResponse, Error> {
+///     Ok(HttpResponse::ok())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn use_guard(attr: TokenStream, item: TokenStream) -> TokenStream {
+    guard_attr::use_guard_impl(attr, item)
+}
+
+/// Applies one or more guard *instances* to a route handler (or stores guard
+/// metadata on a controller struct).
+///
+/// ```ignore
+/// use armature_proc_macro::{get, guard};
+///
+/// #[guard(RolesGuard::new(vec!["admin".to_string()]))]
+/// #[get("/admin")]
+/// async fn admin(req: HttpRequest) -> Result<HttpResponse, Error> {
+///     Ok(HttpResponse::ok())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
+    guard_attr::guard_impl(attr, item)
+}
+
+/// Applies one or more middleware *instances* to a route handler.
+///
+/// The handler is wrapped in a [`MiddlewareChain`](armature_core::middleware::MiddlewareChain)
+/// built from the supplied middleware expressions.
+///
+/// ```ignore
+/// use armature_proc_macro::{get, use_middleware};
+///
+/// #[use_middleware(LoggerMiddleware::new(), CorsMiddleware::new())]
+/// #[get("/users")]
+/// async fn get_users(req: HttpRequest) -> Result<HttpResponse, Error> {
+///     Ok(HttpResponse::ok())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn use_middleware(attr: TokenStream, item: TokenStream) -> TokenStream {
+    middleware_attr::use_middleware_impl(attr, item)
+}
+
+/// Applies middleware to a route handler function, or stores middleware
+/// metadata on a controller struct.
+///
+/// ```ignore
+/// use armature_proc_macro::{get, middleware};
+///
+/// #[middleware(LoggerMiddleware::new())]
+/// #[get("/users")]
+/// async fn get_users(req: HttpRequest) -> Result<HttpResponse, Error> {
+///     Ok(HttpResponse::ok())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn middleware(attr: TokenStream, item: TokenStream) -> TokenStream {
+    middleware_attr::middleware_impl(attr, item)
 }

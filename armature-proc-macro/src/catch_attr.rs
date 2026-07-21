@@ -77,17 +77,17 @@ impl Parse for CatchArgs {
                         let key = ident.to_string();
                         match key.as_str() {
                             "priority" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value {
-                                    if let Lit::Int(lit_int) = &expr_lit.lit {
-                                        priority = Some(lit_int.base10_parse()?);
-                                    }
+                                if let syn::Expr::Lit(expr_lit) = &nv.value
+                                    && let Lit::Int(lit_int) = &expr_lit.lit
+                                {
+                                    priority = Some(lit_int.base10_parse()?);
                                 }
                             }
                             "name" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value {
-                                    if let Lit::Str(lit_str) = &expr_lit.lit {
-                                        name = Some(lit_str.value());
-                                    }
+                                if let syn::Expr::Lit(expr_lit) = &nv.value
+                                    && let Lit::Str(lit_str) = &expr_lit.lit
+                                {
+                                    name = Some(lit_str.value());
                                 }
                             }
                             _ => {}
@@ -115,6 +115,8 @@ pub fn catch_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_vis = &input_fn.vis;
     let fn_block = &input_fn.block;
     let fn_attrs = &input_fn.attrs;
+    let fn_inputs = &input_fn.sig.inputs;
+    let fn_output = &input_fn.sig.output;
 
     // Generate the struct name from the function name
     let struct_name = syn::Ident::new(
@@ -161,28 +163,32 @@ pub fn catch_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Check if the function is async
     let is_async = input_fn.sig.asyncness.is_some();
 
-    // Generate the catch implementation
-    let catch_impl = if is_async {
-        quote! {
-            async fn catch(
-                &self,
-                error: &armature_core::Error,
-                ctx: &armature_core::exception_filter::ExceptionContext,
-            ) -> Option<armature_core::HttpResponse> {
-                #fn_block
-            }
-        }
+    // The user's handler returns `HttpResponse`, but the trait method returns
+    // `Option<HttpResponse>`. Re-emit the user's body as an inner function with
+    // its original signature (so its parameter names are preserved regardless of
+    // what the user called them), call it with the trait-provided `error`/`ctx`,
+    // and wrap the result in `Some`.
+    let inner_name = syn::Ident::new(&format!("__{}_catch_inner", fn_name), fn_name.span());
+    let async_marker = if is_async {
+        quote! { async }
     } else {
-        quote! {
-            async fn catch(
-                &self,
-                error: &armature_core::Error,
-                ctx: &armature_core::exception_filter::ExceptionContext,
-            ) -> Option<armature_core::HttpResponse> {
-                // Wrap sync function result
-                let result = (|| #fn_block)();
-                result
-            }
+        quote! {}
+    };
+    let inner_call = if is_async {
+        quote! { #inner_name(error, ctx).await }
+    } else {
+        quote! { #inner_name(error, ctx) }
+    };
+
+    let catch_impl = quote! {
+        async fn catch(
+            &self,
+            error: &armature_core::Error,
+            ctx: &armature_core::exception_filter::ExceptionContext,
+        ) -> Option<armature_core::HttpResponse> {
+            #async_marker fn #inner_name(#fn_inputs) #fn_output #fn_block
+
+            Some(#inner_call)
         }
     };
 

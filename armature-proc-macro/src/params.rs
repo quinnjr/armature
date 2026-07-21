@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 /// Derive macro for extracting request body
 ///
@@ -82,7 +82,19 @@ pub fn param_derive_impl(input: TokenStream) -> TokenStream {
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let expanded = quote! {
+    // Choose the mode by shape: structs with named fields use multi-field
+    // extraction; everything else uses the single-value `FromStr` mode. The two
+    // are mutually exclusive because the single-value methods carry a
+    // `where Self: FromStr` bound, which is a rejected trivial bound on a
+    // concrete multi-field struct that does not implement `FromStr`.
+    let is_named_struct = matches!(
+        &input.data,
+        Data::Struct(data) if matches!(data.fields, Fields::Named(_))
+    );
+
+    // Single-value mode: the `FromStr` bound on the methods means it is only
+    // usable for types that implement `FromStr`.
+    let single_value = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
             /// Extract a path parameter by name
             pub fn from_param(request: &armature_core::HttpRequest, param_name: &str) -> Result<Self, armature_core::Error>
@@ -106,6 +118,57 @@ pub fn param_derive_impl(input: TokenStream) -> TokenStream {
                     .and_then(|v| v.parse::<Self>().ok())
             }
         }
+    };
+
+    // Multi-field mode: for structs with named fields, extract each field from
+    // the same-named path parameter via `FromStr`.
+    let multi_field = match &input.data {
+        Data::Struct(data) if is_named_struct => match &data.fields {
+            Fields::Named(fields) => {
+                let extractions = fields.named.iter().map(|f| {
+                    let field_ident = f.ident.as_ref().expect("named field has an ident");
+                    let field_name = field_ident.to_string();
+                    let field_ty = &f.ty;
+                    quote! {
+                        #field_ident: {
+                            let __raw = request.param(#field_name)
+                                .ok_or_else(|| armature_core::Error::Validation(
+                                    format!("Missing parameter: {}", #field_name)
+                                ))?;
+                            __raw.parse::<#field_ty>()
+                                .map_err(|e| armature_core::Error::Validation(
+                                    format!("Invalid parameter '{}': {}", #field_name, e)
+                                ))?
+                        }
+                    }
+                });
+
+                quote! {
+                    impl #impl_generics #name #ty_generics #where_clause {
+                        /// Extract this struct from path parameters. Each named field is
+                        /// parsed from the same-named path parameter via `FromStr`.
+                        pub fn from_request(request: &armature_core::HttpRequest) -> Result<Self, armature_core::Error> {
+                            Ok(Self {
+                                #(#extractions),*
+                            })
+                        }
+
+                        /// Like [`from_request`](Self::from_request) but returns `None` on any failure.
+                        pub fn from_request_opt(request: &armature_core::HttpRequest) -> Option<Self> {
+                            Self::from_request(request).ok()
+                        }
+                    }
+                }
+            }
+            _ => quote! {},
+        },
+        _ => quote! {},
+    };
+
+    let expanded = if is_named_struct {
+        multi_field
+    } else {
+        single_value
     };
 
     TokenStream::from(expanded)
@@ -147,11 +210,12 @@ pub fn query_derive_impl(input: TokenStream) -> TokenStream {
             where
                 Self: serde::de::DeserializeOwned,
             {
-                let query_string: String = request.query_params
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("&");
+                // Re-encode the already-decoded pairs with proper percent-encoding
+                // before handing the string to `serde_urlencoded`. Building the
+                // string by hand would corrupt any value containing '&', '=' or '%'.
+                let pairs: Vec<(&String, &String)> = request.query_params.iter().collect();
+                let query_string = serde_urlencoded::to_string(&pairs)
+                    .map_err(|e| armature_core::Error::Validation(format!("Invalid query parameters: {}", e)))?;
 
                 serde_urlencoded::from_str(&query_string)
                     .map_err(|e| armature_core::Error::Validation(format!("Invalid query parameters: {}", e)))

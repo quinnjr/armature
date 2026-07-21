@@ -43,11 +43,31 @@ pub fn controller_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Per-controller trait supplying a default (empty) `__collect_routes`.
+    // The `#[routes]` macro emits an *inherent* `__collect_routes` on the same
+    // type; inherent methods shadow trait methods, so `Self::__collect_routes()`
+    // resolves to the real route list when `#[routes]` is present and to this
+    // empty default otherwise. This keeps controllers without a `#[routes]` impl
+    // compiling while removing the silent `vec![]` for those that have one.
+    let routes_trait = syn::Ident::new(
+        &format!("__ArmatureCollectRoutes{struct_name}"),
+        struct_name.span(),
+    );
+
     let expanded = quote! {
         #input
 
         // Provider trait is now a blanket impl for Send + Sync + 'static types,
         // so no explicit impl is needed.
+
+        #[doc(hidden)]
+        trait #routes_trait {
+            fn __collect_routes() -> Vec<armature_core::RouteDefinition> {
+                ::std::vec::Vec::new()
+            }
+        }
+
+        impl #routes_trait for #struct_name {}
 
         #[async_trait::async_trait]
         impl armature_core::Controller for #struct_name {
@@ -55,6 +75,11 @@ pub fn controller_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #base_path_value
             }
 
+            /// Collect all routes defined on this controller.
+            ///
+            /// Populated from the `#[routes]`-generated metadata (controller-relative
+            /// paths, matching the list registered by the module route registrar).
+            /// Returns an empty list when the controller has no `#[routes]` impl.
             fn routes(&self) -> Vec<armature_core::RouteDefinition> {
                 Self::__collect_routes()
             }
@@ -64,15 +89,6 @@ pub fn controller_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             pub const BASE_PATH: &'static str = #base_path_value;
 
             #constructor
-
-            /// Collect all routes defined on this controller.
-            /// This method is called by the Controller trait implementation.
-            /// Routes are added via the route registration macros.
-            pub fn __collect_routes() -> Vec<armature_core::RouteDefinition> {
-                // This will be populated by route macros via inventory or manual registration
-                // For now, return empty - routes are registered via module's route_registrar
-                vec![]
-            }
         }
     };
 
