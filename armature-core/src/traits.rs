@@ -18,6 +18,35 @@ pub trait Controller: Send + Sync + 'static {
 
 /// Trait for modules that organize components
 pub trait Module: Send + Sync + 'static {
+    /// Returns the `TypeId` of the concrete type implementing this trait.
+    ///
+    /// Do not override this: the default implementation is monomorphized
+    /// per concrete `Self` (the same technique `std::any::Any::type_id`
+    /// uses), so its vtable entry always reports the *concrete* module
+    /// type, even when called through a `&dyn Module` trait object.
+    ///
+    /// This exists so callers that only hold a `&dyn Module` (e.g.
+    /// [`crate::Application`]'s module-tree walk) can still deduplicate
+    /// modules by concrete identity. `std::any::type_name_of_val`/
+    /// `TypeId::of` cannot do this from outside the trait: both resolve
+    /// their type parameter from the *static* type of the reference
+    /// (`dyn Module`), not the concrete type behind the vtable, so every
+    /// module would compare equal to every other module.
+    fn module_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Self>()
+    }
+
+    /// Returns the type name of the concrete type implementing this trait.
+    ///
+    /// Like [`Module::module_type_id`], this is monomorphized per concrete
+    /// `Self`, so it reports the real module type name (useful for
+    /// diagnostics/logging) even through a `&dyn Module` reference — unlike
+    /// `std::any::type_name_of_val(&dyn Module)`, which always returns the
+    /// trait object's own type name.
+    fn module_type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Returns the list of provider types to register
     fn providers(&self) -> Vec<ProviderRegistration>;
 
