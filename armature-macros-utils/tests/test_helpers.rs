@@ -88,7 +88,7 @@ fn assert_json_matches_object_literal() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "assert_json!: response body did not match expected JSON")]
 fn assert_json_panics_on_mismatch() {
     let resp = sample_response();
     assert_json!(resp, { "id": 2, "name": "Bob" });

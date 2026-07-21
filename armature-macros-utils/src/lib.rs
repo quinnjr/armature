@@ -276,6 +276,12 @@ pub fn ensure(input: TokenStream) -> TokenStream {
 ///
 /// let user = User::new(); // requires Default
 /// ```
+///
+/// The generated `Debug`/`Clone` impls do **not** add per-generic-parameter
+/// bounds (unlike `#[derive(Debug, Clone)]`, which bounds every type
+/// parameter): a generic struct needs its own explicit `T: Clone + Debug`
+/// bounds (e.g. on the struct or via a `where` clause) for the emitted impls
+/// to compile.
 #[proc_macro_derive(Model, attributes(model))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     model::derive_model_impl(input)

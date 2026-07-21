@@ -80,6 +80,62 @@ fn api_model_roundtrips_non_skipped_fields() {
     assert_eq!(a.name, "Zed");
 }
 
+// Regression coverage: against the old code, `to_json` removed skipped
+// fields by `stringify!(field_ident)`, ignoring serde's naming attributes.
+// A struct-level `#[serde(rename_all = "camelCase")]` renames
+// `password_hash` to `"passwordHash"` on the wire, so the old removal (which
+// looked for the literal key `"password_hash"`) silently missed it and the
+// secret leaked.
+#[derive(ApiModel, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SecretUser {
+    user_id: i64,
+    first_name: String,
+    #[api(skip)]
+    password_hash: String,
+}
+
+#[test]
+fn api_model_excludes_skipped_field_under_rename_all() {
+    let u = SecretUser {
+        user_id: 1,
+        first_name: "Alice".into(),
+        password_hash: "s3cret".into(),
+    };
+    let json = u.to_json().unwrap();
+    assert!(
+        json.get("passwordHash").is_none(),
+        "skipped field leaked under #[serde(rename_all)]: {json}"
+    );
+    // The non-skipped fields are still present under their renamed keys.
+    assert_eq!(json.get("userId").unwrap(), 1);
+    assert_eq!(json.get("firstName").unwrap(), "Alice");
+}
+
+// Same leak, via a field-level `#[serde(rename = "..")]` instead of a
+// container-level `rename_all`.
+#[derive(ApiModel, Serialize, Deserialize, Default)]
+struct SecretToken {
+    id: i64,
+    #[serde(rename = "apiSecret")]
+    #[api(skip)]
+    secret: String,
+}
+
+#[test]
+fn api_model_excludes_skipped_field_with_field_level_rename() {
+    let t = SecretToken {
+        id: 1,
+        secret: "shh".into(),
+    };
+    let json = t.to_json().unwrap();
+    assert!(
+        json.get("apiSecret").is_none(),
+        "skipped field leaked under #[serde(rename)]: {json}"
+    );
+    assert_eq!(json.get("id").unwrap(), 1);
+}
+
 #[derive(Resource, Default)]
 #[resource(table = "users")]
 struct UserEntity {

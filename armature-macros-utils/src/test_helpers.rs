@@ -90,13 +90,17 @@ pub fn test_request_impl(input: TokenStream) -> TokenStream {
 
     // Serialize the body as JSON (requires the caller to depend on serde_json)
     // and default the Content-Type; explicit headers below still override it.
+    //
+    // The internal binding is `__req` (not `req`) so a caller's body/header
+    // expression that happens to reference its own local `req` cannot
+    // capture this macro's binding.
     let body_setup = match &body {
         Some(body) => quote! {
-            req.set_body(
-                serde_json::to_vec(&(#body))
+            __req.set_body(
+                ::serde_json::to_vec(&(#body))
                     .expect("test_request!: body value must serialize to JSON")
             );
-            req.headers.insert(
+            __req.headers.insert(
                 "Content-Type".to_string(),
                 "application/json".to_string()
             );
@@ -106,19 +110,19 @@ pub fn test_request_impl(input: TokenStream) -> TokenStream {
 
     let header_inserts = headers.iter().map(|HeaderPair { name, value }| {
         quote! {
-            req.headers.insert((#name).to_string(), (#value).to_string());
+            __req.headers.insert((#name).to_string(), (#value).to_string());
         }
     });
 
     let expanded = quote! {
         {
-            let mut req = armature_core::HttpRequest::new(
+            let mut __req = armature_core::HttpRequest::new(
                 #method_str.to_string(),
                 (#path).to_string(),
             );
             #body_setup
             #(#header_inserts)*
-            req
+            __req
         }
     };
 

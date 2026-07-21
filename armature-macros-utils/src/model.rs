@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{Data, DeriveInput, Field, Fields, Ident, LitStr, parse_macro_input};
+use syn::{Attribute, Data, DeriveInput, Field, Fields, Ident, LitStr, parse_macro_input};
 
 /// `#[derive(Model)]` — emit field-wise `Debug` + `Clone` impls plus a
 /// `Default`-bounded `new()`.
@@ -113,43 +113,154 @@ fn has_api_skip(field: &Field) -> bool {
     skip
 }
 
+/// Extract a field-level `#[serde(rename = "...")]` value, if present.
+///
+/// Only the plain `rename = "x"` shape is handled (not the
+/// `rename(serialize = "..", deserialize = "..")` split form), matching what
+/// `#[api(skip)]` needs to counteract: the key `serde_json::to_value` (via
+/// `Serialize`) actually emits.
+fn serde_field_rename(attrs: &[Attribute]) -> Option<String> {
+    let mut renamed = None;
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    let value = meta.value()?;
+                    let lit: LitStr = value.parse()?;
+                    renamed = Some(lit.value());
+                }
+                Ok(())
+            });
+        }
+    }
+    renamed
+}
+
+/// Extract a struct-level `#[serde(rename_all = "...")]` value, if present.
+fn serde_container_rename_all(attrs: &[Attribute]) -> Option<String> {
+    let mut style = None;
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    let value = meta.value()?;
+                    let lit: LitStr = value.parse()?;
+                    style = Some(lit.value());
+                }
+                Ok(())
+            });
+        }
+    }
+    style
+}
+
+/// Apply a serde `rename_all` casing style to a (conventionally snake_case)
+/// Rust field ident, mirroring the naming conventions serde itself supports:
+/// `lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`, `snake_case`,
+/// `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE`.
+///
+/// An unrecognized style falls back to the plain ident rather than guessing,
+/// so an unsupported/misspelled style never produces a bogus removal key.
+fn apply_rename_all(ident: &str, style: &str) -> String {
+    let words: Vec<&str> = ident.split('_').filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return ident.to_string();
+    }
+
+    fn capitalize(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+
+    match style {
+        "lowercase" => words.concat().to_lowercase(),
+        "UPPERCASE" => words.concat().to_uppercase(),
+        "PascalCase" => words.iter().map(|w| capitalize(w)).collect(),
+        "camelCase" => words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                if i == 0 {
+                    w.to_lowercase()
+                } else {
+                    capitalize(w)
+                }
+            })
+            .collect(),
+        "snake_case" => words.join("_").to_lowercase(),
+        "SCREAMING_SNAKE_CASE" => words.join("_").to_uppercase(),
+        "kebab-case" => words.join("-").to_lowercase(),
+        "SCREAMING-KEBAB-CASE" => words.join("-").to_uppercase(),
+        _ => ident.to_string(),
+    }
+}
+
+/// Compute the effective serialized JSON key for a field: a field-level
+/// `#[serde(rename = "..")]` wins; otherwise a struct-level
+/// `#[serde(rename_all = "..")]` is applied to the ident; otherwise the Rust
+/// ident itself is used. This must match what `Serialize` actually emits, or
+/// `#[api(skip)]` silently fails to remove the field (see `to_json` below).
+fn effective_json_key(field: &Field, container_rename_all: Option<&str>) -> String {
+    let ident = field
+        .ident
+        .as_ref()
+        .expect("effective_json_key called on a named field");
+    if let Some(renamed) = serde_field_rename(&field.attrs) {
+        return renamed;
+    }
+    if let Some(style) = container_rename_all {
+        return apply_rename_all(&ident.to_string(), style);
+    }
+    ident.to_string()
+}
+
 /// `#[derive(ApiModel)]` — `to_json`/`from_json`, honoring `#[api(skip)]`.
 pub fn derive_api_model_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let mut skip_fields: Vec<&Ident> = Vec::new();
+    let container_rename_all = serde_container_rename_all(&input.attrs);
+
+    let mut skip_fields: Vec<&Field> = Vec::new();
     if let Data::Struct(s) = &input.data
         && let Fields::Named(named) = &s.fields
     {
         for field in &named.named {
-            if has_api_skip(field)
-                && let Some(ident) = field.ident.as_ref()
-            {
-                skip_fields.push(ident);
+            if has_api_skip(field) && field.ident.is_some() {
+                skip_fields.push(field);
             }
         }
     }
 
-    let removals = skip_fields.iter().map(|ident| {
-        quote! { __map.remove(stringify!(#ident)); }
+    // Remove by the *effective serialized key*, not the Rust ident: a field
+    // that renames on the wire (via `#[serde(rename)]` or a container-level
+    // `#[serde(rename_all)]`) would otherwise leak, because
+    // `stringify!(ident)` never matches the key that actually lands in the
+    // serialized map.
+    let removals = skip_fields.iter().map(|field| {
+        let key = effective_json_key(field, container_rename_all.as_deref());
+        let key_lit = LitStr::new(&key, field.ident.as_ref().unwrap().span());
+        quote! { __map.remove(#key_lit); }
     });
 
     let expanded = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
             /// Convert to a JSON value, excluding any `#[api(skip)]` fields.
-            pub fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
-                let mut __value = serde_json::to_value(self)?;
-                if let serde_json::Value::Object(ref mut __map) = __value {
+            pub fn to_json(&self) -> Result<::serde_json::Value, ::serde_json::Error> {
+                let mut __value = ::serde_json::to_value(self)?;
+                if let ::serde_json::Value::Object(ref mut __map) = __value {
                     #(#removals)*
                 }
                 Ok(__value)
             }
 
             /// Convert from a JSON value.
-            pub fn from_json(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
-                serde_json::from_value(value.clone())
+            pub fn from_json(value: &::serde_json::Value) -> Result<Self, ::serde_json::Error> {
+                ::serde_json::from_value(value.clone())
             }
         }
     };
