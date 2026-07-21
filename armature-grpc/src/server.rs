@@ -181,22 +181,103 @@ impl GrpcServerBuilder {
     }
 }
 
+/// Per-message parse state tracked across HTTP/2 DATA frames so
+/// `max_recv_message_size` gets enforced for *every* gRPC message in a
+/// stream — a client-streaming/bidi RPC's body carries many gRPC messages
+/// one after another, not just one — instead of only the first. Reuses the
+/// shared frame-header layout from [`crate::middleware::GRPC_FRAME_HEADER_LEN`]
+/// / [`crate::middleware::read_frame_header`], the same helper
+/// `middleware::transform_grpc_frames` uses for its own (whole-buffer) frame
+/// parsing, so this streaming-friendly variant doesn't hand-encode a second,
+/// divergent copy of the frame layout.
+enum FrameScanState {
+    /// Accumulating the [`crate::middleware::GRPC_FRAME_HEADER_LEN`]-byte
+    /// gRPC frame header (1 flag byte + 4 big-endian length bytes); holds
+    /// however many header bytes have been seen so far. The header may be
+    /// split arbitrarily across HTTP/2 DATA frames.
+    Header(bytes::BytesMut),
+    /// Inside a message payload whose declared length has already been
+    /// validated against the configured limit; holds the number of payload
+    /// bytes still to come before the next frame header begins.
+    Payload(usize),
+}
+
+impl Default for FrameScanState {
+    fn default() -> Self {
+        FrameScanState::Header(bytes::BytesMut::with_capacity(
+            crate::middleware::GRPC_FRAME_HEADER_LEN,
+        ))
+    }
+}
+
+/// Scan `data` — a chunk of raw gRPC-framed bytes of arbitrary length and
+/// arbitrary alignment relative to message boundaries — against `state`,
+/// validating every gRPC frame header crossed against
+/// `max_recv_message_size`. Advances `state` across calls so a caller can
+/// feed it successive chunks (e.g. successive HTTP/2 DATA frames) and have
+/// message boundaries tracked correctly even when a boundary falls in the
+/// middle of a chunk, or a header is itself split across chunks. Returns
+/// `Err` the moment a message declares a length over the limit.
+fn scan_for_oversized_messages(
+    data: &[u8],
+    state: &mut FrameScanState,
+    max_recv_message_size: usize,
+) -> std::result::Result<(), tonic::Status> {
+    let mut pos = 0;
+    while pos < data.len() {
+        match state {
+            FrameScanState::Header(buf) => {
+                let need = crate::middleware::GRPC_FRAME_HEADER_LEN - buf.len();
+                let take = need.min(data.len() - pos);
+                buf.extend_from_slice(&data[pos..pos + take]);
+                pos += take;
+                if buf.len() == crate::middleware::GRPC_FRAME_HEADER_LEN {
+                    let (_, len) = crate::middleware::read_frame_header(buf)
+                        .expect("buffered exactly GRPC_FRAME_HEADER_LEN bytes");
+                    if len > max_recv_message_size {
+                        return Err(tonic::Status::resource_exhausted(format!(
+                            "request exceeds configured max_recv_message_size of {max_recv_message_size} bytes"
+                        )));
+                    }
+                    *state = FrameScanState::Payload(len);
+                }
+            }
+            FrameScanState::Payload(remaining) => {
+                let take = (*remaining).min(data.len() - pos);
+                pos += take;
+                *remaining -= take;
+                if *remaining == 0 {
+                    *state = FrameScanState::Header(bytes::BytesMut::with_capacity(
+                        crate::middleware::GRPC_FRAME_HEADER_LEN,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A body that replays a queue of already-consumed leading `Frame`s before
-/// delegating to the rest of the original body. Used by
-/// [`MaxRecvMessageSizeService`] to peek the gRPC length-prefix — which may
-/// be split across multiple small HTTP/2 DATA frames — without discarding
-/// the data it read.
+/// delegating to the rest of the original body, while continuing to enforce
+/// `max_recv_message_size` against every later gRPC message that streams
+/// through `rest` (not just the leading one used to fill `buffered`). Used
+/// by [`MaxRecvMessageSizeService`] to peek the gRPC length-prefix — which
+/// may be split across multiple small HTTP/2 DATA frames — without
+/// discarding the data it read, and to keep checking subsequent messages for
+/// client-streaming/bidi RPCs whose body carries more than one message.
 struct PrefetchedBody<B> {
     buffered: std::collections::VecDeque<http_body::Frame<bytes::Bytes>>,
     rest: B,
+    max_recv_message_size: usize,
+    scan_state: FrameScanState,
 }
 
 impl<B> http_body::Body for PrefetchedBody<B>
 where
-    B: http_body::Body<Data = bytes::Bytes> + Unpin,
+    B: http_body::Body<Data = bytes::Bytes, Error = tonic::Status> + Unpin,
 {
     type Data = bytes::Bytes;
-    type Error = B::Error;
+    type Error = tonic::Status;
 
     fn poll_frame(
         mut self: std::pin::Pin<&mut Self>,
@@ -206,7 +287,22 @@ where
         if let Some(frame) = self.buffered.pop_front() {
             return std::task::Poll::Ready(Some(Ok(frame)));
         }
-        std::pin::Pin::new(&mut self.rest).poll_frame(cx)
+        match std::pin::Pin::new(&mut self.rest).poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                let max_recv_message_size = self.max_recv_message_size;
+                if let Some(data) = frame.data_ref()
+                    && let Err(status) = scan_for_oversized_messages(
+                        data,
+                        &mut self.scan_state,
+                        max_recv_message_size,
+                    )
+                {
+                    return std::task::Poll::Ready(Some(Err(status)));
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
     }
 
     fn is_end_stream(&self) -> bool {
@@ -316,24 +412,31 @@ where
                 }
             }
 
-            let oversized = if prefix.len() >= 5 {
-                let len = u32::from_be_bytes([prefix[1], prefix[2], prefix[3], prefix[4]]) as usize;
-                len > max_recv_message_size
-            } else {
-                false
-            };
-
-            if oversized {
-                return Ok(crate::middleware::status_response(
-                    tonic::Status::resource_exhausted(format!(
-                        "request exceeds configured max_recv_message_size of {max_recv_message_size} bytes"
-                    )),
-                ));
+            // Replay `buffered` through the same per-message scan used for
+            // every later frame (see `FrameScanState`/
+            // `scan_for_oversized_messages`), rather than a one-off check
+            // against `prefix`: this both rejects an oversized *first*
+            // message here (before `inner` is ever called, so we can return
+            // a clean status response) and leaves `scan_state` correctly
+            // positioned — mid-payload or at the very next header — for
+            // whatever the last buffered frame's bytes actually contained,
+            // which may run past the first message's header into its
+            // payload or even into a second message.
+            let mut scan_state = FrameScanState::default();
+            for frame in &buffered {
+                if let Some(data) = frame.data_ref()
+                    && let Err(status) =
+                        scan_for_oversized_messages(data, &mut scan_state, max_recv_message_size)
+                {
+                    return Ok(crate::middleware::status_response(status));
+                }
             }
 
             let rebuilt_body = tonic::body::Body::new(PrefetchedBody {
                 buffered,
                 rest: body,
+                max_recv_message_size,
+                scan_state,
             });
             let req = http::Request::from_parts(parts, rebuilt_body);
             inner.call(req).await
@@ -726,6 +829,89 @@ mod tests {
             status.message(),
             format!("received {total_len} bytes"),
             "the reconstructed body must include every byte the fragmented body sent"
+        );
+    }
+
+    /// Like `EchoInner`, but surfaces a body-read error as its own status
+    /// code instead of masking it behind `.unwrap_or_default()` — used by
+    /// the multi-message streaming test below, which needs to observe that a
+    /// later message being rejected actually reaches the inner service as a
+    /// real body error (not silently swallowed into "0 bytes received, OK").
+    #[derive(Clone)]
+    struct EchoInnerSurfacingErrors;
+
+    impl tower::Service<http::Request<tonic::body::Body>> for EchoInnerSurfacingErrors {
+        type Response = http::Response<TonicBody>;
+        type Error = std::convert::Infallible;
+        type Future = std::pin::Pin<
+            Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+            Box::pin(async move {
+                use http_body_util::BodyExt;
+                match req.into_body().collect().await {
+                    Ok(collected) => Ok(crate::middleware::status_response(tonic::Status::ok(
+                        format!("received {} bytes", collected.to_bytes().len()),
+                    ))),
+                    Err(status) => Ok(crate::middleware::status_response(status)),
+                }
+            })
+        }
+    }
+
+    /// Regression test: `max_recv_message_size` must be enforced for *every*
+    /// gRPC message in a client-streaming/bidi request body, not just the
+    /// first — against the pre-fix code, `rest: body` streamed through
+    /// `PrefetchedBody` completely unchecked after the initial prefetch, so
+    /// a second or later oversized message in the same stream would never be
+    /// rejected. This simulates a stream carrying three messages (two small,
+    /// within-limit messages followed by one whose declared length exceeds
+    /// the limit) fragmented one byte at a time, and asserts the oversized
+    /// third message is still caught.
+    #[tokio::test]
+    async fn oversized_later_message_in_multi_message_stream_is_rejected() {
+        let mut full = Vec::new();
+
+        let msg1: &[u8] = b"ok"; // 2 bytes, within an 8-byte limit
+        full.push(0u8);
+        full.extend_from_slice(&(msg1.len() as u32).to_be_bytes());
+        full.extend_from_slice(msg1);
+
+        let msg2: &[u8] = b"al"; // 2 bytes, also within the limit
+        full.push(0u8);
+        full.extend_from_slice(&(msg2.len() as u32).to_be_bytes());
+        full.extend_from_slice(msg2);
+
+        // Third message declares a length well over the 8-byte limit.
+        let declared_len3: u32 = 1000;
+        full.push(0u8);
+        full.extend_from_slice(&declared_len3.to_be_bytes());
+        full.extend(std::iter::repeat_n(b'z', declared_len3 as usize));
+
+        let body = tonic::body::Body::new(FragmentedBody {
+            chunks: one_byte_frames(&full),
+        });
+
+        let mut svc = MaxRecvMessageSizeService {
+            inner: EchoInnerSurfacingErrors,
+            max_recv_message_size: 8,
+        };
+
+        let resp = svc.call(http::Request::new(body)).await.unwrap();
+        let status = tonic::Status::from_header_map(resp.headers()).unwrap();
+        assert_eq!(
+            status.code(),
+            tonic::Code::ResourceExhausted,
+            "a later oversized message in a multi-message stream must still be rejected, \
+             not waved through after only the first message was checked"
         );
     }
 

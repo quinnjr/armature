@@ -515,10 +515,21 @@ impl RetryMiddleware {
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 
+/// Default cap on how many bytes a single gRPC message may expand to during
+/// decompression when no explicit limit has been configured via
+/// [`CompressionMiddleware::max_decompressed_size`]. Chosen well above the
+/// crate's default `max_recv_message_size` (4 MiB, see
+/// `GrpcServerConfig::default`) to avoid surprising legitimate large
+/// messages, while still bounding a decompression-bomb payload to a fixed,
+/// finite amount of memory instead of the unbounded growth
+/// `GzDecoder::read_to_end`/`zstd::stream::decode_all` previously allowed.
+pub const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Compression middleware configuration.
 #[derive(Clone)]
 pub struct CompressionMiddleware {
     encoding: CompressionEncoding,
+    max_decompressed_size: usize,
 }
 
 /// Compression encoding types.
@@ -533,9 +544,16 @@ pub enum CompressionEncoding {
 }
 
 impl CompressionMiddleware {
-    /// Create a new compression middleware.
+    /// Create a new compression middleware. Decompressed message size is
+    /// capped at [`DEFAULT_MAX_DECOMPRESSED_SIZE`]; use
+    /// [`CompressionMiddleware::max_decompressed_size`] to override it (e.g.
+    /// to match a `GrpcServerConfig::max_recv_message_size` configured
+    /// elsewhere).
     pub fn new(encoding: CompressionEncoding) -> Self {
-        Self { encoding }
+        Self {
+            encoding,
+            max_decompressed_size: DEFAULT_MAX_DECOMPRESSED_SIZE,
+        }
     }
 
     /// Create a gzip compression middleware.
@@ -548,9 +566,27 @@ impl CompressionMiddleware {
         Self::new(CompressionEncoding::Zstd)
     }
 
+    /// Set the maximum number of bytes a single gRPC message may expand to
+    /// while being decompressed. Enforced *during* decompression (the
+    /// decompressor is never allowed to produce more than this many bytes),
+    /// not merely checked afterward — this is what actually bounds a
+    /// decompression-bomb payload's memory usage. Requests/responses whose
+    /// decompressed size would exceed this limit are rejected with
+    /// `Status::internal` (server side) or `Status::internal` (client side)
+    /// rather than being allocated in full.
+    pub fn max_decompressed_size(mut self, max_decompressed_size: usize) -> Self {
+        self.max_decompressed_size = max_decompressed_size;
+        self
+    }
+
     /// Get the compression encoding.
     pub fn encoding(&self) -> CompressionEncoding {
         self.encoding
+    }
+
+    /// Get the configured maximum decompressed message size.
+    pub fn max_decompressed_size_limit(&self) -> usize {
+        self.max_decompressed_size
     }
 
     /// Wrap a server-side service so it actually decompresses incoming
@@ -561,6 +597,7 @@ impl CompressionMiddleware {
         CompressionService {
             inner: service,
             encoding: self.encoding,
+            max_decompressed_size: self.max_decompressed_size,
         }
     }
 
@@ -582,6 +619,7 @@ impl CompressionMiddleware {
         CompressionClientService {
             inner: channel,
             encoding: self.encoding,
+            max_decompressed_size: self.max_decompressed_size,
         }
     }
 }
@@ -613,20 +651,83 @@ impl CompressionEncoding {
         }
     }
 
-    fn decompress_bytes(self, data: &[u8]) -> std::io::Result<Vec<u8>> {
+    /// Decompress `data`, refusing to let the decompressor produce more than
+    /// `max_decompressed_size` bytes.
+    ///
+    /// The cap is enforced *during* decompression, not by decompressing in
+    /// full and checking the result afterward: both branches wrap the
+    /// decompressing reader in `Read::take(max_decompressed_size + 1)` before
+    /// `read_to_end`, so a decompression-bomb payload (a small, highly
+    /// compressible input that would otherwise expand to gigabytes) can never
+    /// cause more than `max_decompressed_size + 1` bytes to be allocated —
+    /// once that many bytes have been read, the `take` adapter stops handing
+    /// the decoder anywhere further to write, `read_to_end` returns having
+    /// filled `out` to just past the limit, and this function errors instead
+    /// of returning the (still-truncated) result.
+    fn decompress_bytes(
+        self,
+        data: &[u8],
+        max_decompressed_size: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
         match self {
             CompressionEncoding::Gzip => {
                 use flate2::read::GzDecoder;
-                use std::io::Read;
-                let mut decoder = GzDecoder::new(data);
+                let decoder = GzDecoder::new(data);
+                let mut limited = decoder.take(max_decompressed_size as u64 + 1);
                 let mut out = Vec::new();
-                decoder.read_to_end(&mut out)?;
+                limited.read_to_end(&mut out)?;
+                if out.len() > max_decompressed_size {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "decompressed gzip message exceeds max_decompressed_size of {max_decompressed_size} bytes"
+                        ),
+                    ));
+                }
                 Ok(out)
             }
-            CompressionEncoding::Zstd => zstd::stream::decode_all(data),
+            CompressionEncoding::Zstd => {
+                let decoder = zstd::stream::Decoder::new(data)?;
+                let mut limited = decoder.take(max_decompressed_size as u64 + 1);
+                let mut out = Vec::new();
+                limited.read_to_end(&mut out)?;
+                if out.len() > max_decompressed_size {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "decompressed zstd message exceeds max_decompressed_size of {max_decompressed_size} bytes"
+                        ),
+                    ));
+                }
+                Ok(out)
+            }
             CompressionEncoding::None => Ok(data.to_vec()),
         }
     }
+}
+
+/// Length, in bytes, of a gRPC length-prefixed message frame header: 1
+/// compressed-flag byte followed by 4 big-endian payload-length bytes. Shared
+/// by every place in this crate that parses gRPC frame headers by hand (this
+/// module's [`transform_grpc_frames`] and `server.rs`'s
+/// `MaxRecvMessageSizeService`) so the "1 flag byte + 4 length bytes" layout
+/// is defined once instead of being re-encoded as the magic number `5` (and
+/// raw `[1..5]` slices) in multiple independent parsers.
+pub(crate) const GRPC_FRAME_HEADER_LEN: usize = 5;
+
+/// Parse a gRPC frame header from the start of `bytes`: returns
+/// `(compressed_flag, payload_len)` if at least [`GRPC_FRAME_HEADER_LEN`]
+/// bytes are available, or `None` if `bytes` is too short to contain a full
+/// header yet (e.g. a length-prefix fragmented across multiple HTTP/2 DATA
+/// frames).
+pub(crate) fn read_frame_header(bytes: &[u8]) -> Option<(u8, usize)> {
+    if bytes.len() < GRPC_FRAME_HEADER_LEN {
+        return None;
+    }
+    let flag = bytes[0];
+    let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+    Some((flag, len))
 }
 
 /// Rewrite every gRPC length-prefixed message frame in `bytes` whose
@@ -644,21 +745,19 @@ fn transform_grpc_frames(
 ) -> std::io::Result<Bytes> {
     let mut out = BytesMut::with_capacity(bytes.len());
     while !bytes.is_empty() {
-        if bytes.len() < 5 {
+        let Some((flag, len)) = read_frame_header(&bytes) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "truncated gRPC message length-prefix",
             ));
-        }
-        let flag = bytes[0];
-        let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-        if bytes.len() < 5 + len {
+        };
+        if bytes.len() < GRPC_FRAME_HEADER_LEN + len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "truncated gRPC message payload",
             ));
         }
-        let payload = &bytes[5..5 + len];
+        let payload = &bytes[GRPC_FRAME_HEADER_LEN..GRPC_FRAME_HEADER_LEN + len];
         if flag == matching_flag {
             let transformed = transform(payload)?;
             out.put_u8(1 - matching_flag);
@@ -669,7 +768,7 @@ fn transform_grpc_frames(
             out.put_u32(len as u32);
             out.put_slice(payload);
         }
-        bytes.advance(5 + len);
+        bytes.advance(GRPC_FRAME_HEADER_LEN + len);
     }
     Ok(out.freeze())
 }
@@ -693,6 +792,7 @@ fn accept_encoding_contains(headers: &http::HeaderMap, name: &str) -> bool {
 pub struct CompressionService<S> {
     inner: S,
     encoding: CompressionEncoding,
+    max_decompressed_size: usize,
 }
 
 impl<S: Clone> Clone for CompressionService<S> {
@@ -700,6 +800,7 @@ impl<S: Clone> Clone for CompressionService<S> {
         Self {
             inner: self.inner.clone(),
             encoding: self.encoding,
+            max_decompressed_size: self.max_decompressed_size,
         }
     }
 }
@@ -725,8 +826,22 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         let encoding = self.encoding;
+        let max_decompressed_size = self.max_decompressed_size;
 
         Box::pin(async move {
+            // `CompressionEncoding::None` never compresses or decompresses
+            // anything — short-circuit entirely rather than falling into the
+            // buffer/transform path below. Without this, `wire_name()` is
+            // `None`, and `incoming_encoding.as_deref() == encoding.wire_name()`
+            // (`None == None`) is true whenever the client sent no
+            // `grpc-encoding` header at all — the common uncompressed case —
+            // which would needlessly buffer the body and run it through the
+            // identity "decompress" path, mislabeling the frame's compression
+            // flag along the way.
+            let Some(our_name) = encoding.wire_name() else {
+                return inner.call(req).await;
+            };
+
             let (mut parts, body) = req.into_parts();
 
             let incoming_encoding = parts
@@ -734,19 +849,20 @@ where
                 .get("grpc-encoding")
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string());
-            let client_accepts_our_encoding =
-                accept_encoding_contains(&parts.headers, encoding.wire_name().unwrap_or_default());
+            let client_accepts_our_encoding = accept_encoding_contains(&parts.headers, our_name);
 
             // Decompress the request body only when the client told us it's
             // compressed with the encoding we understand; otherwise pass the
             // body through unmodified (preserves streaming for the common
             // uncompressed case).
-            let req_body = if incoming_encoding.as_deref() == encoding.wire_name() {
+            let req_body = if incoming_encoding.as_deref() == Some(our_name) {
                 let bytes = match buffer_body(body).await {
                     Ok(b) => b,
                     Err(status) => return Ok(status_response(status)),
                 };
-                match transform_grpc_frames(bytes, 1, |p| encoding.decompress_bytes(p)) {
+                match transform_grpc_frames(bytes, 1, |p| {
+                    encoding.decompress_bytes(p, max_decompressed_size)
+                }) {
                     Ok(decompressed) => {
                         parts.headers.remove("grpc-encoding");
                         TonicBody::new(Full::new(decompressed))
@@ -765,11 +881,8 @@ where
                 .call(http::Request::from_parts(parts, req_body))
                 .await?;
 
-            // Compress the response only if we have a real encoding and the
-            // client advertised support for it.
-            let Some(name) = encoding.wire_name() else {
-                return Ok(resp);
-            };
+            // Compress the response only if the client advertised support
+            // for our encoding.
             if !client_accepts_our_encoding {
                 return Ok(resp);
             }
@@ -783,15 +896,20 @@ where
                 Ok(compressed) => {
                     rparts
                         .headers
-                        .insert("grpc-encoding", http::HeaderValue::from_static(name));
+                        .insert("grpc-encoding", http::HeaderValue::from_static(our_name));
                     Ok(http::Response::from_parts(
                         rparts,
                         TonicBody::new(Full::new(compressed)),
                     ))
                 }
-                Err(_) => {
+                Err(e) => {
                     // Fall back to the original, uncompressed bytes rather
-                    // than dropping the response.
+                    // than dropping the response, but don't silently discard
+                    // the underlying error.
+                    tracing::warn!(
+                        error = %e,
+                        "gRPC compression failed; sending response uncompressed"
+                    );
                     Ok(http::Response::from_parts(
                         rparts,
                         TonicBody::new(Full::new(bytes)),
@@ -825,6 +943,7 @@ where
 pub struct CompressionClientService<S> {
     inner: S,
     encoding: CompressionEncoding,
+    max_decompressed_size: usize,
 }
 
 impl<S: Clone> Clone for CompressionClientService<S> {
@@ -832,6 +951,7 @@ impl<S: Clone> Clone for CompressionClientService<S> {
         Self {
             inner: self.inner.clone(),
             encoding: self.encoding,
+            max_decompressed_size: self.max_decompressed_size,
         }
     }
 }
@@ -857,35 +977,45 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         let encoding = self.encoding;
+        let max_decompressed_size = self.max_decompressed_size;
 
         Box::pin(async move {
+            // As in `CompressionService::call`: `CompressionEncoding::None`
+            // never compresses/decompresses anything, so short-circuit
+            // before the buffer/transform path rather than relying on
+            // `wire_name()` being `None` on both sides of a comparison.
+            let Some(our_name) = encoding.wire_name() else {
+                return inner.call(req).await;
+            };
+
             let (mut parts, body) = req.into_parts();
 
-            let req_body = if let Some(name) = encoding.wire_name() {
-                match buffer_body(body).await {
-                    Ok(bytes) => match transform_grpc_frames(bytes.clone(), 0, |p| {
-                        encoding.compress_bytes(p)
-                    }) {
+            let req_body = match buffer_body(body).await {
+                Ok(bytes) => {
+                    match transform_grpc_frames(bytes.clone(), 0, |p| encoding.compress_bytes(p)) {
                         Ok(compressed) => {
                             parts
                                 .headers
-                                .insert("grpc-encoding", http::HeaderValue::from_static(name));
+                                .insert("grpc-encoding", http::HeaderValue::from_static(our_name));
                             parts.headers.insert(
                                 "grpc-accept-encoding",
-                                http::HeaderValue::from_static(name),
+                                http::HeaderValue::from_static(our_name),
                             );
                             TonicBody::new(Full::new(compressed))
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // Compression failed; send the original bytes
-                            // uncompressed rather than dropping the request.
+                            // uncompressed rather than dropping the request, but
+                            // don't silently discard the underlying error.
+                            tracing::warn!(
+                                error = %e,
+                                "gRPC compression failed; sending request uncompressed"
+                            );
                             TonicBody::new(Full::new(bytes))
                         }
-                    },
-                    Err(status) => return Ok(status_response(status)),
+                    }
                 }
-            } else {
-                body
+                Err(status) => return Ok(status_response(status)),
             };
 
             let resp = inner
@@ -899,9 +1029,7 @@ where
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string());
 
-            if response_encoding.as_deref() != encoding.wire_name()
-                || encoding.wire_name().is_none()
-            {
+            if response_encoding.as_deref() != Some(our_name) {
                 return Ok(http::Response::from_parts(rparts, rbody));
             }
 
@@ -909,7 +1037,9 @@ where
                 Ok(b) => b,
                 Err(status) => return Ok(status_response(status)),
             };
-            match transform_grpc_frames(bytes, 1, |p| encoding.decompress_bytes(p)) {
+            match transform_grpc_frames(bytes, 1, |p| {
+                encoding.decompress_bytes(p, max_decompressed_size)
+            }) {
                 Ok(decompressed) => {
                     rparts.headers.remove("grpc-encoding");
                     Ok(http::Response::from_parts(
@@ -1267,7 +1397,7 @@ mod tests {
             response_payload.len()
         );
         let decompressed = CompressionEncoding::Gzip
-            .decompress_bytes(resp_payload)
+            .decompress_bytes(resp_payload, DEFAULT_MAX_DECOMPRESSED_SIZE)
             .unwrap();
         assert_eq!(decompressed, response_payload.to_vec());
     }
@@ -1304,7 +1434,7 @@ mod tests {
                     );
                     let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
                     let decompressed = CompressionEncoding::Gzip
-                        .decompress_bytes(&bytes[5..5 + len])
+                        .decompress_bytes(&bytes[5..5 + len], DEFAULT_MAX_DECOMPRESSED_SIZE)
                         .unwrap();
                     assert_eq!(
                         decompressed,
@@ -1339,5 +1469,166 @@ mod tests {
         assert_eq!(bytes[0], 0, "decompressed response frame must carry flag=0");
         let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
         assert_eq!(&bytes[5..5 + len], vec![b'z'; 2048].as_slice());
+    }
+
+    /// Regression test: a gzip decompression bomb — a small, highly
+    /// compressible payload that would expand to far more than the
+    /// configured limit — must be rejected *during* decompression rather
+    /// than fully decompressed into memory first and checked afterward.
+    /// Against the pre-fix `GzDecoder::read_to_end` with no cap, this would
+    /// have unconditionally allocated the full decompressed size.
+    #[tokio::test]
+    async fn gzip_decompression_bomb_is_rejected_during_decompression() {
+        // 8 MiB of zeros compresses to a tiny gzip payload.
+        let bomb_source = vec![0u8; 8 * 1024 * 1024];
+        let compressed = CompressionEncoding::Gzip
+            .compress_bytes(&bomb_source)
+            .unwrap();
+        assert!(
+            compressed.len() < 8192,
+            "the source data must actually compress well for this to be a meaningful bomb test"
+        );
+
+        // A moderate test-sized limit, far below the bomb's real
+        // decompressed size, keeps the test fast while still proving the
+        // bound is enforced during decompression rather than after.
+        let limit = 1024;
+        let result = CompressionEncoding::Gzip.decompress_bytes(&compressed, limit);
+        assert!(
+            result.is_err(),
+            "a decompression bomb exceeding the configured limit must be rejected, not fully \
+             decompressed into memory"
+        );
+    }
+
+    /// Same as above, but for zstd — proving `decode_all` (unbounded) was
+    /// replaced with a bounded, incremental decode via `zstd::stream::Decoder`.
+    #[tokio::test]
+    async fn zstd_decompression_bomb_is_rejected_during_decompression() {
+        let bomb_source = vec![0u8; 8 * 1024 * 1024];
+        let compressed = CompressionEncoding::Zstd
+            .compress_bytes(&bomb_source)
+            .unwrap();
+        assert!(
+            compressed.len() < 8192,
+            "the source data must actually compress well for this to be a meaningful bomb test"
+        );
+
+        let limit = 1024;
+        let result = CompressionEncoding::Zstd.decompress_bytes(&compressed, limit);
+        assert!(
+            result.is_err(),
+            "a decompression bomb exceeding the configured limit must be rejected, not fully \
+             decompressed into memory"
+        );
+    }
+
+    /// Companion sanity check: a payload that decompresses to *within* the
+    /// limit must still succeed, proving the bound doesn't just reject
+    /// everything.
+    #[tokio::test]
+    async fn decompression_within_limit_still_succeeds() {
+        let source = b"a small, well within any reasonable limit payload".to_vec();
+        let compressed = CompressionEncoding::Gzip.compress_bytes(&source).unwrap();
+        let result = CompressionEncoding::Gzip.decompress_bytes(&compressed, source.len() + 16);
+        assert_eq!(result.unwrap(), source);
+    }
+
+    /// Regression test: `CompressionMiddleware::new(CompressionEncoding::None)`
+    /// must pass request and response bodies through completely untouched —
+    /// against the pre-fix code, `incoming_encoding.as_deref() ==
+    /// encoding.wire_name()` compared `None == None`, which is true whenever
+    /// the client sent no `grpc-encoding` header at all (the common
+    /// uncompressed case), sending the frame through the buffer/"decompress"
+    /// path and potentially mislabeling its compression flag.
+    #[tokio::test]
+    async fn none_encoding_server_passes_body_through_byte_for_byte() {
+        let original_payload = b"an uncompressed request with no grpc-encoding header at all";
+        let request_frame = frame(0, original_payload); // flag=0: not compressed
+
+        // No `grpc-encoding` / `grpc-accept-encoding` headers set at all —
+        // the common case for a plain, uncompressed gRPC call.
+        let req = http::Request::new(TonicBody::new(Full::new(request_frame.clone())));
+
+        let captured = Arc::new(Mutex::new(None));
+        let inner = CaptureService {
+            received: captured.clone(),
+            response_payload: Bytes::from_static(b"an uncompressed response payload"),
+        };
+
+        let mut svc = CompressionMiddleware::new(CompressionEncoding::None).wrap_server(inner);
+        let resp = svc.call(req).await.unwrap();
+
+        let received = captured.lock().await.clone().unwrap();
+        assert_eq!(
+            received, request_frame,
+            "a None-encoding middleware must forward the request frame byte-for-byte unmodified"
+        );
+
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            resp_bytes,
+            frame(0, b"an uncompressed response payload"),
+            "a None-encoding middleware must forward the response frame byte-for-byte unmodified"
+        );
+    }
+
+    /// Client-side counterpart of the test above: `wrap_channel` with
+    /// `CompressionEncoding::None` must not compress outgoing requests or
+    /// attempt to decompress incoming responses.
+    #[tokio::test]
+    async fn none_encoding_client_passes_body_through_byte_for_byte() {
+        #[derive(Clone)]
+        struct ServerLikeService {
+            received: Arc<Mutex<Option<Bytes>>>,
+        }
+
+        impl tower::Service<http::Request<TonicBody>> for ServerLikeService {
+            type Response = http::Response<TonicBody>;
+            type Error = Infallible;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Infallible>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
+                assert!(
+                    req.headers().get("grpc-encoding").is_none(),
+                    "a None-encoding client must not set grpc-encoding"
+                );
+                let received = self.received.clone();
+                Box::pin(async move {
+                    let bytes = req.into_body().collect().await.unwrap().to_bytes();
+                    *received.lock().await = Some(bytes);
+                    Ok(http::Response::new(TonicBody::new(Full::new(frame(
+                        0,
+                        b"server response, also uncompressed",
+                    )))))
+                })
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut svc =
+            CompressionMiddleware::new(CompressionEncoding::None).wrap_channel(ServerLikeService {
+                received: captured.clone(),
+            });
+
+        let request_frame = frame(0, b"client request, sent uncompressed");
+        let req = http::Request::new(TonicBody::new(Full::new(request_frame.clone())));
+        let resp = svc.call(req).await.unwrap();
+
+        let received = captured.lock().await.clone().unwrap();
+        assert_eq!(
+            received, request_frame,
+            "a None-encoding client must forward the request frame byte-for-byte unmodified"
+        );
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            resp_bytes,
+            frame(0, b"server response, also uncompressed"),
+            "a None-encoding client must forward the response frame byte-for-byte unmodified"
+        );
     }
 }

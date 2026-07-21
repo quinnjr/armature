@@ -97,6 +97,9 @@ impl Connection {
     }
 
     /// Set the connection state (internal use).
+    // Reserved for the close handshake: `close()` only ever moves state to `Closing`,
+    // so this setter is what will drive the transition to `Closed` once the server
+    // loop confirms teardown; not yet wired into that path.
     #[allow(dead_code)]
     pub(crate) fn set_state(&self, state: ConnectionState) {
         *self.state.write() = state;

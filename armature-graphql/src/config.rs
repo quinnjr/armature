@@ -340,7 +340,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // GraphQLConfig::configure — regression tests for Finding 1.
+    // GraphQLConfig::configure — regression tests.
     //
     // Prior to this fix, `configure` did not exist and nothing in the
     // crate ever called `.disable_introspection()`/`.limit_depth()` on
