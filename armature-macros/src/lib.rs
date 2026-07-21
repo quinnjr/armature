@@ -9,7 +9,7 @@
 //! ```ignore
 //! json_response!({ "message": "Success" })
 //! ok_json!({ "id": 123 })
-//! error_json!("User not found")
+//! not_found!("User not found")
 //! ```
 //!
 //! # Route Grouping
@@ -185,7 +185,7 @@ macro_rules! query_param {
 ///
 /// ```ignore
 /// let auth = header!(request, "Authorization")?;
-/// let content_type = header!(request, "Content-Type").unwrap_or("text/plain");
+/// let content_type = header!(request, "Content-Type").unwrap_or(&"text/plain".to_string());
 /// ```
 #[macro_export]
 macro_rules! header {
@@ -249,12 +249,11 @@ macro_rules! routes {
     ($($method:ident $path:literal => $handler:expr),* $(,)?) => {
         vec![
             $(
-                armature_core::Route {
-                    method: armature_core::HttpMethod::from_str(stringify!($method)).unwrap(),
-                    path: $path.to_string(),
-                    handler: std::sync::Arc::new($handler),
-                    constraints: None,
-                },
+                armature_core::Route::new(
+                    armature_core::HttpMethod::from_str(stringify!($method)).unwrap(),
+                    $path,
+                    $handler,
+                ),
             )*
         ]
     };
@@ -289,7 +288,7 @@ macro_rules! json_object {
 /// # Examples
 ///
 /// ```ignore
-/// let (user_id, post_id) = path_params!(request, "user_id": i64, "post_id": i64)?;
+/// let (user_id, post_id) = path_params!(request, "user_id": i64, "post_id": i64);
 /// ```
 #[macro_export]
 macro_rules! path_params {
@@ -326,7 +325,7 @@ macro_rules! log_error {
     ($($arg:tt)*) => {
         {
             tracing::error!($($arg)*);
-            Err(armature_core::Error::InternalServerError(
+            Err(armature_core::Error::Internal(
                 format!($($arg)*)
             ))
         }
@@ -345,12 +344,14 @@ macro_rules! paginated_response {
     ($data:expr, $page:expr, $total:expr) => {
         {
             use armature_core::HttpResponse;
+            let __armature_paginated_data = $data;
+            let __armature_paginated_per_page = __armature_paginated_data.len();
             HttpResponse::ok().with_json(&serde_json::json!({
-                "data": $data,
+                "data": __armature_paginated_data,
                 "pagination": {
                     "page": $page,
                     "total": $total,
-                    "per_page": $data.len(),
+                    "per_page": __armature_paginated_per_page,
                 }
             }))
         }
@@ -359,10 +360,8 @@ macro_rules! paginated_response {
 
 pub mod prelude;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_macros_compile() {
-        // Ensure macros are exported
-    }
-}
+// The macro test suite lives in `tests/macros.rs` as an integration test:
+// `#[macro_export]`-ed `macro_rules!` macros are meant to be consumed from
+// external crates, so exercising them the same way downstream users would
+// (via `armature_macros::prelude::*` / `armature_macros::routes!`) is the
+// most faithful regression coverage. See tests/macros.rs.

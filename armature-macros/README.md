@@ -6,9 +6,12 @@ Declarative macros for the Armature framework that reduce boilerplate and improv
 
 - ✅ **Response Macros** - Quick HTTP response creation
 - ✅ **Parameter Extraction** - Type-safe param extraction
-- ✅ **Validation Macros** - Inline validation helpers
 - ✅ **Error Handling** - Consistent error responses
 - ✅ **Utilities** - JSON building, pagination, logging
+
+> Looking for `validate!`, `validate_required!`, or `validate_email!`? Those
+> are proc-macro attribute/derive-style validation helpers and live in
+> [`armature-macros-utils`](../armature-macros-utils), not in this crate.
 
 ## Installation
 
@@ -73,8 +76,10 @@ internal_error!("Database connection failed")
 // Single parameter
 let id: i64 = path_param!(req, "id")?;
 
-// Multiple parameters
-let (user_id, post_id) = path_params!(req, "user_id": i64, "post_id": i64)?;
+// Multiple parameters (the macro's own expansion already resolves to the
+// parsed tuple — no trailing `?` needed, unlike the single-value
+// `path_param!`, whose expansion is `Result<T, Error>`)
+let (user_id, post_id) = path_params!(req, "user_id": i64, "post_id": i64);
 ```
 
 ### Query Parameters
@@ -101,16 +106,11 @@ let content_type = header!(req, "Content-Type")
 
 ## Validation
 
+For field-level validation (`validate!`, `validate_required!`, `validate_email!`),
+see [`armature-macros-utils`](../armature-macros-utils). `armature-macros` itself
+provides two lightweight condition-checking macros:
+
 ```rust
-// Validate required field
-validate_required!(name);
-
-// Validate email format
-validate_email!(email);
-
-// Custom validation
-validate!(age >= 18);
-
 // Guard condition (returns 403 if false)
 guard!(user.is_admin(), "Admin access required");
 
@@ -187,8 +187,8 @@ impl UserController {
         let name: String = extract_field(&req, "name")?;
         let email: String = extract_field(&req, "email")?;
 
-        validate_required!(name);
-        validate_email!(email);
+        guard!(!name.is_empty(), "Name is required");
+        guard!(email.contains('@'), "Invalid email format");
 
         let user = db.create_user(name, email).await?;
         created_json!({ "user": user })

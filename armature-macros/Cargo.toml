@@ -14,4 +14,9 @@ categories = ["web-programming", "development-tools::procedural-macro-helpers"]
 [dependencies]
 armature-core = { path = "../armature-core", version = "0.2.1" }
 serde_json = "1.0"
+# Required by the `log_error!` macro, which expands to `tracing::error!(...)`.
+# `macro_rules!` paths to external crates resolve against the *defining*
+# crate's dependency graph, so this must be a normal (non-dev) dependency
+# for `log_error!` to compile for any caller.
+tracing = "0.1"
 
