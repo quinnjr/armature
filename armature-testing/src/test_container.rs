@@ -25,10 +25,13 @@ impl TestContainer {
         self.container.register(mock);
     }
 
-    /// Get a provider from the container
+    /// Get a provider from the container.
+    ///
+    /// Delegates to the underlying `armature_core::Container`. Returns
+    /// `None` if no provider of type `T` was registered via `register`/
+    /// `register_mock`.
     pub fn get<T: Provider + Clone + 'static>(&self) -> Option<T> {
-        // This would need actual container implementation
-        None
+        self.container.get::<T>().ok().map(|arc| (*arc).clone())
     }
 
     /// Clear all providers
@@ -55,5 +58,48 @@ mod tests {
     #[test]
     fn test_container_creation() {
         let _container = TestContainer::new();
+    }
+
+    #[derive(Clone)]
+    struct Widget {
+        value: u32,
+    }
+
+    #[test]
+    fn registered_provider_is_retrievable() {
+        let container = TestContainer::new();
+        container.register(Widget { value: 5 });
+
+        let widget = container
+            .get::<Widget>()
+            .expect("Widget should be registered");
+        assert_eq!(widget.value, 5);
+    }
+
+    #[test]
+    fn mock_provider_is_retrievable() {
+        let container = TestContainer::new();
+        container.register_mock(Widget { value: 11 });
+
+        let widget = container
+            .get::<Widget>()
+            .expect("Widget mock should be registered");
+        assert_eq!(widget.value, 11);
+    }
+
+    #[test]
+    fn unregistered_provider_returns_none() {
+        let container = TestContainer::new();
+        assert!(container.get::<Widget>().is_none());
+    }
+
+    #[test]
+    fn clear_removes_previously_registered_providers() {
+        let mut container = TestContainer::new();
+        container.register(Widget { value: 1 });
+        assert!(container.get::<Widget>().is_some());
+
+        container.clear();
+        assert!(container.get::<Widget>().is_none());
     }
 }
