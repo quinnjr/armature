@@ -24,6 +24,11 @@ pub struct DataQuery {
     /// Zero-based row offset.
     pub offset: usize,
     /// Maximum number of rows to return.
+    ///
+    /// A value of `0` is the "no limit" sentinel: it means "return every
+    /// matching row" (used by CSV export), **not** "return zero rows". Every
+    /// [`DataSource`] implementation MUST honor this convention — a SQL-backed
+    /// source must omit the `LIMIT` clause entirely rather than emit `LIMIT 0`.
     pub limit: usize,
     /// Ordering clauses, most-significant first.
     pub order_by: Vec<String>,
@@ -49,6 +54,13 @@ pub struct DataPage {
 #[async_trait]
 pub trait DataSource: Send + Sync {
     /// Fetch a page of rows for a list view.
+    ///
+    /// # Note
+    ///
+    /// A [`DataQuery::limit`] of `0` means "no limit / return all matching
+    /// rows", not "return zero rows". Implementations MUST honor this: a
+    /// SQL-backed source must omit the `LIMIT` clause when `limit == 0` rather
+    /// than translate it to `LIMIT 0`.
     async fn list(&self, model: &ModelDefinition, query: &DataQuery) -> DataPage;
 
     /// Fetch a single record by primary-key value.

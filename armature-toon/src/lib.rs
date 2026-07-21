@@ -80,7 +80,7 @@ pub type Result<T> = std::result::Result<T, ToonError>;
 
 /// Serialize a value to a TOON byte vector.
 pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let s = to_string(value)?;
+    let s = to_string(value).map_err(ToonError::from_serialize)?;
     Ok(s.into_bytes())
 }
 
@@ -103,7 +103,7 @@ const PRETTY_INDENT: usize = 4;
 /// round-trips through [`from_str`].
 pub fn to_string_pretty<T: Serialize>(value: &T) -> Result<String> {
     let options = serde_toon::ToonOptions::pretty().with_indent(PRETTY_INDENT);
-    serde_toon::to_string_with_options(value, options).map_err(ToonError::from)
+    serde_toon::to_string_with_options(value, options).map_err(ToonError::from_serialize)
 }
 
 /// Format comparison result.
@@ -139,7 +139,7 @@ pub struct FormatComparison {
 pub fn compare_formats<T: Serialize>(value: &T) -> Result<FormatComparison> {
     let json_string =
         serde_json::to_string(value).map_err(|e| ToonError::SerializeError(e.to_string()))?;
-    let toon_string = to_string(value)?;
+    let toon_string = to_string(value).map_err(ToonError::from_serialize)?;
 
     let json_chars = json_string.len();
     let toon_chars = toon_string.len();
@@ -178,7 +178,7 @@ impl TokenCounter {
 
     /// Add a serialized value to the counter.
     pub fn add<T: Serialize>(&mut self, value: &T) -> Result<()> {
-        let toon = to_string(value)?;
+        let toon = to_string(value).map_err(ToonError::from_serialize)?;
         self.total_chars += toon.len();
         self.total_tokens_estimate += toon.len().div_ceil(4);
         Ok(())
@@ -257,7 +257,7 @@ impl ToonSerializer {
         if self.include_type_hints {
             options = options.with_length_marker('#');
         }
-        serde_toon::to_string_with_options(value, options).map_err(ToonError::from)
+        serde_toon::to_string_with_options(value, options).map_err(ToonError::from_serialize)
     }
 
     /// Serialize a value to TOON bytes, honoring the configured knobs.
@@ -345,7 +345,7 @@ impl BatchConverter {
     pub fn json_to_toon(json: &str) -> Result<String> {
         let value: serde_json::Value =
             serde_json::from_str(json).map_err(|e| ToonError::DeserializeError(e.to_string()))?;
-        to_string(&value).map_err(ToonError::from)
+        to_string(&value).map_err(ToonError::from_serialize)
     }
 
     /// Convert TOON string to JSON string.
@@ -604,6 +604,32 @@ mod tests {
                 panic!("parse failure misclassified as SerializeError: {msg}")
             }
             other => panic!("expected DeserializeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_error_classified_as_serialize() {
+        // Regression: a failure on the serialize path must classify as a
+        // SerializeError, never a DeserializeError. serde's direction-agnostic
+        // `Custom`/`Message` variants used to funnel through the
+        // deserialize-biased `From` impl and mislabel serialize failures.
+        //
+        // A map with non-string keys cannot be encoded as TOON, so `to_string`
+        // fails on the serialize side.
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+        map.insert(vec![1, 2, 3], 42);
+
+        match to_vec(&map) {
+            Err(ToonError::SerializeError(_)) => {}
+            Err(ToonError::DeserializeError(msg)) => {
+                panic!("serialize failure misclassified as DeserializeError: {msg}")
+            }
+            Ok(_) => {
+                // If this serde_toon version happens to accept the value, the
+                // classification bug simply cannot be exercised here; skip.
+            }
+            other => panic!("unexpected result: {other:?}"),
         }
     }
 

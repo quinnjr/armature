@@ -295,30 +295,79 @@ impl RgaText {
         ops
     }
 
-    /// Apply a remote operation
+    /// Apply a remote operation.
+    ///
+    /// Delegates to [`apply_many`](Self::apply_many) with a single op so that
+    /// the out-of-order handling (a `Delete` whose target `Insert` has not yet
+    /// arrived) and the deterministic rebuild are shared with the batch path.
     pub fn apply(&mut self, op: TextOp) {
-        match op {
-            TextOp::Insert { id, value, after } => {
-                // Update clock
-                self.clock.merge(&id.timestamp);
+        self.apply_many(std::iter::once(op));
+    }
 
-                // Skip if already present
-                if self.nodes.contains_key(&id) {
-                    return;
+    /// Apply a batch of remote operations, rebuilding the sequence **once**.
+    ///
+    /// The single-op [`apply`](Self::apply) rebuilds the whole sequence per
+    /// remote insert, so replaying an N-character log is O(N² log N). Because
+    /// the linearization is a pure function of the node set, we can mutate the
+    /// node set for every op in the batch and rebuild exactly once at the end —
+    /// same converged result, O(N log N) total.
+    ///
+    /// Out-of-order delivery is handled: a `Delete` for an id we have not seen
+    /// yet pre-creates a tombstoned placeholder node (value `None`, `deleted`),
+    /// and a later `Insert` for that id fills in its real value and anchor while
+    /// *keeping it deleted* — so a resurrected character can never become
+    /// visible.
+    pub fn apply_many(&mut self, ops: impl IntoIterator<Item = TextOp>) {
+        let mut node_set_changed = false;
+
+        for op in ops {
+            match op {
+                TextOp::Insert { id, value, after } => {
+                    // Update clock
+                    self.clock.merge(&id.timestamp);
+
+                    if let Some(existing) = self.nodes.get_mut(&id) {
+                        // A tombstoned placeholder pre-created by an
+                        // out-of-order `Delete`: fill in the real value/anchor
+                        // but keep the tombstone so it stays invisible.
+                        if existing.value.is_none() && existing.deleted {
+                            existing.value = Some(value);
+                            existing.after = after;
+                            node_set_changed = true;
+                        }
+                        // Otherwise already present — idempotent, skip.
+                        continue;
+                    }
+
+                    self.nodes.insert(id, CharNode::new(id, value, after));
+                    node_set_changed = true;
                 }
-
-                let node = CharNode::new(id, value, after);
-                self.nodes.insert(id, node);
-
-                // Recompute the order deterministically so remote inserts land
-                // in the same place on every replica regardless of arrival order.
-                self.rebuild_sequence();
-            }
-            TextOp::Delete { id } => {
-                if let Some(node) = self.nodes.get_mut(&id) {
-                    node.delete();
+                TextOp::Delete { id } => {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.delete();
+                    } else {
+                        // Delete arrived before its Insert: record the deletion
+                        // as a tombstoned placeholder so the later Insert merges
+                        // into it and the character never resurrects.
+                        self.nodes.insert(
+                            id,
+                            CharNode {
+                                id,
+                                value: None,
+                                after: CharId::root(),
+                                deleted: true,
+                            },
+                        );
+                        node_set_changed = true;
+                    }
                 }
             }
+        }
+
+        // Tombstoning an existing node only flips a flag (order is unchanged),
+        // so a rebuild is only needed when the node set itself grew.
+        if node_set_changed {
+            self.rebuild_sequence();
         }
     }
 
@@ -787,9 +836,16 @@ mod tests {
         assert_eq!(a.len(), 6);
     }
 
-    /// Merge must be deterministic: shuffling HashMap iteration order (by
-    /// building the peer's nodes via different insertion sequences) yields the
-    /// same converged result every time.
+    /// Merge must be deterministic regardless of HashMap iteration order.
+    ///
+    /// "Hello" and "World" are authored concurrently at the same anchor, so an
+    /// order-dependent (incremental-placement) merge interleaves them
+    /// differently depending on which order it walks the peer's nodes. We build
+    /// the peer several times by applying the SAME insert ops in DISTINCT orders
+    /// — identical node set, but distinct `HashMap`s whose iteration orders
+    /// genuinely vary (std `RandomState` seeds each map independently) — and
+    /// also merge in both directions. A merge that leaks iteration order would
+    /// diverge across these; the deterministic tree-walk merge must not.
     #[test]
     fn test_merge_is_deterministic() {
         let r1 = ReplicaId::new();
@@ -798,33 +854,149 @@ mod tests {
         let mut base = RgaText::new(r1);
         base.insert_str(0, "Hello");
 
-        let mut peer = RgaText::new(r2);
-        peer.insert_str(0, "World");
+        // Capture the peer's insert ops once, then replay them in many orders.
+        let mut origin = RgaText::new(r2);
+        let peer_ops = origin.insert_str(0, "World");
+        assert_eq!(origin.to_string(), "World");
 
-        // Merge into several independent clones; every result must be identical.
+        // Distinct application orders of the same ops: every rotation plus the
+        // reverse. Each rebuild yields the identical node set in a fresh map.
+        let mut orderings: Vec<Vec<TextOp>> = Vec::new();
+        for k in 0..peer_ops.len() {
+            let mut o = peer_ops.clone();
+            o.rotate_left(k);
+            orderings.push(o);
+        }
+        let mut rev = peer_ops.clone();
+        rev.reverse();
+        orderings.push(rev);
+
         let mut results = Vec::new();
-        for _ in 0..8 {
+        for ord in &orderings {
+            // Rebuild the peer from this application order.
+            let mut peer = RgaText::new(r2);
+            for op in ord.iter().cloned() {
+                peer.apply(op);
+            }
+            // Same logical content reached via every order.
+            assert_eq!(peer.to_string(), "World");
+
+            // Merge both directions; both must land on the same string.
             let mut lhs = base.clone();
             lhs.merge(&peer);
             results.push(lhs.to_string());
+
+            let mut rhs = peer.clone();
+            rhs.merge(&base);
+            results.push(rhs.to_string());
         }
+
         let first = &results[0];
         for r in &results {
-            assert_eq!(r, first, "merge produced non-deterministic output");
+            assert_eq!(
+                r, first,
+                "merge produced HashMap-iteration-order-dependent output"
+            );
         }
+        // All ten characters must survive in every result.
+        assert_eq!(first.chars().count(), 10);
     }
 
-    /// Deleting then merging must keep the deletion (tombstone) on both peers.
+    /// Op-based delivery may deliver a `Delete` before the `Insert` it targets.
+    /// The tombstone must survive so the later `Insert` does NOT resurrect the
+    /// character. (Fails against the old code, which dropped the Delete.)
+    #[test]
+    fn test_apply_delete_before_insert_does_not_resurrect() {
+        // Author a character on one replica to get a concrete Insert op.
+        let author = ReplicaId::new();
+        let mut src = RgaText::new(author);
+        let insert_op = src.insert(0, 'Z');
+        let id = match insert_op {
+            TextOp::Insert { id, .. } => id,
+            _ => unreachable!(),
+        };
+        let delete_op = TextOp::Delete { id };
+
+        // Peer receives them OUT OF ORDER: Delete first, then Insert.
+        let mut peer = RgaText::new(ReplicaId::new());
+        peer.apply(delete_op);
+        peer.apply(insert_op);
+
+        assert!(
+            !peer.to_string().contains('Z'),
+            "deleted character resurrected after out-of-order Delete/Insert"
+        );
+        assert_eq!(peer.len(), 0);
+
+        // And the tombstone must replay faithfully to a third peer.
+        let mut third = RgaText::new(ReplicaId::new());
+        third.apply_many(peer.operations());
+        assert!(!third.to_string().contains('Z'));
+        assert_eq!(third.len(), 0);
+    }
+
+    /// `apply_many` replaying an `operations()` log yields the identical
+    /// document that per-op `apply` would, but rebuilds the sequence once.
+    #[test]
+    fn test_apply_many_matches_per_op_apply() {
+        let author = ReplicaId::new();
+        let mut src = RgaText::new(author);
+        src.insert_str(0, "Hello, world");
+        src.delete(5); // drop the comma
+        let expected = src.to_string();
+        let ops = src.operations();
+
+        // Per-op replay.
+        let mut a = RgaText::new(ReplicaId::new());
+        for op in ops.clone() {
+            a.apply(op);
+        }
+
+        // Batch replay.
+        let mut b = RgaText::new(ReplicaId::new());
+        b.apply_many(ops);
+
+        assert_eq!(a.to_string(), expected);
+        assert_eq!(b.to_string(), expected);
+        assert_eq!(a.to_string(), b.to_string());
+    }
+
+    /// Deleting a character must preserve it as a real tombstone, never
+    /// re-export it as an `Insert '\0'` placeholder that resurrects on a peer.
+    ///
+    /// Asserting on a merged `to_string()` does NOT catch the resurrection bug:
+    /// even the buggy path re-inserts the deleted node as `'\0'` and then
+    /// tombstones it, so `to_string()` hides it. The bug is deterministically
+    /// visible only in the exported op-log, so we assert there.
     #[test]
     fn test_merge_preserves_deletes() {
         let r1 = ReplicaId::new();
-        let r2 = ReplicaId::new();
         let mut a = RgaText::new(r1);
         a.insert_str(0, "Hello");
-        a.delete(0); // -> "ello"
+        let del_op = a.delete(0).expect("delete should return an op"); // -> "ello"
+        let deleted_id = match del_op {
+            TextOp::Delete { id } => id,
+            _ => unreachable!("delete must return a Delete op"),
+        };
+        assert_eq!(a.to_string(), "ello");
 
-        let mut b = RgaText::new(r2);
-        b.merge(&a);
+        // The exported log must carry a REAL Delete for the tombstoned id and
+        // must never re-insert that character as a NUL placeholder.
+        let ops = a.operations();
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, TextOp::Delete { id } if *id == deleted_id)),
+            "no real Delete emitted for the tombstoned character"
+        );
+        for op in &ops {
+            if let TextOp::Insert { value, .. } = op {
+                assert_ne!(*value, '\0', "tombstone re-exported as Insert '\\0'");
+            }
+        }
+
+        // Replaying that log onto a peer preserves the deletion faithfully.
+        let mut b = RgaText::new(ReplicaId::new());
+        b.apply_many(ops);
         assert_eq!(b.to_string(), "ello");
         assert!(!b.to_string().contains('\0'));
     }

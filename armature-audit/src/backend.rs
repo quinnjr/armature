@@ -112,8 +112,12 @@ impl AuditBackend for FileBackend {
         let writer = guard.as_mut().expect("writer initialized above");
         writer.write_all(json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
-        // Flush the buffer through to the file so events are durable without
-        // reopening the file per event.
+        // DELIBERATE: flush every event to disk. This is an audit log, so
+        // non-repudiation requires each record be durable the moment `write`
+        // returns; a crash must not lose the event that motivated it. We accept
+        // the per-event flush syscall as the cost of a zero-width durability
+        // window rather than buffering events that could vanish on crash. The
+        // BufWriter still coalesces the payload and newline into one flush.
         writer.flush().await?;
 
         Ok(())
@@ -137,13 +141,35 @@ impl AuditBackend for FileBackend {
             Err(e) => return Err(e.into()),
         };
 
+        let mut corrupt = 0usize;
         let events: Vec<AuditEvent> = content
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
+            .filter_map(|line| match serde_json::from_str::<AuditEvent>(line) {
+                Ok(event) => Some(event),
+                Err(e) => {
+                    // Surface corruption instead of silently discarding it — a
+                    // silently-dropped audit record is itself a security event.
+                    corrupt += 1;
+                    tracing::debug!(
+                        path = %self.path.display(),
+                        error = %e,
+                        "skipping unparseable audit log line"
+                    );
+                    None
+                }
+            })
             .rev()
             .take(limit)
             .collect();
+
+        if corrupt > 0 {
+            tracing::warn!(
+                path = %self.path.display(),
+                corrupt_lines = corrupt,
+                "audit log contains unparseable lines"
+            );
+        }
 
         Ok(events)
     }
@@ -389,6 +415,43 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("another.event"));
         assert!(!content.contains("old.event"));
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_read_skips_corrupt_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let backend = FileBackend::new(&path);
+
+        // Write one valid event, then splice a corrupt line into the file.
+        backend
+            .write(&AuditEvent::new("valid.event"))
+            .await
+            .unwrap();
+        backend.flush().await.unwrap();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "{{ this is not valid json").unwrap();
+        }
+        backend
+            .write(&AuditEvent::new("valid.event.2"))
+            .await
+            .unwrap();
+        backend.flush().await.unwrap();
+
+        // Corrupt line is skipped (warned, not fatal); valid events survive.
+        let events = backend.read(10).await.unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "both valid events returned despite corruption"
+        );
+        assert!(events.iter().any(|e| e.event_type == "valid.event"));
+        assert!(events.iter().any(|e| e.event_type == "valid.event.2"));
     }
 
     #[tokio::test]

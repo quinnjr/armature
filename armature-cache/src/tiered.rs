@@ -411,20 +411,12 @@ impl CacheStore for InMemoryCache {
 
     async fn ttl(&self, key: &str) -> CacheResult<Option<Duration>> {
         let data = self.data.read().await;
-        if let Some(entry) = data.get(key) {
-            if let Some(expires_at) = entry.expires_at {
-                let now = tokio::time::Instant::now();
-                if expires_at > now {
-                    Ok(Some(expires_at - now))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
+        let now = tokio::time::Instant::now();
+        Ok(data
+            .get(key)
+            .and_then(|e| e.expires_at)
+            .filter(|&x| x > now)
+            .map(|x| x - now))
     }
 
     async fn expire(&self, key: &str, ttl: Duration) -> CacheResult<()> {

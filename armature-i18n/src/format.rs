@@ -198,8 +198,6 @@ pub struct CurrencyFormatter {
     pub currency_code: String,
     /// Show currency symbol instead of code
     pub use_symbol: bool,
-    /// Symbol position (true = before, false = after)
-    pub symbol_before: bool,
 }
 
 impl CurrencyFormatter {
@@ -208,7 +206,6 @@ impl CurrencyFormatter {
         Self {
             currency_code: currency_code.into().to_uppercase(),
             use_symbol: true,
-            symbol_before: true,
         }
     }
 

@@ -249,9 +249,19 @@ impl AdminInstance {
 
 /// Returns `true` if the request may proceed given the auth policy.
 ///
-/// When `require_auth` is disabled every request passes. Otherwise an
-/// `Authorization` header must be present — the admin router itself does not
-/// verify credentials; pair it with your authentication middleware.
+/// # This is a PRESENCE check, not authentication
+///
+/// When `require_auth` is disabled every request passes. When it is enabled this
+/// function only checks that a **non-empty `Authorization` header is present** —
+/// it does **not** parse, validate, or verify the credential in any way. Any
+/// non-empty value (e.g. `Authorization: x`) is accepted.
+///
+/// This is deliberate: the admin router does not implement authentication. Real
+/// verification (validating a session, bearer token, or signature and rejecting
+/// forged/expired credentials) MUST be performed by upstream authentication
+/// middleware mounted ahead of these routes. Enabling `require_auth(true)`
+/// without such middleware provides **no security** — it merely rejects requests
+/// that omit the header entirely.
 fn is_authorized(config: &AdminConfig, req: &HttpRequest) -> bool {
     if !config.require_auth {
         return true;
@@ -260,6 +270,32 @@ fn is_authorized(config: &AdminConfig, req: &HttpRequest) -> bool {
         .get_ignore_case("authorization")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// Enforce the auth policy and resolve the `:model` path param to its
+/// [`ModelDefinition`], centralizing the identical 401/404 handling that opens
+/// every model-scoped handler.
+///
+/// Returns the resolved model on success, or the ready-to-return error response
+/// (401 when unauthorized, 404 when the model is unknown).
+fn authorize_and_resolve_model(
+    inst: &AdminInstance,
+    req: &HttpRequest,
+) -> Result<ModelDefinition, Box<HttpResponse>> {
+    if !is_authorized(&inst.config, req) {
+        return Err(Box::new(html_response(
+            401,
+            render::render_unauthorized(&inst.config),
+        )));
+    }
+    let model_name = req.param("model").cloned().unwrap_or_default();
+    match inst.get_model(&model_name) {
+        Some(m) => Ok(m.clone()),
+        None => Err(Box::new(html_response(
+            404,
+            render::render_not_found(&inst.config),
+        ))),
+    }
 }
 
 /// Build [`ListParams`] from the request's query string.
@@ -314,6 +350,46 @@ fn html_response(status: u16, body: String) -> HttpResponse {
     resp
 }
 
+/// Quote a single CSV field per RFC 4180 (double internal quotes; wrap in quotes
+/// when the value contains a comma, quote, or newline).
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Render the model's `list_display` columns for the given rows as CSV text.
+///
+/// The header row uses the display fields' labels; each data row emits the
+/// plain (unescaped) value of each display field.
+fn render_list_csv(model: &ModelDefinition, rows: &[serde_json::Value]) -> String {
+    let fields = model.display_fields();
+    let mut out = String::new();
+
+    let header: Vec<String> = fields.iter().map(|f| csv_field(&f.label)).collect();
+    out.push_str(&header.join(","));
+    out.push_str("\r\n");
+
+    for row in rows {
+        let cells: Vec<String> = fields
+            .iter()
+            .map(|f| {
+                let raw = row
+                    .get(&f.name)
+                    .map(data::value_to_plain_string)
+                    .unwrap_or_default();
+                csv_field(&raw)
+            })
+            .collect();
+        out.push_str(&cells.join(","));
+        out.push_str("\r\n");
+    }
+
+    out
+}
+
 async fn handle_dashboard(
     inst: Arc<AdminInstance>,
     req: HttpRequest,
@@ -344,16 +420,9 @@ async fn handle_dashboard(
 }
 
 async fn handle_list(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
 
     let params = list_params_from_request(&req);
@@ -370,6 +439,33 @@ async fn handle_list(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpR
     } else {
         model.ordering.iter().map(|o| o.as_sql()).collect()
     };
+
+    // CSV export of the current query (honoring search/filters/ordering). A
+    // `limit` of 0 tells the data source to return every matching row rather
+    // than a single page.
+    if inst.config.enable_export
+        && req.query_params.get("export").map(String::as_str) == Some("csv")
+    {
+        let query = DataQuery {
+            offset: 0,
+            limit: 0,
+            order_by,
+            search: params.search.clone(),
+            filters: params.filters.clone(),
+        };
+        let page = inst.data_source.list(&model, &query).await;
+        let csv = render_list_csv(&model, &page.rows);
+        return Ok(HttpResponse::new(200)
+            .with_header(
+                "Content-Type".to_string(),
+                "text/csv; charset=utf-8".to_string(),
+            )
+            .with_header(
+                "Content-Disposition".to_string(),
+                format!("attachment; filename=\"{}.csv\"", model.name),
+            )
+            .with_body(csv.into_bytes()));
+    }
 
     let query = DataQuery {
         offset,
@@ -390,18 +486,11 @@ async fn handle_list(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpR
 }
 
 async fn handle_detail(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let id = req.param("id").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
+    let id = req.param("id").cloned().unwrap_or_default();
 
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
@@ -419,39 +508,24 @@ async fn handle_create_form(
     inst: Arc<AdminInstance>,
     req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    match inst.get_model(&model_name) {
-        Some(model) => {
-            let view = CreateView::new(model);
-            Ok(HttpResponse::html(render::render_create(
-                &view,
-                &inst.config,
-            )))
-        }
-        None => Ok(html_response(404, render::render_not_found(&inst.config))),
-    }
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
+    };
+    let view = CreateView::new(&model);
+    Ok(HttpResponse::html(render::render_create(
+        &view,
+        &inst.config,
+    )))
 }
 
 async fn handle_create_submit(
     inst: Arc<AdminInstance>,
     req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
     if !model.can_add {
         return Ok(html_response(
@@ -476,18 +550,11 @@ async fn handle_edit_form(
     inst: Arc<AdminInstance>,
     req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let id = req.param("id").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
+    let id = req.param("id").cloned().unwrap_or_default();
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
             let view = EditView::new(&model, id).with_data(record);
@@ -501,18 +568,11 @@ async fn handle_update_submit(
     inst: Arc<AdminInstance>,
     req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let id = req.param("id").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
+    let id = req.param("id").cloned().unwrap_or_default();
     if !model.can_edit {
         return Ok(html_response(
             403,
@@ -533,18 +593,11 @@ async fn handle_update_submit(
 }
 
 async fn handle_delete(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpResponse, Error> {
-    if !is_authorized(&inst.config, &req) {
-        return Ok(html_response(
-            401,
-            render::render_unauthorized(&inst.config),
-        ));
-    }
-    let model_name = req.param("model").cloned().unwrap_or_default();
-    let id = req.param("id").cloned().unwrap_or_default();
-    let model = match inst.get_model(&model_name) {
-        Some(m) => m.clone(),
-        None => return Ok(html_response(404, render::render_not_found(&inst.config))),
+    let model = match authorize_and_resolve_model(&inst, &req) {
+        Ok(m) => m,
+        Err(resp) => return Ok(*resp),
     };
+    let id = req.param("id").cloned().unwrap_or_default();
     if !model.can_delete {
         return Ok(html_response(
             403,
@@ -584,16 +637,6 @@ impl ListParams {
     /// Get effective page number
     pub fn page(&self) -> usize {
         self.page.unwrap_or(1).max(1)
-    }
-
-    /// Get effective items per page
-    pub fn per_page(&self, default: usize) -> usize {
-        self.per_page.unwrap_or(default).min(100)
-    }
-
-    /// Get offset for pagination
-    pub fn offset(&self, default_per_page: usize) -> usize {
-        (self.page() - 1) * self.per_page(default_per_page)
     }
 
     /// Resolve the effective page size, honoring the requested `per_page`, the
@@ -661,8 +704,8 @@ mod tests {
         };
 
         assert_eq!(params.page(), 2);
-        assert_eq!(params.per_page(10), 20);
-        assert_eq!(params.offset(10), 20);
+        assert_eq!(params.resolve_per_page(&AdminConfig::default()), 20);
+        assert_eq!(params.resolve_offset(20), 20);
     }
 
     #[test]
@@ -830,6 +873,100 @@ mod tests {
             .unwrap();
         assert!((300..400).contains(&resp.status));
         assert!(ds.get(&user_model(), "1").await.is_none());
+    }
+
+    /// End-to-end: the search box rendered on the list page must drive filtering
+    /// when its form is submitted. This ties the *rendered form's* param name to
+    /// the handler — the exact seam where `name="q"` silently broke search.
+    #[tokio::test]
+    async fn search_form_param_filters_end_to_end() {
+        let ds = Arc::new(InMemoryDataSource::new());
+        ds.seed("user", serde_json::json!({ "id": "1", "name": "Alice" }));
+        ds.seed("user", serde_json::json!({ "id": "2", "name": "Bob" }));
+
+        let admin = Admin::new()
+            .require_auth(false)
+            .data_source(ds.clone())
+            .register_model(user_model())
+            .build();
+        let router = admin.routes();
+
+        // Render the list page and pull the search input's `name` straight out of
+        // the emitted HTML, exactly as a browser would submit it.
+        let resp = router.route(req("GET", "/admin/user")).await.unwrap();
+        let body = String::from_utf8(resp.body).unwrap();
+        let form = body
+            .split("admin-search")
+            .nth(1)
+            .expect("search form must be rendered");
+        let after = form
+            .split("name=\"")
+            .nth(1)
+            .expect("input must have a name");
+        let param = &after[..after.find('"').unwrap()];
+        assert_eq!(
+            param, "search",
+            "rendered search input name must match the handler's query key"
+        );
+
+        // Submit that param and assert real filtering occurs.
+        let path = format!("/admin/user?{param}=Alice");
+        let resp = router.route(req("GET", &path)).await.unwrap();
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("Alice"), "search must keep the matching row");
+        assert!(
+            !body.contains("Bob"),
+            "search must filter out non-matching rows"
+        );
+    }
+
+    /// The Export control must produce real CSV of the current query, not just
+    /// re-render HTML.
+    #[tokio::test]
+    async fn export_csv_returns_csv_rows() {
+        let ds = Arc::new(InMemoryDataSource::new());
+        ds.seed("user", serde_json::json!({ "id": "1", "name": "Alice" }));
+        ds.seed("user", serde_json::json!({ "id": "2", "name": "Bob" }));
+
+        let admin = Admin::new()
+            .require_auth(false)
+            .data_source(ds.clone())
+            .register_model(user_model())
+            .build();
+        let router = admin.routes();
+
+        let resp = router
+            .route(req("GET", "/admin/user?export=csv"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        let ct = resp
+            .headers
+            .get("Content-Type")
+            .cloned()
+            .unwrap_or_default();
+        assert!(ct.contains("text/csv"), "export must be served as CSV");
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(
+            !body.contains("<table"),
+            "CSV export must not re-render HTML"
+        );
+        // Header row (labels) + both data rows.
+        assert!(body.contains("Alice"));
+        assert!(body.contains("Bob"));
+        assert!(body.lines().count() >= 3, "header + two data rows");
+
+        // Export honors the active search filter.
+        let resp = router
+            .route(req("GET", "/admin/user?export=csv&search=Alice"))
+            .await
+            .unwrap();
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("Alice"));
+        assert!(
+            !body.contains("Bob"),
+            "CSV export must honor the search query"
+        );
     }
 
     /// The edit route must render an EditView (CRUD is wired, not just claimed).

@@ -23,12 +23,8 @@ parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.2"
 
-# Metrics backends (optional)
-prometheus = { version = "0.14", optional = true }
-
 [features]
 default = []
-prometheus = ["dep:prometheus"]
 
 [dev-dependencies]
 tokio-test = "0.4"

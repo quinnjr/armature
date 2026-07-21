@@ -25,17 +25,44 @@ pub struct RateLimitMiddleware {
     /// When the store errors: `true` fails open (allow the request), `false`
     /// fails closed (deny). Mirrors `RateLimitConfig::skip_on_error`.
     skip_on_error: bool,
+    /// Number of trusted reverse proxies in front of the app. Controls how the
+    /// client IP is read from `X-Forwarded-For`; `0` (default) trusts no proxy
+    /// and ignores the header. Mirrors `RateLimitConfig::trusted_proxy_depth`.
+    trusted_proxy_depth: usize,
 }
 
-/// Parse only the **first hop** of an `X-Forwarded-For` value.
+/// Select the client IP from an `X-Forwarded-For` value using the number of
+/// trusted proxies (`depth`).
 ///
-/// `X-Forwarded-For` is a comma-separated list `client, proxy1, proxy2, ...`;
-/// the originating client is the first entry. Parsing the whole header string
-/// as a single `IpAddr` always fails on multi-hop traffic, which previously
-/// collapsed the extracted key to `None` and silently **disabled IP rate
-/// limiting for all proxied requests** (a fail-open security gap).
-fn first_forwarded_ip(xff: &str) -> Option<IpAddr> {
-    xff.split(',').next()?.trim().parse().ok()
+/// `X-Forwarded-For` is a comma-separated list `client, proxy1, proxy2, ...`
+/// where each proxy *appends* the address it received the connection from, so
+/// the **rightmost** hops are the ones added by your own infrastructure and are
+/// the only trustworthy entries. The client is therefore selected
+/// `depth`-from-the-right (1-indexed): with a single trusted proxy (`depth == 1`)
+/// the rightmost hop is the client address your proxy observed.
+///
+/// A `depth` of `0` means **no proxy is trusted** — every entry is
+/// attacker-controlled, so this returns `None` and the caller does not derive an
+/// IP from the header at all. Trusting the first (leftmost) hop unconditionally,
+/// as the code previously did, let an attacker rotate that hop per request to
+/// mint a fresh bucket each time (limit bypass) or spoof a victim's IP (pollution).
+///
+/// Note: `armature_core::HttpRequest` does not currently expose the socket peer
+/// address, so when XFF trust is not configured there is no non-spoofable peer to
+/// fall back to; IP-based limiting is simply not applied to such requests. Enable
+/// it explicitly by setting the trusted-proxy depth.
+fn forwarded_ip_at_depth(xff: &str, depth: usize) -> Option<IpAddr> {
+    if depth == 0 {
+        return None;
+    }
+    let hops: Vec<&str> = xff
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    // `depth` counts from the right; out-of-range depth trusts nothing.
+    let idx = hops.len().checked_sub(depth)?;
+    hops.get(idx)?.parse().ok()
 }
 
 impl RateLimitMiddleware {
@@ -51,7 +78,18 @@ impl RateLimitMiddleware {
                 .error_message
                 .unwrap_or_else(|| "Rate limit exceeded".to_string()),
             bypass_keys: config.bypass_keys,
+            trusted_proxy_depth: config.trusted_proxy_depth,
         }
+    }
+
+    /// Set the number of trusted reverse proxies in front of the app.
+    ///
+    /// Controls how the client IP is derived from `X-Forwarded-For`. Defaults to
+    /// `0` (no proxy trusted; the header is ignored). See
+    /// [`crate::config::RateLimitConfig::trusted_proxy_depth`].
+    pub fn with_trusted_proxy_depth(mut self, depth: usize) -> Self {
+        self.trusted_proxy_depth = depth;
+        self
     }
 
     /// Create middleware with a custom key extractor
@@ -246,106 +284,6 @@ impl RateLimitCheckResponse {
     }
 }
 
-/// Builder for configuring rate limit middleware
-pub struct RateLimitMiddlewareBuilder {
-    limiter: Option<Arc<RateLimiter>>,
-    key_extractor: KeyExtractor,
-    include_headers: bool,
-    error_message: Option<String>,
-    bypass_keys: Vec<String>,
-}
-
-impl RateLimitMiddlewareBuilder {
-    /// Create a new middleware builder
-    pub fn new() -> Self {
-        Self {
-            limiter: None,
-            key_extractor: KeyExtractor::Ip,
-            include_headers: true,
-            error_message: None,
-            bypass_keys: Vec::new(),
-        }
-    }
-
-    /// Set the rate limiter
-    pub fn limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
-        self.limiter = Some(limiter);
-        self
-    }
-
-    /// Set the key extractor
-    pub fn key_extractor(mut self, extractor: KeyExtractor) -> Self {
-        self.key_extractor = extractor;
-        self
-    }
-
-    /// Extract key from IP address
-    pub fn by_ip(mut self) -> Self {
-        self.key_extractor = KeyExtractor::Ip;
-        self
-    }
-
-    /// Extract key from user ID
-    pub fn by_user_id(mut self) -> Self {
-        self.key_extractor = KeyExtractor::UserId;
-        self
-    }
-
-    /// Extract key from API key header
-    pub fn by_api_key(mut self, header_name: impl Into<String>) -> Self {
-        self.key_extractor = KeyExtractor::ApiKey {
-            header_name: header_name.into(),
-        };
-        self
-    }
-
-    /// Extract key from IP and path combination
-    pub fn by_ip_and_path(mut self) -> Self {
-        self.key_extractor = KeyExtractor::IpAndPath;
-        self
-    }
-
-    /// Include rate limit headers in responses
-    pub fn include_headers(mut self, include: bool) -> Self {
-        self.include_headers = include;
-        self
-    }
-
-    /// Set custom error message
-    pub fn error_message(mut self, message: impl Into<String>) -> Self {
-        self.error_message = Some(message.into());
-        self
-    }
-
-    /// Add a bypass key
-    pub fn bypass_key(mut self, key: impl Into<String>) -> Self {
-        self.bypass_keys.push(key.into());
-        self
-    }
-
-    /// Build the middleware
-    pub fn build(self) -> Option<RateLimitMiddleware> {
-        let limiter = self.limiter?;
-
-        let mut middleware = RateLimitMiddleware::new(limiter)
-            .with_extractor(self.key_extractor)
-            .with_headers(self.include_headers)
-            .with_bypass_keys(self.bypass_keys);
-
-        if let Some(msg) = self.error_message {
-            middleware = middleware.with_error_message(msg);
-        }
-
-        Some(middleware)
-    }
-}
-
-impl Default for RateLimitMiddlewareBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Implement the armature_core::Middleware trait for RateLimitMiddleware
 /// This allows it to be used in a MiddlewareChain
 #[async_trait::async_trait]
@@ -365,20 +303,23 @@ impl armature_core::Middleware for RateLimitMiddleware {
                 > + Send,
         >,
     ) -> Result<armature_core::HttpResponse, armature_core::Error> {
-        // Extract request info
-        // Prefer the first hop of X-Forwarded-For (the originating client);
-        // fall back to X-Real-IP. Parsing the whole comma-separated XFF as one
-        // IpAddr fails on any multi-hop chain, which used to disable IP rate
-        // limiting for all proxied traffic.
-        let ip = req
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|s| first_forwarded_ip(s))
-            .or_else(|| {
-                req.headers
-                    .get("x-real-ip")
-                    .and_then(|s| s.trim().parse().ok())
-            });
+        // Derive the client IP from forwarding headers only when a trusted-proxy
+        // depth is configured. `X-Forwarded-For`/`X-Real-IP` are attacker-
+        // controlled unless the request is known to have transited a trusted
+        // proxy, so with the default depth of 0 they are ignored entirely (an
+        // attacker cannot rotate/spoof them to bypass or pollute rate limits).
+        let ip = if self.trusted_proxy_depth == 0 {
+            None
+        } else {
+            req.headers
+                .get("x-forwarded-for")
+                .and_then(|s| forwarded_ip_at_depth(s, self.trusted_proxy_depth))
+                .or_else(|| {
+                    req.headers
+                        .get("x-real-ip")
+                        .and_then(|s| s.trim().parse().ok())
+                })
+        };
 
         let user_id = req.headers.get("x-user-id").map(|s| s.as_str());
 
@@ -586,25 +527,34 @@ mod tests {
     }
 
     #[test]
-    fn test_first_forwarded_ip_parses_first_hop() {
-        // Multi-hop chain: the client is the first entry.
+    fn test_forwarded_ip_at_depth_selects_from_right() {
+        let xff = "203.0.113.5, 70.41.3.18, 150.172.238.178";
+        // depth 0: no proxy trusted, header ignored entirely.
+        assert_eq!(forwarded_ip_at_depth(xff, 0), None);
+        // depth 1: rightmost hop (added by our proxy).
         assert_eq!(
-            first_forwarded_ip("203.0.113.5, 70.41.3.18, 150.172.238.178"),
+            forwarded_ip_at_depth(xff, 1),
+            Some(IpAddr::V4(Ipv4Addr::new(150, 172, 238, 178)))
+        );
+        // depth 2: second from the right.
+        assert_eq!(
+            forwarded_ip_at_depth(xff, 2),
+            Some(IpAddr::V4(Ipv4Addr::new(70, 41, 3, 18)))
+        );
+        // depth 3: the originating client (leftmost of a 3-hop chain).
+        assert_eq!(
+            forwarded_ip_at_depth(xff, 3),
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)))
         );
-        // Single hop, no whitespace.
-        assert_eq!(
-            first_forwarded_ip("198.51.100.7"),
-            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
-        );
-        // Garbage first hop yields None (not a silent pass-through).
-        assert_eq!(first_forwarded_ip("not-an-ip, 10.0.0.1"), None);
+        // depth beyond the number of hops trusts nothing.
+        assert_eq!(forwarded_ip_at_depth(xff, 4), None);
     }
 
-    /// Regression: a multi-hop `X-Forwarded-For` used to be parsed as a single
-    /// `IpAddr`, fail, drop the key to `None`, and fail **open** — proxied IP
-    /// rate limiting was silently disabled. The middleware must now key on the
-    /// first hop and actually enforce the limit (429 once exhausted).
+    /// Regression: with the client's originating IP trusted (all 3 proxies
+    /// configured), a multi-hop `X-Forwarded-For` must actually enforce the
+    /// limit on that client (429 once exhausted). Previously the whole header
+    /// was parsed as a single `IpAddr`, failed, dropped the key to `None`, and
+    /// failed **open** — proxied IP rate limiting was silently disabled.
     #[tokio::test]
     async fn test_multi_hop_xff_rate_limits_on_client() {
         use armature_core::Middleware;
@@ -616,7 +566,8 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let middleware = RateLimitMiddleware::new(limiter);
+        // Trust all 3 hops so the leftmost (originating client) is the key.
+        let middleware = RateLimitMiddleware::new(limiter).with_trusted_proxy_depth(3);
 
         let make_req = || {
             let mut req =
@@ -638,7 +589,7 @@ mod tests {
             .unwrap();
         assert_eq!(r1.status, 200);
 
-        // Second request must be rate limited on the client's first hop.
+        // Second request must be rate limited on the client's IP.
         let r2 = middleware
             .handle(
                 make_req(),
@@ -650,6 +601,68 @@ mod tests {
             r2.status, 429,
             "proxied client must be rate limited, not failed open"
         );
+    }
+
+    /// Security regression: an attacker who can set `X-Forwarded-For` used to
+    /// mint a fresh bucket per request by rotating the (spoofable) first hop,
+    /// because the middleware unconditionally trusted it. With one trusted proxy
+    /// configured, the client is read from the *rightmost* hop (added by our
+    /// proxy), so rotating the leftmost hop no longer creates a fresh bucket and
+    /// the shared client still gets rate limited.
+    #[tokio::test]
+    async fn test_spoofed_first_hop_shares_bucket_with_trusted_proxy() {
+        use armature_core::Middleware;
+
+        let limiter = Arc::new(
+            RateLimiter::builder()
+                .token_bucket(1, f64::EPSILON)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let middleware = RateLimitMiddleware::new(limiter).with_trusted_proxy_depth(1);
+
+        let make_req = |xff: &'static str| {
+            let mut req =
+                armature_core::HttpRequest::new("GET".to_string(), "/api/test".to_string());
+            req.headers.insert("x-forwarded-for", xff);
+            req
+        };
+
+        // Attacker rotates the leftmost hop; the rightmost (10.0.0.1) is our
+        // proxy's observed client address and is the same both times.
+        let r1 = middleware
+            .handle(
+                make_req("203.0.113.1, 10.0.0.1"),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status, 200);
+
+        let r2 = middleware
+            .handle(
+                make_req("203.0.113.2, 10.0.0.1"),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r2.status, 429,
+            "rotating the spoofable first hop must not mint a fresh bucket"
+        );
+    }
+
+    /// With the safe default (no trusted proxy), `X-Forwarded-For` is not
+    /// trusted at all: no IP is derived from it, so a spoofed header cannot be
+    /// used to target or partition rate-limit buckets.
+    #[tokio::test]
+    async fn test_xff_ignored_when_no_trusted_proxy() {
+        let middleware = RateLimitMiddleware::new(create_test_limiter().await);
+        assert_eq!(middleware.trusted_proxy_depth, 0);
+
+        // Sanity: the selector itself refuses to trust anything at depth 0.
+        assert_eq!(forwarded_ip_at_depth("1.2.3.4, 5.6.7.8", 0), None);
     }
 
     /// A store that always errors, used to exercise the fail-open/closed path.

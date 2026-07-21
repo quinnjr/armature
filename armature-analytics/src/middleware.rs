@@ -33,70 +33,6 @@ impl AnalyticsMiddleware {
     pub fn analytics(&self) -> &Analytics {
         &self.analytics
     }
-
-    /// Record a request manually (for custom middleware implementations)
-    pub fn record_request(
-        &self,
-        method: &str,
-        path: &str,
-        status: u16,
-        start_time: Instant,
-        response_size: Option<u64>,
-        authenticated: bool,
-    ) {
-        let config = self.analytics.config();
-
-        // Respect the global enable flag.
-        if !config.enabled {
-            return;
-        }
-
-        // Check if path should be excluded
-        if config.should_exclude(path) {
-            return;
-        }
-
-        // Check sampling
-        if !config.should_sample() {
-            return;
-        }
-
-        let duration = start_time.elapsed();
-
-        // Aggregate variable path segments (IDs) so that per-endpoint metrics
-        // do not explode into one bucket per concrete resource id.
-        let normalized = normalize_path(path);
-
-        let mut record = RequestRecord::new(method, normalized, status, duration)
-            .with_authenticated(authenticated);
-
-        if let Some(size) = response_size {
-            record = record.with_response_size(size);
-        }
-
-        self.analytics.record_request(record);
-    }
-
-    /// Record an error manually
-    pub fn record_error(
-        &self,
-        error_type: &str,
-        message: &str,
-        status: Option<u16>,
-        endpoint: Option<&str>,
-    ) {
-        let mut record = ErrorRecord::new(error_type, message);
-
-        if let Some(s) = status {
-            record = record.with_status(s);
-        }
-
-        if let Some(ep) = endpoint {
-            record = record.with_endpoint(ep);
-        }
-
-        self.analytics.record_error(record);
-    }
 }
 
 /// Request context for tracking within handlers
@@ -182,8 +118,16 @@ impl Middleware for AnalyticsMiddleware {
         let method = req.method.clone();
         let raw_path = req.path.clone();
 
-        // Build the recording path up front (before `req` is consumed by
-        // `next`). Optionally fold query parameters into the tracked path.
+        // Exclusion and sampling gate what we record, but never what we return.
+        // Evaluate them first, before any normalization or allocation, so that
+        // excluded/unsampled requests skip the expensive path-normalization and
+        // query/client-id work entirely.
+        if config.should_exclude(&raw_path) || !config.should_sample() {
+            return next(req).await;
+        }
+
+        // Build the recording path (before `req` is consumed by `next`).
+        // Optionally fold query parameters into the tracked path.
         let mut tracked_path = normalize_path(&raw_path);
         if config.include_query_params && !req.query_params.is_empty() {
             let mut pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
@@ -202,11 +146,6 @@ impl Middleware for AnalyticsMiddleware {
         let start = Instant::now();
         let result = next(req).await;
         let duration = start.elapsed();
-
-        // Exclusion and sampling gate what we record, but never what we return.
-        if config.should_exclude(&raw_path) || !config.should_sample() {
-            return result;
-        }
 
         match &result {
             Ok(response) => {
@@ -242,22 +181,24 @@ impl Middleware for AnalyticsMiddleware {
 ///
 /// Converts paths like `/users/123/posts/456` to `/users/:id/posts/:id`
 pub fn normalize_path(path: &str) -> String {
-    let segments: Vec<&str> = path.split('/').collect();
-    let normalized: Vec<String> = segments
-        .into_iter()
-        .map(|segment| {
-            // Check if segment looks like an ID
-            if segment.is_empty() {
-                String::new()
-            } else if is_likely_id(segment) {
-                ":id".to_string()
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect();
-
-    normalized.join("/")
+    // Write directly into a single pre-sized buffer, pushing either the
+    // borrowed segment or the `:id` placeholder, instead of allocating an
+    // intermediate `Vec<&str>`, a `Vec<String>` (one heap String per segment)
+    // and a joined String.
+    let mut out = String::with_capacity(path.len());
+    for (i, segment) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if segment.is_empty() {
+            // Preserve empty segments (leading/trailing/double slashes).
+        } else if is_likely_id(segment) {
+            out.push_str(":id");
+        } else {
+            out.push_str(segment);
+        }
+    }
+    out
 }
 
 /// Check if a path segment is likely an ID

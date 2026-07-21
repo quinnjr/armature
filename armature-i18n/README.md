@@ -4,7 +4,7 @@ Internationalization (i18n) support for the Armature framework.
 
 ## Features
 
-- **Message Translation** - Fluent-based translations
+- **Message Translation** - key/value messages, plus a `key = value` subset of Fluent
 - **Locale Detection** - Accept-Language header parsing
 - **Pluralization** - CLDR plural rules
 - **Date/Number Formatting** - Locale-aware formatting

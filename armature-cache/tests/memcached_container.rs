@@ -96,3 +96,89 @@ async fn memcached_increment_never_fabricates_delta_abs() {
     // The old code would have returned `delta.abs()` == 1 here.
     assert_ne!(returned, 1, "must not fabricate delta.abs()");
 }
+
+/// `mget` must return values in input order with `None` for absent keys, using
+/// memcached's native multi-get. (The default trait `mget` would issue one
+/// `get_json` per key serialized on the shared client mutex; this override
+/// collapses that to a single round-trip, but the observable contract — order
+/// preserved, holes as `None` — is what we assert here.)
+#[tokio::test]
+async fn memcached_mget_batches_and_preserves_order() {
+    armature_testkit::skip_if_no_docker!();
+
+    let image = GenericImage::new("memcached", "1.6-alpine").with_exposed_port(11211.tcp());
+    let container = image.start().await.expect("start memcached container");
+    let port = container
+        .get_host_port_ipv4(11211.tcp())
+        .await
+        .expect("memcached mapped port");
+    let url = format!("memcache://127.0.0.1:{port}");
+
+    let cache = connect(&url).await;
+    cache.clear().await.unwrap();
+
+    cache.set_json("a", "1".to_string(), None).await.unwrap();
+    cache.set_json("c", "3".to_string(), None).await.unwrap();
+
+    // "b" is absent -> None; order matches the request order.
+    let got = cache.mget(&["a", "b", "c"]).await.unwrap();
+    assert_eq!(
+        got,
+        vec![Some("1".to_string()), None, Some("3".to_string())]
+    );
+
+    // Empty input is a no-op returning an empty vec (no round-trip).
+    assert!(cache.mget(&[]).await.unwrap().is_empty());
+
+    // All-miss batch is all `None`.
+    let misses = cache.mget(&["x", "y"]).await.unwrap();
+    assert_eq!(misses, vec![None, None]);
+}
+
+/// `expire` must update an item's TTL in place via native `touch`, returning
+/// `NotFound` for an absent key. Distinguishing feature vs. the old read+set
+/// path: touching preserves the stored value untouched.
+#[tokio::test]
+async fn memcached_expire_touches_ttl_in_place() {
+    armature_testkit::skip_if_no_docker!();
+
+    let image = GenericImage::new("memcached", "1.6-alpine").with_exposed_port(11211.tcp());
+    let container = image.start().await.expect("start memcached container");
+    let port = container
+        .get_host_port_ipv4(11211.tcp())
+        .await
+        .expect("memcached mapped port");
+    let url = format!("memcache://127.0.0.1:{port}");
+
+    let cache = connect(&url).await;
+    cache.clear().await.unwrap();
+
+    cache
+        .set_json(
+            "present",
+            "payload".to_string(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+    // Touch to a longer TTL; the value must be preserved unchanged.
+    cache
+        .expire("present", Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert_eq!(
+        cache.get_json("present").await.unwrap().as_deref(),
+        Some("payload")
+    );
+
+    // Absent key -> NotFound (never silently succeeds).
+    let err = cache
+        .expire("absent", Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, armature_cache::CacheError::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}

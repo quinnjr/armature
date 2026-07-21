@@ -123,8 +123,15 @@ pub enum SyncState {
 pub struct OperationBuffer {
     /// Pending operations (waiting for dependencies)
     pending: Vec<PendingOp>,
-    /// Acknowledged operation IDs
+    /// Operation IDs acknowledged by a *peer* (delivery receipt only).
+    ///
+    /// A peer ack does NOT mean the op has been applied locally, so this set
+    /// must never be used to decide whether a causal dependency is satisfied.
     acked: std::collections::HashSet<Uuid>,
+    /// Operation IDs that have been *applied locally* (returned from
+    /// [`ready`](Self::ready) or marked via [`mark_applied`](Self::mark_applied)).
+    /// Causal dependencies are satisfied only from this set.
+    applied: std::collections::HashSet<Uuid>,
     /// Maximum buffer size
     max_size: usize,
 }
@@ -148,6 +155,7 @@ impl OperationBuffer {
         Self {
             pending: Vec::new(),
             acked: std::collections::HashSet::new(),
+            applied: std::collections::HashSet::new(),
             max_size,
         }
     }
@@ -165,8 +173,9 @@ impl OperationBuffer {
             self.pending.drain(0..drop);
         }
 
-        // Check if already processed
-        if self.acked.contains(&op.id) {
+        // Check if already applied locally (dedup); a peer ack alone is not
+        // enough to consider an op processed.
+        if self.applied.contains(&op.id) {
             return false;
         }
 
@@ -179,32 +188,56 @@ impl OperationBuffer {
         self.pending.iter().any(|op| op.id == *id)
     }
 
-    /// Get operations ready to be applied
+    /// Get operations ready to be applied.
+    ///
+    /// A dependency is satisfied only when the dep op has been **applied
+    /// locally** (`applied` set) — a peer ack is not sufficient, as that would
+    /// let an op be released before the op it causally depends on has actually
+    /// been applied here. The scan loops to a fixpoint so a chain buffered in
+    /// reverse order (`B` added before its dep `A`) is fully released in a
+    /// single call rather than one op per call.
     pub fn ready(&mut self) -> Vec<PendingOp> {
         let mut ready = Vec::new();
-        let mut i = 0;
 
-        while i < self.pending.len() {
-            let deps_satisfied = self.pending[i]
-                .deps
-                .iter()
-                .all(|dep| self.acked.contains(dep));
+        loop {
+            let mut released_this_pass = false;
+            let mut i = 0;
+            while i < self.pending.len() {
+                let deps_satisfied = self.pending[i]
+                    .deps
+                    .iter()
+                    .all(|dep| self.applied.contains(dep));
 
-            if deps_satisfied {
-                let op = self.pending.remove(i);
-                self.acked.insert(op.id);
-                ready.push(op);
-            } else {
-                i += 1;
+                if deps_satisfied {
+                    let op = self.pending.remove(i);
+                    self.applied.insert(op.id);
+                    ready.push(op);
+                    released_this_pass = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if !released_this_pass {
+                break;
             }
         }
 
         ready
     }
 
-    /// Mark an operation as acknowledged
+    /// Mark an operation as acknowledged by a peer (delivery receipt).
+    ///
+    /// This records a peer's receipt only; it does NOT satisfy a local causal
+    /// dependency — use [`mark_applied`](Self::mark_applied) for that.
     pub fn ack(&mut self, op_id: Uuid) {
         self.acked.insert(op_id);
+    }
+
+    /// Mark an operation as applied locally, so ops depending on it become
+    /// eligible. Use this for dependencies applied outside this buffer (e.g.
+    /// prior to it being constructed or via a state-based sync).
+    pub fn mark_applied(&mut self, op_id: Uuid) {
+        self.applied.insert(op_id);
     }
 
     /// Get pending count
@@ -514,11 +547,71 @@ mod tests {
         assert!(buffer.ready().is_empty());
         assert_eq!(buffer.pending_count(), 1);
 
-        // Satisfy the dependency; now it becomes ready.
-        buffer.ack(dep);
+        // Satisfy the dependency by marking it locally applied; now ready.
+        buffer.mark_applied(dep);
         let ready = buffer.ready();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, op.id);
+    }
+
+    /// A peer `Ack` must NOT satisfy a local causal dependency — only local
+    /// application does. (Fails against the old code, where `ack` released the
+    /// dependent, a causal-order violation.)
+    #[test]
+    fn test_peer_ack_does_not_satisfy_local_dep() {
+        let mut buffer = OperationBuffer::new(100);
+        let dep = Uuid::new_v4();
+        let op = PendingOp {
+            id: Uuid::new_v4(),
+            data: vec![],
+            deps: vec![dep],
+            received_at: chrono::Utc::now(),
+        };
+        buffer.add(op.clone());
+
+        // A peer acked the dep, but we have not applied it locally.
+        buffer.ack(dep);
+        assert!(
+            buffer.ready().is_empty(),
+            "peer ack must not release a causally-dependent op"
+        );
+        assert_eq!(buffer.pending_count(), 1);
+
+        // Now it is actually applied locally -> the dependent is released.
+        buffer.mark_applied(dep);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, op.id);
+    }
+
+    /// A chain buffered in reverse order (dependent added before its dep) must
+    /// be fully released in a single `ready()` call, dep before dependent.
+    #[test]
+    fn test_ready_releases_reordered_chain_in_one_pass() {
+        let mut buffer = OperationBuffer::new(100);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        // B depends on A, but B is added FIRST.
+        buffer.add(PendingOp {
+            id: b,
+            data: vec![],
+            deps: vec![a],
+            received_at: now,
+        });
+        buffer.add(PendingOp {
+            id: a,
+            data: vec![],
+            deps: vec![],
+            received_at: now,
+        });
+
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 2, "reordered chain not fully released");
+        assert_eq!(ready[0].id, a, "dep must be released before dependent");
+        assert_eq!(ready[1].id, b);
+        assert_eq!(buffer.pending_count(), 0);
     }
 
     /// Operation messages carry real deps through to the buffer.

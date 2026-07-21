@@ -196,11 +196,14 @@ pub fn query_derive(input: TokenStream) -> TokenStream {
 
 /// Derives an `armature_validation::Validate` implementation.
 ///
-/// Field-level `#[validate(...)]` attributes drive the generated checks, which
-/// call the built-in validators in `armature-validation`:
+/// Field-level `#[validate(...)]` attributes drive the generated checks. Most
+/// arms call the built-in validators in `armature-validation`; `range` is the
+/// exception — it is emitted inline so it works for any `PartialOrd` numeric
+/// field (e.g. `u8`, `f64`), which the built-in `InRange`/`Min`/`Max`
+/// validators do not all cover:
 ///
 /// - `length(min = N, max = M)` — string length bounds (character count)
-/// - `range(min = N, max = M)` — numeric range bounds
+/// - `range(min = N, max = M)` — numeric range bounds (emitted inline)
 /// - `email` / `url` — format validators
 /// - `regex(pattern = "...")` — pattern match
 /// - `required` — non-empty string

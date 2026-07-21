@@ -101,6 +101,36 @@ impl CacheStore for MemcachedCache {
         }
     }
 
+    async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Prefix-map every key, then fetch them all with memcached's native
+        // multi-get (`gets`) in a single round-trip inside one `spawn_blocking`.
+        // The default `mget` (traits.rs) issues one `get_json` per key, and
+        // although those futures are joined, they all contend on the single
+        // `Arc<Mutex<Client>>`, degrading to N serial round-trips. This is N->1.
+        let prefixed: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
+        let client = self.client.clone();
+
+        let found: std::collections::HashMap<String, String> =
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = prefixed.iter().map(|s| s.as_str()).collect();
+                let client = client.blocking_lock();
+                client.gets::<String>(&refs)
+            })
+            .await
+            .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))?
+            .map_err(|e| CacheError::Other(format!("memcached mget failed: {}", e)))?;
+
+        // Reassemble in input order; absent keys become `None`.
+        Ok(keys
+            .iter()
+            .map(|k| found.get(&self.build_key(k)).cloned())
+            .collect())
+    }
+
     async fn set_json(&self, key: &str, value: String, ttl: Option<Duration>) -> CacheResult<()> {
         let key = self.build_key(key);
         let client = self.client.clone();
@@ -164,12 +194,22 @@ impl CacheStore for MemcachedCache {
     }
 
     async fn expire(&self, key: &str, ttl: Duration) -> CacheResult<()> {
-        // Memcached doesn't support updating expiration without resetting the value
-        // We need to get the value first, then set it again with new TTL
-        let value = self.get_json(key).await?;
+        // Use memcached's native `touch`, which updates an item's expiration in
+        // place: one round-trip, no payload transfer, and no get->set race. The
+        // old read-then-write did two round-trips and re-uploaded the full
+        // value. `touch` returns Ok(false) when the key is absent -> NotFound.
+        let full_key = self.build_key(key);
+        let client = self.client.clone();
+        let expiration = Self::duration_to_expiration(Some(ttl));
 
-        if let Some(value) = value {
-            self.set_json(key, value, Some(ttl)).await?;
+        let touched = tokio::task::spawn_blocking(move || {
+            let client = client.blocking_lock();
+            client.touch(&full_key, expiration)
+        })
+        .await
+        .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
+
+        if touched {
             Ok(())
         } else {
             Err(CacheError::NotFound(key.to_string()))

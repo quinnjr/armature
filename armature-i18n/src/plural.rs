@@ -70,9 +70,6 @@ impl std::fmt::Display for PluralCategory {
 pub trait PluralRules {
     /// Get the plural category for a number.
     fn category(&self, n: f64) -> PluralCategory;
-
-    /// Get all categories used by this language.
-    fn categories(&self) -> &[PluralCategory];
 }
 
 /// Get the plural category for a number in a locale.
@@ -138,10 +135,6 @@ impl PluralRules for DefaultPlurals {
             PluralCategory::Other
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::One, PluralCategory::Other]
-    }
 }
 
 /// No plural forms (Chinese, Japanese, Korean, etc.).
@@ -150,10 +143,6 @@ struct NoPlurals;
 impl PluralRules for NoPlurals {
     fn category(&self, _n: f64) -> PluralCategory {
         PluralCategory::Other
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::Other]
     }
 }
 
@@ -168,10 +157,6 @@ impl PluralRules for FrenchPlurals {
         } else {
             PluralCategory::Other
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::One, PluralCategory::Other]
     }
 }
 
@@ -199,14 +184,6 @@ impl PluralRules for RussianPlurals {
         } else {
             PluralCategory::Many
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-        ]
     }
 }
 
@@ -238,14 +215,6 @@ impl PluralRules for PolishPlurals {
             PluralCategory::Many
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-        ]
-    }
 }
 
 /// Czech/Slovak pluralization.
@@ -269,15 +238,6 @@ impl PluralRules for CzechPlurals {
             2..=4 => PluralCategory::Few,
             _ => PluralCategory::Other,
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
     }
 }
 
@@ -308,17 +268,6 @@ impl PluralRules for WelshPlurals {
             _ => PluralCategory::Other,
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::Zero,
-            PluralCategory::One,
-            PluralCategory::Two,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
-    }
 }
 
 /// Arabic pluralization (most complex).
@@ -348,17 +297,6 @@ impl PluralRules for ArabicPlurals {
             _ if (11..=99).contains(&mod100) => PluralCategory::Many,
             _ => PluralCategory::Other,
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::Zero,
-            PluralCategory::One,
-            PluralCategory::Two,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
     }
 }
 

@@ -199,11 +199,12 @@ pub fn render_list(view: &ListView, config: &AdminConfig) -> String {
     // search form and export link.
     let list_url = format!("{}/{}", config.base_path, view.model_name);
 
-    // A search box that posts back to the list route with a `?q=` query param.
+    // A search box that submits back to the list route with a `?search=` query
+    // param (the key `list_params_from_request` reads).
     let search = if config.enable_search {
         format!(
             "<form class=\"admin-search\" method=\"get\" action=\"{}\">\
-             <input class=\"admin-input\" type=\"search\" name=\"q\" placeholder=\"Search\">\
+             <input class=\"admin-input\" type=\"search\" name=\"search\" placeholder=\"Search\">\
              <button class=\"admin-btn\" type=\"submit\">Search</button></form>",
             escape(&list_url)
         )
@@ -434,7 +435,7 @@ mod tests {
         assert!(html.contains("© 2026 Example Corp"));
         // Search + export controls on the list view.
         assert!(html.contains("admin-search"));
-        assert!(html.contains("name=\"q\""));
+        assert!(html.contains("name=\"search\""));
         assert!(html.contains("admin-export"));
         assert!(html.contains("?export=csv"));
     }

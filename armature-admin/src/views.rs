@@ -8,6 +8,9 @@ use crate::{
     model::ModelDefinition,
     ui::{Breadcrumb, CellType, FilterDef, Pagination, TableCell, TableColumn, TableRow},
 };
+// Single shared HTML-escape helper lives in `render`; alias it here so the
+// existing call sites keep reading naturally.
+use crate::render::escape as html_escape;
 use serde::{Deserialize, Serialize};
 
 /// List view for a model
@@ -566,15 +569,6 @@ fn render_value(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Object(_) => "[Object]".to_string(),
     }
-}
-
-/// HTML escape a string
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

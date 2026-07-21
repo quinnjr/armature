@@ -169,8 +169,18 @@ impl Summary {
         if values.is_empty() {
             return None;
         }
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Some(quantile_of(&values, q))
+        // Single quantile: an O(n) partial-sort (`select_nth_unstable_by`) puts
+        // the nearest-rank element at its final index without fully sorting the
+        // buffer, which the old `sort_by` did on every call. The index is the
+        // same nearest-rank position `quantile_of` computes on a sorted slice.
+        let n = values.len();
+        let q = q.clamp(0.0, 1.0);
+        let rank = (q * n as f64).ceil() as usize;
+        let idx = rank.saturating_sub(1).min(n - 1);
+        let (_, nth, _) = values.select_nth_unstable_by(idx, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Some(*nth)
     }
 
     /// Drop observations older than `max_age` and enforce the size bound.

@@ -345,19 +345,6 @@ impl CollabSession {
         self.set_status(SessionStatus::Closed).await;
     }
 
-    /// Record an operation
-    pub async fn record_operation(&self, replica_id: &ReplicaId) {
-        if let Some(mut client) = self.clients.get_mut(replica_id) {
-            client.ops_received += 1;
-            client.last_message = Utc::now();
-        }
-
-        let mut state = self.state.write().await;
-        state.operations_count += 1;
-        state.last_activity = Utc::now();
-        state.vclock.increment(*replica_id);
-    }
-
     /// Touch the session's last-activity timestamp.
     async fn touch_activity(&self) {
         let mut state = self.state.write().await;

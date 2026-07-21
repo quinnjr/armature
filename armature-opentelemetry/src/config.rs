@@ -84,7 +84,9 @@ pub struct MetricsConfig {
     /// OTLP endpoint (if using OTLP)
     pub otlp_endpoint: Option<String>,
 
-    /// Prometheus endpoint (if using Prometheus)
+    /// Deprecated: the Prometheus exporter was discontinued and this field is
+    /// ignored. It is retained only to preserve the deserialization surface;
+    /// the `Prometheus` exporter arm hard-errors and never reads this value.
     pub prometheus_endpoint: Option<String>,
 
     /// Metrics collection interval in seconds

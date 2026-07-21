@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Thread-safe metrics collector
 pub struct MetricsCollector {
@@ -47,8 +47,14 @@ pub struct MetricsCollector {
     // Per-endpoint tracking
     endpoint_metrics: DashMap<String, EndpointData>,
 
-    // Throughput tracking
-    request_timestamps: RwLock<VecDeque<Instant>>,
+    // Throughput tracking. Requests are downsampled into per-second buckets
+    // `(second, count)` rather than one entry per request. This bounds the
+    // structure to ~one bucket per second over the retention horizon
+    // (~3600 entries) regardless of RPS — instead of RPS*3600 timestamps —
+    // and bounds the peak-RPS computation to at most `throughput_window_secs`
+    // buckets instead of a full O(requests) scan under the write lock.
+    throughput_epoch: Instant,
+    request_buckets: RwLock<VecDeque<(u64, u64)>>,
     total_response_bytes: AtomicU64,
     peak_rps: RwLock<f64>,
 
@@ -119,7 +125,8 @@ impl MetricsCollector {
 
             endpoint_metrics: DashMap::new(),
 
-            request_timestamps: RwLock::new(VecDeque::with_capacity(10_000)),
+            throughput_epoch: Instant::now(),
+            request_buckets: RwLock::new(VecDeque::with_capacity(3601)),
             total_response_bytes: AtomicU64::new(0),
             peak_rps: RwLock::new(0.0),
 
@@ -210,30 +217,50 @@ impl MetricsCollector {
             }
         }
 
-        // Record timestamp for throughput calculation. Retain up to one hour so
-        // that `requests_last_hour` reflects real observations instead of a
-        // `requests_last_minute * 60` extrapolation.
-        let mut timestamps = self.request_timestamps.write();
+        // Record throughput into per-second buckets. Downsampling to
+        // `(second, count)` keeps the structure count-bounded (~one bucket per
+        // second over the one-hour horizon) even under sustained high RPS,
+        // where a per-request timestamp deque would grow to RPS*3600 entries.
+        // Retain up to one hour so `requests_last_hour` reflects real
+        // observations rather than a `requests_last_minute * 60` extrapolation.
+        //
+        // The slight exactness tradeoff: windows are now second-granular (each
+        // request is attributed to the 1-second bucket it fell in) rather than
+        // exact-instant. `requests_last_minute`/`requests_last_hour` sum bucket
+        // counts and remain correct to within sub-second boundary rounding.
         let now = Instant::now();
+        let sec = now
+            .saturating_duration_since(self.throughput_epoch)
+            .as_secs();
+        let window = self.throughput_window_secs.max(1);
 
-        // Remove timestamps older than the retention horizon (1 hour).
-        while let Some(front) = timestamps.front() {
-            if now.duration_since(*front) > Duration::from_secs(3600) {
-                timestamps.pop_front();
+        let mut buckets = self.request_buckets.write();
+
+        // Append to the current second's bucket, opening a new one on rollover.
+        match buckets.back_mut() {
+            Some((s, count)) if *s == sec => *count += 1,
+            _ => buckets.push_back((sec, 1)),
+        }
+
+        // Drop buckets older than the one-hour retention horizon.
+        let horizon = sec.saturating_sub(3600);
+        while let Some((s, _)) = buckets.front() {
+            if *s < horizon {
+                buckets.pop_front();
             } else {
                 break;
             }
         }
 
-        timestamps.push_back(now);
+        // Peak RPS over the configured window. Summing only the buckets inside
+        // the window (at most `window` + 1 of them, since there is one bucket
+        // per second) keeps this O(window) rather than O(total requests) — the
+        // in-window count is maintained by the incremental bucket counts, so no
+        // full scan of individual requests is ever performed under the lock.
+        let window_start = sec.saturating_sub(window - 1);
+        let in_window: u64 = sum_buckets_since(&buckets, window_start);
+        drop(buckets);
 
-        // Update peak RPS over the configured throughput window.
-        let window = self.throughput_window_secs.max(1);
-        let in_window = timestamps
-            .iter()
-            .rev()
-            .take_while(|t| now.duration_since(**t) <= Duration::from_secs(window))
-            .count();
         let current_rps = in_window as f64 / window as f64;
         let mut peak = self.peak_rps.write();
         if current_rps > *peak {
@@ -388,21 +415,24 @@ impl MetricsCollector {
 
     /// Get latency metrics
     pub fn latency_metrics(&self) -> LatencyMetrics {
-        let samples = self.latency_samples.read();
+        let mut values: Vec<f64> = {
+            let samples = self.latency_samples.read();
+            samples.iter().copied().collect()
+        };
         let total = self.total_requests.load(Ordering::Relaxed);
 
-        if samples.is_empty() || total == 0 {
+        if values.is_empty() || total == 0 {
             return LatencyMetrics::default();
         }
 
-        let mut sorted: Vec<f64> = samples.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let len = sorted.len();
+        let len = values.len();
         let avg = self.total_latency_us.load(Ordering::Relaxed) as f64 / total as f64 / 1000.0;
         let min = self.min_latency_us.load(Ordering::Relaxed);
         let max = self.max_latency_us.load(Ordering::Relaxed);
 
+        // Use quickselect (O(n) per percentile, only partially reordering the
+        // buffer) instead of a full O(n log n) sort of the whole sample buffer
+        // on every snapshot — matching `endpoint_metrics`.
         LatencyMetrics {
             avg_ms: avg,
             min_ms: if min == u64::MAX {
@@ -411,10 +441,10 @@ impl MetricsCollector {
                 min as f64 / 1000.0
             },
             max_ms: max as f64 / 1000.0,
-            p50_ms: percentile(&sorted, 50.0),
-            p90_ms: percentile(&sorted, 90.0),
-            p95_ms: percentile(&sorted, 95.0),
-            p99_ms: percentile(&sorted, 99.0),
+            p50_ms: percentile_select(&mut values, 50.0),
+            p90_ms: percentile_select(&mut values, 90.0),
+            p95_ms: percentile_select(&mut values, 95.0),
+            p99_ms: percentile_select(&mut values, 99.0),
             samples: len as u64,
         }
     }
@@ -523,29 +553,24 @@ impl MetricsCollector {
 
     /// Get throughput metrics
     pub fn throughput_metrics(&self) -> ThroughputMetrics {
-        let timestamps = self.request_timestamps.read();
+        let buckets = self.request_buckets.read();
         let now = Instant::now();
+        let sec = now
+            .saturating_duration_since(self.throughput_epoch)
+            .as_secs();
 
-        // Count requests in last minute
-        let requests_last_minute = timestamps
-            .iter()
-            .filter(|t| now.duration_since(**t) <= Duration::from_secs(60))
-            .count() as u64;
+        // Sum the counts of all per-second buckets at or after `cutoff`. Buckets
+        // are stored in ascending second order, so a reverse `take_while` visits
+        // only the relevant tail.
+        let sum_since = |cutoff: u64| -> u64 { sum_buckets_since(&buckets, cutoff) };
 
-        // Count requests actually observed in the last hour (timestamps are
-        // retained for up to one hour), rather than extrapolating from the
-        // last-minute count.
-        let requests_last_hour = timestamps
-            .iter()
-            .filter(|t| now.duration_since(**t) <= Duration::from_secs(3600))
-            .count() as u64;
+        // Second-granular windows (each request counted in its 1-second bucket).
+        let requests_last_minute = sum_since(sec.saturating_sub(59));
+        let requests_last_hour = sum_since(sec.saturating_sub(3599));
 
         // Current RPS is measured over the configured throughput window.
         let window = self.throughput_window_secs.max(1);
-        let requests_in_window = timestamps
-            .iter()
-            .filter(|t| now.duration_since(**t) <= Duration::from_secs(window))
-            .count() as u64;
+        let requests_in_window = sum_since(sec.saturating_sub(window - 1));
         let rps = requests_in_window as f64 / window as f64;
 
         ThroughputMetrics {
@@ -591,7 +616,7 @@ impl MetricsCollector {
 
         self.endpoint_metrics.clear();
 
-        self.request_timestamps.write().clear();
+        self.request_buckets.write().clear();
         self.total_response_bytes.store(0, Ordering::Relaxed);
         *self.peak_rps.write() = 0.0;
     }
@@ -604,6 +629,10 @@ impl Default for MetricsCollector {
 }
 
 /// Calculate percentile from sorted array
+///
+/// Retained as the reference implementation used to validate `percentile_select`
+/// in tests; production snapshots use the O(n) quickselect variant below.
+#[cfg(test)]
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -629,9 +658,23 @@ fn percentile_select(data: &mut [f64], pct: f64) -> f64 {
     *nth
 }
 
+/// Sum the counts of all `(second, count)` buckets at or after `cutoff`.
+///
+/// Buckets are stored in ascending second order, so a reverse `take_while`
+/// visits only the relevant tail and stops as soon as it passes `cutoff`.
+fn sum_buckets_since(buckets: &std::collections::VecDeque<(u64, u64)>, cutoff: u64) -> u64 {
+    buckets
+        .iter()
+        .rev()
+        .take_while(|(s, _)| *s >= cutoff)
+        .map(|(_, c)| c)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_percentile_calculation() {
@@ -830,5 +873,58 @@ mod tests {
         );
         // Core request counters still work.
         assert_eq!(collector.request_metrics().total, 1);
+    }
+
+    // Regression (item 1): peak/current RPS must still be computed correctly
+    // after switching from a per-request timestamp scan to incremental
+    // per-second bucket counts. All requests recorded back-to-back land in the
+    // same 1-second bucket; over the default 60s window that is count/60 rps,
+    // and peak must equal the highest observed current rps.
+    #[test]
+    fn test_peak_rps_from_incremental_buckets() {
+        let collector = MetricsCollector::new(); // 60s throughput window
+        for _ in 0..120 {
+            collector.record_request(RequestRecord::new(
+                "GET",
+                "/x",
+                200,
+                Duration::from_millis(1),
+            ));
+        }
+        let t = collector.throughput_metrics();
+        assert_eq!(t.requests_last_minute, 120);
+        assert_eq!(t.requests_last_hour, 120);
+        // 120 requests over a 60s window = 2.0 rps.
+        assert!(
+            (t.requests_per_second - 2.0).abs() < 1e-9,
+            "current rps = {}",
+            t.requests_per_second
+        );
+        assert!((t.peak_rps - 2.0).abs() < 1e-9, "peak rps = {}", t.peak_rps);
+    }
+
+    // Regression (item 2): the throughput structure must be count-bounded. A
+    // per-request timestamp deque would hold one entry per request (10k here);
+    // per-second bucketing collapses same-second requests into a single
+    // `(second, count)` entry, so the deque stays tiny while totals are exact.
+    #[test]
+    fn test_request_buckets_are_count_bounded() {
+        let collector = MetricsCollector::new();
+        for _ in 0..10_000 {
+            collector.record_request(RequestRecord::new(
+                "GET",
+                "/x",
+                200,
+                Duration::from_millis(1),
+            ));
+        }
+        let buckets = collector.request_buckets.read();
+        assert!(
+            buckets.len() <= 2,
+            "10k same-second requests must downsample to <=2 buckets, got {}",
+            buckets.len()
+        );
+        let total: u64 = buckets.iter().map(|(_, c)| c).sum();
+        assert_eq!(total, 10_000, "bucket counts must preserve the exact total");
     }
 }

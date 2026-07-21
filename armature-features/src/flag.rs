@@ -3,7 +3,35 @@
 //! Defines feature flags, targeting rules, and evaluation logic.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+thread_local! {
+    /// Per-thread cache of compiled regexes keyed by pattern string.
+    ///
+    /// `Operator::Matches` previously recompiled the DFA on every flag
+    /// evaluation (µs–ms on the request path); memoizing the compiled `Regex`
+    /// per pattern makes repeat evaluations effectively free. `None` memoizes
+    /// patterns that failed to compile, so an invalid pattern still yields no
+    /// match — identical to the old `Regex::new(..).map(..).unwrap_or(false)`.
+    static REGEX_CACHE: RefCell<HashMap<String, Option<regex::Regex>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Test `value` against `pattern`, compiling the regex once per thread and
+/// reusing the cached compilation thereafter. Invalid patterns match nothing.
+fn regex_matches(pattern: &str, value: &str) -> bool {
+    REGEX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let compiled = cache
+            .entry(pattern.to_string())
+            .or_insert_with(|| regex::Regex::new(pattern).ok());
+        compiled
+            .as_ref()
+            .map(|re| re.is_match(value))
+            .unwrap_or(false)
+    })
+}
 
 /// Feature flag
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,13 +313,7 @@ impl Condition {
                 .map(|v| self.values.iter().any(|val| v.ends_with(val)))
                 .unwrap_or(false),
             Operator::Matches => attr_value
-                .map(|v| {
-                    self.values.iter().any(|pattern| {
-                        regex::Regex::new(pattern)
-                            .map(|re| re.is_match(v))
-                            .unwrap_or(false)
-                    })
-                })
+                .map(|v| self.values.iter().any(|pattern| regex_matches(pattern, v)))
                 .unwrap_or(false),
         }
     }
@@ -695,15 +717,52 @@ mod tests {
 
     #[test]
     fn test_calculate_bucket_uniform_and_in_range() {
-        // Every bucket must land in 0..=99 and the distribution should be
-        // reasonably uniform across the full range.
-        let mut buckets: HashMap<u8, usize> = HashMap::new();
-        for i in 0..10_000 {
-            let b = Rollout::calculate_bucket("flag", &format!("user-{i}"));
-            assert!(b < 100, "bucket {b} out of range");
-            *buckets.entry(b).or_default() += 1;
+        // Bucketing must be (a) in range and (b) *flat* across all 100 buckets.
+        //
+        // The old mapping folded a single hash byte onto 0..99 via
+        // `(byte * 100) / 256`. That is monotonic and still reaches every
+        // integer 0..99 — so a mere "all buckets hit" check passes against it
+        // too and never detects the ~50% skew it induces (56 buckets receive 3
+        // source byte-values, 44 receive only 2, a 3:2 count ratio). The uniform
+        // `hash_to_u64 % 100` fix removes that skew. To *discriminate* we bucket
+        // a large deterministic sample and assert distribution flatness with a
+        // chi-square goodness-of-fit statistic against the uniform expectation.
+        const N: usize = 200_000;
+        const BUCKETS: usize = 100;
+
+        let mut counts = [0usize; BUCKETS];
+        for i in 0..N {
+            let b = Rollout::calculate_bucket("flag", &format!("user{i}"));
+            assert!((b as usize) < BUCKETS, "bucket {b} out of range");
+            counts[b as usize] += 1;
         }
-        // With 10k samples over 100 buckets (~100 each) every bucket should be hit.
-        assert_eq!(buckets.len(), 100, "some buckets never hit");
+
+        // Every bucket must be hit (necessary but, alone, insufficient).
+        assert!(
+            counts.iter().all(|&c| c > 0),
+            "some buckets never hit: {counts:?}"
+        );
+
+        // Chi-square over 99 degrees of freedom. Expected per bucket = N/100.
+        // For a genuinely uniform mapping this lands near 99 (± ~14). The old
+        // single-byte mapping produces a chi-square in the thousands (each "3"
+        // bucket ~ (3N/256 - N/100)^2 / (N/100) ≈ 59, each "2" bucket ≈ 96, over
+        // 100 buckets ≈ 7500). A threshold of 200 (≈7σ above the uniform mean,
+        // p ≪ 1e-6) passes the fix comfortably yet fails the biased mapping by
+        // ~37×, so the test now measures flatness rather than mere coverage.
+        let expected = N as f64 / BUCKETS as f64;
+        let chi_square: f64 = counts
+            .iter()
+            .map(|&c| {
+                let diff = c as f64 - expected;
+                diff * diff / expected
+            })
+            .sum();
+
+        assert!(
+            chi_square < 200.0,
+            "distribution not flat: chi-square {chi_square:.1} exceeds 200 \
+             (uniform expects ~99); counts={counts:?}"
+        );
     }
 }

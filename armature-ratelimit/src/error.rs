@@ -8,6 +8,7 @@ pub type RateLimitResult<T> = Result<T, RateLimitError>;
 
 /// Rate limiting errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RateLimitError {
     /// Rate limit exceeded
     #[error("Rate limit exceeded. Retry after {retry_after:?}")]
@@ -25,6 +26,15 @@ pub enum RateLimitError {
     /// Store error (Redis, memory, etc.)
     #[error("Rate limit store error: {0}")]
     StoreError(String),
+
+    /// A store operation exceeded its configured `operation_timeout`.
+    ///
+    /// Surfaced instead of blocking the request path indefinitely when the
+    /// backing store (e.g. a partitioned Redis) stops responding. Treated as a
+    /// store failure by the middleware, so `skip_on_error` decides fail-open vs
+    /// fail-closed rather than the request hanging forever.
+    #[error("Rate limit store operation timed out")]
+    Timeout,
 
     /// Configuration error
     #[error("Rate limit configuration error: {0}")]

@@ -22,7 +22,28 @@ pub enum ToonError {
     IoError(#[from] std::io::Error),
 }
 
+impl ToonError {
+    /// Map a `serde_toon::Error` produced on the **serialize** path.
+    ///
+    /// serde's `Custom`/`Message`/`Io` variants carry no direction information,
+    /// so the blanket [`From`] impl (which is deserialize-biased) would
+    /// mislabel a serialize-time failure as a [`ToonError::DeserializeError`].
+    /// Serialize call sites use this constructor instead so those errors are
+    /// classified correctly.
+    pub(crate) fn from_serialize(err: serde_toon::Error) -> Self {
+        ToonError::SerializeError(err.to_string())
+    }
+}
+
 impl From<serde_toon::Error> for ToonError {
+    /// Deserialize-biased conversion.
+    ///
+    /// This is used on the **deserialize** path (parsing TOON text into a
+    /// value). The only unambiguously serialize-side variant
+    /// (`UnsupportedType`) is still mapped to [`ToonError::SerializeError`], but
+    /// the direction-agnostic variants (`Custom`/`Message`/`Io`) are treated as
+    /// deserialization failures here. Serialize call sites must not route
+    /// through this impl — they use [`ToonError::from_serialize`] instead.
     fn from(err: serde_toon::Error) -> Self {
         use serde_toon::Error as E;
         let msg = err.to_string();

@@ -26,11 +26,10 @@ regex = "1"
 
 # LaunchDarkly integration (optional)
 launchdarkly-server-sdk = { version = "2.6", optional = true }
-futures = { version = "0.3", optional = true }
 
 [features]
 default = []
-launchdarkly = ["dep:launchdarkly-server-sdk", "dep:futures"]
+launchdarkly = ["dep:launchdarkly-server-sdk"]
 
 [dev-dependencies]
 tokio-test = "0.4"

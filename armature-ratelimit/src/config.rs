@@ -51,6 +51,7 @@ fn validate_algorithm(algorithm: &Algorithm) -> RateLimitResult<()> {
 
 /// Configuration for the rate limiter
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RateLimitConfig {
     /// Algorithm to use
     pub algorithm: Algorithm,
@@ -66,6 +67,23 @@ pub struct RateLimitConfig {
     pub error_message: Option<String>,
     /// Bypass keys (these keys will never be rate limited)
     pub bypass_keys: Vec<String>,
+    /// Per-operation timeout applied to the backing store (currently the Redis
+    /// store). A store op that does not complete within this bound fails with
+    /// [`crate::error::RateLimitError::Timeout`] instead of stalling the request
+    /// path forever, letting `skip_on_error` decide fail-open vs fail-closed.
+    pub operation_timeout: Duration,
+    /// Number of trusted reverse proxies in front of the application.
+    ///
+    /// Controls how the client IP is derived from `X-Forwarded-For`: the
+    /// rightmost hops are appended by *your* infrastructure and are
+    /// trustworthy, so the client is selected `trusted_proxy_depth`-from-the-
+    /// right. A value of `0` (the default) means **no** proxy is trusted and
+    /// `X-Forwarded-For`/`X-Real-IP` are ignored entirely, because those
+    /// headers are attacker-controlled when the request is not known to have
+    /// passed through a trusted proxy. Set this to the exact number of proxies
+    /// between the client and the app to enable IP rate limiting on proxied
+    /// traffic.
+    pub trusted_proxy_depth: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -81,6 +99,8 @@ impl Default for RateLimitConfig {
             skip_on_error: true,
             error_message: None,
             bypass_keys: Vec::new(),
+            operation_timeout: Duration::from_secs(3),
+            trusted_proxy_depth: 0,
         }
     }
 }
@@ -106,6 +126,8 @@ pub struct RateLimiterBuilder {
     skip_on_error: bool,
     error_message: Option<String>,
     bypass_keys: Vec<String>,
+    operation_timeout: Duration,
+    trusted_proxy_depth: usize,
     #[cfg(feature = "redis")]
     redis_url: Option<String>,
 }
@@ -121,6 +143,8 @@ impl RateLimiterBuilder {
             skip_on_error: true,
             error_message: None,
             bypass_keys: Vec::new(),
+            operation_timeout: Duration::from_secs(3),
+            trusted_proxy_depth: 0,
             #[cfg(feature = "redis")]
             redis_url: None,
         }
@@ -191,6 +215,25 @@ impl RateLimiterBuilder {
         self
     }
 
+    /// Set the per-operation timeout applied to the backing store.
+    ///
+    /// A store op that exceeds this bound fails with
+    /// [`crate::error::RateLimitError::Timeout`] rather than blocking the
+    /// request path indefinitely.
+    pub fn operation_timeout(mut self, timeout: Duration) -> Self {
+        self.operation_timeout = timeout;
+        self
+    }
+
+    /// Set the number of trusted reverse proxies in front of the app.
+    ///
+    /// See [`RateLimitConfig::trusted_proxy_depth`]. Defaults to `0`
+    /// (`X-Forwarded-For`/`X-Real-IP` are not trusted).
+    pub fn trusted_proxy_depth(mut self, depth: usize) -> Self {
+        self.trusted_proxy_depth = depth;
+        self
+    }
+
     /// Set custom error message when rate limited
     pub fn error_message(mut self, message: impl Into<String>) -> Self {
         self.error_message = Some(message.into());
@@ -230,6 +273,8 @@ impl RateLimiterBuilder {
             skip_on_error: self.skip_on_error,
             error_message: self.error_message,
             bypass_keys: self.bypass_keys,
+            operation_timeout: self.operation_timeout,
+            trusted_proxy_depth: self.trusted_proxy_depth,
         };
 
         let store: Arc<dyn RateLimitStore> = match self.store_type {
@@ -243,7 +288,9 @@ impl RateLimiterBuilder {
                 // "ratelimit" default so multiple limiters can share a Redis
                 // instance without colliding.
                 Arc::new(
-                    crate::stores::RedisStore::with_prefix(&url, self.key_prefix.clone()).await?,
+                    crate::stores::RedisStore::with_prefix(&url, self.key_prefix.clone())
+                        .await?
+                        .with_operation_timeout(self.operation_timeout),
                 )
             }
             #[cfg(not(feature = "redis"))]

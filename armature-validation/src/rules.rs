@@ -119,7 +119,6 @@ impl ValidationBuilder {
     /// data.insert("username".to_string(), "john_doe".to_string());
     /// data.insert("age".to_string(), "25".to_string());
     ///
-    /// // Validate all fields in parallel (2-4x faster)
     /// validator.validate_parallel(&data).await?;
     /// # Ok(())
     /// # }
