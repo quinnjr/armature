@@ -806,9 +806,11 @@ impl Middleware for Cors {
 ///
 /// When the client's `Accept-Encoding` permits gzip, the response body is
 /// compressed with the configured [`CompressionLevel`], `Content-Encoding:
-/// gzip` is set, and `Vary: Accept-Encoding` is added so downstream caches key
-/// on the negotiated encoding. Responses that already carry a `Content-Encoding`
-/// or have an empty body are passed through untouched (but still gain `Vary`).
+/// gzip` is set, and `Accept-Encoding` is merged into `Vary` so downstream
+/// caches key on the negotiated encoding — merged rather than overwritten, so
+/// a pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware upstream)
+/// survives. Responses that already carry a `Content-Encoding` or have an
+/// empty body are passed through untouched (but still gain `Vary`).
 pub struct Compress {
     level: CompressionLevel,
 }
@@ -868,6 +870,33 @@ pub(crate) fn gzip_encode(data: &[u8], level: CompressionLevel) -> Option<Vec<u8
     encoder.finish().ok()
 }
 
+/// Add `Accept-Encoding` to the response's `Vary` header, *merging* with any
+/// existing value instead of clobbering it — e.g. `Vary: Origin` set upstream
+/// by CORS middleware must survive compression adding its own dimension.
+///
+/// Leaves an existing `*` wildcard alone (it already covers every header) and
+/// is a no-op if `Accept-Encoding` is already present as a token
+/// (case-insensitive), so repeated calls don't pile up duplicates.
+pub(crate) fn add_vary_accept_encoding(response: &mut HttpResponse) {
+    const TOKEN: &str = "Accept-Encoding";
+
+    let merged = match response.headers.get("Vary") {
+        None => TOKEN.to_string(),
+        Some(existing) => {
+            let already_present = existing.trim() == "*"
+                || existing
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(TOKEN));
+            if already_present {
+                return;
+            }
+            format!("{}, {}", existing, TOKEN)
+        }
+    };
+
+    response.headers.insert("Vary".to_string(), merged);
+}
+
 impl Default for Compress {
     fn default() -> Self {
         Self {
@@ -897,9 +926,9 @@ impl Middleware for Compress {
 
             // Advertise that the representation varies by Accept-Encoding, even
             // when we ultimately do not compress (so shared caches stay correct).
-            response
-                .headers
-                .insert("Vary".to_string(), "Accept-Encoding".to_string());
+            // Merges with any pre-existing `Vary` (e.g. `Vary: Origin` from CORS
+            // middleware upstream) instead of clobbering it.
+            add_vary_accept_encoding(&mut response);
 
             // Only compress when the client accepts gzip, the body is non-empty,
             // and it is not already content-encoded.
@@ -1278,6 +1307,42 @@ mod tests {
         assert_eq!(
             resp.headers.get("Vary").map(String::as_str),
             Some("Accept-Encoding")
+        );
+    }
+
+    /// Regression: a pre-existing `Vary` header (e.g. `Vary: Origin` set by
+    /// CORS middleware upstream) must be preserved, not clobbered, when
+    /// `Compress` adds its own `Accept-Encoding` dimension.
+    #[tokio::test]
+    async fn test_compress_merges_vary_with_existing_value() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'c'; 8192];
+        let next: Next = Box::new(move |_req: HttpRequest| {
+            Box::pin(async move {
+                let mut resp = HttpResponse::ok();
+                resp.body = original;
+                resp.headers
+                    .insert("Vary".to_string(), "Origin".to_string());
+                Ok(resp)
+            })
+        });
+
+        let resp = mw.call(req, next).await.unwrap();
+
+        let vary = resp.headers.get("Vary").cloned().unwrap_or_default();
+        let tokens: Vec<&str> = vary.split(',').map(str::trim).collect();
+        assert!(
+            tokens.contains(&"Origin"),
+            "Vary lost pre-existing Origin token: {vary}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
+            "Vary missing Accept-Encoding token: {vary}"
         );
     }
 }

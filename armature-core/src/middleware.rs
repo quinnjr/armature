@@ -379,10 +379,12 @@ impl Middleware for SecurityHeadersMiddleware {
 /// Gzip-compression middleware.
 ///
 /// Compresses response bodies larger than `min_size` with gzip when the client's
-/// `Accept-Encoding` permits it, setting `Content-Encoding: gzip` and
-/// `Vary: Accept-Encoding`. Small bodies, bodies that are already
-/// content-encoded, and clients that do not accept gzip are passed through
-/// unchanged (but still gain `Vary`).
+/// `Accept-Encoding` permits it, setting `Content-Encoding: gzip` and merging
+/// `Accept-Encoding` into `Vary` — merged rather than overwritten, so a
+/// pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware upstream)
+/// survives. Small bodies, bodies that are already content-encoded, and
+/// clients that do not accept gzip are passed through unchanged (but still
+/// gain `Vary`).
 pub struct CompressionMiddleware {
     min_size: usize,
     level: crate::micro::CompressionLevel,
@@ -422,10 +424,10 @@ impl Middleware for CompressionMiddleware {
         let mut response = next(req).await?;
 
         // Advertise Accept-Encoding as a cache-varying dimension regardless of
-        // whether we compress this particular response.
-        response
-            .headers
-            .insert("Vary".to_string(), "Accept-Encoding".to_string());
+        // whether we compress this particular response. Merges with any
+        // pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware
+        // upstream) instead of clobbering it.
+        crate::micro::add_vary_accept_encoding(&mut response);
 
         let already_encoded = response.headers.contains_key("Content-Encoding");
         if client_accepts_gzip
@@ -845,6 +847,45 @@ mod tests {
 
         assert!(response.headers.get("Content-Encoding").is_none());
         assert_eq!(response.body_ref(), expected.as_slice());
+    }
+
+    /// Regression: a pre-existing `Vary` header (e.g. `Vary: Origin` set by
+    /// CORS middleware upstream) must be preserved, not clobbered, when
+    /// `CompressionMiddleware` adds its own `Accept-Encoding` dimension.
+    #[tokio::test]
+    async fn test_compression_middleware_merges_vary_with_existing_value() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'z'; 4096];
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move {
+                        let mut resp = HttpResponse::ok().with_body(original);
+                        resp.headers
+                            .insert("Vary".to_string(), "Origin".to_string());
+                        Ok(resp)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        let vary = response.headers.get("Vary").cloned().unwrap_or_default();
+        let tokens: Vec<&str> = vary.split(',').map(str::trim).collect();
+        assert!(
+            tokens.contains(&"Origin"),
+            "Vary lost pre-existing Origin token: {vary}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
+            "Vary missing Accept-Encoding token: {vary}"
+        );
     }
 
     #[tokio::test]
