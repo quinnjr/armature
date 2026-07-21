@@ -1,5 +1,6 @@
 // Programmatic schema builder
 
+use crate::config::GraphQLConfig;
 use async_graphql::Schema;
 
 /// Programmatic schema builder with DI integration
@@ -8,6 +9,7 @@ pub struct ProgrammaticSchemaBuilder<Q, M, S> {
     mutation: Option<M>,
     subscription: Option<S>,
     services: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    config: Option<GraphQLConfig>,
 }
 
 impl<Q, M, S> ProgrammaticSchemaBuilder<Q, M, S>
@@ -23,6 +25,7 @@ where
             mutation: None,
             subscription: None,
             services: Vec::new(),
+            config: None,
         }
     }
 
@@ -50,6 +53,14 @@ where
         self
     }
 
+    /// Attach a [`GraphQLConfig`] whose security/behavior knobs (introspection,
+    /// max depth, max complexity, validation, tracing) will be applied to the
+    /// built schema. Without this, the schema is built unrestricted.
+    pub fn config(mut self, config: GraphQLConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     /// Build the schema
     pub fn build(self) -> Schema<Q, M, S> {
         let query = self.query.expect("Query root is required");
@@ -61,6 +72,10 @@ where
         // Add all services to the schema data
         for service in self.services {
             schema_builder = schema_builder.data(service);
+        }
+
+        if let Some(config) = &self.config {
+            schema_builder = config.configure(schema_builder);
         }
 
         schema_builder.finish()
@@ -126,22 +141,6 @@ macro_rules! merge_resolvers {
     };
 }
 
-/// Helper for creating schema with merged resolvers
-pub fn create_merged_schema<Q, M, S>(
-    _query_resolvers: Vec<Q>,
-    _mutation_resolvers: Vec<M>,
-    _subscription_resolvers: Vec<S>,
-) -> ProgrammaticSchemaBuilder<Q, M, S>
-where
-    Q: async_graphql::ObjectType + 'static,
-    M: async_graphql::ObjectType + 'static,
-    S: async_graphql::SubscriptionType + 'static,
-{
-    // Note: This is a simplified version. In practice, you'd need to merge the resolvers
-    // For now, users can use the MergedObject derive macro directly
-    ProgrammaticSchemaBuilder::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +162,54 @@ mod tests {
             .mutation(EmptyMutation)
             .subscription(EmptySubscription)
             .build();
+    }
+
+    // Regression test: `create_merged_schema` used to silently ignore its
+    // resolver arguments and return an unconfigured `ProgrammaticSchemaBuilder`
+    // that panicked on `.build()`. It has been removed; the crate's real,
+    // working merging mechanism is the `merge_resolvers!` macro (compile-time
+    // `MergedObject` composition). This test proves that mechanism actually
+    // resolves fields from multiple merged resolvers.
+    #[derive(Default)]
+    struct AlphaQuery;
+
+    #[async_graphql::Object]
+    impl AlphaQuery {
+        async fn alpha(&self) -> &str {
+            "alpha"
+        }
+    }
+
+    #[derive(Default)]
+    struct BetaQuery;
+
+    #[async_graphql::Object]
+    impl BetaQuery {
+        async fn beta(&self) -> &str {
+            "beta"
+        }
+    }
+
+    #[test]
+    fn test_merge_resolvers_macro_resolves_merged_fields() {
+        let merged = merge_resolvers!(AlphaQuery, BetaQuery);
+
+        let schema = ProgrammaticSchemaBuilder::new()
+            .query(merged)
+            .mutation(EmptyMutation)
+            .subscription(EmptySubscription)
+            .build();
+
+        let response = tokio_test::block_on(schema.execute("{ alpha beta }"));
+
+        assert!(
+            response.errors.is_empty(),
+            "merged query should resolve both fields without error: {:?}",
+            response.errors
+        );
+
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["alpha"], "alpha");
+        assert_eq!(data["beta"], "beta");
     }
 }

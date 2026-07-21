@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 /// Authentication method for MCP access
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum McpAuthMethod {
     /// No authentication required (not recommended for production)
     None,
@@ -551,7 +552,10 @@ async fn authenticate_api_token(
     }
 
     Ok(McpAuthContext {
-        subject: Some(format!("api-token:{}", &token[..token.len().min(8)])),
+        subject: Some(format!(
+            "api-token:{}",
+            token.chars().take(8).collect::<String>()
+        )),
         scopes: vec!["*".to_string()], // API tokens get all scopes by default
         claims: serde_json::Value::Null,
         auth_method: "api_token".to_string(),
@@ -838,7 +842,13 @@ async fn validate_oauth2_via_introspection(
 ) -> Result<McpAuthContext> {
     let mut request = oauth2_http_client()
         .post(url)
-        .form(&[("token", token), ("token_type_hint", "access_token")]);
+        .form(&[("token", token), ("token_type_hint", "access_token")])
+        .map_err(|e| {
+            McpError::InvalidRequest(format!(
+                "failed to build OAuth2 introspection request to {}: {}",
+                url, e
+            ))
+        })?;
 
     // RFC 7662 requires the caller to authenticate; use HTTP Basic with the
     // configured client credentials when available.
@@ -847,25 +857,33 @@ async fn validate_oauth2_via_introspection(
     }
 
     let response = request.send().await.map_err(|e| {
-        McpError::InvalidRequest(format!("OAuth2 introspection request failed: {}", e))
+        McpError::InvalidRequest(format!(
+            "OAuth2 introspection request to {} failed: {}",
+            url, e
+        ))
     })?;
 
     if !response.is_success() {
         return Err(McpError::InvalidRequest(format!(
-            "OAuth2 introspection endpoint returned status {}",
+            "OAuth2 introspection endpoint {} returned status {}",
+            url,
             response.status().as_u16()
         )));
     }
 
     let body: serde_json::Value = response.json().map_err(|_| {
-        McpError::InvalidRequest("Invalid OAuth2 introspection response body".into())
+        McpError::InvalidRequest(format!(
+            "Invalid OAuth2 introspection response body from {}",
+            url
+        ))
     })?;
 
     // RFC 7662: only an explicit `"active": true` means the token is valid.
     if body.get("active").and_then(|v| v.as_bool()) != Some(true) {
-        return Err(McpError::InvalidRequest(
-            "OAuth2 token is not active".into(),
-        ));
+        return Err(McpError::InvalidRequest(format!(
+            "OAuth2 token is not active (introspection endpoint: {})",
+            url
+        )));
     }
 
     let subject = body
@@ -997,6 +1015,28 @@ mod tests {
         let result = authenticate_api_token(&auth, &headers).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().auth_method, "api_token");
+    }
+
+    #[tokio::test]
+    async fn test_api_token_authentication_multibyte_no_panic() {
+        // "1234567" is 7 ASCII bytes, followed by 'é' (U+00E9), which is
+        // encoded as the two bytes 0xC3 0xA9. A naive `&token[..8]` byte
+        // slice would land in the middle of that two-byte character (byte
+        // index 8 falls between 0xC3 and 0xA9), which is not a char
+        // boundary and panics. The fix truncates by `char`, not by byte
+        // index, so this must succeed without panicking.
+        let token = "1234567éxtra-tail-bytes";
+        assert!(!token.is_char_boundary(8), "test token must repro the bug");
+
+        let auth = ApiTokenAuth::new().with_tokens(vec![token]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_ok());
+        let ctx = result.unwrap();
+        assert_eq!(ctx.subject, Some("api-token:1234567é".to_string()));
     }
 
     #[tokio::test]

@@ -124,6 +124,43 @@ fn test_swagger_ui_response() {
 }
 
 #[test]
+fn test_swagger_ui_response_escapes_script_but_not_backslashes() {
+    // A description carrying both a regex backslash (`\d+`) and a raw
+    // `</script>` sequence exercises the two hazards of injecting the spec
+    // JSON into the HTML <script> block.
+    let spec = OpenApiBuilder::new("My API", "1.0.0")
+        .description(r"regex \d+ break</script>injection")
+        .build();
+    let config = SwaggerConfig::new("/api-docs", spec);
+    let body_bytes = swagger_ui_response(&config).unwrap().body;
+    let body = String::from_utf8(body_bytes).unwrap();
+
+    // Backslash must be single-escaped by serde (`\\` in JSON text) and NOT
+    // doubled again. A doubled backslash (`\\\\d+`) would corrupt the data
+    // the browser reconstructs.
+    assert!(
+        body.contains(r"\\d+"),
+        "expected single JSON-escaped backslash for the \\d+ pattern"
+    );
+    assert!(
+        !body.contains(r"\\\\d+"),
+        "backslash was double-escaped, corrupting the rendered data"
+    );
+
+    // The `</script>` inside the spec data must be neutralized to `<\/script>`
+    // so it cannot break out of the enclosing <script> element. The raw,
+    // unescaped data sequence must not appear.
+    assert!(
+        body.contains(r"break<\/script>injection"),
+        "the spec's </script> was not escaped to <\\/script>"
+    );
+    assert!(
+        !body.contains("break</script>injection"),
+        "a raw </script> from the spec data leaked into the page"
+    );
+}
+
+#[test]
 fn test_openapi_spec_serialization() {
     let builder = OpenApiBuilder::new("My API", "1.0.0");
     let spec = builder.build();

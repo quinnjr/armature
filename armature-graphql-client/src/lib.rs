@@ -6,11 +6,10 @@
 //!
 //! ## Features
 //!
-//! - **Type-safe queries**: Generate Rust types from GraphQL schema
+//! - **Type-safe queries**: Deserialize responses into your own Rust types
 //! - **Subscriptions**: WebSocket-based GraphQL subscriptions
-//! - **Batching**: Batch multiple queries into a single request
-//! - **Caching**: Optional response caching
-//! - **Federation**: Support for Apollo Federation
+//! - **Batching**: Send multiple queries in a single request via [`GraphQLClient::batch`]
+//! - **Caching**: Optional response caching for queries
 //!
 //! ## Quick Start
 //!

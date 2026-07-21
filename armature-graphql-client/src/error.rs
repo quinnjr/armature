@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, GraphQLError>;
 
 /// GraphQL client errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GraphQLError {
     /// HTTP request failed.
     #[error("HTTP error: {0}")]

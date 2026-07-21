@@ -74,8 +74,8 @@ impl McpController {
     /// Handle GET /mcp - Returns server info and capabilities
     pub async fn handle_info(&self) -> Result<HttpResponse, Error> {
         let config = self.service.config();
-        let tools = self.service.tools().list_tools();
-        let resources = self.service.resources().list_resources();
+        let tools = self.service.list_tools();
+        let resources = self.service.list_resources();
 
         let info = serde_json::json!({
             "name": config.server_name,
@@ -103,7 +103,7 @@ impl McpController {
 
     /// Handle GET /mcp/tools - List all available tools
     pub async fn handle_list_tools(&self) -> Result<HttpResponse, Error> {
-        let tools = self.service.tools().list_tools();
+        let tools = self.service.list_tools();
 
         let response = serde_json::json!({
             "tools": tools
@@ -120,7 +120,7 @@ impl McpController {
 
     /// Handle GET /mcp/resources - List all available resources
     pub async fn handle_list_resources(&self) -> Result<HttpResponse, Error> {
-        let resources = self.service.resources().list_resources();
+        let resources = self.service.list_resources();
 
         let response = serde_json::json!({
             "resources": resources
@@ -215,5 +215,88 @@ impl McpRouterExt for armature_core::routing::Router {
         });
 
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{McpError, Result as McpResult};
+    use crate::tool::McpToolProvider;
+    use crate::types::{ToolCallResult, ToolDefinition};
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    /// A dynamically-registered tool provider (the code path the compile-time
+    /// inventory registry does NOT cover).
+    struct DynToolProvider;
+
+    #[async_trait]
+    impl McpToolProvider for DynToolProvider {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "dyn_tool".to_string(),
+                description: Some("registered dynamically".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn call_tool(&self, name: &str, arguments: Value) -> McpResult<ToolCallResult> {
+            if name == "dyn_tool" {
+                Ok(ToolCallResult::text(arguments.to_string()))
+            } else {
+                Err(McpError::ToolNotFound(name.to_string()))
+            }
+        }
+    }
+
+    /// Build a controller wrapping a service that already has providers
+    /// registered (McpController's own constructors build a fresh service, so
+    /// the test reaches into the private field directly — it's in-crate).
+    fn controller_wrapping(service: McpService) -> McpController {
+        McpController {
+            service: Arc::new(service),
+        }
+    }
+
+    fn body_json(resp: &HttpResponse) -> Value {
+        serde_json::from_slice(&resp.body).expect("response body should be valid JSON")
+    }
+
+    #[tokio::test]
+    async fn handle_list_tools_includes_dynamically_registered_provider() {
+        let service = McpService::new().with_tool_provider(Arc::new(DynToolProvider));
+        let controller = controller_wrapping(service);
+
+        let resp = controller.handle_list_tools().await.unwrap();
+        let json = body_json(&resp);
+        let tools = json
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .expect("`tools` array");
+
+        // The GET handler must report the SAME merged view as `tools/list`,
+        // so the dynamically-registered provider's tool must appear here.
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("dyn_tool")),
+            "GET /mcp/tools omitted the dynamically-registered provider's tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_info_tools_count_includes_dynamically_registered_provider() {
+        let service = McpService::new().with_tool_provider(Arc::new(DynToolProvider));
+        let controller = controller_wrapping(service);
+
+        let resp = controller.handle_info().await.unwrap();
+        let json = body_json(&resp);
+
+        assert_eq!(
+            json.get("tools_count").and_then(|c| c.as_u64()),
+            Some(1),
+            "GET /mcp info under-counted the merged tools"
+        );
     }
 }
