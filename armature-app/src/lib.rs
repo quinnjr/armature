@@ -17,12 +17,17 @@
 //! // Define a controller with routes
 //! let users = controller("/api/users");
 //! users.get("/", |req, ctx| {
-//!     let data = ctx.call("UserService", "get_users");
-//!     Response::ok().json(data)
+//!     // `ctx.invoke(...)`, not `ctx.call(...)` — `call` is a reserved
+//!     // word in Rhai (function-pointer invocation syntax).
+//!     let data = ctx.invoke("UserService", "get_users");
+//!     // `ok()`, not `Response::ok()` — the response helpers are plain
+//!     // global functions, not a `Response` namespace/module.
+//!     ok().json(data)
 //! });
 //!
-//! // Assemble into a module
-//! let app_module = module("AppModule");
+//! // Assemble into a module — `create_module`, not `module`: `module` is a
+//! // reserved keyword in Rhai.
+//! let app_module = create_module("AppModule");
 //! app_module.providers([user_service]);
 //! app_module.controllers([users]);
 //!

@@ -31,6 +31,12 @@ pub enum AppError {
     #[error("No listen port configured — call app.listen(port)")]
     NoPort,
 
+    /// Configured host is not a parseable IP address.
+    #[error(
+        "Invalid host {host:?} — expected an IP address such as \"127.0.0.1\" or \"0.0.0.0\" (set via app.listen_host(port, host) or RunConfig::host); DNS hostnames are not resolved"
+    )]
+    InvalidHost { host: String },
+
     /// Service not found during handler execution.
     #[error("Service not found: {name}")]
     ServiceNotFound { name: String },
