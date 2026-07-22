@@ -118,7 +118,24 @@ impl FerronManager {
         self.process.restart().await
     }
 
-    /// Reload Ferron configuration
+    /// Reload Ferron configuration, regenerating it from the service
+    /// registry first if one is configured.
+    ///
+    /// This is the entry point for registry-driven state changes --
+    /// `register_backend`/`deregister_backend` call it (via
+    /// `regenerate_config_from_registry` directly) when the registered
+    /// backend set actually changes, and it's also the right thing for a
+    /// caller who wants to force a full regenerate-and-reload.
+    ///
+    /// It must NOT be called from the config-file watcher's own
+    /// change-detection path: `regenerate_config_from_registry` writes the
+    /// regenerated config back to `config_path`, which is the very file the
+    /// watcher watches. If the watcher reacted to *its own* filesystem
+    /// events by calling this, that write would re-trigger the watcher,
+    /// which would reload and write again, forever -- a self-perpetuating
+    /// reload loop with no further external input after the first change.
+    /// The watcher calls `signal_reload()` instead, which re-applies the
+    /// on-disk config without regenerating or rewriting it.
     pub async fn reload(&self) -> Result<()> {
         self.reload_count.fetch_add(1, Ordering::Relaxed);
 
@@ -127,6 +144,25 @@ impl FerronManager {
             self.regenerate_config_from_registry(registry).await?;
         }
 
+        self.process.reload().await
+    }
+
+    /// Re-apply the current on-disk configuration by signalling the Ferron
+    /// process to reload (SIGHUP), without regenerating or rewriting the
+    /// config file.
+    ///
+    /// This is what the config-file watcher calls when it observes a change
+    /// to `config_path`: Ferron re-reads the config file from disk on its
+    /// own when signalled, so simply signalling it is sufficient to pick up
+    /// an external edit. Crucially, unlike `reload()`, this never calls
+    /// `regenerate_config_from_registry` (and therefore never calls
+    /// `FerronConfig::write_to_file`), so it cannot produce a filesystem
+    /// event that re-triggers the very watcher that called it -- breaking
+    /// the self-perpetuating reload loop that combining a registry with the
+    /// watcher used to cause. Still counted in `reload_count()`, since it's
+    /// a real reload signal to the process.
+    pub async fn signal_reload(&self) -> Result<()> {
+        self.reload_count.fetch_add(1, Ordering::Relaxed);
         self.process.reload().await
     }
 
@@ -408,12 +444,19 @@ impl FerronManagerBuilder {
 const CONFIG_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Spawn a background task that watches `manager.config_path` for changes
-/// using `notify`, reloading the manager (regenerating config from the
-/// service registry, then signalling the Ferron process) whenever the file
-/// is modified or (re)created -- covering both in-place writes and
-/// atomic-replace-via-rename editors. Rapid successive events (e.g. from a
-/// single save) are debounced into a single reload; see
-/// `CONFIG_WATCH_DEBOUNCE`.
+/// using `notify`, signalling the Ferron process to reload (via
+/// `FerronManager::signal_reload()`) whenever the file is modified or
+/// (re)created -- covering both in-place writes and atomic-replace-via-rename
+/// editors. Rapid successive events (e.g. from a single save) are debounced
+/// into a single reload; see `CONFIG_WATCH_DEBOUNCE`.
+///
+/// Deliberately does *not* regenerate the config from the service registry:
+/// doing so would rewrite `config_path` -- the very file this task watches
+/// -- which would re-trigger this same watcher, forming a self-perpetuating
+/// reload loop with no further external input after the first change.
+/// Registry-driven regeneration is instead triggered directly by the actual
+/// state-change events that warrant it (`register_backend`/
+/// `deregister_backend`), never by the watcher observing its own write.
 ///
 /// The task holds only a `Weak<FerronManager>`, not a strong `Arc`: it is
 /// otherwise the last thing keeping its own channel's sender alive (via the
@@ -560,7 +603,14 @@ fn spawn_config_watcher(
                 "Detected change to {}, reloading Ferron",
                 watch_path.display()
             );
-            if let Err(e) = manager.reload().await {
+            // Deliberately `signal_reload()`, not `reload()`: this path runs
+            // in reaction to a filesystem event on `config_path` itself, so
+            // it must not regenerate-and-rewrite that same file (that would
+            // be a self-perpetuating loop -- see `signal_reload()`'s doc
+            // comment). Registry-driven regeneration happens elsewhere, in
+            // response to actual registry state changes
+            // (`register_backend`/`deregister_backend`), not here.
+            if let Err(e) = manager.signal_reload().await {
                 warn!("Failed to reload Ferron after config change: {}", e);
             }
         }
@@ -743,7 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watcher_reloads_config_from_registry_on_file_change() {
+    async fn test_watcher_reload_does_not_regenerate_from_registry() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("ferron.conf");
 
@@ -776,26 +826,35 @@ mod tests {
             .await
             .unwrap();
 
-        // The watcher should notice the change and call reload(), which
-        // regenerates the config from the service registry (and writes it
-        // back out) before attempting -- and failing, since no real Ferron
-        // process is running -- to signal the process. The regenerated
-        // file content is therefore observable proof the watcher fired.
+        // The watcher should notice the change and call `signal_reload()`
+        // (observable via `reload_count()`) *without* regenerating the
+        // config from the service registry and writing it back out --
+        // doing so would mean the watcher's own reaction to an external
+        // edit rewrites the very file it's watching, re-triggering itself
+        // forever (see
+        // `test_watcher_does_not_self_perpetuate_reload_loop_with_registry`).
         let mut saw_reload = false;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let contents = tokio::fs::read_to_string(&config_path)
-                .await
-                .unwrap_or_default();
-            if contents.contains("127.0.0.1:9999") {
+            if manager.reload_count() >= 1 {
                 saw_reload = true;
                 break;
             }
         }
-
         assert!(
             saw_reload,
-            "expected the config file watcher to trigger a registry-backed reload"
+            "expected the config file watcher to trigger a reload on an external edit"
+        );
+
+        // Give an (incorrect) self-rewrite a further chance to happen, then
+        // confirm the on-disk content is still exactly what the external
+        // edit wrote -- i.e. the watcher's reload path did not regenerate
+        // and rewrite it from the registry.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
+        assert_eq!(
+            contents, "// externally modified\n",
+            "the watcher's reload path must not rewrite the config file it just observed"
         );
     }
 
@@ -898,6 +957,78 @@ mod tests {
         assert!(
             !manager.is_watching().await,
             "stop() must abort/join the watcher task and clear watch_handle"
+        );
+    }
+
+    /// Regression test for the watcher/registry reload-loop bug: with a
+    /// `ServiceRegistry` configured, the watcher's reaction to a config-file
+    /// change used to call `manager.reload()`, which -- because a registry
+    /// is present -- regenerates the config *and writes it back to the very
+    /// file being watched*. That write is itself a relevant filesystem
+    /// event, so the watcher fires again, regenerates again, writes again,
+    /// forever, with no further external input after the first edit.
+    ///
+    /// A single external touch to the config file must settle to a bounded,
+    /// stable `reload_count()` rather than climbing indefinitely. This is
+    /// checked by sampling the count twice, several debounce windows apart:
+    /// a fixed reaction to the one external write settles and holds; a
+    /// self-perpetuating loop keeps incrementing roughly once per debounce
+    /// window forever, so the two samples would differ.
+    #[tokio::test]
+    async fn test_watcher_does_not_self_perpetuate_reload_loop_with_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ferron.conf");
+        tokio::fs::write(&config_path, "// initial\n")
+            .await
+            .unwrap();
+
+        let base_config = FerronConfig::builder()
+            .domain("example.com")
+            .backend_url("http://localhost:3000")
+            .build()
+            .unwrap();
+
+        let registry = ServiceRegistry::new();
+        registry
+            .register("svc", "http://127.0.0.1:9999")
+            .await
+            .unwrap();
+
+        let manager = FerronManager::builder()
+            .binary_path("/nonexistent/ferron")
+            .config_path(&config_path)
+            .config(base_config)
+            .service_registry(registry)
+            .auto_reload(true)
+            .build()
+            .unwrap();
+
+        assert!(manager.is_watching().await);
+
+        // Let the watcher fully register before triggering anything.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The one and only externally-caused event in this test.
+        tokio::fs::write(&config_path, "// externally modified\n")
+            .await
+            .unwrap();
+
+        let window_ms = CONFIG_WATCH_DEBOUNCE.as_millis() as u64;
+
+        tokio::time::sleep(std::time::Duration::from_millis(window_ms * 6)).await;
+        let count_a = manager.reload_count();
+
+        tokio::time::sleep(std::time::Duration::from_millis(window_ms * 6)).await;
+        let count_b = manager.reload_count();
+
+        assert!(
+            count_a <= 2,
+            "a single external edit must produce at most one reload, got {count_a}"
+        );
+        assert_eq!(
+            count_a, count_b,
+            "reload_count must stabilize after the single external edit rather than \
+             climb unboundedly (sampled {count_a} then {count_b} {window_ms}ms later)"
         );
     }
 
