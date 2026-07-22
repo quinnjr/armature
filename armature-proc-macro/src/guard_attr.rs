@@ -160,10 +160,7 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             };
 
             let struct_name = &item_struct.ident;
-            let vis = &item_struct.vis;
-            let attrs = &item_struct.attrs;
-            let fields = &item_struct.fields;
-            let generics = &item_struct.generics;
+            let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
 
             let guards: Vec<_> = args.guards.iter().collect();
 
@@ -199,12 +196,19 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             let guard_count = guards.len();
 
+            // Re-emit the struct verbatim (preserving its exact form — unit,
+            // tuple, or named — including any trailing `;`) and attach the
+            // metadata impl. The module route registrar calls
+            // `__get_guard_factories()` to enforce these guards on every route.
             quote! {
-                #(#attrs)*
-                #vis struct #struct_name #generics #fields
+                #item_struct
 
-                impl #struct_name {
-                    /// Get the guard factories for this controller
+                impl #impl_generics #struct_name #ty_generics #where_clause {
+                    /// Guard factories for this controller.
+                    ///
+                    /// Consumed by the `#[module]` route registrar, which builds
+                    /// each guard and runs its `can_activate` before dispatching
+                    /// any route declared on this controller.
                     pub fn __get_guard_factories() -> Vec<fn() -> Box<dyn armature_core::guard::Guard>> {
                         vec![#(Self::#factory_names),*]
                     }

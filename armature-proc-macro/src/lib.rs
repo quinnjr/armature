@@ -462,17 +462,27 @@ pub fn use_guard(attr: TokenStream, item: TokenStream) -> TokenStream {
     guard_attr::use_guard_impl(attr, item)
 }
 
-/// Applies one or more guard *instances* to a route handler (or stores guard
-/// metadata on a controller struct).
+/// Applies one or more guard *instances* to a route handler.
+///
+/// On a controller **struct** it attaches guard metadata that the [`module`]
+/// route registrar enforces: before dispatching any route declared on that
+/// controller, every guard's `can_activate` runs, and the first guard that does
+/// not activate (or errors) short-circuits the request with `403 Forbidden`.
 ///
 /// ```ignore
-/// use armature_proc_macro::{get, guard};
+/// use armature_proc_macro::{controller, get, guard, routes};
 ///
+/// // Handler form — guard instance on a single route.
 /// #[guard(RolesGuard::new(vec!["admin".to_string()]))]
 /// #[get("/admin")]
 /// async fn admin(req: HttpRequest) -> Result<HttpResponse, Error> {
 ///     Ok(HttpResponse::ok())
 /// }
+///
+/// // Controller-struct form — guards every route on the controller.
+/// #[controller("/admin")]
+/// #[guard(AuthGuard)]
+/// struct AdminController;
 /// ```
 #[proc_macro_attribute]
 pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -498,17 +508,27 @@ pub fn use_middleware(attr: TokenStream, item: TokenStream) -> TokenStream {
     middleware_attr::use_middleware_impl(attr, item)
 }
 
-/// Applies middleware to a route handler function, or stores middleware
-/// metadata on a controller struct.
+/// Applies middleware to a route handler function.
+///
+/// On a controller **struct** it attaches middleware metadata that the
+/// [`module`] route registrar enforces: every route declared on that controller
+/// is wrapped in a middleware chain built from the supplied expressions (the
+/// first-listed middleware runs first).
 ///
 /// ```ignore
-/// use armature_proc_macro::{get, middleware};
+/// use armature_proc_macro::{controller, get, middleware};
 ///
+/// // Handler form — middleware on a single route.
 /// #[middleware(LoggerMiddleware::new())]
 /// #[get("/users")]
 /// async fn get_users(req: HttpRequest) -> Result<HttpResponse, Error> {
 ///     Ok(HttpResponse::ok())
 /// }
+///
+/// // Controller-struct form — wraps every route on the controller.
+/// #[controller("/users")]
+/// #[middleware(LoggerMiddleware::new())]
+/// struct UsersController;
 /// ```
 #[proc_macro_attribute]
 pub fn middleware(attr: TokenStream, item: TokenStream) -> TokenStream {

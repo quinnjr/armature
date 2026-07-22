@@ -172,10 +172,7 @@ pub fn middleware_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             };
 
             let struct_name = &item_struct.ident;
-            let vis = &item_struct.vis;
-            let attrs = &item_struct.attrs;
-            let fields = &item_struct.fields;
-            let generics = &item_struct.generics;
+            let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
 
             let middlewares: Vec<_> = args.middlewares.iter().collect();
 
@@ -211,12 +208,20 @@ pub fn middleware_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             let middleware_count = middlewares.len();
 
+            // Re-emit the struct verbatim (preserving its exact form — unit,
+            // tuple, or named — including any trailing `;`) and attach the
+            // metadata impl. The module route registrar calls
+            // `__get_middleware_factories()` to wrap every route on this
+            // controller with these middlewares.
             quote! {
-                #(#attrs)*
-                #vis struct #struct_name #generics #fields
+                #item_struct
 
-                impl #struct_name {
-                    /// Get the middleware factories for this controller
+                impl #impl_generics #struct_name #ty_generics #where_clause {
+                    /// Middleware factories for this controller.
+                    ///
+                    /// Consumed by the `#[module]` route registrar, which builds
+                    /// each middleware and wraps every route declared on this
+                    /// controller with the resulting chain.
                     pub fn __get_middleware_factories() -> Vec<fn() -> Box<dyn armature_core::middleware::Middleware>> {
                         vec![#(Self::#factory_names),*]
                     }
