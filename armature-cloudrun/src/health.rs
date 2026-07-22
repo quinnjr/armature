@@ -1,8 +1,13 @@
 //! Health check utilities for Cloud Run.
 
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::{Request, Response, StatusCode};
 
 /// Health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +171,96 @@ impl HealthCheck {
     pub async fn readiness(&self) -> bool {
         self.check().await.status.is_ready()
     }
+
+    /// Handle a single health-check HTTP request.
+    ///
+    /// This is the routing core behind [`HealthCheck::serve`]. It is generic
+    /// over the request body (which it never reads) so it can be driven
+    /// directly in tests or wired into an existing hyper server:
+    ///
+    /// - `GET /health`, `/healthz`, `/readyz` — full readiness: runs every
+    ///   registered checker, returns `200` when healthy/degraded and `503`
+    ///   when unhealthy, with the [`HealthCheckResult`] as a JSON body.
+    /// - `GET /livez` — liveness: `200` unless the status has been overridden
+    ///   to unhealthy (e.g. during graceful shutdown).
+    /// - anything else — `404`.
+    pub async fn handle_request<B>(&self, req: &Request<B>) -> Response<Full<Bytes>> {
+        match req.uri().path() {
+            "/livez" => {
+                let alive = self.liveness().await;
+                let status = if alive {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                json_response(
+                    status,
+                    &serde_json::json!({
+                        "status": if alive { "healthy" } else { "unhealthy" },
+                    }),
+                )
+            }
+            "/health" | "/healthz" | "/readyz" => {
+                let result = self.check().await;
+                let status = if result.status.is_ready() {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                json_response(status, &result)
+            }
+            _ => json_response(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({ "error": "not found" }),
+            ),
+        }
+    }
+
+    /// Serve the health-check endpoints over HTTP on `addr`.
+    ///
+    /// Runs until the process exits; typically spawned alongside the main
+    /// application (e.g. on a sidecar port) so Cloud Run / load-balancer
+    /// probes hit [`HealthCheck::handle_request`]. Returns an error only if
+    /// binding or accepting a connection fails.
+    pub async fn serve(self, addr: SocketAddr) -> crate::Result<()> {
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as AutoBuilder;
+        use std::convert::Infallible;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| crate::CloudRunError::Server(format!("failed to bind {addr}: {e}")))?;
+
+        loop {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .map_err(|e| crate::CloudRunError::Server(format!("accept failed: {e}")))?;
+            let io = TokioIo::new(stream);
+            let health = self.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let health = health.clone();
+                    async move { Ok::<_, Infallible>(health.handle_request(&req).await) }
+                });
+                let _ = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    }
+}
+
+/// Build a JSON HTTP response with the given status code.
+fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
+    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(bytes)))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"{}"))))
 }
 
 /// Trait for health checkers.

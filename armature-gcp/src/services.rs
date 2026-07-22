@@ -10,8 +10,12 @@ use crate::{GcpConfig, GcpError, Result};
 
 /// Container for GCP service clients.
 ///
-/// Services are loaded lazily based on configuration.
-/// Only enabled services are initialized.
+/// Which services are compiled in is controlled by Cargo feature flags; which
+/// of those are actually constructed is controlled by the [`GcpConfig`]
+/// `enable_*` flags. Clients are initialized **eagerly**: [`GcpServices::new`]
+/// pre-initializes every enabled service's client before it returns, so the
+/// accessor methods only ever hand back an already-built client (or a clear
+/// error). Once created, a client is cached and shared on subsequent access.
 pub struct GcpServices {
     config: GcpConfig,
 
@@ -29,10 +33,21 @@ pub struct GcpServices {
 
     #[cfg(feature = "bigquery")]
     bigquery: RwLock<Option<gcloud_bigquery::client::Client>>,
+
+    #[cfg(feature = "secret-manager")]
+    secret_manager: RwLock<Option<crate::rest::SecretManagerClient>>,
+
+    #[cfg(feature = "cloud-run")]
+    cloud_run: RwLock<Option<crate::rest::CloudRunClient>>,
+
+    #[cfg(feature = "cloud-functions")]
+    cloud_functions: RwLock<Option<crate::rest::CloudFunctionsClient>>,
 }
 
 impl GcpServices {
     /// Create a new GCP services container.
+    ///
+    /// Every enabled service is initialized eagerly before this returns.
     pub async fn new(config: GcpConfig) -> Result<Arc<Self>> {
         info!(
             project = ?config.project_id,
@@ -50,11 +65,17 @@ impl GcpServices {
             spanner: RwLock::new(None),
             #[cfg(feature = "bigquery")]
             bigquery: RwLock::new(None),
+            #[cfg(feature = "secret-manager")]
+            secret_manager: RwLock::new(None),
+            #[cfg(feature = "cloud-run")]
+            cloud_run: RwLock::new(None),
+            #[cfg(feature = "cloud-functions")]
+            cloud_functions: RwLock::new(None),
         };
 
         let services = Arc::new(services);
 
-        // Pre-initialize enabled services
+        // Pre-initialize enabled services.
         services.initialize_enabled_services().await?;
 
         Ok(services)
@@ -79,6 +100,18 @@ impl GcpServices {
                 #[cfg(feature = "bigquery")]
                 "bigquery" => {
                     self.init_bigquery().await?;
+                }
+                #[cfg(feature = "secret-manager")]
+                "secret-manager" => {
+                    self.init_secret_manager().await?;
+                }
+                #[cfg(feature = "cloud-run")]
+                "cloud-run" => {
+                    self.init_cloud_run().await?;
+                }
+                #[cfg(feature = "cloud-functions")]
+                "cloud-functions" => {
+                    self.init_cloud_functions().await?;
                 }
                 _ => {}
             }
@@ -106,9 +139,18 @@ impl GcpServices {
             return Ok(());
         }
 
-        // The builder uses Application Default Credentials by default.
+        // Thread the configured credentials and endpoint override (emulator or
+        // per-service `service_configs.endpoint`) into the client builder.
         // Build the client without holding the lock across the await.
-        let storage_client = Storage::builder()
+        let mut builder = Storage::builder();
+        if let Some(cred) = crate::credentials::build_gcloud_credentials(&self.config.credentials)?
+        {
+            builder = builder.with_credentials(cred);
+        }
+        if let Some(endpoint) = crate::credentials::resolve_endpoint(&self.config, "storage") {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let storage_client = builder
             .build()
             .await
             .map_err(|e| GcpError::Auth(e.to_string()))?;
@@ -129,15 +171,19 @@ impl GcpServices {
             return Ok(());
         }
 
-        let project_id = self
-            .config
-            .project_id
-            .as_ref()
-            .ok_or(GcpError::ProjectNotSpecified)?;
-
-        // The builder uses Application Default Credentials by default.
-        // Build the client without holding the lock across the await.
-        let pubsub_client = TopicAdmin::builder()
+        // The Pub/Sub SDK auto-detects the project from the credentials/ADC and
+        // takes the project per-request via resource paths, so `project_id` is
+        // not a required builder input here. Credentials and an optional
+        // endpoint override (emulator / service_configs) are threaded in.
+        let mut builder = TopicAdmin::builder();
+        if let Some(cred) = crate::credentials::build_gcloud_credentials(&self.config.credentials)?
+        {
+            builder = builder.with_credentials(cred);
+        }
+        if let Some(endpoint) = crate::credentials::resolve_endpoint(&self.config, "pubsub") {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let pubsub_client = builder
             .build()
             .await
             .map_err(|e| GcpError::Auth(e.to_string()))?;
@@ -145,7 +191,7 @@ impl GcpServices {
         let mut client = self.pubsub.write();
         if client.is_none() {
             *client = Some(pubsub_client);
-            info!(project = %project_id, "Pub/Sub client initialized");
+            info!(project = ?self.config.project_id, "Pub/Sub client initialized");
         }
         Ok(())
     }
@@ -209,6 +255,48 @@ impl GcpServices {
         if client.is_none() {
             *client = Some(bigquery_client);
             info!(project = %project_id, "BigQuery client initialized");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "secret-manager")]
+    async fn init_secret_manager(&self) -> Result<()> {
+        if self.secret_manager.read().is_some() {
+            return Ok(());
+        }
+        let built = crate::rest::SecretManagerClient::new(&self.config).await?;
+        let mut client = self.secret_manager.write();
+        if client.is_none() {
+            *client = Some(built);
+            info!("Secret Manager client initialized");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cloud-run")]
+    async fn init_cloud_run(&self) -> Result<()> {
+        if self.cloud_run.read().is_some() {
+            return Ok(());
+        }
+        let built = crate::rest::CloudRunClient::new(&self.config).await?;
+        let mut client = self.cloud_run.write();
+        if client.is_none() {
+            *client = Some(built);
+            info!("Cloud Run client initialized");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cloud-functions")]
+    async fn init_cloud_functions(&self) -> Result<()> {
+        if self.cloud_functions.read().is_some() {
+            return Ok(());
+        }
+        let built = crate::rest::CloudFunctionsClient::new(&self.config).await?;
+        let mut client = self.cloud_functions.write();
+        if client.is_none() {
+            *client = Some(built);
+            info!("Cloud Functions client initialized");
         }
         Ok(())
     }
@@ -285,5 +373,59 @@ impl GcpServices {
     #[cfg(not(feature = "bigquery"))]
     pub fn bigquery(&self) -> Result<()> {
         Err(GcpError::not_enabled("bigquery"))
+    }
+
+    /// Get the Secret Manager client.
+    #[cfg(feature = "secret-manager")]
+    pub fn secret_manager(&self) -> Result<crate::rest::SecretManagerClient> {
+        if !self.config.is_enabled("secret-manager") {
+            return Err(GcpError::not_configured("secret-manager"));
+        }
+
+        self.secret_manager
+            .read()
+            .clone()
+            .ok_or_else(|| GcpError::Service("Secret Manager client not initialized".to_string()))
+    }
+
+    #[cfg(not(feature = "secret-manager"))]
+    pub fn secret_manager(&self) -> Result<()> {
+        Err(GcpError::not_enabled("secret-manager"))
+    }
+
+    /// Get the Cloud Run client.
+    #[cfg(feature = "cloud-run")]
+    pub fn cloud_run(&self) -> Result<crate::rest::CloudRunClient> {
+        if !self.config.is_enabled("cloud-run") {
+            return Err(GcpError::not_configured("cloud-run"));
+        }
+
+        self.cloud_run
+            .read()
+            .clone()
+            .ok_or_else(|| GcpError::Service("Cloud Run client not initialized".to_string()))
+    }
+
+    #[cfg(not(feature = "cloud-run"))]
+    pub fn cloud_run(&self) -> Result<()> {
+        Err(GcpError::not_enabled("cloud-run"))
+    }
+
+    /// Get the Cloud Functions client.
+    #[cfg(feature = "cloud-functions")]
+    pub fn cloud_functions(&self) -> Result<crate::rest::CloudFunctionsClient> {
+        if !self.config.is_enabled("cloud-functions") {
+            return Err(GcpError::not_configured("cloud-functions"));
+        }
+
+        self.cloud_functions
+            .read()
+            .clone()
+            .ok_or_else(|| GcpError::Service("Cloud Functions client not initialized".to_string()))
+    }
+
+    #[cfg(not(feature = "cloud-functions"))]
+    pub fn cloud_functions(&self) -> Result<()> {
+        Err(GcpError::not_enabled("cloud-functions"))
     }
 }

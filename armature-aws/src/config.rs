@@ -69,6 +69,23 @@ impl AwsConfig {
     }
 
     /// Load configuration from environment variables.
+    ///
+    /// The following variables are read:
+    ///
+    /// * `AWS_REGION` / `AWS_DEFAULT_REGION` — the region (the former wins).
+    /// * `AWS_ENDPOINT_URL` — a custom endpoint (LocalStack, MinIO, ...).
+    /// * Credential source, in precedence order:
+    ///   * `AWS_PROFILE` — selects [`CredentialsSource::Profile`].
+    ///   * `AWS_WEB_IDENTITY_TOKEN_FILE` — selects
+    ///     [`CredentialsSource::WebIdentity`] (EKS/OIDC).
+    ///   * `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` — selects
+    ///     [`CredentialsSource::Environment`].
+    ///   * otherwise the source is left as [`CredentialsSource::Auto`].
+    /// * `ARMATURE_AWS_SERVICES` — a comma/whitespace-separated list of
+    ///   services to enable (e.g. `"s3,dynamodb,sqs"`).
+    ///
+    /// Returns a builder so callers can override or add to any of the above
+    /// (for example chaining `.enable_s3()`).
     pub fn from_env() -> AwsConfigBuilder {
         let mut builder = AwsConfigBuilder::new();
 
@@ -80,6 +97,29 @@ impl AwsConfig {
 
         if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
             builder = builder.endpoint_url(endpoint);
+        }
+
+        // Resolve the credential source from the environment.
+        if let Ok(profile) = std::env::var("AWS_PROFILE") {
+            if !profile.is_empty() {
+                builder = builder.credentials(CredentialsSource::Profile(profile));
+            }
+        } else if std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE").is_ok() {
+            builder = builder.credentials(CredentialsSource::WebIdentity);
+        } else if std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+            && std::env::var("AWS_SECRET_ACCESS_KEY").is_ok()
+        {
+            builder = builder.credentials(CredentialsSource::Environment);
+        }
+
+        // Enable services listed in `ARMATURE_AWS_SERVICES`.
+        if let Ok(services) = std::env::var("ARMATURE_AWS_SERVICES") {
+            for service in services.split([',', ' ', '\t']) {
+                let service = service.trim();
+                if !service.is_empty() {
+                    builder = builder.enable(service);
+                }
+            }
         }
 
         builder

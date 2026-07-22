@@ -28,6 +28,9 @@ pub struct AzureServices {
     #[cfg(feature = "cosmos")]
     cosmos: RwLock<Option<azure_data_cosmos::CosmosClient>>,
 
+    #[cfg(feature = "servicebus")]
+    servicebus: RwLock<Option<crate::servicebus::ServiceBusClient>>,
+
     #[cfg(feature = "keyvault")]
     keyvault: RwLock<Option<Arc<azure_security_keyvault_secrets::SecretClient>>>,
 }
@@ -54,6 +57,8 @@ impl AzureServices {
             queue_service: RwLock::new(None),
             #[cfg(feature = "cosmos")]
             cosmos: RwLock::new(None),
+            #[cfg(feature = "servicebus")]
+            servicebus: RwLock::new(None),
             #[cfg(feature = "keyvault")]
             keyvault: RwLock::new(None),
         };
@@ -100,12 +105,6 @@ impl AzureServices {
                     None,
                 )
                 .map_err(|e| AzureError::Auth(e.to_string()))?,
-                CredentialsSource::ConnectionString(_)
-                | CredentialsSource::StorageAccountKey { .. } => {
-                    // For storage-specific auth, we'll handle it at the client level.
-                    DeveloperToolsCredential::new(None)
-                        .map_err(|e| AzureError::Auth(e.to_string()))?
-                }
             };
 
         Ok(credential)
@@ -126,6 +125,10 @@ impl AzureServices {
                 #[cfg(feature = "cosmos")]
                 "cosmos" => {
                     self.init_cosmos().await?;
+                }
+                #[cfg(feature = "servicebus")]
+                "servicebus" => {
+                    self.init_servicebus()?;
                 }
                 #[cfg(feature = "keyvault")]
                 "keyvault" => {
@@ -168,33 +171,10 @@ impl AzureServices {
                 BlobServiceClient::new(endpoint, None, None)
                     .map_err(|e| AzureError::Service(e.to_string()))?
             } else {
-                match &self.config.credentials {
-                    CredentialsSource::ConnectionString(_) => {
-                        return Err(AzureError::Config(
-                            "azure_storage_blob 1.0 requires AAD (Entra ID) token \
-                             credentials; connection-string authentication is no longer \
-                             supported by the new Azure SDK. Use a token credential source \
-                             (DefaultCredential, ManagedIdentity, AzureCli, ServicePrincipal)."
-                                .to_string(),
-                        ));
-                    }
-                    CredentialsSource::StorageAccountKey { .. } => {
-                        return Err(AzureError::Config(
-                            "azure_storage_blob 1.0 requires AAD (Entra ID) token \
-                             credentials; shared-key (storage account key) authentication is \
-                             no longer supported by the new Azure SDK. Use a token credential \
-                             source instead."
-                                .to_string(),
-                        ));
-                    }
-                    _ => {
-                        let endpoint =
-                            Url::parse(&format!("https://{account}.blob.core.windows.net/"))
-                                .map_err(|e| AzureError::Config(e.to_string()))?;
-                        BlobServiceClient::new(endpoint, Some(self.credential.clone()), None)
-                            .map_err(|e| AzureError::Service(e.to_string()))?
-                    }
-                }
+                let endpoint = Url::parse(&format!("https://{account}.blob.core.windows.net/"))
+                    .map_err(|e| AzureError::Config(e.to_string()))?;
+                BlobServiceClient::new(endpoint, Some(self.credential.clone()), None)
+                    .map_err(|e| AzureError::Service(e.to_string()))?
             };
 
             *client = Some(Arc::new(blob_client));
@@ -226,33 +206,10 @@ impl AzureServices {
                 QueueServiceClient::new(endpoint, None, None)
                     .map_err(|e| AzureError::Service(e.to_string()))?
             } else {
-                match &self.config.credentials {
-                    CredentialsSource::ConnectionString(_) => {
-                        return Err(AzureError::Config(
-                            "azure_storage_queue 1.0 requires AAD (Entra ID) token \
-                             credentials; connection-string authentication is no longer \
-                             supported by the new Azure SDK. Use a token credential source \
-                             (DefaultCredential, ManagedIdentity, AzureCli, ServicePrincipal)."
-                                .to_string(),
-                        ));
-                    }
-                    CredentialsSource::StorageAccountKey { .. } => {
-                        return Err(AzureError::Config(
-                            "azure_storage_queue 1.0 requires AAD (Entra ID) token \
-                             credentials; shared-key (storage account key) authentication is \
-                             no longer supported by the new Azure SDK. Use a token credential \
-                             source instead."
-                                .to_string(),
-                        ));
-                    }
-                    _ => {
-                        let endpoint =
-                            Url::parse(&format!("https://{account}.queue.core.windows.net/"))
-                                .map_err(|e| AzureError::Config(e.to_string()))?;
-                        QueueServiceClient::new(endpoint, Some(self.credential.clone()), None)
-                            .map_err(|e| AzureError::Service(e.to_string()))?
-                    }
-                }
+                let endpoint = Url::parse(&format!("https://{account}.queue.core.windows.net/"))
+                    .map_err(|e| AzureError::Config(e.to_string()))?;
+                QueueServiceClient::new(endpoint, Some(self.credential.clone()), None)
+                    .map_err(|e| AzureError::Service(e.to_string()))?
             };
 
             *client = Some(Arc::new(queue_client));
@@ -296,6 +253,51 @@ impl AzureServices {
             *client = Some(cosmos_client);
             info!(endpoint = %endpoint, "Cosmos DB client initialized");
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "servicebus")]
+    fn init_servicebus(&self) -> Result<()> {
+        use crate::servicebus::{ServiceBusClient, ServiceBusServiceConfig};
+
+        let mut client = self.servicebus.write();
+        if client.is_some() {
+            return Ok(());
+        }
+
+        // Service Bus (azure_messaging_servicebus 0.21) is SAS-based: it needs a
+        // shared-access policy name + key, resolved from either a connection
+        // string or the per-service `service_config("servicebus")` block.
+        let sb = if let Some(conn) = &self.config.servicebus_connection_string {
+            ServiceBusClient::from_connection_string(conn)?
+        } else if let Some(cfg) = self
+            .config
+            .service_config::<ServiceBusServiceConfig>("servicebus")
+        {
+            let namespace = cfg
+                .namespace
+                .or_else(|| self.config.servicebus_namespace.clone())
+                .ok_or_else(|| {
+                    AzureError::Config(
+                        "Service Bus namespace not specified (set servicebus_namespace or \
+                         include it in service_config(\"servicebus\"))"
+                            .to_string(),
+                    )
+                })?;
+            ServiceBusClient::new(namespace, cfg.policy_name, cfg.shared_access_key)
+        } else {
+            return Err(AzureError::Config(
+                "Service Bus requires SAS credentials: set servicebus_connection_string, or a \
+                 service_config(\"servicebus\") with policy_name + shared_access_key. The \
+                 azure_messaging_servicebus 0.21 SDK is SAS-based and has no token-credential \
+                 path."
+                    .to_string(),
+            ));
+        };
+
+        let namespace = sb.namespace().to_string();
+        *client = Some(sb);
+        info!(namespace = %namespace, "Service Bus client initialized");
         Ok(())
     }
 
@@ -379,6 +381,42 @@ impl AzureServices {
         Err(AzureError::not_enabled("cosmos"))
     }
 
+    /// Get a Cosmos DB [`DatabaseClient`](azure_data_cosmos::DatabaseClient) for
+    /// the configured `cosmos_database`.
+    #[cfg(feature = "cosmos")]
+    pub fn cosmos_database(&self) -> Result<azure_data_cosmos::DatabaseClient> {
+        let database = self.config.cosmos_database.as_ref().ok_or_else(|| {
+            AzureError::Config(
+                "Cosmos database not specified. Call cosmos_database(..) on the config builder."
+                    .to_string(),
+            )
+        })?;
+        Ok(self.cosmos()?.database_client(database))
+    }
+
+    #[cfg(not(feature = "cosmos"))]
+    pub fn cosmos_database(&self) -> Result<()> {
+        Err(AzureError::not_enabled("cosmos"))
+    }
+
+    /// Get the Service Bus client.
+    #[cfg(feature = "servicebus")]
+    pub fn servicebus(&self) -> Result<crate::servicebus::ServiceBusClient> {
+        if !self.config.is_enabled("servicebus") {
+            return Err(AzureError::not_configured("servicebus"));
+        }
+
+        self.servicebus
+            .read()
+            .clone()
+            .ok_or_else(|| AzureError::Service("Service Bus client not initialized".to_string()))
+    }
+
+    #[cfg(not(feature = "servicebus"))]
+    pub fn servicebus(&self) -> Result<()> {
+        Err(AzureError::not_enabled("servicebus"))
+    }
+
     /// Get the Key Vault client.
     #[cfg(feature = "keyvault")]
     pub fn keyvault(&self) -> Result<Arc<azure_security_keyvault_secrets::SecretClient>> {
@@ -395,5 +433,85 @@ impl AzureServices {
     #[cfg(not(feature = "keyvault"))]
     pub fn keyvault(&self) -> Result<()> {
         Err(AzureError::not_enabled("keyvault"))
+    }
+}
+
+#[cfg(all(test, feature = "servicebus"))]
+mod servicebus_tests {
+    use crate::{AzureConfig, AzureServices};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn servicebus_initializes_from_connection_string() {
+        let config = AzureConfig::builder()
+            .servicebus_connection_string(
+                "Endpoint=sb://mybus.servicebus.windows.net/;\
+                 SharedAccessKeyName=policy;SharedAccessKey=a2V5",
+            )
+            .enable_servicebus()
+            .build();
+
+        let services = AzureServices::new(config).await.expect("init services");
+        let sb = services.servicebus().expect("servicebus accessor");
+        assert_eq!(sb.namespace(), "mybus");
+        assert!(sb.queue("orders").is_ok());
+        assert!(sb.topic("events").is_ok());
+    }
+
+    #[tokio::test]
+    async fn servicebus_initializes_from_service_config() {
+        // Proves service_configs is actually read by an initializer.
+        let config = AzureConfig::builder()
+            .servicebus_namespace("mybus")
+            .service_config(
+                "servicebus",
+                json!({ "policy_name": "policy", "shared_access_key": "a2V5" }),
+            )
+            .enable_servicebus()
+            .build();
+
+        let services = AzureServices::new(config).await.expect("init services");
+        let sb = services.servicebus().expect("servicebus accessor");
+        assert_eq!(sb.namespace(), "mybus");
+    }
+
+    #[tokio::test]
+    async fn servicebus_without_sas_credentials_errors() {
+        let config = AzureConfig::builder().enable_servicebus().build();
+        assert!(AzureServices::new(config).await.is_err());
+    }
+}
+
+#[cfg(all(test, feature = "cosmos"))]
+mod cosmos_tests {
+    use crate::{AzureConfig, AzureServices};
+
+    fn err_string(result: crate::Result<azure_data_cosmos::DatabaseClient>) -> String {
+        match result {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cosmos_database_requires_a_database_name() {
+        // cosmos not enabled -> no client construction / no network.
+        let config = AzureConfig::builder().build();
+        let services = AzureServices::new(config).await.expect("init services");
+        let err = err_string(services.cosmos_database());
+        assert!(err.contains("database not specified"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cosmos_database_reads_the_configured_name() {
+        // Database IS set, so the accessor advances past the name check (proving
+        // the field is read) and only then fails because cosmos is not enabled.
+        let config = AzureConfig::builder().cosmos_database("mydb").build();
+        let services = AzureServices::new(config).await.expect("init services");
+        let err = err_string(services.cosmos_database());
+        assert!(
+            err.contains("not configured") || err.contains("not initialized"),
+            "got: {err}"
+        );
     }
 }

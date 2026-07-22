@@ -4,30 +4,50 @@ use std::net::SocketAddr;
 
 /// Cloud Run configuration.
 ///
-/// Reads configuration from environment variables set by Cloud Run.
+/// Reads configuration from the process environment. Cloud Run itself only
+/// sets a handful of these variables (`PORT`, `K_SERVICE`, `K_REVISION`,
+/// `K_CONFIGURATION`); the remaining fields are **user-supplied overrides**
+/// that you must set yourself (they are not provided by the Cloud Run
+/// runtime) — see the individual field docs.
 #[derive(Debug, Clone)]
 pub struct CloudRunConfig {
-    /// Port to listen on (from PORT env var).
+    /// Port to listen on (from the `PORT` env var set by Cloud Run).
     pub port: u16,
     /// Host to bind to.
     pub host: String,
-    /// Service name (from K_SERVICE env var).
+    /// Service name (from the `K_SERVICE` env var set by Cloud Run).
     pub service: Option<String>,
-    /// Revision name (from K_REVISION env var).
+    /// Revision name (from the `K_REVISION` env var set by Cloud Run).
     pub revision: Option<String>,
-    /// Configuration name (from K_CONFIGURATION env var).
+    /// Configuration name (from the `K_CONFIGURATION` env var set by Cloud Run).
     pub configuration: Option<String>,
-    /// Project ID (from GOOGLE_CLOUD_PROJECT env var).
+    /// Project ID. User-supplied via `GOOGLE_CLOUD_PROJECT` — Cloud Run does
+    /// not set this automatically; fetch it from the metadata server if needed
+    /// (see [`crate::InstanceMetadata`]).
     pub project_id: Option<String>,
-    /// Region (from GOOGLE_CLOUD_REGION env var).
+    /// Region. User-supplied via `GOOGLE_CLOUD_REGION` — Cloud Run does not set
+    /// this automatically.
     pub region: Option<String>,
-    /// Memory limit in MB.
+    /// Service URL. User-supplied via `CLOUD_RUN_URL` — Cloud Run does not set
+    /// this automatically. See [`CloudRunConfig::service_url`].
+    pub url: Option<String>,
+    /// Memory limit in MB. **User-supplied override** via `MEMORY_LIMIT_MB` —
+    /// Cloud Run does not expose the container memory limit as an env var, so
+    /// this is `None` unless you set it yourself.
     pub memory_limit_mb: Option<u32>,
-    /// CPU limit.
+    /// CPU limit. **User-supplied override** via `CPU_LIMIT` — Cloud Run does
+    /// not expose the CPU allocation as an env var, so this is `None` unless
+    /// you set it yourself.
     pub cpu_limit: Option<f32>,
-    /// Request timeout in seconds.
+    /// Request timeout in seconds. **User-supplied override** via
+    /// `CLOUD_RUN_TIMEOUT_SECONDS` — Cloud Run does not expose the request
+    /// timeout as an env var, so this falls back to the default (300) unless
+    /// you set it yourself.
     pub timeout_seconds: u32,
-    /// Maximum concurrent requests per instance.
+    /// Maximum concurrent requests per instance. **User-supplied override** via
+    /// `CLOUD_RUN_CONCURRENCY` — Cloud Run does not expose the concurrency
+    /// setting as an env var, so this falls back to the default (80) unless you
+    /// set it yourself.
     pub max_concurrent_requests: u32,
 }
 
@@ -41,6 +61,7 @@ impl Default for CloudRunConfig {
             configuration: None,
             project_id: None,
             region: None,
+            url: None,
             memory_limit_mb: None,
             cpu_limit: None,
             timeout_seconds: 300,
@@ -51,6 +72,13 @@ impl Default for CloudRunConfig {
 
 impl CloudRunConfig {
     /// Create configuration from environment variables.
+    ///
+    /// `PORT`, `K_SERVICE`, `K_REVISION` and `K_CONFIGURATION` are populated by
+    /// the Cloud Run runtime. The remaining fields (`project_id`, `region`,
+    /// `url`, `memory_limit_mb`, `cpu_limit`, `timeout_seconds`,
+    /// `max_concurrent_requests`) are read from env vars that Cloud Run does
+    /// **not** set — they only take effect if you supply them yourself, and
+    /// otherwise stay `None`/at their defaults.
     pub fn from_env() -> Self {
         let port = std::env::var("PORT")
             .ok()
@@ -65,6 +93,7 @@ impl CloudRunConfig {
             configuration: std::env::var("K_CONFIGURATION").ok(),
             project_id: std::env::var("GOOGLE_CLOUD_PROJECT").ok(),
             region: std::env::var("GOOGLE_CLOUD_REGION").ok(),
+            url: std::env::var("CLOUD_RUN_URL").ok(),
             memory_limit_mb: std::env::var("MEMORY_LIMIT_MB")
                 .ok()
                 .and_then(|m| m.parse().ok()),
@@ -112,20 +141,15 @@ impl CloudRunConfig {
         self.service.is_some()
     }
 
-    /// Get service URL (if deployed).
+    /// Get the service URL, if known.
+    ///
+    /// Cloud Run's public URL is derived from an opaque project hash and cannot
+    /// be reconstructed from the service name, project ID and region alone.
+    /// This returns the URL only when it was provided out-of-band via the
+    /// `CLOUD_RUN_URL` env var (read into [`CloudRunConfig::url`] by
+    /// [`CloudRunConfig::from_env`]); otherwise it returns `None` rather than a
+    /// fabricated, non-resolving URL.
     pub fn service_url(&self) -> Option<String> {
-        match (&self.service, &self.project_id, &self.region) {
-            (Some(service), Some(project), Some(region)) => Some(format!(
-                "https://{}-{}.{}.run.app",
-                service,
-                project
-                    .replace('_', "-")
-                    .chars()
-                    .take(10)
-                    .collect::<String>(),
-                region
-            )),
-            _ => None,
-        }
+        self.url.clone()
     }
 }

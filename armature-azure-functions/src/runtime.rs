@@ -96,9 +96,10 @@ where
             }
         }
 
-        // Log request if enabled
+        // Log request if enabled. Uses `info!` so the line is actually emitted
+        // under `init_tracing()`'s default `info` EnvFilter.
         if self.config.log_requests {
-            debug!(
+            info!(
                 method = %request.method,
                 path = %request.path,
                 invocation_id = ?request.context.invocation_id,
@@ -106,8 +107,30 @@ where
             );
         }
 
-        // Handle request
-        let response = self.app.handle(request).await;
+        // Handle request, applying the configured request timeout. A value of 0
+        // disables the timeout.
+        let timeout_seconds = self.config.function.timeout_seconds;
+        let response = if timeout_seconds == 0 {
+            self.app.handle(request).await
+        } else {
+            let path = request.path.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_seconds),
+                self.app.handle(request),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(_elapsed) => {
+                    error!(
+                        path = %path,
+                        timeout_seconds,
+                        "Azure Function request timed out"
+                    );
+                    FunctionResponse::error(504, "Gateway Timeout")
+                }
+            }
+        };
 
         // Log response if enabled
         if self.config.log_responses {
@@ -176,21 +199,45 @@ where
 }
 
 /// Handle an HTTP request from the custom handler.
-async fn handle_http_request<App: RequestHandler + 'static>(
+async fn handle_http_request<App, B>(
     app: Arc<App>,
     config: RuntimeConfig,
-    req: hyper::Request<hyper::body::Incoming>,
-) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
+    req: hyper::Request<B>,
+) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible>
+where
+    App: RequestHandler + 'static,
+    B: hyper::body::Body<Data = bytes::Bytes>,
+{
     use http_body_util::BodyExt;
 
     // Convert hyper request to FunctionRequest
     let (parts, body) = req.into_parts();
+
+    let max_request_size = config.function.max_request_size;
+
+    // Early rejection: if the client declared a Content-Length that already
+    // exceeds the cap, refuse before buffering the body.
+    if let Some(len) = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        && len > max_request_size
+    {
+        return Ok(oversize_response(len, max_request_size));
+    }
 
     let body_bytes = body
         .collect()
         .await
         .map(|b| b.to_bytes())
         .unwrap_or_default();
+
+    // Enforce the cap against the actual collected body (covers chunked bodies
+    // with no Content-Length, or a lying Content-Length header).
+    if body_bytes.len() > max_request_size {
+        return Ok(oversize_response(body_bytes.len(), max_request_size));
+    }
 
     let mut headers = std::collections::HashMap::new();
     for (name, value) in parts.headers.iter() {
@@ -261,6 +308,36 @@ async fn handle_http_request<App: RequestHandler + 'static>(
         }))
 }
 
+/// Build a `413 Payload Too Large` response for an oversize request body.
+fn oversize_response(
+    actual: usize,
+    limit: usize,
+) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    error!(
+        actual_bytes = actual,
+        limit_bytes = limit,
+        "Rejecting oversize request body"
+    );
+    let body = serde_json::json!({
+        "error": format!(
+            "Request body of {actual} bytes exceeds the maximum of {limit} bytes"
+        )
+    })
+    .to_string();
+    hyper::Response::builder()
+        .status(413)
+        .header("content-type", "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(413)
+                .body(http_body_util::Full::new(bytes::Bytes::from(
+                    "Payload Too Large",
+                )))
+                .unwrap()
+        })
+}
+
 /// Request handler trait for Armature applications.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync {
@@ -304,4 +381,162 @@ macro_rules! impl_request_handler {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FunctionRequest;
+    use http_body_util::{BodyExt, Full};
+    use std::sync::Arc;
+
+    /// Build a runtime around a closure handler.
+    fn runtime_with<F, Fut>(handler: F) -> AzureFunctionsRuntime<F>
+    where
+        F: Fn(FunctionRequest) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = FunctionResponse> + Send,
+    {
+        AzureFunctionsRuntime::new(handler)
+    }
+
+    async fn body_bytes(resp: hyper::Response<Full<bytes::Bytes>>) -> bytes::Bytes {
+        resp.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    #[tokio::test]
+    async fn base_path_prefix_is_stripped() {
+        let mut runtime = runtime_with(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, req.path)
+        });
+        runtime.config.function.base_path = Some("/api".to_string());
+
+        let resp = runtime
+            .handle(FunctionRequest::new("GET", "/api/hello"))
+            .await;
+        assert_eq!(resp.body, "/hello");
+    }
+
+    #[tokio::test]
+    async fn base_path_exact_match_becomes_root() {
+        let mut runtime = runtime_with(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, req.path)
+        });
+        runtime.config.function.base_path = Some("/api".to_string());
+
+        let resp = runtime.handle(FunctionRequest::new("GET", "/api")).await;
+        assert_eq!(resp.body, "/");
+    }
+
+    #[tokio::test]
+    async fn base_path_non_matching_path_unchanged() {
+        let mut runtime = runtime_with(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, req.path)
+        });
+        runtime.config.function.base_path = Some("/api".to_string());
+
+        let resp = runtime
+            .handle(FunctionRequest::new("GET", "/other/x"))
+            .await;
+        assert_eq!(resp.body, "/other/x");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_handler_times_out_with_504() {
+        let mut runtime = runtime_with(|_req: FunctionRequest| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            FunctionResponse::ok()
+        });
+        runtime.config.function.timeout_seconds = 1;
+
+        let resp = runtime.handle(FunctionRequest::new("GET", "/")).await;
+        assert_eq!(resp.status_code, 504);
+    }
+
+    #[tokio::test]
+    async fn fast_handler_does_not_time_out() {
+        let mut runtime =
+            runtime_with(
+                |_req: FunctionRequest| async move { FunctionResponse::with_body(201, "ok") },
+            );
+        runtime.config.function.timeout_seconds = 30;
+
+        let resp = runtime.handle(FunctionRequest::new("GET", "/")).await;
+        assert_eq!(resp.status_code, 201);
+    }
+
+    #[tokio::test]
+    async fn oversize_body_returns_413_via_collected_length() {
+        let app = Arc::new(|_req: FunctionRequest| async move { FunctionResponse::ok() });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        // No Content-Length header set by the builder for Full bodies, so this
+        // exercises the post-collect size check.
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::from(vec![0u8; 100])))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn oversize_content_length_header_returns_413_early() {
+        let app = Arc::new(|_req: FunctionRequest| async move { FunctionResponse::ok() });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-length", "1000000")
+            .body(Full::new(bytes::Bytes::from_static(b"tiny")))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn within_limit_body_is_accepted() {
+        let app = Arc::new(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, format!("{} bytes", req.body.len()))
+        });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 1024;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::from_static(b"hello")))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(&body_bytes(resp).await[..], b"5 bytes");
+    }
+
+    #[tokio::test]
+    async fn base64_response_body_is_decoded_to_raw_bytes() {
+        // Invalid UTF-8 forces the base64-encoded response path.
+        let raw: Vec<u8> = vec![0u8, 159, 146, 150];
+        let raw_for_handler = raw.clone();
+        let app = Arc::new(move |_req: FunctionRequest| {
+            let raw = raw_for_handler.clone();
+            async move { FunctionResponse::ok().binary_body(&raw) }
+        });
+        let config = RuntimeConfig::default();
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::new()))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(&body_bytes(resp).await[..], &raw[..]);
+    }
 }

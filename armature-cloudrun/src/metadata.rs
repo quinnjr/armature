@@ -19,27 +19,73 @@ pub struct InstanceMetadata {
     pub region: Option<String>,
 }
 
+/// Base URL of the GCE/Cloud Run metadata server.
+const METADATA_BASE: &str = "http://metadata.google.internal/computeMetadata/v1/";
+
 impl InstanceMetadata {
     /// Fetch instance metadata from the GCE metadata server.
+    ///
+    /// Returns `Err(CloudRunError::Metadata(..))` when the metadata server is
+    /// unreachable (network/transport error), so callers can distinguish
+    /// "metadata server unavailable" from "field absent". Individual fields
+    /// that the server reports as missing (a non-success HTTP status) degrade
+    /// to `None` rather than erroring.
     pub async fn fetch() -> Result<Self, crate::CloudRunError> {
-        let client = reqwest::Client::new();
+        Self::fetch_from(METADATA_BASE).await
+    }
 
-        async fn get_metadata(client: &reqwest::Client, path: &str) -> Option<String> {
-            client
-                .get(format!(
-                    "http://metadata.google.internal/computeMetadata/v1/{}",
-                    path
-                ))
+    /// Fetch instance metadata from a specific base URL.
+    ///
+    /// Exposed (crate-internal) so tests can point at an unreachable or stub
+    /// address instead of the live metadata server.
+    pub(crate) async fn fetch_from(base: &str) -> Result<Self, crate::CloudRunError> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| {
+                crate::CloudRunError::Metadata(format!("failed to build HTTP client: {e}"))
+            })?;
+
+        // A single field lookup. A transport error (server unreachable) is a
+        // hard error; a non-success status (field absent) degrades to `None`.
+        async fn get_metadata(
+            client: &reqwest::Client,
+            base: &str,
+            path: &str,
+        ) -> Result<Option<String>, crate::CloudRunError> {
+            let resp = client
+                .get(format!("{base}{path}"))
                 .header("Metadata-Flavor", "Google")
                 .send()
                 .await
-                .ok()?
-                .text()
-                .await
-                .ok()
+                .map_err(|e| {
+                    crate::CloudRunError::Metadata(format!(
+                        "metadata server unreachable ({path}): {e}"
+                    ))
+                })?;
+
+            if !resp.status().is_success() {
+                return Ok(None);
+            }
+
+            let text = resp.text().await.map_err(|e| {
+                crate::CloudRunError::Metadata(format!(
+                    "failed to read metadata response ({path}): {e}"
+                ))
+            })?;
+            Ok(Some(text))
         }
 
-        let zone = get_metadata(&client, "instance/zone").await;
+        // Independent lookups run concurrently; the first transport error
+        // short-circuits the whole fetch.
+        let (instance_id, zone, project_id, project_number, service_account) = tokio::try_join!(
+            get_metadata(&client, base, "instance/id"),
+            get_metadata(&client, base, "instance/zone"),
+            get_metadata(&client, base, "project/project-id"),
+            get_metadata(&client, base, "project/numeric-project-id"),
+            get_metadata(&client, base, "instance/service-accounts/default/email"),
+        )?;
+
         let region = zone.as_ref().map(|z| {
             // Zone is like "projects/123456789/zones/us-central1-a"
             // Extract region as "us-central1"
@@ -59,11 +105,11 @@ impl InstanceMetadata {
         });
 
         Ok(Self {
-            instance_id: get_metadata(&client, "instance/id").await,
+            instance_id,
             zone,
-            project_id: get_metadata(&client, "project/project-id").await,
-            project_number: get_metadata(&client, "project/numeric-project-id").await,
-            service_account: get_metadata(&client, "instance/service-accounts/default/email").await,
+            project_id,
+            project_number,
+            service_account,
             region,
         })
     }
@@ -116,5 +162,80 @@ impl ServiceMetadata {
     /// Check if running on Cloud Run.
     pub fn is_cloud_run() -> bool {
         std::env::var("K_SERVICE").is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_errors_when_metadata_server_unreachable() {
+        // Port 1 on loopback refuses connections immediately, standing in for
+        // an unreachable metadata server. The old code returned Ok(all-None).
+        let err = InstanceMetadata::fetch_from("http://127.0.0.1:1/")
+            .await
+            .expect_err("unreachable metadata server must surface an error");
+        assert!(
+            matches!(err, crate::CloudRunError::Metadata(_)),
+            "expected CloudRunError::Metadata, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_maps_absent_fields_to_none_and_derives_region() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use hyper::service::service_fn;
+        use hyper::{Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        // Stub metadata server: 200 for instance/zone, 404 for everything else.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                        let resp = if req.uri().path().ends_with("/instance/zone") {
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Full::new(Bytes::from_static(
+                                    b"projects/123456789/zones/us-central1-a",
+                                )))
+                                .unwrap()
+                        } else {
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Full::new(Bytes::new()))
+                                .unwrap()
+                        };
+                        Ok::<_, std::convert::Infallible>(resp)
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await;
+                });
+            }
+        });
+
+        let base = format!("http://{addr}/computeMetadata/v1/");
+        let md = InstanceMetadata::fetch_from(&base)
+            .await
+            .expect("reachable server (even with 404 fields) must not error");
+
+        // Present field parsed; region derived from zone.
+        assert_eq!(
+            md.zone.as_deref(),
+            Some("projects/123456789/zones/us-central1-a")
+        );
+        assert_eq!(md.region.as_deref(), Some("us-central1"));
+        // 404 fields degrade to None rather than erroring.
+        assert!(md.instance_id.is_none());
+        assert!(md.project_id.is_none());
+        assert!(md.project_number.is_none());
+        assert!(md.service_account.is_none());
     }
 }

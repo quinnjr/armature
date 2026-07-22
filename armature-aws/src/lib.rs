@@ -63,9 +63,6 @@ mod config;
 mod error;
 mod services;
 
-#[cfg(feature = "s3")]
-pub mod s3;
-
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
 
