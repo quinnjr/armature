@@ -843,17 +843,20 @@ pub(crate) fn accepts_gzip(req: &HttpRequest) -> bool {
     let Some(value) = req.headers.get("accept-encoding") else {
         return false;
     };
-    let value = value.to_ascii_lowercase();
+    // Compare tokens case-insensitively in place instead of allocating a
+    // lowercased copy of the whole header value on every request.
     value.split(',').any(|part| {
         let mut segs = part.split(';').map(str::trim);
         let coding = segs.next().unwrap_or("");
-        if coding != "gzip" && coding != "*" {
+        if !coding.eq_ignore_ascii_case("gzip") && coding != "*" {
             return false;
         }
-        // Reject `q=0`(.0…); any other q (or none) permits the encoding.
+        // Reject `q=0`(.0…); any other q (or none) permits the encoding. The
+        // `q` parameter name is matched case-insensitively (e.g. `Q=0`).
         !segs.any(|p| {
-            p.strip_prefix("q=")
-                .and_then(|q| q.parse::<f32>().ok())
+            p.split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("q"))
+                .and_then(|(_, v)| v.parse::<f32>().ok())
                 .map(|q| q == 0.0)
                 .unwrap_or(false)
         })
@@ -868,6 +871,36 @@ pub(crate) fn gzip_encode(data: &[u8], level: CompressionLevel) -> Option<Vec<u8
     let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2 + 32), level.to_flate2());
     encoder.write_all(data).ok()?;
     encoder.finish().ok()
+}
+
+/// Bodies at least this large are gzip-encoded on a blocking thread (via
+/// `spawn_blocking`) instead of inline on the async worker. gzip is CPU-bound,
+/// so a multi-megabyte body at `Best` can stall a tokio worker for milliseconds;
+/// small bodies compress fast enough that the spawn round-trip would cost more
+/// than it saves, so they stay inline.
+pub(crate) const GZIP_OFFLOAD_THRESHOLD: usize = 32 * 1024;
+
+/// Gzip-encode `data`, offloading to a blocking thread once the body reaches
+/// [`GZIP_OFFLOAD_THRESHOLD`] so the CPU-bound encode does not block the async
+/// worker. Behaviour-preserving: the bytes returned are identical to
+/// [`gzip_encode`]; only *where* the work runs changes. Below the threshold it
+/// encodes inline to avoid the spawn overhead. Returns `None` if encoding fails
+/// or the blocking task is cancelled/panics (caller then passes the body
+/// through uncompressed).
+pub(crate) async fn gzip_encode_offloaded(
+    data: &[u8],
+    level: CompressionLevel,
+) -> Option<Vec<u8>> {
+    if data.len() < GZIP_OFFLOAD_THRESHOLD {
+        return gzip_encode(data, level);
+    }
+    // Own the bytes so the blocking task is `'static`; no lock is held here, so
+    // this never pins a guard across the `.await`.
+    let owned = data.to_vec();
+    tokio::task::spawn_blocking(move || gzip_encode(&owned, level))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Add `Accept-Encoding` to the response's `Vary` header, *merging* with any
@@ -936,7 +969,8 @@ impl Middleware for Compress {
             if client_accepts_gzip
                 && !already_encoded
                 && !response.body_ref().is_empty()
-                && let Some(compressed) = gzip_encode(response.body_ref(), level)
+                && let Some(compressed) =
+                    gzip_encode_offloaded(response.body_ref(), level).await
             {
                 let had_content_length = response.headers.contains_key("Content-Length");
                 response = response.with_body(compressed);
@@ -1344,5 +1378,30 @@ mod tests {
                 .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
             "Vary missing Accept-Encoding token: {vary}"
         );
+    }
+
+    /// A body larger than [`GZIP_OFFLOAD_THRESHOLD`] takes the `spawn_blocking`
+    /// offload path. The output must be byte-identical to inline encoding:
+    /// gzip-decoding it yields the original bytes exactly.
+    #[tokio::test]
+    async fn test_compress_offloads_large_body_and_round_trips() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        // Well above the offload threshold; non-repeating so it does not trivially
+        // collapse to nothing.
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(gunzip(resp.body_ref()), original);
     }
 }

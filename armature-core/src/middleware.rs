@@ -433,7 +433,8 @@ impl Middleware for CompressionMiddleware {
         if client_accepts_gzip
             && !already_encoded
             && response.body_ref().len() > self.min_size
-            && let Some(compressed) = crate::micro::gzip_encode(response.body_ref(), self.level)
+            && let Some(compressed) =
+                crate::micro::gzip_encode_offloaded(response.body_ref(), self.level).await
         {
             let had_content_length = response.headers.contains_key("Content-Length");
             response = response.with_body(compressed);
@@ -886,6 +887,41 @@ mod tests {
                 .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
             "Vary missing Accept-Encoding token: {vary}"
         );
+    }
+
+    /// A body larger than the gzip offload threshold is encoded on the
+    /// `spawn_blocking` path; the result must be byte-identical to inline
+    /// encoding, so gzip-decoding it reproduces the original exactly.
+    #[tokio::test]
+    async fn test_compression_middleware_offloads_large_body_and_round_trips() {
+        let threshold = crate::micro::GZIP_OFFLOAD_THRESHOLD;
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        // Well past the offload threshold, non-repeating so it does not trivially
+        // collapse to nothing.
+        let original: Vec<u8> = (0..(threshold * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > threshold);
+        let expected = original.clone();
+
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(gunzip(response.body_ref()), expected);
     }
 
     #[tokio::test]

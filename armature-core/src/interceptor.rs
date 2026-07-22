@@ -100,14 +100,33 @@ where
 
 /// Response-cache interceptor.
 ///
-/// Caches successful responses keyed by `method:path` for `ttl_seconds`. On a
-/// fresh hit the cached response is returned without invoking the downstream
-/// handler; otherwise the handler runs and its response is stored. Expired
-/// entries are pruned lazily whenever a new response is inserted.
+/// Caches successful **GET/HEAD** responses keyed by `METHOD:path?sorted-query`
+/// for `ttl_seconds`. Query parameters are folded into the key (sorted by name)
+/// so that requests differing only in the query string — e.g. `?q=cats` vs
+/// `?q=dogs` — never collide. On a fresh hit the cached response is returned
+/// without invoking the downstream handler; otherwise the handler runs and its
+/// response is stored. Expired entries are pruned lazily whenever a new response
+/// is inserted.
 ///
 /// The cache is process-local and shared across clones of the interceptor via
 /// an `Arc`, so a single `CacheInterceptor` value serves every request routed
 /// through it.
+///
+/// # Safety: do not use on per-user or authenticated routes
+///
+/// This is a **shared, unkeyed-by-identity** cache: it does not discriminate on
+/// `Authorization`, `Cookie`, or any other per-user dimension. Placing it on a
+/// route whose response depends on the caller's identity would serve one user's
+/// body to another. To reduce that blast radius it will **not store** a response
+/// that:
+///
+/// - was produced by a method other than `GET` or `HEAD`, or
+/// - carries a `Set-Cookie` header (session/user state), or
+/// - carries `Cache-Control: private` or `Cache-Control: no-store`.
+///
+/// These guards are defensive, not a substitute for correct placement: only
+/// attach this interceptor to routes whose responses are identical for every
+/// caller.
 pub struct CacheInterceptor {
     /// Freshness window, in seconds. A cached entry is served only while its
     /// age is strictly less than this. `0` disables caching (nothing is ever
@@ -150,6 +169,51 @@ fn clone_response(response: &HttpResponse) -> HttpResponse {
     copy
 }
 
+/// Build the cache key for a request: `METHOD:path` with a canonicalized query
+/// string appended as `?k1=v1&k2=v2`, sorted by parameter name. Sorting means
+/// logically-identical requests with different parameter orderings map to the
+/// same entry, while any difference in a query value yields a distinct entry
+/// (so `?q=cats` and `?q=dogs` never share a cached body).
+fn cache_key(request: &HttpRequest) -> String {
+    let mut key = format!("{}:{}", request.method, request.path);
+    if request.query_params.is_empty() {
+        return key;
+    }
+    let mut params: Vec<(&String, &String)> = request.query_params.iter().collect();
+    params.sort_by(|a, b| a.0.cmp(b.0));
+    key.push('?');
+    for (i, (k, v)) in params.iter().enumerate() {
+        if i > 0 {
+            key.push('&');
+        }
+        key.push_str(k);
+        key.push('=');
+        key.push_str(v);
+    }
+    key
+}
+
+/// Only safe, idempotent methods are cacheable here: `GET` and `HEAD`.
+fn is_cacheable_method(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")
+}
+
+/// Whether a response must not be stored in this shared, identity-agnostic
+/// cache: it carries a `Set-Cookie` (per-user session state) or a
+/// `Cache-Control` directive that forbids shared storage (`private`/`no-store`).
+fn must_not_cache(response: &HttpResponse) -> bool {
+    if !response.cookies.is_empty() || response.headers.contains_key("Set-Cookie") {
+        return true;
+    }
+    if let Some(cc) = response.headers.get("Cache-Control") {
+        return cc.split(',').any(|directive| {
+            let directive = directive.trim();
+            directive.eq_ignore_ascii_case("private") || directive.eq_ignore_ascii_case("no-store")
+        });
+    }
+    false
+}
+
 #[async_trait]
 impl Interceptor for CacheInterceptor {
     async fn intercept(
@@ -157,11 +221,13 @@ impl Interceptor for CacheInterceptor {
         context: ExecutionContext,
         next: Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>,
     ) -> Result<HttpResponse, Error> {
-        let cache_key = format!("{}:{}", context.request.method, context.request.path);
         let ttl = Duration::from_secs(self.ttl_seconds);
+        // Only safe methods (GET/HEAD) ever read from or write to the cache.
+        let method_cacheable = is_cacheable_method(&context.request.method);
+        let cache_key = cache_key(&context.request);
 
         // Lookup: serve a fresh hit without touching the handler.
-        {
+        if method_cacheable {
             let store = self.store.read();
             if let Some((stored_at, cached)) = store.get(&cache_key)
                 && stored_at.elapsed() < ttl
@@ -173,8 +239,15 @@ impl Interceptor for CacheInterceptor {
         // Miss (or stale): run the handler.
         let response = next.await?;
 
-        // Only cache success responses; errors and non-2xx must not be pinned.
-        if (200..300).contains(&response.status) && self.ttl_seconds > 0 {
+        // Store only when: the method is safe, caching is enabled, the response
+        // is a success (2xx), and it is safe to share — i.e. it does not carry a
+        // Set-Cookie or a private/no-store Cache-Control. This keeps per-user
+        // bodies and session cookies from bleeding across callers.
+        if method_cacheable
+            && self.ttl_seconds > 0
+            && (200..300).contains(&response.status)
+            && !must_not_cache(&response)
+        {
             let mut store = self.store.write();
             // Prune expired entries so a full-of-stale cache cannot grow without
             // bound on the insert path.
@@ -348,5 +421,106 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(interceptor.is_empty());
+    }
+
+    /// Requests that differ only in a query parameter must not collide: the
+    /// second must receive its own body, not a replay of the first. The old
+    /// `method:path` key ignored the query string entirely, so `?q=cats` and
+    /// `?q=dogs` shared one entry.
+    #[tokio::test]
+    async fn test_cache_interceptor_query_params_distinct() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut req_cats = HttpRequest::new("GET".into(), "/search".into());
+        req_cats.query_params.insert("q".into(), "cats".into());
+        let first = interceptor
+            .intercept(
+                ExecutionContext::new(req_cats),
+                counting_next(calls.clone(), 200, b"cats-result"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.body_ref(), b"cats-result");
+
+        let mut req_dogs = HttpRequest::new("GET".into(), "/search".into());
+        req_dogs.query_params.insert("q".into(), "dogs".into());
+        let second = interceptor
+            .intercept(
+                ExecutionContext::new(req_dogs),
+                counting_next(calls.clone(), 200, b"dogs-result"),
+            )
+            .await
+            .unwrap();
+        // Must be the dogs handler's body, not a replay of the cats entry.
+        assert_eq!(second.body_ref(), b"dogs-result");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    fn cookie_next(
+        calls: Arc<AtomicUsize>,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
+        Box::pin(async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let mut resp = HttpResponse::ok();
+            resp.body = format!("user-{n}").into_bytes();
+            resp.cookies.push(format!("session=secret-{n}; HttpOnly"));
+            Ok(resp)
+        })
+    }
+
+    /// A response carrying a `Set-Cookie` holds per-user session state and must
+    /// never be cached: the handler must be re-invoked on the next request and
+    /// user A's cookie must never be replayed to user B.
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_set_cookie() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first = interceptor
+            .intercept(
+                ExecutionContext::new(HttpRequest::new("GET".into(), "/me".into())),
+                cookie_next(calls.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.body_ref(), b"user-0");
+        assert_eq!(first.cookies, vec!["session=secret-0; HttpOnly".to_string()]);
+
+        // Second request must NOT be served user-0's body or cookie from cache.
+        let second = interceptor
+            .intercept(
+                ExecutionContext::new(HttpRequest::new("GET".into(), "/me".into())),
+                cookie_next(calls.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.body_ref(), b"user-1");
+        assert_eq!(second.cookies, vec!["session=secret-1; HttpOnly".to_string()]);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a Set-Cookie response must be re-fetched, never cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// Only safe methods (GET/HEAD) are cached. A cacheable-status POST must run
+    /// its handler on every request and must not be stored.
+    #[tokio::test]
+    async fn test_cache_interceptor_skips_unsafe_methods() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("POST".into(), "/submit".into()));
+            interceptor
+                .intercept(ctx, counting_next(calls.clone(), 200, b"ok"))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(interceptor.is_empty(), "POST responses must not be cached");
     }
 }
