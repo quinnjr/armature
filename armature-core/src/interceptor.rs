@@ -170,10 +170,20 @@ fn clone_response(response: &HttpResponse) -> HttpResponse {
 }
 
 /// Build the cache key for a request: `METHOD:path` with a canonicalized query
-/// string appended as `?k1=v1&k2=v2`, sorted by parameter name. Sorting means
-/// logically-identical requests with different parameter orderings map to the
-/// same entry, while any difference in a query value yields a distinct entry
-/// (so `?q=cats` and `?q=dogs` never share a cached body).
+/// string appended, sorted by parameter name. Sorting means logically-identical
+/// requests with different parameter orderings map to the same entry, while any
+/// difference in a query value yields a distinct entry (so `?q=cats` and
+/// `?q=dogs` never share a cached body).
+///
+/// Query params are already percent-decoded by the time they reach here, so a
+/// decoded value may itself contain `&` or `=`. To keep the key injective we
+/// length-prefix each key and value as `{len}:{bytes}` before joining with `=`
+/// and `&` — the prefix lets a (hypothetical) parser skip exactly `len` bytes
+/// regardless of what delimiter-like characters they contain, so two params
+/// with different decoded content can never serialize to the same key. (E.g.
+/// decoded `{"a": "1&b=2"}` and decoded `{"a": "1", "b": "2"}` would both join
+/// to the literal string `a=1&b=2` under naive concatenation; length-prefixing
+/// makes them `5:1&b=2` vs. `1:1` + `1:2` under distinct keys.)
 fn cache_key(request: &HttpRequest) -> String {
     let mut key = format!("{}:{}", request.method, request.path);
     if request.query_params.is_empty() {
@@ -182,13 +192,15 @@ fn cache_key(request: &HttpRequest) -> String {
     let mut params: Vec<(&String, &String)> = request.query_params.iter().collect();
     params.sort_by(|a, b| a.0.cmp(b.0));
     key.push('?');
-    for (i, (k, v)) in params.iter().enumerate() {
-        if i > 0 {
-            key.push('&');
-        }
+    for (k, v) in params {
+        key.push_str(&k.len().to_string());
+        key.push(':');
         key.push_str(k);
         key.push('=');
+        key.push_str(&v.len().to_string());
+        key.push(':');
         key.push_str(v);
+        key.push('&');
     }
     key
 }
@@ -201,11 +213,27 @@ fn is_cacheable_method(method: &str) -> bool {
 /// Whether a response must not be stored in this shared, identity-agnostic
 /// cache: it carries a `Set-Cookie` (per-user session state) or a
 /// `Cache-Control` directive that forbids shared storage (`private`/`no-store`).
+///
+/// `HttpResponse.headers` (`LazyHeaders`) is backed by a plain `HashMap` whose
+/// `get`/`contains_key` are case-sensitive, but HTTP header *names* are not —
+/// and nothing normalizes response header casing before it reaches here. A
+/// handler emitting `cache-control: private` or `set-cookie: ...` (any casing
+/// is legal) must be caught just like the canonically-cased form, so both
+/// checks walk `headers.iter()` and compare names with `eq_ignore_ascii_case`.
 fn must_not_cache(response: &HttpResponse) -> bool {
-    if !response.cookies.is_empty() || response.headers.contains_key("Set-Cookie") {
+    if !response.cookies.is_empty() {
         return true;
     }
-    if let Some(cc) = response.headers.get("Cache-Control") {
+    let mut cache_control: Option<&str> = None;
+    for (name, value) in response.headers.iter() {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return true;
+        }
+        if name.eq_ignore_ascii_case("cache-control") {
+            cache_control = Some(value.as_str());
+        }
+    }
+    if let Some(cc) = cache_control {
         return cc.split(',').any(|directive| {
             let directive = directive.trim();
             directive.eq_ignore_ascii_case("private") || directive.eq_ignore_ascii_case("no-store")
@@ -522,5 +550,141 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(interceptor.is_empty(), "POST responses must not be cached");
+    }
+
+    // ---- Round 2 regression tests -----------------------------------------
+
+    fn header_next(
+        calls: Arc<AtomicUsize>,
+        header_name: &'static str,
+        header_value: &'static str,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
+        Box::pin(async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let mut resp = HttpResponse::ok();
+            resp.body = format!("body-{n}").into_bytes();
+            resp.headers
+                .insert(header_name.to_string(), header_value.to_string());
+            Ok(resp)
+        })
+    }
+
+    /// FIX A (RED->GREEN): HTTP header names are case-insensitive and nothing
+    /// normalizes response header casing before it reaches the cache. A
+    /// response carrying a lowercased `cache-control: private` must be refused
+    /// exactly like the canonically-cased form.
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_lowercase_cache_control_private() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/private".into()));
+            interceptor
+                .intercept(ctx, header_next(calls.clone(), "cache-control", "private"))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a lowercased Cache-Control: private response must never be cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// FIX A (RED->GREEN): same as above for the `no-store` directive, and for
+    /// a value with mixed case and trailing directives (`No-Store, max-age=0`).
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_lowercase_cache_control_no_store() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/no-store".into()));
+            interceptor
+                .intercept(
+                    ctx,
+                    header_next(calls.clone(), "cache-control", "No-Store, max-age=0"),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a lowercased Cache-Control: no-store response must never be cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// FIX A (RED->GREEN): the `Set-Cookie` *header* check (independent of the
+    /// `response.cookies` backstop) must also be case-insensitive.
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_lowercase_set_cookie_header() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/lc-cookie".into()));
+            interceptor
+                .intercept(
+                    ctx,
+                    header_next(calls.clone(), "set-cookie", "session=abc; HttpOnly"),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a lowercased set-cookie header must never be cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// FIX B (RED->GREEN): two requests whose DECODED query params differ —
+    /// `{"a": "1&b=2"}` (what `?a=1%26b%3D2` decodes to) vs.
+    /// `{"a": "1", "b": "2"}` (what `?a=1&b=2` decodes to) — must not collide
+    /// on the same cache key. The old joiner concatenated raw decoded values
+    /// with literal unescaped `&`/`=`, so both produced the literal string
+    /// `a=1&b=2` and shared one entry.
+    #[tokio::test]
+    async fn test_cache_interceptor_query_delimiter_injection_distinct() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut req_encoded = HttpRequest::new("GET".into(), "/inject".into());
+        req_encoded.query_params.insert("a".into(), "1&b=2".into());
+        let first = interceptor
+            .intercept(
+                ExecutionContext::new(req_encoded),
+                counting_next(calls.clone(), 200, b"encoded-result"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.body_ref(), b"encoded-result");
+
+        let mut req_plain = HttpRequest::new("GET".into(), "/inject".into());
+        req_plain.query_params.insert("a".into(), "1".into());
+        req_plain.query_params.insert("b".into(), "2".into());
+        let second = interceptor
+            .intercept(
+                ExecutionContext::new(req_plain),
+                counting_next(calls.clone(), 200, b"plain-result"),
+            )
+            .await
+            .unwrap();
+
+        // Must be the plain handler's own body, not a replay of the encoded entry.
+        assert_eq!(second.body_ref(), b"plain-result");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "delimiter-colliding decoded query params must not share a cache entry"
+        );
     }
 }
