@@ -887,10 +887,7 @@ pub(crate) const GZIP_OFFLOAD_THRESHOLD: usize = 32 * 1024;
 /// encodes inline to avoid the spawn overhead. Returns `None` if encoding fails
 /// or the blocking task is cancelled/panics (caller then passes the body
 /// through uncompressed).
-pub(crate) async fn gzip_encode_offloaded(
-    data: &[u8],
-    level: CompressionLevel,
-) -> Option<Vec<u8>> {
+pub(crate) async fn gzip_encode_offloaded(data: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
     if data.len() < GZIP_OFFLOAD_THRESHOLD {
         return gzip_encode(data, level);
     }
@@ -969,8 +966,7 @@ impl Middleware for Compress {
             if client_accepts_gzip
                 && !already_encoded
                 && !response.body_ref().is_empty()
-                && let Some(compressed) =
-                    gzip_encode_offloaded(response.body_ref(), level).await
+                && let Some(compressed) = gzip_encode_offloaded(response.body_ref(), level).await
             {
                 let had_content_length = response.headers.contains_key("Content-Length");
                 response = response.with_body(compressed);

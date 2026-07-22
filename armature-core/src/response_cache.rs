@@ -785,8 +785,7 @@ impl EvictionIndex {
         let mut seen = HashSet::with_capacity(entries.len());
         let mut compacted = VecDeque::with_capacity(entries.len());
         for (key, seq) in self.order.drain(..) {
-            if entries.get(&key).is_some_and(|e| e.eviction_seq == seq)
-                && seen.insert(key.clone())
+            if entries.get(&key).is_some_and(|e| e.eviction_seq == seq) && seen.insert(key.clone())
             {
                 compacted.push_back((key, seq));
             }

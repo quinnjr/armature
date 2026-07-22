@@ -513,7 +513,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.body_ref(), b"user-0");
-        assert_eq!(first.cookies, vec!["session=secret-0; HttpOnly".to_string()]);
+        assert_eq!(
+            first.cookies,
+            vec!["session=secret-0; HttpOnly".to_string()]
+        );
 
         // Second request must NOT be served user-0's body or cookie from cache.
         let second = interceptor
@@ -524,7 +527,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.body_ref(), b"user-1");
-        assert_eq!(second.cookies, vec!["session=secret-1; HttpOnly".to_string()]);
+        assert_eq!(
+            second.cookies,
+            vec!["session=secret-1; HttpOnly".to_string()]
+        );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             2,
