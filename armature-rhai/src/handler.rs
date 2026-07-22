@@ -434,6 +434,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_call_after_header_only_mutation_preserves_exact_binary_body() {
+        // Guards the `ResponseBinding` storage-representation change
+        // (`Option<Vec<u8>>` -> `Option<bytes::Bytes>`): a header-only
+        // mutation must round-trip an arbitrary binary (non-UTF-8) body
+        // through `from_http_response` -> scope clone ->
+        // `into_http_response` with byte-for-byte fidelity.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("after.rhai"),
+            r#"response.header("x-after", "binary-ok");"#,
+        )
+        .unwrap();
+
+        let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
+        let middleware = ScriptMiddleware::after(engine, "after.rhai");
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let binary_body: Vec<u8> = vec![0x00, 0xFF, 0x01, 0xFE, 0x80, 0x7F, 0x00, 0x00, 0xDE, 0xAD];
+        let real_response = HttpResponse::new(200).with_body(binary_body.clone());
+
+        let amended = middleware
+            .call_after(&request, real_response)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            amended.headers.get("x-after"),
+            Some(&"binary-ok".to_string())
+        );
+        assert_eq!(
+            amended.body_ref(),
+            binary_body.as_slice(),
+            "header-only mutation must preserve the exact binary body bytes"
+        );
+    }
+
+    #[tokio::test]
     async fn test_call_after_falls_back_to_original_response_if_script_stomps_response_variable() {
         // If a script reassigns `response` to something that isn't a
         // ResponseBinding at all (a script bug, not a normal outcome), the

@@ -1,6 +1,7 @@
 //! Rhai bindings for Armature HTTP types.
 
 use armature_core::{HttpRequest, HttpResponse};
+use bytes::Bytes;
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -164,7 +165,13 @@ pub struct ResponseBinding {
     /// round-tripping a response through a script (e.g. `call_after`) never
     /// silently drops cookies.
     cookies: Vec<String>,
-    body: Option<Vec<u8>>,
+    /// Stored as `Bytes` (not `Vec<u8>`) so that `.clone()`-ing a
+    /// `ResponseBinding` — e.g. to seed both the `response` and
+    /// `original_response` script scope variables in `call_after` — is an
+    /// O(1) refcount bump instead of a full body memcpy. The one
+    /// unavoidable copy happens once, in `from_http_response`, converting
+    /// from the real `HttpResponse`'s `&[u8]` into an owned `Bytes`.
+    body: Option<Bytes>,
 }
 
 impl Default for ResponseBinding {
@@ -200,7 +207,7 @@ impl ResponseBinding {
             status: response.status,
             headers,
             cookies: response.cookies.clone(),
-            body: Some(response.body_ref().to_vec()),
+            body: Some(Bytes::copy_from_slice(response.body_ref())),
         }
     }
 
@@ -218,7 +225,7 @@ impl ResponseBinding {
 
     /// Set body as text.
     pub fn body(&mut self, content: String) -> Self {
-        self.body = Some(content.into_bytes());
+        self.body = Some(Bytes::from(content.into_bytes()));
         self.clone()
     }
 
@@ -229,7 +236,7 @@ impl ResponseBinding {
             .map_err(|e| Box::new(EvalAltResult::from(e.to_string())))?;
         self.headers
             .insert("content-type".to_string(), "application/json".to_string());
-        self.body = Some(json.into_bytes());
+        self.body = Some(Bytes::from(json.into_bytes()));
         Ok(self.clone())
     }
 
@@ -313,7 +320,10 @@ impl ResponseBinding {
         response.cookies = self.cookies;
 
         if let Some(body) = self.body {
-            response = response.with_body(body);
+            // `with_bytes_body` stores the `Bytes` directly on
+            // `HttpResponse` (its `body_bytes` field), so this is O(1) —
+            // no `.to_vec()` copy back into a `Vec<u8>` is needed.
+            response = response.with_bytes_body(body);
         }
 
         response
