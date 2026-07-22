@@ -263,7 +263,7 @@ pub fn derive_api_model_impl(input: TokenStream) -> TokenStream {
         && let Fields::Named(named) = &s.fields
     {
         for field in &named.named {
-            if has_api_skip(field) && field.ident.is_some() {
+            if has_api_skip(field) {
                 skip_fields.push(field);
             }
         }

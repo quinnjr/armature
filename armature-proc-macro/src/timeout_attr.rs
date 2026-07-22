@@ -108,8 +108,8 @@ impl Parse for TimeoutArgs {
 /// # How It Works
 ///
 /// The macro generates a wrapper function that:
-/// 1. Creates a `TimeoutMiddleware` with the specified duration
-/// 2. Wraps the original handler function
+/// 1. Defines an inner function containing the original handler body
+/// 2. Awaits the inner function's call wrapped in `tokio::time::timeout(...)` with the specified duration
 /// 3. Returns a timeout error if the handler doesn't complete in time
 pub fn timeout_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as TimeoutArgs);

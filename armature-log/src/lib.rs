@@ -720,29 +720,6 @@ pub fn log(level: Level, target: &str, message: &str) {
     }
 }
 
-#[allow(dead_code)]
-fn log_pretty(level: Level, target: &str, message: &str, config: &LogConfig) {
-    log_pretty_runtime(
-        level,
-        target,
-        message,
-        config.color,
-        config.timestamps,
-        config.module_path,
-    );
-}
-
-#[allow(dead_code)]
-fn log_compact(level: Level, target: &str, message: &str, config: &LogConfig) {
-    log_compact_runtime(
-        level,
-        target,
-        message,
-        config.timestamps,
-        config.module_path,
-    );
-}
-
 // Runtime-configurable versions
 
 fn log_pretty_runtime(

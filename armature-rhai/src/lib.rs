@@ -48,7 +48,7 @@
 //!
 //! // Access request data
 //! let user_id = request.param("id");
-//! let method = request.method();
+//! let method = request.method;
 //!
 //! // Handle different methods
 //! if method == "GET" {

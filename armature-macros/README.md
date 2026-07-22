@@ -23,6 +23,7 @@ armature-macros = { path = "../armature-macros" }
 ## Quick Start
 
 ```rust
+use armature_proc_macro::get;
 use armature_macros::prelude::*;
 
 #[get("/users/:id")]
@@ -154,7 +155,7 @@ match db.query().await {
 ## Complete Example
 
 ```rust
-use armature_macro::{controller, get, post, put, delete};
+use armature_proc_macro::{controller, get, post, put, delete};
 use armature_macros::prelude::*;
 
 #[controller("/api/users")]

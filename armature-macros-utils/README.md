@@ -131,6 +131,8 @@ async fn test_endpoint() {
 These crates work together:
 
 ```rust
+use armature_proc_macro::get;
+
 // Declarative macros
 use armature_macros::prelude::*;
 

@@ -366,7 +366,7 @@ pub fn cache(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Requirements
 ///
 /// - Function must be async
-/// - Function should return `ToolCallResult` or implement `Into<ToolCallResult>`
+/// - Function must return `ToolCallResult`
 /// - Input parameter should implement `Deserialize`
 #[proc_macro_attribute]
 pub fn mcp(attr: TokenStream, item: TokenStream) -> TokenStream {

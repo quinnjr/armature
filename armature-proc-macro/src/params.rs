@@ -19,7 +19,7 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// }
 ///
 /// // In a handler
-/// let user: CreateUser = body!(request)?;
+/// let user: CreateUser = body!(request, CreateUser)?;
 /// // Or using the extractor
 /// let body: Body<CreateUser> = Body::from_request(&request)?;
 /// ```
@@ -64,7 +64,7 @@ pub fn body_derive_impl(input: TokenStream) -> TokenStream {
 /// #[derive(Param)]
 /// struct UserId(u32);
 ///
-/// // Usage: let id: UserId = path!(request, "id")?;
+/// // Usage: let id: UserId = path!(request, "id", UserId)?;
 ///
 /// // For structs with multiple path params
 /// #[derive(Param, Deserialize)]
@@ -193,7 +193,7 @@ pub fn param_derive_impl(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// // In a handler
-/// let filters: UserFilters = query!(request)?;
+/// let filters: UserFilters = query!(request, UserFilters)?;
 /// // Or using the extractor
 /// let query: Query<UserFilters> = Query::from_request(&request)?;
 /// ```
