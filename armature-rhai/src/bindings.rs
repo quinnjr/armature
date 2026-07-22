@@ -168,9 +168,10 @@ pub struct ResponseBinding {
     /// Stored as `Bytes` (not `Vec<u8>`) so that `.clone()`-ing a
     /// `ResponseBinding` — e.g. to seed both the `response` and
     /// `original_response` script scope variables in `call_after` — is an
-    /// O(1) refcount bump instead of a full body memcpy. The one
-    /// unavoidable copy happens once, in `from_http_response`, converting
-    /// from the real `HttpResponse`'s `&[u8]` into an owned `Bytes`.
+    /// O(1) refcount bump instead of a full body memcpy. `from_http_response`
+    /// obtains its `Bytes` via `HttpResponse::body_bytes()`, which is itself
+    /// O(1) when the source response is already `Bytes`-backed and only copies
+    /// when it still holds a `Vec<u8>` body.
     body: Option<Bytes>,
 }
 
@@ -207,7 +208,7 @@ impl ResponseBinding {
             status: response.status,
             headers,
             cookies: response.cookies.clone(),
-            body: Some(Bytes::copy_from_slice(response.body_ref())),
+            body: Some(response.body_bytes()),
         }
     }
 
