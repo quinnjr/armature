@@ -32,10 +32,12 @@ pub struct FerronManager {
     /// by `build()` when `auto_reload` is enabled and a Tokio runtime is
     /// available to run it on.
     watch_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// Count of `reload()` invocations. Exposed via `reload_count()` both
-    /// as a genuinely useful operational stat and so tests can verify the
-    /// config-file watcher debounces a burst of filesystem events into a
-    /// single reload rather than one reload per raw event.
+    /// Count of reload signals to Ferron — bumped by both `reload()`
+    /// (regenerate + rewrite + signal) and `signal_reload()` (signal only,
+    /// the watcher's path). Exposed via `reload_count()` both as a genuinely
+    /// useful operational stat and so tests can verify the config-file
+    /// watcher debounces a burst of filesystem events into a single reload
+    /// rather than one reload per raw event.
     reload_count: AtomicU64,
 }
 
@@ -166,7 +168,8 @@ impl FerronManager {
         self.process.reload().await
     }
 
-    /// Number of times `reload()` has been invoked so far.
+    /// Number of reload signals sent to Ferron so far, counting both
+    /// `reload()` and the watcher's `signal_reload()`.
     ///
     /// This is a genuinely useful operational stat (e.g. for dashboards or
     /// alerting on unexpectedly frequent reloads), and also lets tests
