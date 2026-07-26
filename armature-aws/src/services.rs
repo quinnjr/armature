@@ -20,6 +20,43 @@ use tracing::info;
 
 use crate::{AwsConfig, AwsError, CredentialsSource, Result};
 
+/// Double-checked lazy initializer for a service client behind a `RwLock`.
+///
+/// Takes the fast path under a read lock when the client already exists, and
+/// otherwise initializes it under the write lock (re-checking so a racing
+/// writer's client is reused). `$init` is evaluated at most once and only when
+/// the slot is empty. Expands to the accessor's tail expression, returning a
+/// clone of the client wrapped in `Ok`.
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "sqs",
+    feature = "sns",
+    feature = "ses",
+    feature = "lambda",
+    feature = "secrets-manager",
+    feature = "ssm",
+    feature = "cloudwatch",
+    feature = "kinesis",
+    feature = "kms",
+    feature = "cognito"
+))]
+macro_rules! get_or_init {
+    ($lock:expr, $init:expr) => {{
+        // Fast path: already initialized — only take a read lock.
+        if let Some(client) = $lock.read().as_ref() {
+            return Ok(client.clone());
+        }
+
+        // Slow path: initialize under the write lock (double-checked).
+        let mut guard = $lock.write();
+        if guard.is_none() {
+            *guard = Some($init);
+        }
+        Ok(guard.as_ref().unwrap().clone())
+    }};
+}
+
 /// Container for AWS service clients.
 ///
 /// Services are loaded lazily based on configuration.
@@ -107,7 +144,7 @@ impl AwsServices {
 
         // Pre-initialize enabled services
         let services = Arc::new(services);
-        services.initialize_enabled_services().await;
+        services.initialize_enabled_services().await?;
 
         Ok(services)
     }
@@ -121,10 +158,41 @@ impl AwsServices {
             loader = loader.region(aws_config::Region::new(region.clone()));
         }
 
-        // Set credentials
+        // Set credentials.
+        //
+        // Each `CredentialsSource` variant selects a concrete provider from
+        // `aws-config`, rather than silently delegating to the default chain:
+        //
+        // * `Environment` -> `EnvironmentVariableCredentialsProvider` (reads
+        //   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`).
+        // * `Profile`     -> the named profile from `~/.aws/{config,credentials}`.
+        // * `IamRole`     -> `ImdsCredentialsProvider` (EC2/ECS instance metadata).
+        // * `WebIdentity` -> `WebIdentityTokenCredentialsProvider` (EKS/OIDC via
+        //   `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`).
+        // * `Explicit`    -> the supplied static credentials.
+        // * `Auto`        -> the full default credential provider chain (which
+        //   tries env, profile, web-identity, ECS, and IMDS in order).
         match &config.credentials {
+            CredentialsSource::Environment => {
+                loader = loader.credentials_provider(
+                    aws_config::environment::EnvironmentVariableCredentialsProvider::new(),
+                );
+            }
             CredentialsSource::Profile(profile) => {
                 loader = loader.profile_name(profile);
+            }
+            CredentialsSource::IamRole => {
+                let provider = aws_config::imds::credentials::ImdsCredentialsProvider::builder()
+                    .configure(&Self::provider_config(config))
+                    .build();
+                loader = loader.credentials_provider(provider);
+            }
+            CredentialsSource::WebIdentity => {
+                let provider =
+                    aws_config::web_identity_token::WebIdentityTokenCredentialsProvider::builder()
+                        .configure(&Self::provider_config(config))
+                        .build();
+                loader = loader.credentials_provider(provider);
             }
             CredentialsSource::Explicit {
                 access_key_id,
@@ -140,8 +208,8 @@ impl AwsServices {
                 );
                 loader = loader.credentials_provider(creds);
             }
-            _ => {
-                // Use default credential chain
+            CredentialsSource::Auto => {
+                // Use the SDK default credential provider chain.
             }
         }
 
@@ -153,61 +221,73 @@ impl AwsServices {
         Ok(loader.load().await)
     }
 
+    /// Build a `ProviderConfig` for the IMDS / web-identity credential
+    /// providers so they resolve STS/metadata endpoints against the configured
+    /// region instead of falling back to their own default region lookup.
+    fn provider_config(config: &AwsConfig) -> aws_config::provider_config::ProviderConfig {
+        let region = config
+            .region
+            .as_ref()
+            .map(|r| aws_config::Region::new(r.clone()));
+        aws_config::provider_config::ProviderConfig::without_region().with_region(region)
+    }
+
     /// Initialize all enabled services.
-    async fn initialize_enabled_services(&self) {
+    async fn initialize_enabled_services(&self) -> Result<()> {
         for service in &self.config.enabled_services {
             match service.as_str() {
                 #[cfg(feature = "s3")]
                 "s3" => {
-                    let _ = self.s3();
+                    self.s3()?;
                 }
                 #[cfg(feature = "dynamodb")]
                 "dynamodb" => {
-                    let _ = self.dynamodb();
+                    self.dynamodb()?;
                 }
                 #[cfg(feature = "sqs")]
                 "sqs" => {
-                    let _ = self.sqs();
+                    self.sqs()?;
                 }
                 #[cfg(feature = "sns")]
                 "sns" => {
-                    let _ = self.sns();
+                    self.sns()?;
                 }
                 #[cfg(feature = "ses")]
                 "ses" => {
-                    let _ = self.ses();
+                    self.ses()?;
                 }
                 #[cfg(feature = "lambda")]
                 "lambda" => {
-                    let _ = self.lambda();
+                    self.lambda()?;
                 }
                 #[cfg(feature = "secrets-manager")]
                 "secrets-manager" => {
-                    let _ = self.secrets_manager();
+                    self.secrets_manager()?;
                 }
                 #[cfg(feature = "ssm")]
                 "ssm" => {
-                    let _ = self.ssm();
+                    self.ssm()?;
                 }
                 #[cfg(feature = "cloudwatch")]
                 "cloudwatch" => {
-                    let _ = self.cloudwatch();
+                    self.cloudwatch()?;
                 }
                 #[cfg(feature = "kinesis")]
                 "kinesis" => {
-                    let _ = self.kinesis();
+                    self.kinesis()?;
                 }
                 #[cfg(feature = "kms")]
                 "kms" => {
-                    let _ = self.kms();
+                    self.kms()?;
                 }
                 #[cfg(feature = "cognito")]
                 "cognito" => {
-                    let _ = self.cognito();
+                    self.cognito()?;
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 
     /// Get the configuration.
@@ -234,16 +314,15 @@ impl AwsServices {
             return Err(AwsError::not_configured("s3"));
         }
 
-        let mut client = self.s3.write();
-        if client.is_none() {
+        get_or_init!(self.s3, {
             let mut config = aws_sdk_s3::config::Builder::from(&self.sdk_config);
             if self.config.endpoint_url.is_some() {
                 config = config.force_path_style(true);
             }
-            *client = Some(aws_sdk_s3::Client::from_conf(config.build()));
+            let client = aws_sdk_s3::Client::from_conf(config.build());
             info!("S3 client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "s3"))]
@@ -258,12 +337,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("dynamodb"));
         }
 
-        let mut client = self.dynamodb.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_dynamodb::Client::new(&self.sdk_config));
+        get_or_init!(self.dynamodb, {
+            let client = aws_sdk_dynamodb::Client::new(&self.sdk_config);
             info!("DynamoDB client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "dynamodb"))]
@@ -278,12 +356,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("sqs"));
         }
 
-        let mut client = self.sqs.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sqs::Client::new(&self.sdk_config));
+        get_or_init!(self.sqs, {
+            let client = aws_sdk_sqs::Client::new(&self.sdk_config);
             info!("SQS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "sqs"))]
@@ -298,12 +375,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("sns"));
         }
 
-        let mut client = self.sns.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sns::Client::new(&self.sdk_config));
+        get_or_init!(self.sns, {
+            let client = aws_sdk_sns::Client::new(&self.sdk_config);
             info!("SNS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "sns"))]
@@ -318,12 +394,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("ses"));
         }
 
-        let mut client = self.ses.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sesv2::Client::new(&self.sdk_config));
+        get_or_init!(self.ses, {
+            let client = aws_sdk_sesv2::Client::new(&self.sdk_config);
             info!("SES client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "ses"))]
@@ -338,12 +413,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("lambda"));
         }
 
-        let mut client = self.lambda.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_lambda::Client::new(&self.sdk_config));
+        get_or_init!(self.lambda, {
+            let client = aws_sdk_lambda::Client::new(&self.sdk_config);
             info!("Lambda client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "lambda"))]
@@ -358,12 +432,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("secrets-manager"));
         }
 
-        let mut client = self.secrets_manager.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_secretsmanager::Client::new(&self.sdk_config));
+        get_or_init!(self.secrets_manager, {
+            let client = aws_sdk_secretsmanager::Client::new(&self.sdk_config);
             info!("Secrets Manager client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "secrets-manager"))]
@@ -378,12 +451,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("ssm"));
         }
 
-        let mut client = self.ssm.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_ssm::Client::new(&self.sdk_config));
+        get_or_init!(self.ssm, {
+            let client = aws_sdk_ssm::Client::new(&self.sdk_config);
             info!("SSM client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "ssm"))]
@@ -398,12 +470,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("cloudwatch"));
         }
 
-        let mut client = self.cloudwatch.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_cloudwatch::Client::new(&self.sdk_config));
+        get_or_init!(self.cloudwatch, {
+            let client = aws_sdk_cloudwatch::Client::new(&self.sdk_config);
             info!("CloudWatch client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "cloudwatch"))]
@@ -418,12 +489,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("kinesis"));
         }
 
-        let mut client = self.kinesis.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_kinesis::Client::new(&self.sdk_config));
+        get_or_init!(self.kinesis, {
+            let client = aws_sdk_kinesis::Client::new(&self.sdk_config);
             info!("Kinesis client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "kinesis"))]
@@ -438,12 +508,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("kms"));
         }
 
-        let mut client = self.kms.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_kms::Client::new(&self.sdk_config));
+        get_or_init!(self.kms, {
+            let client = aws_sdk_kms::Client::new(&self.sdk_config);
             info!("KMS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "kms"))]
@@ -458,12 +527,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("cognito"));
         }
 
-        let mut client = self.cognito.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_cognito_idp::Client::new(&self.sdk_config));
+        get_or_init!(self.cognito, {
+            let client = aws_sdk_cognito_idp::Client::new(&self.sdk_config);
             info!("Cognito client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "cognito"))]

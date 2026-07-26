@@ -20,26 +20,46 @@ armature-aws = "0.1"
 
 ## Quick Start
 
+`armature-aws` does not wrap the AWS SDK. You configure which services to
+enable, construct an `AwsServices` container, and pull raw
+`aws_sdk_*::Client`s out of it via accessors like `services.s3()`.
+
 ```rust
-use armature_aws::{S3Client, DynamoClient, SqsClient};
+use armature_aws::{AwsConfig, AwsServices};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // S3
-    let s3 = S3Client::new("us-east-1").await?;
-    s3.put_object("bucket", "key", bytes).await?;
+    // Choose region + which services to load.
+    let config = AwsConfig::builder()
+        .region("us-east-1")
+        .enable_s3()
+        .enable_dynamodb()
+        .enable_sqs()
+        .build();
 
-    // DynamoDB
-    let dynamo = DynamoClient::new("us-east-1").await?;
-    dynamo.put_item("table", item).await?;
+    let services = AwsServices::new(config).await?;
 
-    // SQS
-    let sqs = SqsClient::new("us-east-1").await?;
-    sqs.send_message("queue-url", "message").await?;
+    // Accessors return the raw AWS SDK clients.
+    let s3 = services.s3()?;
+    let buckets = s3.list_buckets().send().await?;
+
+    let dynamo = services.dynamodb()?;
+    let tables = dynamo.list_tables().send().await?;
+
+    let sqs = services.sqs()?;
+    sqs.send_message()
+        .queue_url("https://sqs.us-east-1.amazonaws.com/123456789012/my-queue")
+        .message_body("hello")
+        .send()
+        .await?;
 
     Ok(())
 }
 ```
+
+Each service requires its Cargo feature (e.g. `features = ["s3", "dynamodb",
+"sqs"]`); accessors for services that were not enabled return an error.
+Configuration can also be read from the environment with `AwsConfig::from_env()`.
 
 ## Credential Chain
 

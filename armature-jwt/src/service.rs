@@ -302,7 +302,7 @@ mod tests {
         // (refresh_token.exp - now ≈ refresh_expires_in, within tolerance of ±2 seconds)
         let now = chrono::Utc::now().timestamp();
         let actual_lifetime = r_exp - now;
-        let expected = pair.refresh_expires_in as i64;
+        let expected = pair.refresh_expires_in;
         assert!(
             (actual_lifetime - expected).abs() <= 2,
             "TokenPair.refresh_expires_in {} must match refresh token lifetime {} (±2s)",

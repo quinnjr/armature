@@ -54,12 +54,36 @@
 //! ```
 
 mod config;
+#[cfg(any(
+    feature = "storage",
+    feature = "pubsub",
+    feature = "secret-manager",
+    feature = "cloud-run",
+    feature = "cloud-functions"
+))]
+mod credentials;
 mod error;
+#[cfg(any(
+    feature = "secret-manager",
+    feature = "cloud-run",
+    feature = "cloud-functions"
+))]
+mod rest;
 mod services;
 
 pub use config::{CredentialsSource, GcpConfig, GcpConfigBuilder};
 pub use error::{GcpError, Result};
 pub use services::GcpServices;
+
+// Re-export the REST service client types.
+#[cfg(feature = "secret-manager")]
+pub use rest::SecretManagerClient;
+
+#[cfg(feature = "cloud-run")]
+pub use rest::CloudRunClient;
+
+#[cfg(feature = "cloud-functions")]
+pub use rest::CloudFunctionsClient;
 
 // Re-export enabled service clients
 #[cfg(feature = "storage")]

@@ -8,10 +8,61 @@ use tracing::info;
 
 use crate::{GcpConfig, GcpError, Result};
 
+/// Generate the eager initializer, the typed accessor, and the feature-absent
+/// fallback for a REST-backed service. These three follow an identical shape;
+/// only the feature, service key, field, client type, method names, and log
+/// label differ, so a declarative macro removes the near-verbatim triplication.
+macro_rules! rest_service {
+    (
+        feature = $feature:literal,
+        service = $service:literal,
+        field = $field:ident,
+        client = $client:ty,
+        init = $init:ident,
+        accessor = $accessor:ident,
+        label = $label:literal $(,)?
+    ) => {
+        #[cfg(feature = $feature)]
+        async fn $init(&self) -> Result<()> {
+            if self.$field.read().is_some() {
+                return Ok(());
+            }
+            let built = <$client>::new(&self.config).await?;
+            let mut client = self.$field.write();
+            if client.is_none() {
+                *client = Some(built);
+                info!("{} client initialized", $label);
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = $feature)]
+        #[doc = concat!("Get the ", $label, " client.")]
+        pub fn $accessor(&self) -> Result<$client> {
+            if !self.config.is_enabled($service) {
+                return Err(GcpError::not_configured($service));
+            }
+
+            self.$field.read().clone().ok_or_else(|| {
+                GcpError::Service(concat!($label, " client not initialized").to_string())
+            })
+        }
+
+        #[cfg(not(feature = $feature))]
+        pub fn $accessor(&self) -> Result<()> {
+            Err(GcpError::not_enabled($service))
+        }
+    };
+}
+
 /// Container for GCP service clients.
 ///
-/// Services are loaded lazily based on configuration.
-/// Only enabled services are initialized.
+/// Which services are compiled in is controlled by Cargo feature flags; which
+/// of those are actually constructed is controlled by the [`GcpConfig`]
+/// `enable_*` flags. Clients are initialized **eagerly**: [`GcpServices::new`]
+/// pre-initializes every enabled service's client before it returns, so the
+/// accessor methods only ever hand back an already-built client (or a clear
+/// error). Once created, a client is cached and shared on subsequent access.
 pub struct GcpServices {
     config: GcpConfig,
 
@@ -29,10 +80,21 @@ pub struct GcpServices {
 
     #[cfg(feature = "bigquery")]
     bigquery: RwLock<Option<gcloud_bigquery::client::Client>>,
+
+    #[cfg(feature = "secret-manager")]
+    secret_manager: RwLock<Option<crate::rest::SecretManagerClient>>,
+
+    #[cfg(feature = "cloud-run")]
+    cloud_run: RwLock<Option<crate::rest::CloudRunClient>>,
+
+    #[cfg(feature = "cloud-functions")]
+    cloud_functions: RwLock<Option<crate::rest::CloudFunctionsClient>>,
 }
 
 impl GcpServices {
     /// Create a new GCP services container.
+    ///
+    /// Every enabled service is initialized eagerly before this returns.
     pub async fn new(config: GcpConfig) -> Result<Arc<Self>> {
         info!(
             project = ?config.project_id,
@@ -50,11 +112,17 @@ impl GcpServices {
             spanner: RwLock::new(None),
             #[cfg(feature = "bigquery")]
             bigquery: RwLock::new(None),
+            #[cfg(feature = "secret-manager")]
+            secret_manager: RwLock::new(None),
+            #[cfg(feature = "cloud-run")]
+            cloud_run: RwLock::new(None),
+            #[cfg(feature = "cloud-functions")]
+            cloud_functions: RwLock::new(None),
         };
 
         let services = Arc::new(services);
 
-        // Pre-initialize enabled services
+        // Pre-initialize enabled services.
         services.initialize_enabled_services().await?;
 
         Ok(services)
@@ -79,6 +147,18 @@ impl GcpServices {
                 #[cfg(feature = "bigquery")]
                 "bigquery" => {
                     self.init_bigquery().await?;
+                }
+                #[cfg(feature = "secret-manager")]
+                "secret-manager" => {
+                    self.init_secret_manager().await?;
+                }
+                #[cfg(feature = "cloud-run")]
+                "cloud-run" => {
+                    self.init_cloud_run().await?;
+                }
+                #[cfg(feature = "cloud-functions")]
+                "cloud-functions" => {
+                    self.init_cloud_functions().await?;
                 }
                 _ => {}
             }
@@ -106,9 +186,18 @@ impl GcpServices {
             return Ok(());
         }
 
-        // The builder uses Application Default Credentials by default.
+        // Thread the configured credentials and endpoint override (emulator or
+        // per-service `service_configs.endpoint`) into the client builder.
         // Build the client without holding the lock across the await.
-        let storage_client = Storage::builder()
+        let mut builder = Storage::builder();
+        if let Some(cred) = crate::credentials::build_gcloud_credentials(&self.config.credentials)?
+        {
+            builder = builder.with_credentials(cred);
+        }
+        if let Some(endpoint) = crate::credentials::resolve_endpoint(&self.config, "storage") {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let storage_client = builder
             .build()
             .await
             .map_err(|e| GcpError::Auth(e.to_string()))?;
@@ -129,15 +218,19 @@ impl GcpServices {
             return Ok(());
         }
 
-        let project_id = self
-            .config
-            .project_id
-            .as_ref()
-            .ok_or(GcpError::ProjectNotSpecified)?;
-
-        // The builder uses Application Default Credentials by default.
-        // Build the client without holding the lock across the await.
-        let pubsub_client = TopicAdmin::builder()
+        // The Pub/Sub SDK auto-detects the project from the credentials/ADC and
+        // takes the project per-request via resource paths, so `project_id` is
+        // not a required builder input here. Credentials and an optional
+        // endpoint override (emulator / service_configs) are threaded in.
+        let mut builder = TopicAdmin::builder();
+        if let Some(cred) = crate::credentials::build_gcloud_credentials(&self.config.credentials)?
+        {
+            builder = builder.with_credentials(cred);
+        }
+        if let Some(endpoint) = crate::credentials::resolve_endpoint(&self.config, "pubsub") {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let pubsub_client = builder
             .build()
             .await
             .map_err(|e| GcpError::Auth(e.to_string()))?;
@@ -145,7 +238,7 @@ impl GcpServices {
         let mut client = self.pubsub.write();
         if client.is_none() {
             *client = Some(pubsub_client);
-            info!(project = %project_id, "Pub/Sub client initialized");
+            info!(project = ?self.config.project_id, "Pub/Sub client initialized");
         }
         Ok(())
     }
@@ -211,6 +304,38 @@ impl GcpServices {
             info!(project = %project_id, "BigQuery client initialized");
         }
         Ok(())
+    }
+
+    // REST-backed services: initializer + accessor + feature-absent fallback,
+    // generated from a single shared shape (see `rest_service!`).
+    rest_service! {
+        feature = "secret-manager",
+        service = "secret-manager",
+        field = secret_manager,
+        client = crate::rest::SecretManagerClient,
+        init = init_secret_manager,
+        accessor = secret_manager,
+        label = "Secret Manager",
+    }
+
+    rest_service! {
+        feature = "cloud-run",
+        service = "cloud-run",
+        field = cloud_run,
+        client = crate::rest::CloudRunClient,
+        init = init_cloud_run,
+        accessor = cloud_run,
+        label = "Cloud Run",
+    }
+
+    rest_service! {
+        feature = "cloud-functions",
+        service = "cloud-functions",
+        field = cloud_functions,
+        client = crate::rest::CloudFunctionsClient,
+        init = init_cloud_functions,
+        accessor = cloud_functions,
+        label = "Cloud Functions",
     }
 
     // Service accessors
@@ -286,4 +411,8 @@ impl GcpServices {
     pub fn bigquery(&self) -> Result<()> {
         Err(GcpError::not_enabled("bigquery"))
     }
+
+    // The Secret Manager / Cloud Run / Cloud Functions accessors (and their
+    // feature-absent fallbacks) are generated by the `rest_service!` invocations
+    // above.
 }

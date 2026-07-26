@@ -1,6 +1,6 @@
 [package]
 name = "armature-gcp"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Google Cloud Platform services integration for Armature - dynamically loadable and DI-ready"
-keywords = ["gcp", "google-cloud", "firestore", "pubsub", "bigquery"]
+keywords = ["gcp", "google-cloud", "pubsub", "bigquery"]
 categories = ["web-programming", "asynchronous"]
 
 [dependencies]
@@ -19,15 +19,16 @@ async-trait = "0.1"
 # GCP authentication
 gcp_auth = { version = "0.12", optional = true }
 
+# Credentials construction for the gRPC-based SDKs (storage/pubsub). This is the
+# exact same google-cloud-auth version those SDKs compile against, so the
+# `Credentials` type unifies and can be threaded into their client builders.
+google-cloud-auth = { version = "1.14", optional = true, default-features = false }
+
 # GCP services (all optional)
 google-cloud-storage = { version = "1.15", optional = true }
 google-cloud-pubsub = { version = "1.1", optional = true }
 google-cloud-spanner = { version = "0.33", optional = true }
 gcloud-bigquery = { version = "1.7", optional = true }
-
-# Firestore uses tonic-based client
-google-cloud-googleapis = { version = "0.16", optional = true }
-tonic = { version = "0.14", optional = true }
 
 # HTTP client for REST APIs
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
@@ -42,27 +43,26 @@ thiserror = "2.0"
 # Utilities
 tracing = "0.1"
 parking_lot = "0.12"
-jsonwebtoken = { version = "10.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
+serde_json = "1.0"
 
 [features]
 default = []
 # Core auth
 auth = ["gcp_auth"]
 # Individual services
-storage = ["google-cloud-storage", "auth"]
-pubsub = ["google-cloud-pubsub", "auth"]
+storage = ["google-cloud-storage", "google-cloud-auth", "auth"]
+pubsub = ["google-cloud-pubsub", "google-cloud-auth", "auth"]
 spanner = ["google-cloud-spanner", "auth"]
 bigquery = ["gcloud-bigquery", "auth"]
-firestore = ["google-cloud-googleapis", "tonic", "auth"]
 # REST-based services (use HTTP client)
-cloud-run = ["reqwest", "jsonwebtoken", "auth"]
-cloud-functions = ["reqwest", "jsonwebtoken", "auth"]
-secret-manager = ["reqwest", "jsonwebtoken", "auth"]
+cloud-run = ["reqwest", "auth"]
+cloud-functions = ["reqwest", "auth"]
+secret-manager = ["reqwest", "auth"]
 # Service groups
-data = ["storage", "firestore", "spanner", "bigquery"]
+data = ["storage", "spanner", "bigquery"]
 messaging = ["pubsub"]
 compute = ["cloud-run", "cloud-functions"]
 # All services

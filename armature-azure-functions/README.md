@@ -5,10 +5,8 @@ Azure Functions runtime adapter for the Armature framework.
 ## Features
 
 - **Functions Runtime** - Run Armature apps on Azure Functions
-- **HTTP Triggers** - Handle HTTP events
-- **Timer Triggers** - Scheduled execution
-- **Queue Triggers** - Process queue messages
-- **Blob Triggers** - React to blob changes
+- **HTTP Triggers** - Handle HTTP events via the custom-handler HTTP server
+- **Application Insights** - Structured JSON logging for monitoring
 
 ## Installation
 
