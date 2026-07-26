@@ -343,6 +343,79 @@ mod tests {
         assert!(compressed.body_len() < original_len);
     }
 
+    // Build a boxed `next` handler returning a fixed response, matching the
+    // `Middleware::handle` signature.
+    #[allow(clippy::type_complexity)] // mirrors the trait's boxed-closure signature
+    fn next_returning(
+        response: HttpResponse,
+    ) -> Box<
+        dyn FnOnce(HttpRequest) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+            + Send,
+    > {
+        Box::new(move |_req| Box::pin(async move { Ok(response) }))
+    }
+
+    /// End-to-end: Accept-Encoding drives algorithm selection, and the response
+    /// body comes back gzip-compressed and byte-for-byte recoverable.
+    #[cfg(feature = "gzip")]
+    #[tokio::test]
+    async fn test_handle_end_to_end_gzip() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let middleware = CompressionMiddleware::with_config(
+            CompressionConfig::builder().gzip().min_size(10).build(),
+        );
+
+        let mut req = HttpRequest::new("GET".to_string(), "/data".to_string());
+        req.headers
+            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+
+        let body = "Hello, World! ".repeat(100);
+        let next = next_returning(create_response(&body, "text/plain"));
+
+        let response = middleware.handle(req, next).await.unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding"),
+            Some(&"gzip".to_string())
+        );
+        assert!(
+            response
+                .headers
+                .get("Vary")
+                .unwrap()
+                .contains("Accept-Encoding")
+        );
+        assert_eq!(
+            response.headers.get("Content-Length"),
+            Some(&response.body_len().to_string())
+        );
+        assert!(response.body_len() < body.len());
+
+        let mut decoder = GzDecoder::new(response.body_ref());
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, body.as_bytes());
+    }
+
+    /// End-to-end: with no Accept-Encoding, the middleware selects `None` and
+    /// passes the body through untouched.
+    #[tokio::test]
+    async fn test_handle_end_to_end_no_accept_encoding() {
+        let middleware =
+            CompressionMiddleware::with_config(CompressionConfig::builder().min_size(10).build());
+
+        let req = HttpRequest::new("GET".to_string(), "/data".to_string());
+        let body = "Hello, World! ".repeat(100);
+        let next = next_returning(create_response(&body, "text/plain"));
+
+        let response = middleware.handle(req, next).await.unwrap();
+
+        assert!(response.headers.get("Content-Encoding").is_none());
+        assert_eq!(response.body_ref(), body.as_bytes());
+    }
+
     #[cfg(feature = "gzip")]
     #[test]
     fn test_vary_header_appended() {

@@ -70,9 +70,6 @@ impl std::fmt::Display for PluralCategory {
 pub trait PluralRules {
     /// Get the plural category for a number.
     fn category(&self, n: f64) -> PluralCategory;
-
-    /// Get all categories used by this language.
-    fn categories(&self) -> &[PluralCategory];
 }
 
 /// Get the plural category for a number in a locale.
@@ -93,27 +90,32 @@ pub fn plural_category(n: impl Into<f64>, locale: &Locale) -> PluralCategory {
 }
 
 /// Get plural rules for a language.
-fn get_plural_rules(language: &str) -> Box<dyn PluralRules> {
+///
+/// The rule implementations are zero-sized, stateless unit structs, so we
+/// return references to const-promoted `'static` instances rather than
+/// heap-allocating a fresh boxed trait object on every call. This keeps
+/// [`plural_category`] allocation-free and lets callers cache the result.
+fn get_plural_rules(language: &str) -> &'static dyn PluralRules {
     match language {
         // East Asian languages - no plural forms
-        "ja" | "ko" | "zh" | "vi" | "th" | "id" | "ms" => Box::new(NoPlurals),
+        "ja" | "ko" | "zh" | "vi" | "th" | "id" | "ms" => &NoPlurals,
 
         // Romance languages (French special case for 0/1)
-        "fr" => Box::new(FrenchPlurals),
+        "fr" => &FrenchPlurals,
 
         // Slavic languages with complex plurals
-        "ru" | "uk" | "be" => Box::new(RussianPlurals),
-        "pl" => Box::new(PolishPlurals),
-        "cs" | "sk" => Box::new(CzechPlurals),
+        "ru" | "uk" | "be" => &RussianPlurals,
+        "pl" => &PolishPlurals,
+        "cs" | "sk" => &CzechPlurals,
 
         // Celtic languages
-        "cy" => Box::new(WelshPlurals),
+        "cy" => &WelshPlurals,
 
         // Arabic
-        "ar" => Box::new(ArabicPlurals),
+        "ar" => &ArabicPlurals,
 
         // Germanic, Romance (except French), and most others
-        _ => Box::new(DefaultPlurals),
+        _ => &DefaultPlurals,
     }
 }
 
@@ -133,10 +135,6 @@ impl PluralRules for DefaultPlurals {
             PluralCategory::Other
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::One, PluralCategory::Other]
-    }
 }
 
 /// No plural forms (Chinese, Japanese, Korean, etc.).
@@ -145,10 +143,6 @@ struct NoPlurals;
 impl PluralRules for NoPlurals {
     fn category(&self, _n: f64) -> PluralCategory {
         PluralCategory::Other
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::Other]
     }
 }
 
@@ -163,10 +157,6 @@ impl PluralRules for FrenchPlurals {
         } else {
             PluralCategory::Other
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[PluralCategory::One, PluralCategory::Other]
     }
 }
 
@@ -194,14 +184,6 @@ impl PluralRules for RussianPlurals {
         } else {
             PluralCategory::Many
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-        ]
     }
 }
 
@@ -233,14 +215,6 @@ impl PluralRules for PolishPlurals {
             PluralCategory::Many
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-        ]
-    }
 }
 
 /// Czech/Slovak pluralization.
@@ -264,15 +238,6 @@ impl PluralRules for CzechPlurals {
             2..=4 => PluralCategory::Few,
             _ => PluralCategory::Other,
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::One,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
     }
 }
 
@@ -303,17 +268,6 @@ impl PluralRules for WelshPlurals {
             _ => PluralCategory::Other,
         }
     }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::Zero,
-            PluralCategory::One,
-            PluralCategory::Two,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
-    }
 }
 
 /// Arabic pluralization (most complex).
@@ -343,17 +297,6 @@ impl PluralRules for ArabicPlurals {
             _ if (11..=99).contains(&mod100) => PluralCategory::Many,
             _ => PluralCategory::Other,
         }
-    }
-
-    fn categories(&self) -> &[PluralCategory] {
-        &[
-            PluralCategory::Zero,
-            PluralCategory::One,
-            PluralCategory::Two,
-            PluralCategory::Few,
-            PluralCategory::Many,
-            PluralCategory::Other,
-        ]
     }
 }
 
@@ -407,6 +350,26 @@ mod tests {
         assert_eq!(plural_category(5, &ar), PluralCategory::Few);
         assert_eq!(plural_category(11, &ar), PluralCategory::Many);
         assert_eq!(plural_category(100, &ar), PluralCategory::Other);
+    }
+
+    #[test]
+    fn test_plural_rules_are_cached() {
+        // Regression: `get_plural_rules` must return the same const-promoted
+        // 'static instance on every call instead of boxing a fresh trait
+        // object (which would yield a distinct heap pointer each time).
+        let a = get_plural_rules("en");
+        let b = get_plural_rules("en");
+        assert!(
+            std::ptr::eq(a as *const _ as *const (), b as *const _ as *const ()),
+            "plural rules should be cached, not re-allocated per call"
+        );
+
+        let fr1 = get_plural_rules("fr");
+        let fr2 = get_plural_rules("fr");
+        assert!(std::ptr::eq(
+            fr1 as *const _ as *const (),
+            fr2 as *const _ as *const ()
+        ));
     }
 
     #[test]

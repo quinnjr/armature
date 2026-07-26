@@ -3,6 +3,21 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use std::borrow::Cow;
+
+/// Field-name fragments that identify high-sensitivity identifiers (SSNs, card
+/// numbers, and similar). For these, even the last few characters are abused
+/// (e.g. the last four of an SSN), so field-name masking reveals *zero*
+/// trailing characters regardless of the configured `show_last_chars`.
+const IDENTITY_FIELDS: &[&str] = &[
+    "ssn",
+    "social_security",
+    "credit_card",
+    "creditcard",
+    "card_number",
+    "cvv",
+    "pin",
+];
 
 /// Fields to mask by default
 pub const DEFAULT_MASKED_FIELDS: &[&str] = &[
@@ -36,10 +51,15 @@ static EMAIL_REGEX: Lazy<Regex> =
 static PHONE_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b").unwrap());
 
-static SSN_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap());
+// Matches both the hyphenated `123-45-6789` form and a bare 9-digit run
+// `123456789` so a dashless SSN is not left in the clear.
+static SSN_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b").unwrap());
 
+// Matches 13–19 digit card numbers (Visa/MC 16, Amex 15, Diners 14, and the
+// 13/19-digit extremes) with optional single space/hyphen group separators.
 static CREDIT_CARD_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b").unwrap());
+    Lazy::new(|| Regex::new(r"\b\d(?:[- ]?\d){12,18}\b").unwrap());
 
 /// Data masking configuration
 #[derive(Debug, Clone)]
@@ -132,29 +152,41 @@ impl MaskingConfig {
 /// // Result contains masked password
 /// ```
 pub fn mask_string(input: &str, config: &MaskingConfig) -> String {
-    let mut result = input.to_string();
+    // Thread a `Cow` through the substitution chain so the dominant no-match
+    // path never clones the body. `Regex::replace_all` returns `Cow::Borrowed`
+    // when it made no replacement; only a real match materializes an owned
+    // `String`, and subsequent stages keep operating on that same buffer.
+    let mut result: Cow<str> = Cow::Borrowed(input);
 
-    // Mask emails
     if config.mask_emails {
-        result = EMAIL_REGEX.replace_all(&result, "[EMAIL]").to_string();
+        result = apply_regex(result, &EMAIL_REGEX, "[EMAIL]");
     }
 
-    // Mask phone numbers
     if config.mask_phones {
-        result = PHONE_REGEX.replace_all(&result, "[PHONE]").to_string();
+        result = apply_regex(result, &PHONE_REGEX, "[PHONE]");
     }
 
-    // Mask SSNs
     if config.mask_ssn {
-        result = SSN_REGEX.replace_all(&result, "[SSN]").to_string();
+        result = apply_regex(result, &SSN_REGEX, "[SSN]");
     }
 
-    // Mask credit cards
     if config.mask_credit_cards {
-        result = CREDIT_CARD_REGEX.replace_all(&result, "[CARD]").to_string();
+        result = apply_regex(result, &CREDIT_CARD_REGEX, "[CARD]");
     }
 
-    result
+    result.into_owned()
+}
+
+/// Apply one masking regex, preserving the input buffer when nothing matched.
+///
+/// If `replace_all` returns `Cow::Borrowed` no replacement occurred, so the
+/// original `Cow` is returned untouched (no allocation). Only an actual match
+/// (`Cow::Owned`) produces a new buffer.
+fn apply_regex<'a>(input: Cow<'a, str>, regex: &Regex, replacement: &str) -> Cow<'a, str> {
+    match regex.replace_all(&input, replacement) {
+        Cow::Borrowed(_) => input,
+        Cow::Owned(owned) => Cow::Owned(owned),
+    }
 }
 
 /// Mask a value (show only last N characters)
@@ -168,15 +200,20 @@ pub fn mask_string(input: &str, config: &MaskingConfig) -> String {
 /// assert_eq!(masked, "******123");
 /// ```
 pub fn mask_value(value: &str, mask_char: char, show_last: usize) -> String {
-    if value.len() <= show_last {
-        return mask_char.to_string().repeat(value.len());
+    // Count/slice by Unicode scalar values (chars), never by bytes, so a
+    // multibyte secret (emoji, accented text, CJK, …) can never be sliced at a
+    // mid-codepoint offset and panic.
+    let total_chars = value.chars().count();
+
+    if total_chars <= show_last {
+        return std::iter::repeat_n(mask_char, total_chars).collect();
     }
 
-    let masked_len = value.len() - show_last;
-    let masked_part = mask_char.to_string().repeat(masked_len);
-    let visible_part = &value[masked_len..];
+    let masked_len = total_chars - show_last;
+    let mut result: String = std::iter::repeat_n(mask_char, masked_len).collect();
+    result.extend(value.chars().skip(masked_len));
 
-    format!("{}{}", masked_part, visible_part)
+    result
 }
 
 /// Mask sensitive fields in JSON
@@ -197,6 +234,17 @@ pub fn mask_value(value: &str, mask_char: char, show_last: usize) -> String {
 /// // password field will be masked
 /// ```
 pub fn mask_json(value: &Value, config: &MaskingConfig) -> Value {
+    // Precompute the lowercased matcher set once for the whole (recursive)
+    // traversal instead of lowercasing every configured field for every key.
+    let matchers: Vec<String> = config
+        .masked_fields
+        .iter()
+        .map(|f| f.to_lowercase())
+        .collect();
+    mask_json_inner(value, config, &matchers)
+}
+
+fn mask_json_inner(value: &Value, config: &MaskingConfig, matchers: &[String]) -> Value {
     match value {
         Value::Object(map) => {
             let mut masked_map = serde_json::Map::new();
@@ -205,32 +253,52 @@ pub fn mask_json(value: &Value, config: &MaskingConfig) -> Value {
                 let key_lower = key.to_lowercase();
 
                 // Check if this field should be masked
-                let should_mask = config
-                    .masked_fields
+                let should_mask = matchers
                     .iter()
-                    .any(|field| key_lower.contains(field));
+                    .any(|field| key_lower.contains(field.as_str()));
 
                 if should_mask {
                     if let Value::String(s) = val {
+                        // For high-sensitivity identifiers (SSN, card, …) reveal
+                        // zero trailing characters — the last four digits are
+                        // exactly what an attacker wants — regardless of the
+                        // configured `show_last_chars`.
+                        let show_last = if is_identity_field(&key_lower) {
+                            0
+                        } else {
+                            config.show_last_chars
+                        };
                         masked_map.insert(
                             key.clone(),
-                            Value::String(mask_value(s, config.mask_char, config.show_last_chars)),
+                            Value::String(mask_value(s, config.mask_char, show_last)),
                         );
                     } else {
                         masked_map.insert(key.clone(), Value::String("[REDACTED]".to_string()));
                     }
                 } else {
                     // Recursively mask nested objects
-                    masked_map.insert(key.clone(), mask_json(val, config));
+                    masked_map.insert(key.clone(), mask_json_inner(val, config, matchers));
                 }
             }
 
             Value::Object(masked_map)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(|v| mask_json(v, config)).collect()),
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| mask_json_inner(v, config, matchers))
+                .collect(),
+        ),
         Value::String(s) => Value::String(mask_string(s, config)),
         _ => value.clone(),
     }
+}
+
+/// Whether a (lowercased) field name denotes a high-sensitivity identifier
+/// whose trailing characters must never be revealed.
+fn is_identity_field(key_lower: &str) -> bool {
+    IDENTITY_FIELDS
+        .iter()
+        .any(|field| key_lower.contains(field))
 }
 
 /// Mask sensitive data in text body
@@ -255,6 +323,24 @@ mod tests {
         assert_eq!(mask_value("secret123", '*', 3), "******123");
         assert_eq!(mask_value("abc", '*', 3), "***");
         assert_eq!(mask_value("ab", '*', 3), "**");
+    }
+
+    #[test]
+    fn test_mask_value_multibyte_no_panic() {
+        // Each 🔒 is 4 bytes; a byte-based slice at masked_len would fall in the
+        // middle of a codepoint and panic. Char-based masking must not.
+        let masked = mask_value("🔒🔒🔒🔒🔒", '*', 2);
+        assert_eq!(masked, "***🔒🔒");
+        // 3 masked chars + 2 visible chars = 5 chars total.
+        assert_eq!(masked.chars().count(), 5);
+
+        // Mixed multibyte secret masked entirely except last char.
+        let masked = mask_value("café☕", '*', 1);
+        assert_eq!(masked, "****☕");
+
+        // show_last larger than the (char) length: fully masked, no panic.
+        let masked = mask_value("naïve", '*', 10);
+        assert_eq!(masked, "*****");
     }
 
     #[test]
@@ -321,6 +407,67 @@ mod tests {
         let masked = mask_body(body, &config);
         assert!(masked.contains("alice"));
         assert!(!masked.contains("secret123"));
+    }
+
+    #[test]
+    fn test_mask_ssn_dashless() {
+        // A bare 9-digit SSN must be masked, not just the hyphenated form.
+        let config = MaskingConfig::default();
+        let masked = mask_string("SSN: 123456789 done", &config);
+        assert!(masked.contains("[SSN]"), "dashless SSN masked: {masked}");
+        assert!(!masked.contains("123456789"));
+
+        // The hyphenated form keeps working.
+        let masked = mask_string("SSN: 123-45-6789", &config);
+        assert!(masked.contains("[SSN]"));
+        assert!(!masked.contains("123-45-6789"));
+    }
+
+    #[test]
+    fn test_mask_credit_card_variable_length() {
+        let config = MaskingConfig::default();
+
+        // 15-digit Amex (4-6-5 grouping).
+        let masked = mask_string("Card 3782 822463 10005", &config);
+        assert!(masked.contains("[CARD]"), "amex masked: {masked}");
+        assert!(!masked.contains("822463"));
+
+        // 14-digit Diners.
+        let masked = mask_string("Card 3056 930902 5904", &config);
+        assert!(masked.contains("[CARD]"), "diners masked: {masked}");
+
+        // Classic 16-digit still masked.
+        let masked = mask_string("Card 4111 1111 1111 1111", &config);
+        assert!(masked.contains("[CARD]"));
+        assert!(!masked.contains("4111"));
+    }
+
+    #[test]
+    fn test_mask_json_identity_field_hides_last_four() {
+        // Field-name masking of an SSN must NOT reveal the last four digits,
+        // even with the default show_last_chars = 4.
+        let config = MaskingConfig::default();
+        let data = json!({ "ssn": "123-45-6789", "card_number": "4111111111111111" });
+        let masked = mask_json(&data, &config);
+
+        let ssn = masked["ssn"].as_str().unwrap();
+        assert!(!ssn.contains("6789"), "SSN last-4 leaked: {ssn}");
+        assert!(ssn.chars().all(|c| c == '*'), "SSN fully masked: {ssn}");
+
+        let card = masked["card_number"].as_str().unwrap();
+        assert!(!card.contains("1111"), "card tail leaked: {card}");
+        assert!(card.chars().all(|c| c == '*'));
+    }
+
+    #[test]
+    fn test_mask_json_nonidentity_field_keeps_last_chars() {
+        // Non-identity secret fields still reveal the configured tail.
+        let config = MaskingConfig::default();
+        let data = json!({ "password": "secret123" });
+        let masked = mask_json(&data, &config);
+        let pw = masked["password"].as_str().unwrap();
+        assert!(pw.ends_with("123"), "password tail preserved: {pw}");
+        assert!(pw.starts_with('*'));
     }
 
     #[test]

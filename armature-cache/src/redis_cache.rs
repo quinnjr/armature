@@ -5,7 +5,8 @@ use crate::error::{CacheError, CacheResult};
 use crate::traits::CacheStore;
 use armature_log::{debug, trace};
 use async_trait::async_trait;
-use redis::{AsyncCommands, Client, aio::ConnectionManager};
+use redis::{AsyncCommands, Client, aio::ConnectionManager, aio::ConnectionManagerConfig};
+use std::future::Future;
 use std::time::Duration;
 
 /// Redis cache store.
@@ -39,7 +40,25 @@ impl RedisCache {
         let client =
             Client::open(config.url.as_str()).map_err(|e| CacheError::Connection(e.to_string()))?;
 
-        let connection = ConnectionManager::new(client)
+        // Apply the connection tuning from `CacheConfig`:
+        //
+        // * `connection_timeout` bounds each attempt to (re)establish the TCP
+        //   connection to the server.
+        // * `max_connections` caps the number of commands the multiplexed
+        //   manager keeps in flight concurrently (the manager multiplexes over
+        //   a single socket, so this is the pool-equivalent back-pressure knob).
+        //
+        // The per-operation timeout is intentionally *not* wired into the
+        // manager's `response_timeout`: doing so would surface as an opaque
+        // `redis::RedisError`. We instead enforce `operation_timeout` ourselves
+        // (see `with_op_timeout`) so a slow op fails as `CacheError::Timeout`.
+        let mut manager_config =
+            ConnectionManagerConfig::new().set_connection_timeout(Some(config.connection_timeout));
+        if config.max_connections > 0 {
+            manager_config = manager_config.set_concurrency_limit(config.max_connections);
+        }
+
+        let connection = ConnectionManager::new_with_config(client, manager_config)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
 
@@ -56,6 +75,22 @@ impl RedisCache {
     fn build_key(&self, key: &str) -> String {
         self.config.build_key(key)
     }
+
+    /// Run a Redis future under the configured `operation_timeout`.
+    ///
+    /// When the operation does not complete within `operation_timeout` the
+    /// future is dropped and the call resolves to [`CacheError::Timeout`]
+    /// rather than blocking indefinitely (or waiting out a much longer default
+    /// socket timeout). This is what makes `CacheError::Timeout` reachable.
+    async fn with_op_timeout<F, T>(&self, fut: F) -> CacheResult<T>
+    where
+        F: Future<Output = redis::RedisResult<T>>,
+    {
+        match tokio::time::timeout(self.config.operation_timeout, fut).await {
+            Ok(result) => Ok(result?),
+            Err(_) => Err(CacheError::Timeout),
+        }
+    }
 }
 
 #[async_trait]
@@ -65,7 +100,7 @@ impl CacheStore for RedisCache {
         trace!("Cache GET: {}", key);
         let mut conn = self.connection.clone();
 
-        let value: Option<String> = conn.get(&key).await?;
+        let value: Option<String> = self.with_op_timeout(conn.get(&key)).await?;
         trace!(
             "Cache {} for: {}",
             if value.is_some() { "HIT" } else { "MISS" },
@@ -83,9 +118,11 @@ impl CacheStore for RedisCache {
 
         if let Some(ttl) = ttl {
             let ttl_seconds = ttl.as_secs();
-            let _: () = conn.set_ex(&key, value, ttl_seconds).await?;
+            let _: () = self
+                .with_op_timeout(conn.set_ex(&key, value, ttl_seconds))
+                .await?;
         } else {
-            let _: () = conn.set(&key, value).await?;
+            let _: () = self.with_op_timeout(conn.set(&key, value)).await?;
         }
 
         Ok(())
@@ -94,20 +131,22 @@ impl CacheStore for RedisCache {
     async fn delete(&self, key: &str) -> CacheResult<()> {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
-        let _: () = conn.del(&key).await?;
+        let _: () = self.with_op_timeout(conn.del(&key)).await?;
         Ok(())
     }
 
     async fn exists(&self, key: &str) -> CacheResult<bool> {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
-        let exists: bool = conn.exists(&key).await?;
+        let exists: bool = self.with_op_timeout(conn.exists(&key)).await?;
         Ok(exists)
     }
 
     async fn clear(&self) -> CacheResult<()> {
         let mut conn = self.connection.clone();
-        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await?;
+        let _: () = self
+            .with_op_timeout(redis::cmd("FLUSHDB").query_async(&mut conn))
+            .await?;
         Ok(())
     }
 
@@ -115,7 +154,7 @@ impl CacheStore for RedisCache {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
 
-        let ttl_seconds: i64 = conn.ttl(&key).await?;
+        let ttl_seconds: i64 = self.with_op_timeout(conn.ttl(&key)).await?;
 
         match ttl_seconds {
             -2 => Ok(None), // Key doesn't exist
@@ -129,21 +168,23 @@ impl CacheStore for RedisCache {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
         let ttl_seconds = ttl.as_secs();
-        let _: () = conn.expire(&key, ttl_seconds as i64).await?;
+        let _: () = self
+            .with_op_timeout(conn.expire(&key, ttl_seconds as i64))
+            .await?;
         Ok(())
     }
 
     async fn increment(&self, key: &str, delta: i64) -> CacheResult<i64> {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
-        let new_value: i64 = conn.incr(&key, delta).await?;
+        let new_value: i64 = self.with_op_timeout(conn.incr(&key, delta)).await?;
         Ok(new_value)
     }
 
     async fn decrement(&self, key: &str, delta: i64) -> CacheResult<i64> {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
-        let new_value: i64 = conn.decr(&key, delta).await?;
+        let new_value: i64 = self.with_op_timeout(conn.decr(&key, delta)).await?;
         Ok(new_value)
     }
 
@@ -158,9 +199,8 @@ impl CacheStore for RedisCache {
         let full_keys: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
         trace!("Cache MGET: {} keys", full_keys.len());
         let mut conn = self.connection.clone();
-        let values: Vec<Option<String>> = redis::cmd("MGET")
-            .arg(&full_keys)
-            .query_async(&mut conn)
+        let values: Vec<Option<String>> = self
+            .with_op_timeout(redis::cmd("MGET").arg(&full_keys).query_async(&mut conn))
             .await?;
         Ok(values)
     }
@@ -190,14 +230,14 @@ impl CacheStore for RedisCache {
                     .arg(ttl_seconds)
                     .ignore();
             }
-            let _: () = pipe.query_async(&mut conn).await?;
+            let _: () = self.with_op_timeout(pipe.query_async(&mut conn)).await?;
         } else {
             trace!("Cache MSET: {} items", items.len());
             let mut cmd = redis::cmd("MSET");
             for (key, value) in items {
                 cmd.arg(self.build_key(key)).arg(value);
             }
-            let _: () = cmd.query_async(&mut conn).await?;
+            let _: () = self.with_op_timeout(cmd.query_async(&mut conn)).await?;
         }
         Ok(())
     }
@@ -210,9 +250,8 @@ impl CacheStore for RedisCache {
         let full_keys: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
         trace!("Cache DEL: {} keys", full_keys.len());
         let mut conn = self.connection.clone();
-        let _: () = redis::cmd("DEL")
-            .arg(&full_keys)
-            .query_async(&mut conn)
+        let _: () = self
+            .with_op_timeout(redis::cmd("DEL").arg(&full_keys).query_async(&mut conn))
             .await?;
         Ok(())
     }

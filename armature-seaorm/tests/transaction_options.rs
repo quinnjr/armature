@@ -6,6 +6,13 @@
 //! Self-skips when Docker is unavailable via
 //! `armature_testkit::skip_if_no_docker!`, which instead fails the test when
 //! `ARMATURE_REQUIRE_DOCKER=1` is set (CI).
+//!
+//! Gated behind the `sqlx-postgres` feature: it connects to a `postgres://`
+//! URL, so without the Postgres driver compiled in (e.g. the CI
+//! `--no-default-features` "minimal features" job) `Database::connect` would
+//! fail with "no supporting driver". The feature gate excludes the test from
+//! those runs instead of failing them.
+#![cfg(feature = "sqlx-postgres")]
 
 use armature_seaorm::{
     Database, DatabaseConfig, IsolationLevel, TransactionExt, TransactionOptions,

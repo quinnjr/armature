@@ -10,13 +10,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Source for translation messages.
+///
+/// Each variant carries the message data directly (not a file path) and can be
+/// turned into a [`MessageBundle`] via [`MessageBundle::from_source`], or loaded
+/// into a collection with [`Messages::add_source`] / [`I18n::add_source`].
 #[derive(Debug, Clone)]
 pub enum TranslationSource {
-    /// JSON file format
+    /// JSON document content (see [`MessageBundle::from_json`]).
     Json(String),
-    /// Fluent file format (.ftl)
+    /// Fluent (`.ftl`) document content. A pragmatic `key = value` subset of
+    /// the Fluent syntax is supported (comments and blank lines are skipped).
     Fluent(String),
-    /// In-memory messages
+    /// In-memory messages, keyed by message ID.
     Memory(HashMap<String, String>),
 }
 
@@ -63,6 +68,42 @@ impl MessageBundle {
         }
 
         Ok(bundle)
+    }
+
+    /// Load from Fluent (`.ftl`) content.
+    ///
+    /// Parses the pragmatic `key = value` subset of Fluent: comment lines
+    /// (`#`) and blank lines are ignored, and each `id = message` line becomes
+    /// a simple message. Plural selectors and terms are not expanded here.
+    pub fn from_fluent(source: &str) -> Result<Self> {
+        let mut bundle = Self::new();
+        for line in source.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                bundle
+                    .messages
+                    .insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        Ok(bundle)
+    }
+
+    /// Build a bundle from a [`TranslationSource`].
+    pub fn from_source(source: &TranslationSource) -> Result<Self> {
+        match source {
+            TranslationSource::Json(content) => Self::from_json(content),
+            TranslationSource::Fluent(content) => Self::from_fluent(content),
+            TranslationSource::Memory(map) => {
+                let mut bundle = Self::new();
+                for (key, value) in map {
+                    bundle.messages.insert(key.clone(), value.clone());
+                }
+                Ok(bundle)
+            }
+        }
     }
 
     /// Add a message.
@@ -125,6 +166,13 @@ impl Messages {
     /// Add a bundle for a locale.
     pub fn add_bundle(&mut self, locale: &Locale, bundle: MessageBundle) {
         self.bundles.insert(locale.tag(), bundle);
+    }
+
+    /// Add a bundle for a locale from a [`TranslationSource`].
+    pub fn add_source(&mut self, locale: &Locale, source: &TranslationSource) -> Result<()> {
+        let bundle = MessageBundle::from_source(source)?;
+        self.add_bundle(locale, bundle);
+        Ok(())
     }
 
     /// Get a bundle for a locale.
@@ -223,6 +271,12 @@ impl I18n {
     /// Add a message bundle.
     pub fn add_bundle(&self, locale: &Locale, bundle: MessageBundle) {
         self.messages.write().add_bundle(locale, bundle);
+    }
+
+    /// Add a bundle for a locale from a [`TranslationSource`]
+    /// (JSON, Fluent, or in-memory).
+    pub fn add_source(&self, locale: &Locale, source: &TranslationSource) -> Result<()> {
+        self.messages.write().add_source(locale, source)
     }
 
     /// Get the default locale.
@@ -420,6 +474,27 @@ mod tests {
 
         // Missing key returns the key itself
         assert_eq!(i18n.t("unknown.key", &Locale::en()), "unknown.key");
+    }
+
+    #[test]
+    fn test_translation_source_variants_are_consumable() {
+        // Regression: the Fluent and Memory variants of TranslationSource were
+        // never constructed or consumed anywhere. They must now build bundles.
+        let json = TranslationSource::Json(r#"{"hello":"Hello!"}"#.to_string());
+        let bundle = MessageBundle::from_source(&json).unwrap();
+        assert_eq!(bundle.get("hello"), Some("Hello!"));
+
+        let ftl = TranslationSource::Fluent("# comment\nhello = Bonjour!\n".to_string());
+        let bundle = MessageBundle::from_source(&ftl).unwrap();
+        assert_eq!(bundle.get("hello"), Some("Bonjour!"));
+
+        let mut map = HashMap::new();
+        map.insert("hello".to_string(), "Hallo!".to_string());
+        let mem = TranslationSource::Memory(map);
+
+        let i18n = I18n::new();
+        i18n.add_source(&Locale::de(), &mem).unwrap();
+        assert_eq!(i18n.t("hello", &Locale::de()), "Hallo!");
     }
 
     #[test]

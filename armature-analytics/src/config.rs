@@ -143,14 +143,51 @@ impl AnalyticsConfig {
     }
 }
 
-/// Simple random float generator (0.0 to 1.0)
+/// Uniform random float generator in `[0.0, 1.0)`.
+///
+/// Backed by a per-thread `xorshift64*` PRNG seeded from a high-resolution
+/// clock and a monotonic counter. The previous implementation derived the
+/// value from `subsec_nanos() % 1000`, which is neither uniform (nanosecond
+/// timers are quantized on most platforms) nor well distributed, so sampling
+/// decisions were badly biased. This produces 53 bits of uniform entropy.
 fn rand_float() -> f64 {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    (nanos as f64 % 1000.0) / 1000.0
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Distinct, ever-changing contribution to each thread's seed so that
+    // threads spawned within the same clock tick do not share a stream.
+    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+            // Mix the clock and the counter; force a non-zero state.
+            let mut s = nanos
+                ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ 0xD1B5_4A32_D192_ED03;
+            if s == 0 {
+                s = 0x9E37_79B9_7F4A_7C15;
+            }
+            s
+        });
+    }
+
+    STATE.with(|state| {
+        let mut x = state.get();
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        state.set(x);
+        let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        // Top 53 bits -> uniform f64 in [0, 1).
+        ((v >> 11) as f64) / ((1u64 << 53) as f64)
+    })
 }
 
 /// Builder for AnalyticsConfig
@@ -262,5 +299,37 @@ mod tests {
         assert_eq!(config.sampling_rate, 0.5);
         assert_eq!(config.max_latency_samples, 5000);
         assert!(config.should_exclude("/internal"));
+    }
+
+    // Regression: the old rand_float derived from `subsec_nanos() % 1000` was
+    // heavily biased in a tight loop, so a 50% sampling rate did not sample
+    // anywhere near half of requests. This asserts rough uniformity.
+    #[test]
+    fn test_sampling_is_roughly_uniform() {
+        let config = AnalyticsConfig::builder().sampling_rate(0.5).build();
+        let n = 20_000;
+        let sampled = (0..n).filter(|_| config.should_sample()).count();
+        let ratio = sampled as f64 / n as f64;
+        assert!(
+            (0.45..=0.55).contains(&ratio),
+            "expected ~50% sampling, got {:.3}",
+            ratio
+        );
+    }
+
+    #[test]
+    fn test_rand_float_in_range_and_varies() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let v = rand_float();
+            assert!((0.0..1.0).contains(&v));
+            seen.insert(v.to_bits());
+        }
+        // A biased/quantized generator would collapse to a handful of values.
+        assert!(
+            seen.len() > 500,
+            "rand_float not varied enough: {}",
+            seen.len()
+        );
     }
 }

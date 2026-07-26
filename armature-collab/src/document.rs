@@ -131,6 +131,14 @@ impl Document {
         self.version
     }
 
+    /// Bump the document version (e.g. to mark an externally-applied change) and
+    /// return the new version number.
+    pub fn bump_version(&mut self) -> u64 {
+        self.version += 1;
+        self.updated_at = chrono::Utc::now();
+        self.version
+    }
+
     /// Tick the clock and return the new timestamp
     fn tick(&mut self) -> LogicalClock {
         self.vclock.increment(self.replica);

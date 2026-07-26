@@ -51,10 +51,8 @@
 //!                           │
 //!                           ▼
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                    Export Backends                           │
-//! │  ┌──────────┐ ┌──────────┐ ┌──────────┐                     │
-//! │  │   JSON   │ │Prometheus│ │  Custom  │                     │
-//! │  └──────────┘ └──────────┘ └──────────┘                     │
+//! │                    JSON Snapshot / Dashboard                 │
+//! │  `Analytics::snapshot()` / `Analytics::dashboard_json()`     │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -95,10 +93,11 @@ struct AnalyticsInner {
 impl Analytics {
     /// Create a new analytics instance
     pub fn new(config: AnalyticsConfig) -> Self {
+        let collector = MetricsCollector::from_config(&config);
         Self {
             inner: Arc::new(AnalyticsInner {
                 config,
-                collector: MetricsCollector::new(),
+                collector,
                 started_at: Utc::now(),
             }),
         }
@@ -579,5 +578,29 @@ mod tests {
 
         assert_eq!(snapshot.requests.total, 0);
         assert_eq!(snapshot.errors.total, 0);
+    }
+
+    // Regression: Analytics::new used to hardcode MetricsCollector::new(),
+    // ignoring the config's capacity knobs. A low max_endpoints must be honored.
+    #[test]
+    fn test_analytics_new_respects_capacity_knobs() {
+        let config = AnalyticsConfig::builder().max_endpoints(2).build();
+        let analytics = Analytics::new(config);
+
+        for i in 0..5 {
+            analytics.record_request(RequestRecord::new(
+                "GET",
+                format!("/endpoint-{i}"),
+                200,
+                Duration::from_millis(1),
+            ));
+        }
+
+        let snapshot = analytics.snapshot();
+        assert_eq!(
+            snapshot.endpoints.len(),
+            2,
+            "max_endpoints from config must be respected"
+        );
     }
 }

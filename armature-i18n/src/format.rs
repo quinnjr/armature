@@ -66,6 +66,12 @@ impl NumberFormatter {
         Self::default()
     }
 
+    /// Set minimum integer digits (zero-pads the integer part).
+    pub fn min_integer_digits(mut self, digits: usize) -> Self {
+        self.min_integer_digits = digits;
+        self
+    }
+
     /// Set minimum fraction digits.
     pub fn min_fraction_digits(mut self, digits: usize) -> Self {
         self.min_fraction_digits = digits;
@@ -85,44 +91,64 @@ impl NumberFormatter {
     }
 
     /// Format a number for the given locale.
+    ///
+    /// Fraction handling: the value is rounded to `max_fraction_digits`, then
+    /// trailing zeros are trimmed down to `min_fraction_digits`. So with the
+    /// defaults (`min = 0`, `max = 3`), `1.5` renders as `"1.5"` (not
+    /// `"1.50"`), while `1.0` renders as `"1"`. To force trailing zeros (e.g.
+    /// currency cents) raise `min_fraction_digits` — with `min = max = 2`,
+    /// `1.5` renders as `"1.50"` and `1.0` as `"1.00"`.
+    ///
+    /// The integer part is zero-padded on the left to `min_integer_digits`.
     pub fn format(&self, n: f64, locale: &Locale) -> String {
         let (decimal_sep, group_sep) = get_number_separators(locale);
 
-        // Format with appropriate decimal places
-        let fraction_digits = if n.fract() == 0.0 {
-            self.min_fraction_digits
-        } else {
-            self.max_fraction_digits.max(self.min_fraction_digits)
+        // Preserve the sign ourselves so grouping/padding operate on digits.
+        let negative = n.is_sign_negative() && n != 0.0;
+        let abs = n.abs();
+
+        // Round to the maximum precision (never below the minimum).
+        let precision = self.max_fraction_digits.max(self.min_fraction_digits);
+        let formatted = format!("{:.*}", precision, abs);
+
+        let (integer_part, frac_full) = match formatted.split_once('.') {
+            Some((i, f)) => (i.to_string(), f.to_string()),
+            None => (formatted, String::new()),
         };
 
-        let formatted = if fraction_digits > 0 {
-            format!("{:.1$}", n, fraction_digits)
-        } else {
-            format!("{:.0}", n)
-        };
-
-        // Split into integer and fraction parts
-        let parts: Vec<&str> = formatted.split('.').collect();
-        let integer_part = parts[0];
-        let fraction_part = parts.get(1).copied();
-
-        // Add grouping separators to integer part
-        let grouped_integer = if self.use_grouping {
-            add_grouping(integer_part, group_sep)
-        } else {
-            integer_part.to_string()
-        };
-
-        // Combine with locale-appropriate decimal separator
-        match fraction_part {
-            Some(frac) if !frac.is_empty() && frac.chars().any(|c| c != '0') => {
-                format!("{}{}{}", grouped_integer, decimal_sep, frac)
-            }
-            Some(frac) if self.min_fraction_digits > 0 => {
-                format!("{}{}{}", grouped_integer, decimal_sep, frac)
-            }
-            _ => grouped_integer,
+        // Trim trailing zeros from the fraction, but keep at least
+        // `min_fraction_digits` digits.
+        let mut frac: Vec<char> = frac_full.chars().collect();
+        while frac.len() > self.min_fraction_digits && frac.last() == Some(&'0') {
+            frac.pop();
         }
+        let fraction: String = frac.into_iter().collect();
+
+        // Zero-pad the integer part to the requested minimum width.
+        let integer_part = if integer_part.len() < self.min_integer_digits {
+            let pad = self.min_integer_digits - integer_part.len();
+            format!("{}{}", "0".repeat(pad), integer_part)
+        } else {
+            integer_part
+        };
+
+        // Add grouping separators to the (padded) integer part.
+        let grouped_integer = if self.use_grouping {
+            add_grouping(&integer_part, group_sep)
+        } else {
+            integer_part
+        };
+
+        let mut result = String::new();
+        if negative {
+            result.push('-');
+        }
+        result.push_str(&grouped_integer);
+        if !fraction.is_empty() {
+            result.push_str(decimal_sep);
+            result.push_str(&fraction);
+        }
+        result
     }
 }
 
@@ -172,8 +198,6 @@ pub struct CurrencyFormatter {
     pub currency_code: String,
     /// Show currency symbol instead of code
     pub use_symbol: bool,
-    /// Symbol position (true = before, false = after)
-    pub symbol_before: bool,
 }
 
 impl CurrencyFormatter {
@@ -182,7 +206,6 @@ impl CurrencyFormatter {
         Self {
             currency_code: currency_code.into().to_uppercase(),
             use_symbol: true,
-            symbol_before: true,
         }
     }
 
@@ -234,6 +257,35 @@ pub fn format_currency(amount: f64, currency_code: &str, locale: &Locale) -> Str
 // Date Formatting
 // ============================================================================
 
+/// A timezone descriptor used by the `Full`/`Long` time styles.
+///
+/// Formatting is calendar-only (it does not shift the wall-clock time), so the
+/// timezone is supplied explicitly. `Full` appends the [`name`](Self::name)
+/// (e.g. "Eastern Standard Time") and `Long` appends the
+/// [`abbreviation`](Self::abbreviation) (e.g. "EST").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeZone {
+    /// Full display name, e.g. "Eastern Standard Time".
+    pub name: String,
+    /// Short abbreviation, e.g. "EST".
+    pub abbreviation: String,
+}
+
+impl TimeZone {
+    /// Create a timezone from a full name and its abbreviation.
+    pub fn new(name: impl Into<String>, abbreviation: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            abbreviation: abbreviation.into(),
+        }
+    }
+
+    /// Coordinated Universal Time.
+    pub fn utc() -> Self {
+        Self::new("Coordinated Universal Time", "UTC")
+    }
+}
+
 /// Date formatting configuration.
 #[derive(Debug, Clone, Default)]
 pub struct DateFormatter {
@@ -241,6 +293,8 @@ pub struct DateFormatter {
     pub date_style: Option<DateStyle>,
     /// Time style
     pub time_style: Option<TimeStyle>,
+    /// Timezone applied by the `Full`/`Long` time styles.
+    pub timezone: Option<TimeZone>,
 }
 
 impl DateFormatter {
@@ -261,6 +315,12 @@ impl DateFormatter {
         self
     }
 
+    /// Set the timezone shown by the `Full`/`Long` time styles.
+    pub fn timezone(mut self, tz: TimeZone) -> Self {
+        self.timezone = Some(tz);
+        self
+    }
+
     /// Format a date (year, month, day).
     pub fn format_date(&self, year: i32, month: u32, day: u32, locale: &Locale) -> String {
         let style = self.date_style.unwrap_or(DateStyle::Medium);
@@ -270,7 +330,7 @@ impl DateFormatter {
     /// Format a time (hour, minute, second).
     pub fn format_time(&self, hour: u32, minute: u32, second: u32, locale: &Locale) -> String {
         let style = self.time_style.unwrap_or(TimeStyle::Medium);
-        format_time_impl(hour, minute, second, style, locale)
+        format_time_impl(hour, minute, second, style, self.timezone.as_ref(), locale)
     }
 }
 
@@ -290,25 +350,8 @@ pub fn format_date(year: i32, month: u32, day: u32, locale: &Locale) -> String {
 }
 
 fn format_date_impl(year: i32, month: u32, day: u32, style: DateStyle, locale: &Locale) -> String {
-    let month_names_short = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let month_names_long = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
-
     let month_idx = (month.saturating_sub(1) as usize).min(11);
+    let (month_names_short, month_names_long) = month_names(locale);
 
     // Determine date order based on locale
     let is_dmy = matches!(locale.language.as_str(), "en" if locale.region.as_deref() == Some("GB"))
@@ -320,8 +363,13 @@ fn format_date_impl(year: i32, month: u32, day: u32, style: DateStyle, locale: &
 
     match style {
         DateStyle::Full => {
-            // TODO: Day of week would need calendar calculation
-            format!("{} {}, {}", month_names_long[month_idx], day, year)
+            // Full includes the weekday, computed from the proleptic
+            // Gregorian calendar via Sakamoto's algorithm.
+            let weekday = weekday_name(year, month, day, locale);
+            format!(
+                "{}, {} {}, {}",
+                weekday, month_names_long[month_idx], day, year
+            )
         }
         DateStyle::Long => {
             format!("{} {}, {}", month_names_long[month_idx], day, year)
@@ -352,28 +400,39 @@ fn format_time_impl(
     minute: u32,
     second: u32,
     style: TimeStyle,
+    timezone: Option<&TimeZone>,
     locale: &Locale,
 ) -> String {
     // Determine if 12-hour format
     let use_12h = matches!(locale.language.as_str(), "en");
 
+    // Base HH:MM:SS (with AM/PM for English) shared by Full/Long/Medium.
+    let base = if use_12h {
+        let (h, period) = if hour == 0 {
+            (12, "AM")
+        } else if hour < 12 {
+            (hour, "AM")
+        } else if hour == 12 {
+            (12, "PM")
+        } else {
+            (hour - 12, "PM")
+        };
+        format!("{}:{:02}:{:02} {}", h, minute, second, period)
+    } else {
+        format!("{:02}:{:02}:{:02}", hour, minute, second)
+    };
+
     match style {
-        TimeStyle::Full | TimeStyle::Long => {
-            if use_12h {
-                let (h, period) = if hour == 0 {
-                    (12, "AM")
-                } else if hour < 12 {
-                    (hour, "AM")
-                } else if hour == 12 {
-                    (12, "PM")
-                } else {
-                    (hour - 12, "PM")
-                };
-                format!("{}:{:02}:{:02} {}", h, minute, second, period)
-            } else {
-                format!("{:02}:{:02}:{:02}", hour, minute, second)
-            }
-        }
+        // Full appends the full timezone name; Long appends its abbreviation.
+        // With no timezone supplied both degrade to the Medium rendering.
+        TimeStyle::Full => match timezone {
+            Some(tz) => format!("{} {}", base, tz.name),
+            None => base,
+        },
+        TimeStyle::Long => match timezone {
+            Some(tz) => format!("{} {}", base, tz.abbreviation),
+            None => base,
+        },
         TimeStyle::Medium => {
             if use_12h {
                 let (h, period) = if hour == 0 {
@@ -504,6 +563,139 @@ fn get_currency_symbol(currency_code: &str, locale: &Locale) -> (String, bool) {
     (symbol.to_string(), symbol_before)
 }
 
+/// Locale-aware (short, long) month name tables.
+///
+/// Falls back to English for languages without a bundled table.
+fn month_names(locale: &Locale) -> (&'static [&'static str; 12], &'static [&'static str; 12]) {
+    const EN_SHORT: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const EN_LONG: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    const FR_SHORT: [&str; 12] = [
+        "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.",
+        "déc.",
+    ];
+    const FR_LONG: [&str; 12] = [
+        "janvier",
+        "février",
+        "mars",
+        "avril",
+        "mai",
+        "juin",
+        "juillet",
+        "août",
+        "septembre",
+        "octobre",
+        "novembre",
+        "décembre",
+    ];
+    const DE_SHORT: [&str; 12] = [
+        "Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.",
+        "Dez.",
+    ];
+    const DE_LONG: [&str; 12] = [
+        "Januar",
+        "Februar",
+        "März",
+        "April",
+        "Mai",
+        "Juni",
+        "Juli",
+        "August",
+        "September",
+        "Oktober",
+        "November",
+        "Dezember",
+    ];
+    const ES_SHORT: [&str; 12] = [
+        "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sept.", "oct.", "nov.",
+        "dic.",
+    ];
+    const ES_LONG: [&str; 12] = [
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ];
+
+    match locale.language.as_str() {
+        "fr" => (&FR_SHORT, &FR_LONG),
+        "de" => (&DE_SHORT, &DE_LONG),
+        "es" => (&ES_SHORT, &ES_LONG),
+        _ => (&EN_SHORT, &EN_LONG),
+    }
+}
+
+/// Compute the weekday name for a proleptic-Gregorian date.
+///
+/// Uses Sakamoto's algorithm; `dow` is 0 = Sunday .. 6 = Saturday.
+fn weekday_name(year: i32, month: u32, day: u32, locale: &Locale) -> &'static str {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let m = (month.clamp(1, 12)) as usize;
+    let y = if m < 3 { year - 1 } else { year };
+    let dow = (y + y / 4 - y / 100 + y / 400 + T[m - 1] + day as i32).rem_euclid(7) as usize;
+
+    const EN: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    const FR: [&str; 7] = [
+        "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
+    ];
+    const DE: [&str; 7] = [
+        "Sonntag",
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+    ];
+    const ES: [&str; 7] = [
+        "domingo",
+        "lunes",
+        "martes",
+        "miércoles",
+        "jueves",
+        "viernes",
+        "sábado",
+    ];
+
+    let table = match locale.language.as_str() {
+        "fr" => &FR,
+        "de" => &DE,
+        "es" => &ES,
+        _ => &EN,
+    };
+    table[dow]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +769,87 @@ mod tests {
             .time_style(TimeStyle::Short)
             .format_time(14, 30, 0, &de);
         assert_eq!(time, "14:30");
+    }
+
+    #[test]
+    fn test_min_integer_digits_zero_pads() {
+        // Regression: `min_integer_digits` was never applied.
+        let f = NumberFormatter::new()
+            .min_integer_digits(3)
+            .max_fraction_digits(0)
+            .use_grouping(false);
+        assert_eq!(f.format(5.0, &Locale::en_us()), "005");
+        assert_eq!(f.format(42.0, &Locale::en_us()), "042");
+        assert_eq!(f.format(1234.0, &Locale::en_us()), "1234");
+    }
+
+    #[test]
+    fn test_max_fraction_digits_trims_trailing_zeros() {
+        // Regression: 1.5 formatted "1.50" instead of "1.5".
+        let f = NumberFormatter::new().max_fraction_digits(2);
+        assert_eq!(f.format(1.5, &Locale::en_us()), "1.5");
+        assert_eq!(f.format(1.0, &Locale::en_us()), "1");
+        assert_eq!(f.format(1.25, &Locale::en_us()), "1.25");
+
+        // With min == max, trailing zeros are intentionally kept.
+        let padded = NumberFormatter::new()
+            .min_fraction_digits(2)
+            .max_fraction_digits(2);
+        assert_eq!(padded.format(1.5, &Locale::en_us()), "1.50");
+        assert_eq!(padded.format(1.0, &Locale::en_us()), "1.00");
+    }
+
+    #[test]
+    fn test_time_full_long_include_timezone() {
+        // Regression: Full/Long were identical to Medium (no timezone).
+        let us = Locale::en_us();
+        let tz = TimeZone::new("Eastern Standard Time", "EST");
+
+        let full = DateFormatter::new()
+            .time_style(TimeStyle::Full)
+            .timezone(tz.clone())
+            .format_time(12, 0, 0, &us);
+        assert_eq!(full, "12:00:00 PM Eastern Standard Time");
+
+        let long = DateFormatter::new()
+            .time_style(TimeStyle::Long)
+            .timezone(tz)
+            .format_time(12, 0, 0, &us);
+        assert_eq!(long, "12:00:00 PM EST");
+
+        let medium = DateFormatter::new()
+            .time_style(TimeStyle::Medium)
+            .format_time(12, 0, 0, &us);
+        assert_ne!(full, medium);
+        assert_ne!(long, medium);
+    }
+
+    #[test]
+    fn test_date_full_includes_weekday() {
+        // Regression: DateStyle::Full omitted the weekday (TODO stub).
+        let us = Locale::en_us();
+        let date = DateFormatter::new()
+            .date_style(DateStyle::Full)
+            .format_date(2024, 1, 15, &us);
+        // 2024-01-15 is a Monday.
+        assert!(date.starts_with("Monday, "), "got {date:?}");
+        assert!(date.contains("January 15, 2024"));
+    }
+
+    #[test]
+    fn test_month_names_are_locale_aware() {
+        // Regression: month names were hardcoded English for all locales.
+        let fr = Locale::fr_fr();
+        let date = DateFormatter::new()
+            .date_style(DateStyle::Long)
+            .format_date(2024, 1, 15, &fr);
+        assert!(date.contains("janvier"), "got {date:?}");
+
+        let de = Locale::de_de();
+        let date = DateFormatter::new()
+            .date_style(DateStyle::Long)
+            .format_date(2024, 3, 1, &de);
+        assert!(date.contains("März"), "got {date:?}");
     }
 
     #[test]

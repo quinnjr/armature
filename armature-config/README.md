@@ -4,11 +4,10 @@ Configuration management for the Armature framework.
 
 ## Features
 
-- **Multiple Sources** - Environment, files, remote
-- **File Formats** - TOML, YAML, JSON
-- **Type-Safe** - Deserialize into typed structs
-- **Hot Reload** - Watch for config changes
-- **Secrets** - Vault, AWS Secrets Manager integration
+- **Multiple Sources** - Environment variables, `.env` files, and config files
+- **File Formats** - JSON, TOML, and `.env`
+- **Type-Safe** - Get typed values or deserialize into your own structs
+- **Nested Keys** - Access nested config with dot paths (`database.host`)
 
 ## Installation
 
@@ -20,26 +19,36 @@ armature-config = "0.1"
 ## Quick Start
 
 ```rust
-use armature_config::{Config, Environment};
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct AppConfig {
-    database_url: String,
-    port: u16,
-    debug: bool,
-}
+use armature_config::{ConfigService, FileFormat};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config: AppConfig = Config::builder()
-        .add_source(Environment::with_prefix("APP"))
-        .add_source(File::with_name("config"))
-        .build()?
-        .try_deserialize()?;
+    let config = ConfigService::builder()
+        .with_prefix("APP".to_string())
+        .load_env()
+        .add_file("config.toml".to_string(), FileFormat::Toml)
+        .build()?;
 
-    println!("Port: {}", config.port);
+    // Typed getters; string values (e.g. from env vars) are parse-coerced.
+    let port = config.get_int("APP_PORT")?;
+    let debug = config.get_bool("APP_DEBUG")?;
+
+    // Dot paths reach into nested config files.
+    let db_host = config.get_string("database.host")?;
+
+    println!("Port: {}, debug: {}, db host: {}", port, debug, db_host);
     Ok(())
 }
+```
+
+You can also use the lower-level [`ConfigManager`] directly:
+
+```rust
+use armature_config::ConfigManager;
+
+let manager = ConfigManager::new();
+manager.set("app.port", 3000i64)?;
+let port: i64 = manager.get("app.port")?;
+# Ok::<(), armature_config::ConfigError>(())
 ```
 
 ## Environment Variables

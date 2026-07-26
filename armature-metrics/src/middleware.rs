@@ -6,7 +6,7 @@ use armature_core::{Error, HttpRequest, HttpResponse, Middleware};
 use once_cell::sync::Lazy;
 use prometheus::{CounterVec, GaugeVec, HistogramVec};
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Instant;
 
 /// Default upper bound on the number of distinct `path` label values a single
@@ -136,7 +136,7 @@ pub struct RequestMetricsMiddleware {
     /// Bounded set of path label values already emitted by this instance. Used
     /// to decide whether a newly seen path can get its own label or must be
     /// folded into `<other>`.
-    seen_paths: Mutex<HashSet<String>>,
+    seen_paths: RwLock<HashSet<String>>,
 }
 
 impl RequestMetricsMiddleware {
@@ -150,7 +150,7 @@ impl RequestMetricsMiddleware {
         Self {
             include_path: false,
             max_path_cardinality: DEFAULT_PATH_CARDINALITY_CAP,
-            seen_paths: Mutex::new(HashSet::new()),
+            seen_paths: RwLock::new(HashSet::new()),
         }
     }
 
@@ -198,19 +198,42 @@ impl RequestMetricsMiddleware {
         }
 
         // Limit raw path length first (defence in depth against huge labels).
+        // Truncate on a UTF-8 char boundary: slicing `&path[..97]` directly
+        // panics when byte 97 lands in the middle of a multibyte codepoint, so
+        // an attacker-controlled multibyte path near the limit could crash the
+        // request path.
         let candidate = if path.len() > 100 {
-            format!("{}...", &path[..97])
+            let mut end = 97;
+            while end > 0 && !path.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &path[..end])
         } else {
             path.to_string()
         };
 
-        let mut seen = match self.seen_paths.lock() {
+        // Fast path: an already-seen path (the overwhelmingly common case) only
+        // needs a shared read lock, so concurrent requests don't serialize on a
+        // mutex. Poisoned lock -> bounded label so a panic elsewhere can't turn
+        // into unbounded cardinality.
+        {
+            let seen = match self.seen_paths.read() {
+                Ok(guard) => guard,
+                Err(_) => return OTHER_PATH_LABEL.to_string(),
+            };
+            if seen.contains(&candidate) {
+                return candidate;
+            }
+        }
+
+        // New path: upgrade to a write lock to (maybe) admit it under the cap.
+        let mut seen = match self.seen_paths.write() {
             Ok(guard) => guard,
-            // If the lock is poisoned, fall back to the bounded label so a
-            // panic in another thread can't turn into unbounded cardinality.
             Err(_) => return OTHER_PATH_LABEL.to_string(),
         };
 
+        // Re-check under the write lock: another thread may have admitted this
+        // same path between dropping the read lock and taking the write lock.
         if seen.contains(&candidate) {
             return candidate;
         }
@@ -367,6 +390,74 @@ mod tests {
         );
         // Overflow paths are folded into the shared "<other>" bucket.
         assert!(labels.contains(OTHER_PATH_LABEL));
+    }
+
+    #[tokio::test]
+    async fn test_handle_records_counter_duration_and_in_flight() {
+        use armature_core::HttpResponse;
+
+        // Distinct method/path labels so this test's series don't collide with
+        // any other test hitting the shared static metric families.
+        let method = "QZHANDLETEST";
+        let path = "/handle-metrics-regression";
+        let middleware = RequestMetricsMiddleware::with_path();
+
+        let mut request = HttpRequest::new(method.to_string(), path.to_string());
+        request.body = b"hello".to_vec(); // 5-byte request body
+
+        let count_before = HTTP_REQUEST_COUNTER
+            .with_label_values(&[method, path, "200"])
+            .get();
+        let dur_before = HTTP_REQUEST_DURATION
+            .with_label_values(&[method, path, "200"])
+            .get_sample_count();
+        let size_before = HTTP_REQUEST_SIZE_BYTES
+            .with_label_values(&[method, path])
+            .get_sample_count();
+
+        let next: armature_core::middleware::Next = Box::new(|_req| {
+            Box::pin(async move { Ok(HttpResponse::ok().with_body(b"response-body".to_vec())) })
+        });
+
+        let response = middleware.handle(request, next).await.unwrap();
+        assert_eq!(response.status, 200);
+
+        // Request counter incremented exactly once for this label set.
+        let count_after = HTTP_REQUEST_COUNTER
+            .with_label_values(&[method, path, "200"])
+            .get();
+        assert_eq!(count_after - count_before, 1.0);
+
+        // Duration histogram recorded one sample.
+        let dur_after = HTTP_REQUEST_DURATION
+            .with_label_values(&[method, path, "200"])
+            .get_sample_count();
+        assert_eq!(dur_after - dur_before, 1);
+
+        // Request-size histogram recorded the body.
+        let size_after = HTTP_REQUEST_SIZE_BYTES
+            .with_label_values(&[method, path])
+            .get_sample_count();
+        assert_eq!(size_after - size_before, 1);
+
+        // In-flight gauge is balanced back to zero after the request completes.
+        let in_flight = HTTP_REQUESTS_IN_FLIGHT
+            .with_label_values(&[method, path])
+            .get();
+        assert_eq!(in_flight, 0.0);
+    }
+
+    #[test]
+    fn test_sanitize_path_multibyte_near_limit_does_not_panic() {
+        let middleware = RequestMetricsMiddleware::with_path();
+        // 40 x 4-byte emoji = 160 bytes; byte index 97 falls in the middle of a
+        // codepoint, so the old `&path[..97]` slice panicked outright.
+        let path = "\u{1F389}".repeat(40);
+        let sanitized = middleware.sanitize_path(&path);
+        assert!(sanitized.ends_with("..."));
+        // Truncation stays within the byte budget and never splits a codepoint.
+        assert!(sanitized.len() <= 100);
+        assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
     }
 
     #[test]

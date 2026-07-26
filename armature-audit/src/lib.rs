@@ -5,12 +5,16 @@
 //!
 //! # Features
 //!
-//! - **Audit Events** - Structured audit event logging
-//! - **Request/Response Logging** - HTTP payload logging
-//! - **Data Masking** - Automatic PII/sensitive data masking
-//! - **Retention Policies** - Automatic log cleanup
-//! - **Multiple Backends** - File, JSON, database storage
-//! - **Filtering** - Configurable event filtering
+//! - **Audit Events** - Structured [`AuditEvent`] logging with status/severity
+//! - **Request/Response Logging** - [`AuditMiddleware`] logs HTTP payloads and
+//!   records the caller's real principal from the bearer token's subject claim
+//! - **Data Masking** - PII/sensitive data masking via [`mask_json`],
+//!   [`mask_string`], and [`mask_value`]
+//! - **Retention Policies** - [`RetentionManager`] deletes logs past their age
+//! - **Backends** - [`FileBackend`] (JSON-lines file), [`MemoryBackend`],
+//!   [`StdoutBackend`], and [`MultiBackend`] fan-out
+//!
+//! Events serialize to JSON; there is no bundled database or query backend.
 //!
 //! # Quick Start
 //!

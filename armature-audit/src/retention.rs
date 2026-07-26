@@ -161,6 +161,17 @@ impl RetentionManager {
                             tracing::info!("Retention cleanup: deleted {} logs", deleted);
                         }
                     }
+                    // A backend that cannot delete (e.g. stdout) will never be
+                    // able to; stop the background task instead of re-erroring
+                    // on every tick forever.
+                    Err(crate::backend::AuditBackendError::NotSupported) => {
+                        tracing::warn!(
+                            "Retention backend does not support deletion; \
+                             stopping retention manager"
+                        );
+                        *manager.running.lock().await = false;
+                        break;
+                    }
                     Err(e) => {
                         tracing::error!("Retention cleanup failed: {}", e);
                     }
@@ -228,6 +239,33 @@ mod tests {
 
         // Both events should be deleted (they're both old now)
         assert!(deleted > 0);
+    }
+
+    #[tokio::test]
+    async fn test_retention_manager_cleanup_file_backend() {
+        use crate::FileBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let backend = Arc::new(FileBackend::new(&path));
+
+        // One old event, one fresh event.
+        let mut old_event = AuditEvent::new("old");
+        old_event.timestamp = Utc::now() - Duration::hours(2);
+        backend.write(&old_event).await.unwrap();
+        backend.write(&AuditEvent::new("new")).await.unwrap();
+        backend.flush().await.unwrap();
+
+        // Keep only the last hour.
+        let policy = RetentionPolicy::new(Duration::hours(1));
+        let manager = RetentionManager::new(backend.clone(), policy);
+
+        let deleted = manager.cleanup().await.unwrap();
+        assert_eq!(deleted, 1, "the old file-backed entry should be deleted");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("new"));
+        assert!(!content.contains("\"event_type\":\"old\""));
     }
 
     #[tokio::test]

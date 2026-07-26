@@ -32,7 +32,11 @@ pub async fn init_metrics(config: &TelemetryConfig) -> TelemetryResult<SdkMeterP
                 .build()
                 .map_err(|e| TelemetryError::Exporter(e.to_string()))?;
 
-            let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build();
+            let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
+                .with_interval(std::time::Duration::from_secs(
+                    config.metrics.collection_interval_secs,
+                ))
+                .build();
 
             SdkMeterProvider::builder()
                 .with_resource(resource)
