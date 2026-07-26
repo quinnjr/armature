@@ -19,6 +19,20 @@ async fn healthz_reports_ok_with_json() {
 }
 
 #[tokio::test]
+async fn readyz_reports_200_json_when_healthy() {
+    let hc = HealthCheck::new();
+    hc.register(FnHealthChecker::new("dep", || async { Ok(()) }))
+        .await;
+
+    let resp = hc.handle_request(&req("/readyz")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+}
+
+#[tokio::test]
 async fn readiness_fails_when_a_checker_is_unhealthy_but_liveness_stays_ok() {
     let hc = HealthCheck::new();
     hc.register(FnHealthChecker::new("dep", || async {

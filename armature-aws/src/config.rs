@@ -74,12 +74,14 @@ impl AwsConfig {
     ///
     /// * `AWS_REGION` / `AWS_DEFAULT_REGION` — the region (the former wins).
     /// * `AWS_ENDPOINT_URL` — a custom endpoint (LocalStack, MinIO, ...).
-    /// * Credential source, in precedence order:
-    ///   * `AWS_PROFILE` — selects [`CredentialsSource::Profile`].
-    ///   * `AWS_WEB_IDENTITY_TOKEN_FILE` — selects
-    ///     [`CredentialsSource::WebIdentity`] (EKS/OIDC).
+    /// * Credential source, in precedence order (mirrors the AWS SDK default
+    ///   credential chain):
     ///   * `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` — selects
     ///     [`CredentialsSource::Environment`].
+    ///   * `AWS_WEB_IDENTITY_TOKEN_FILE` — selects
+    ///     [`CredentialsSource::WebIdentity`] (EKS/OIDC).
+    ///   * `AWS_PROFILE` (when non-empty) — selects
+    ///     [`CredentialsSource::Profile`].
     ///   * otherwise the source is left as [`CredentialsSource::Auto`].
     /// * `ARMATURE_AWS_SERVICES` — a comma/whitespace-separated list of
     ///   services to enable (e.g. `"s3,dynamodb,sqs"`).
@@ -99,17 +101,20 @@ impl AwsConfig {
             builder = builder.endpoint_url(endpoint);
         }
 
-        // Resolve the credential source from the environment.
-        if let Ok(profile) = std::env::var("AWS_PROFILE") {
-            if !profile.is_empty() {
-                builder = builder.credentials(CredentialsSource::Profile(profile));
-            }
-        } else if std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE").is_ok() {
-            builder = builder.credentials(CredentialsSource::WebIdentity);
-        } else if std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+        // Resolve the credential source from the environment, mirroring the AWS
+        // SDK default credential chain: static env credentials first, then
+        // web-identity, then a named profile (an empty `AWS_PROFILE` is treated
+        // as unset).
+        if std::env::var("AWS_ACCESS_KEY_ID").is_ok()
             && std::env::var("AWS_SECRET_ACCESS_KEY").is_ok()
         {
             builder = builder.credentials(CredentialsSource::Environment);
+        } else if std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE").is_ok() {
+            builder = builder.credentials(CredentialsSource::WebIdentity);
+        } else if let Ok(profile) = std::env::var("AWS_PROFILE")
+            && !profile.is_empty()
+        {
+            builder = builder.credentials(CredentialsSource::Profile(profile));
         }
 
         // Enable services listed in `ARMATURE_AWS_SERVICES`.

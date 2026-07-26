@@ -91,19 +91,15 @@
 //! - **Configuration**: Read runtime settings from environment variables
 //!   ([`FunctionConfig::from_env`])
 //!
-//! Non-HTTP triggers (Timer/Queue/Blob) and binding-based Azure service I/O
-//! are not yet dispatched by the runtime. The [`InputBinding`]/[`OutputBinding`]
-//! traits exist only as scaffolding for a future binding layer; there are no
-//! concrete binding implementations that read or write Azure services.
+//! Only HTTP triggers are supported. Non-HTTP triggers (Timer/Queue/Blob) and
+//! binding-based Azure service I/O are not dispatched by the runtime.
 
-mod bindings;
 mod config;
 mod error;
 mod request;
 mod response;
 mod runtime;
 
-pub use bindings::{InputBinding, OutputBinding};
 pub use config::FunctionConfig;
 pub use error::{AzureFunctionsError, Result};
 pub use request::FunctionRequest;

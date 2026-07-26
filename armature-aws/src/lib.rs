@@ -63,39 +63,6 @@ mod config;
 mod error;
 mod services;
 
-#[cfg(feature = "dynamodb")]
-pub mod dynamodb;
-
-#[cfg(feature = "sqs")]
-pub mod sqs;
-
-#[cfg(feature = "sns")]
-pub mod sns;
-
-#[cfg(feature = "ses")]
-pub mod ses;
-
-#[cfg(feature = "lambda")]
-pub mod lambda;
-
-#[cfg(feature = "secrets-manager")]
-pub mod secrets;
-
-#[cfg(feature = "ssm")]
-pub mod ssm;
-
-#[cfg(feature = "cloudwatch")]
-pub mod cloudwatch;
-
-#[cfg(feature = "kinesis")]
-pub mod kinesis;
-
-#[cfg(feature = "kms")]
-pub mod kms;
-
-#[cfg(feature = "cognito")]
-pub mod cognito;
-
 pub use config::{AwsConfig, AwsConfigBuilder, CredentialsSource};
 pub use error::{AwsError, Result};
 pub use services::AwsServices;

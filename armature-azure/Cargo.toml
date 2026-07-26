@@ -30,6 +30,12 @@ azure_data_cosmos = { version = "0.36", optional = true }
 # rustls is selected explicitly (no native-tls/OpenSSL).
 azure_messaging_servicebus = { version = "0.21", optional = true, default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 azure_core_sb = { package = "azure_core", version = "0.21", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
+# reqwest 0.12 is the transport azure_core 0.21 already resolves to, so depending
+# on it directly reuses the same `reqwest::Client` type that azure_core 0.21
+# implements `HttpClient` for. This lets the Service Bus client inject a client
+# with an explicit request timeout instead of the untimed SDK default. rustls
+# only (no native-tls/OpenSSL), matching azure_core_sb.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
 azure_security_keyvault_secrets = { version = "1.0", optional = true }
 
 # Serialization
@@ -55,7 +61,7 @@ auth = ["azure_identity", "azure_core"]
 blob = ["azure_storage_blob", "auth"]
 queue = ["azure_storage_queue", "auth"]
 cosmos = ["azure_data_cosmos", "auth"]
-servicebus = ["azure_messaging_servicebus", "azure_core_sb", "auth"]
+servicebus = ["azure_messaging_servicebus", "azure_core_sb", "auth", "reqwest"]
 keyvault = ["azure_security_keyvault_secrets", "auth"]
 # Service groups
 storage = ["blob", "queue"]

@@ -32,26 +32,47 @@ pub struct ServiceBusServiceConfig {
 ///
 /// Clone-cheap: it holds an `Arc<dyn HttpClient>` and the SAS material, and
 /// builds a fresh [`QueueClient`]/[`TopicClient`] per entity on request.
+///
+/// The shared transport is configured with an explicit 30-second per-request
+/// timeout so a hung or unreachable Service Bus namespace cannot block callers
+/// indefinitely (the bare `azure_core_sb::new_http_client()` default has none).
 #[derive(Clone)]
 pub struct ServiceBusClient {
     namespace: String,
     policy_name: String,
-    signing_key: String,
+    shared_access_key: String,
     http_client: Arc<dyn azure_core_sb::HttpClient>,
 }
 
 impl ServiceBusClient {
+    /// Build the shared HTTP transport with an explicit per-request timeout.
+    ///
+    /// `azure_core_sb::new_http_client()` hands back an untimed
+    /// `Arc::new(reqwest::Client::new())`, so a hung Service Bus namespace would
+    /// block queue/topic operations forever. We build the same `reqwest::Client`
+    /// (which `azure_core` 0.21 implements `HttpClient` for) with a 30-second
+    /// request timeout and hand that to every entity client instead.
+    fn build_http_client() -> Arc<dyn azure_core_sb::HttpClient> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            // Mirrors `reqwest::Client::new()`, which the SDK default also uses:
+            // building only fails if the TLS backend cannot be initialized.
+            .expect("failed to build Service Bus HTTP client with timeout");
+        Arc::new(client)
+    }
+
     /// Create a client from an explicit namespace + SAS policy.
     pub fn new(
         namespace: impl Into<String>,
         policy_name: impl Into<String>,
-        signing_key: impl Into<String>,
+        shared_access_key: impl Into<String>,
     ) -> Self {
         Self {
             namespace: namespace.into(),
             policy_name: policy_name.into(),
-            signing_key: signing_key.into(),
-            http_client: azure_core_sb::new_http_client(),
+            shared_access_key: shared_access_key.into(),
+            http_client: Self::build_http_client(),
         }
     }
 
@@ -60,7 +81,7 @@ impl ServiceBusClient {
     pub fn from_connection_string(conn: &str) -> Result<Self> {
         let mut endpoint = None;
         let mut policy_name = None;
-        let mut signing_key = None;
+        let mut shared_access_key = None;
 
         for part in conn.split(';') {
             let part = part.trim();
@@ -69,14 +90,18 @@ impl ServiceBusClient {
             }
             // Split on the FIRST '=' only: the base64 SAS key itself may contain '='.
             let (key, value) = part.split_once('=').ok_or_else(|| {
-                AzureError::Config(format!(
-                    "invalid Service Bus connection string segment: '{part}'"
-                ))
+                // Only reached when the segment has no '=', so it is unstructured and
+                // could be a bare, unpadded SAS key. Never echo the raw segment into
+                // the error (and thus logs) — report a redacted placeholder instead.
+                AzureError::Config(
+                    "invalid Service Bus connection string segment (missing '='): <redacted>"
+                        .to_string(),
+                )
             })?;
             match key.trim().to_ascii_lowercase().as_str() {
                 "endpoint" => endpoint = Some(value.trim().to_string()),
                 "sharedaccesskeyname" => policy_name = Some(value.trim().to_string()),
-                "sharedaccesskey" => signing_key = Some(value.trim().to_string()),
+                "sharedaccesskey" => shared_access_key = Some(value.trim().to_string()),
                 _ => {}
             }
         }
@@ -90,13 +115,13 @@ impl ServiceBusClient {
                 "Service Bus connection string missing 'SharedAccessKeyName'".to_string(),
             )
         })?;
-        let signing_key = signing_key.ok_or_else(|| {
+        let shared_access_key = shared_access_key.ok_or_else(|| {
             AzureError::Config(
                 "Service Bus connection string missing 'SharedAccessKey'".to_string(),
             )
         })?;
 
-        Ok(Self::new(namespace, policy_name, signing_key))
+        Ok(Self::new(namespace, policy_name, shared_access_key))
     }
 
     /// The Service Bus namespace this client targets.
@@ -111,7 +136,7 @@ impl ServiceBusClient {
             self.namespace.clone(),
             queue.into(),
             self.policy_name.clone(),
-            self.signing_key.clone(),
+            self.shared_access_key.clone(),
         )
         .map_err(|e| AzureError::Service(e.to_string()))
     }
@@ -123,7 +148,7 @@ impl ServiceBusClient {
             self.namespace.clone(),
             topic.into(),
             self.policy_name.clone(),
-            self.signing_key.clone(),
+            self.shared_access_key.clone(),
         )
         .map_err(|e| AzureError::Service(e.to_string()))
     }
@@ -168,7 +193,7 @@ mod tests {
         assert_eq!(client.namespace(), "mybus");
         assert_eq!(client.policy_name, "RootManageSharedAccessKey");
         // The base64 key contains '=' which must survive split_once-on-first-'='.
-        assert_eq!(client.signing_key, "abc123def456==");
+        assert_eq!(client.shared_access_key, "abc123def456==");
     }
 
     #[test]

@@ -84,8 +84,8 @@ services; the gRPC SDKs (storage/pubsub) support the remaining variants.
 `GcpConfig::from_env()` seeds a builder from the standard environment variables:
 `GOOGLE_CLOUD_PROJECT` / `GCP_PROJECT` / `GCLOUD_PROJECT` for the project id,
 `GOOGLE_APPLICATION_CREDENTIALS` for a service-account file, and
-`PUBSUB_EMULATOR_HOST` / `FIRESTORE_EMULATOR_HOST` / `STORAGE_EMULATOR_HOST` for
-an emulator endpoint override.
+`PUBSUB_EMULATOR_HOST` / `STORAGE_EMULATOR_HOST` for an emulator endpoint
+override.
 
 ## License
 

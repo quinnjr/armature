@@ -13,11 +13,16 @@ use crate::config::GcpConfig;
 /// Emulator environment variables (e.g. `PUBSUB_EMULATOR_HOST`) are commonly
 /// bare `host:port` pairs; the SDK `with_endpoint` methods expect a URL, so a
 /// scheme is prepended when one is missing.
+///
+/// A bare host defaults to **`https://`**: these endpoints carry a bearer
+/// token, so plaintext must never be inferred. Emulator / loopback users who
+/// genuinely want cleartext must write an explicit `http://` prefix, which is
+/// preserved verbatim (as is an explicit `https://`).
 pub(crate) fn normalize_endpoint(host: &str) -> String {
     if host.starts_with("http://") || host.starts_with("https://") {
         host.to_string()
     } else {
-        format!("http://{host}")
+        format!("https://{host}")
     }
 }
 
@@ -181,10 +186,13 @@ mod tests {
 
     #[test]
     fn normalize_endpoint_prepends_scheme_when_missing() {
+        // A bare host defaults to https (never plaintext, since a bearer token
+        // is attached downstream).
         assert_eq!(
             normalize_endpoint("localhost:8085"),
-            "http://localhost:8085"
+            "https://localhost:8085"
         );
+        // Explicit schemes are preserved verbatim, including http for emulators.
         assert_eq!(
             normalize_endpoint("http://localhost:8085"),
             "http://localhost:8085"
@@ -206,7 +214,7 @@ mod tests {
         let config = GcpConfig::builder().emulator_host("localhost:9000").build();
         assert_eq!(
             resolve_endpoint(&config, "storage"),
-            Some("http://localhost:9000".to_string())
+            Some("https://localhost:9000".to_string())
         );
     }
 
@@ -223,10 +231,11 @@ mod tests {
             resolve_endpoint(&config, "storage"),
             Some("https://storage.internal:443".to_string())
         );
-        // A service without an override still falls back to the emulator host.
+        // A service without an override still falls back to the emulator host
+        // (a bare host normalizes to https).
         assert_eq!(
             resolve_endpoint(&config, "pubsub"),
-            Some("http://localhost:9000".to_string())
+            Some("https://localhost:9000".to_string())
         );
     }
 

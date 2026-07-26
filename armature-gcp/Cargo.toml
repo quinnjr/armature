@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Google Cloud Platform services integration for Armature - dynamically loadable and DI-ready"
-keywords = ["gcp", "google-cloud", "firestore", "pubsub", "bigquery"]
+keywords = ["gcp", "google-cloud", "pubsub", "bigquery"]
 categories = ["web-programming", "asynchronous"]
 
 [dependencies]

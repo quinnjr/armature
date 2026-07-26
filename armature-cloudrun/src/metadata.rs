@@ -64,8 +64,21 @@ impl InstanceMetadata {
                     ))
                 })?;
 
-            if !resp.status().is_success() {
-                return Ok(None);
+            let status = resp.status();
+            if !status.is_success() {
+                // Distinguish "field genuinely absent" from "server degraded".
+                // 404 (not found) and 403 (this instance may not read the field)
+                // mean the value simply isn't available -> None. Anything else,
+                // notably 5xx and 429, is a transient/degraded response: surface
+                // it as a retryable error rather than silently returning an
+                // incomplete InstanceMetadata that looks complete.
+                if status.as_u16() == 404 || status.as_u16() == 403 {
+                    return Ok(None);
+                }
+                return Err(crate::CloudRunError::Metadata(format!(
+                    "metadata server returned HTTP {} for {path}",
+                    status.as_u16()
+                )));
             }
 
             let text = resp.text().await.map_err(|e| {
@@ -86,23 +99,7 @@ impl InstanceMetadata {
             get_metadata(&client, base, "instance/service-accounts/default/email"),
         )?;
 
-        let region = zone.as_ref().map(|z| {
-            // Zone is like "projects/123456789/zones/us-central1-a"
-            // Extract region as "us-central1"
-            z.rsplit('/')
-                .next()
-                .and_then(|z| {
-                    z.rsplit('-')
-                        .skip(1)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("-")
-                        .into()
-                })
-                .unwrap_or_default()
-        });
+        let region = zone.as_deref().and_then(region_from_zone);
 
         Ok(Self {
             instance_id,
@@ -124,6 +121,34 @@ impl InstanceMetadata {
             service_account: std::env::var("SERVICE_ACCOUNT").ok(),
             region: std::env::var("GOOGLE_CLOUD_REGION").ok(),
         }
+    }
+}
+
+/// Derive the Cloud Run region from a GCE `instance/zone` value.
+///
+/// The metadata server reports zones like
+/// `projects/123456789/zones/us-central1-a`; the region is that value with the
+/// leading path stripped and the trailing single-letter zone suffix (`-a`)
+/// removed, giving `us-central1`.
+///
+/// Degenerate inputs are handled explicitly rather than silently producing an
+/// empty string (the previous behaviour):
+/// - a value whose final `-` segment is not a single-letter zone suffix
+///   (e.g. a bare `"us-central1"` with no `-a`) is treated as already being a
+///   region and returned whole;
+/// - a value with no `-` at all (e.g. `"uscentral1"`) is likewise returned
+///   whole rather than collapsing to `""`;
+/// - an empty value yields `None`.
+fn region_from_zone(zone: &str) -> Option<String> {
+    let last = zone.rsplit('/').next().unwrap_or(zone);
+    if last.is_empty() {
+        return None;
+    }
+    match last.rsplit_once('-') {
+        Some((region, suffix)) if suffix.len() == 1 && !region.is_empty() => {
+            Some(region.to_string())
+        }
+        _ => Some(last.to_string()),
     }
 }
 
@@ -180,6 +205,34 @@ mod tests {
             matches!(err, crate::CloudRunError::Metadata(_)),
             "expected CloudRunError::Metadata, got {err:?}"
         );
+    }
+
+    #[test]
+    fn region_from_zone_handles_normal_and_degenerate_inputs() {
+        // Full metadata-server zone path -> region with the "-a" suffix stripped.
+        assert_eq!(
+            region_from_zone("projects/123456789/zones/us-central1-a").as_deref(),
+            Some("us-central1")
+        );
+        // Bare zone without the leading metadata path.
+        assert_eq!(
+            region_from_zone("us-central1-a").as_deref(),
+            Some("us-central1")
+        );
+        // Degenerate: no single-letter "-a" zone suffix. Treated as already a
+        // region and returned whole (previously this over-stripped to "us").
+        assert_eq!(
+            region_from_zone("us-central1").as_deref(),
+            Some("us-central1")
+        );
+        // Degenerate: no '-' at all -> returned whole, not an empty string
+        // (the old derivation silently produced "").
+        assert_eq!(
+            region_from_zone("uscentral1").as_deref(),
+            Some("uscentral1")
+        );
+        // Empty value -> None.
+        assert_eq!(region_from_zone(""), None);
     }
 
     #[tokio::test]

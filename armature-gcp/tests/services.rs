@@ -98,7 +98,9 @@ async fn cloud_run_honors_endpoint_override() {
     assert_eq!(client.endpoint(), "http://localhost:8088");
 }
 
-/// The emulator host is honored as an endpoint override too.
+/// The emulator host is honored as an endpoint override too. A bare host
+/// normalizes to https (a bearer token is attached, so plaintext is never
+/// inferred; explicit `http://` would be required for cleartext).
 #[cfg(feature = "cloud-functions")]
 #[tokio::test]
 async fn cloud_functions_honors_emulator_host() {
@@ -113,7 +115,98 @@ async fn cloud_functions_honors_emulator_host() {
     let client = services
         .cloud_functions()
         .expect("client should be initialized");
-    assert_eq!(client.endpoint(), "http://localhost:7000");
+    assert_eq!(client.endpoint(), "https://localhost:7000");
+}
+
+/// The Secret Manager client emits the expected request path and
+/// `Authorization: Bearer <token>` header. A local single-shot stub server on an
+/// ephemeral loopback port captures the raw request; the client's endpoint is
+/// pointed at it via an explicit `http://` `service_config` override.
+#[cfg(feature = "secret-manager")]
+#[tokio::test]
+async fn secret_manager_targets_expected_path_and_auth_header() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // The stub hands the captured (path, authorization-header) back to the test.
+    let (tx, rx) = tokio::sync::oneshot::channel::<(String, Option<String>)>();
+
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        // Read the request head (a GET has no body; it ends at the blank line).
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&raw);
+
+        // Request line: "GET <path> HTTP/1.1".
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
+
+        // Authorization header (case-insensitive name).
+        let auth = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .and_then(|line| line.split_once(':').map(|(_, v)| v))
+            .map(|value| value.trim().to_string());
+
+        // Minimal well-formed JSON response so the client's decode succeeds.
+        let body = r#"{"name":"ok"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let _ = tx.send((path, auth));
+    });
+
+    let config = GcpConfig::builder()
+        .project_id("test-project")
+        .credentials(CredentialsSource::AccessToken("dummy-token".into()))
+        .service_config(
+            "secret-manager",
+            serde_json::json!({ "endpoint": format!("http://{addr}") }),
+        )
+        .enable_secret_manager()
+        .build();
+
+    let services = GcpServices::new(config).await.unwrap();
+    let client = services
+        .secret_manager()
+        .expect("client should be initialized");
+
+    let value = client
+        .access_secret_version("my-secret", "latest")
+        .await
+        .expect("request against the local stub should succeed");
+    assert_eq!(value, serde_json::json!({ "name": "ok" }));
+
+    let (path, auth) = rx.await.expect("stub should capture one request");
+    assert_eq!(
+        path,
+        "/v1/projects/test-project/secrets/my-secret/versions/latest:access"
+    );
+    assert_eq!(auth.as_deref(), Some("Bearer dummy-token"));
 }
 
 /// A REST service enabled without a project id fails construction with a clear error.

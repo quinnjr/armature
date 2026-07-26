@@ -208,6 +208,24 @@ jobs:
           # protects it rather than breaking it.
           - crate: armature-acme
             minimal: ""
+          # Cloud Platform crates (Workflow 5). Their default feature set is
+          # empty and every conformance suite is feature-gated (s3, servicebus,
+          # secret-manager, cloud-run, …), so they run nowhere without an
+          # --all-features row here — the coverage job builds members with
+          # default features only. Tests are credential-free (loopback stubs /
+          # connection-refused); any live path is Docker-gated.
+          - crate: armature-aws
+            minimal: "--no-default-features"
+          - crate: armature-azure
+            minimal: "--no-default-features"
+          - crate: armature-gcp
+            minimal: "--no-default-features"
+          - crate: armature-lambda
+            minimal: "--no-default-features"
+          - crate: armature-cloudrun
+            minimal: "--no-default-features"
+          - crate: armature-azure-functions
+            minimal: "--no-default-features"
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies

@@ -24,8 +24,9 @@ fn base_builder() -> armature_aws::AwsConfigBuilder {
 /// must install *some* credentials provider on the resulting `SdkConfig`.
 ///
 /// This is a regression test for the old `_ => {}` arm: the `IamRole` and
-/// `WebIdentity` arms now eagerly construct concrete providers (the latter
-/// builds an STS client), so a mistake there would surface as a panic here.
+/// `WebIdentity` arms now eagerly construct concrete providers (installed on the
+/// `SdkConfig` and asserted present below; the underlying clients they use are
+/// built lazily), so a mistake there would surface as a panic here.
 #[tokio::test]
 async fn every_credential_source_builds_a_provider() {
     let sources = [

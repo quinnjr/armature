@@ -207,8 +207,9 @@ async fn handle_http_request<App, B>(
 where
     App: RequestHandler + 'static,
     B: hyper::body::Body<Data = bytes::Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    use http_body_util::BodyExt;
+    use http_body_util::{BodyExt, LengthLimitError, Limited};
 
     // Convert hyper request to FunctionRequest
     let (parts, body) = req.into_parts();
@@ -227,14 +228,44 @@ where
         return Ok(oversize_response(len, max_request_size));
     }
 
-    let body_bytes = body
-        .collect()
-        .await
-        .map(|b| b.to_bytes())
-        .unwrap_or_default();
+    // Bound the body *during* ingestion so a chunked request with no
+    // Content-Length cannot OOM the process before any size check fires.
+    // `Limited` caps buffered bytes at `max_request_size + 1`; the extra byte
+    // lets the post-collect check below distinguish an at-limit body from an
+    // over-limit one exactly. Ingestion is wrapped in the configured request
+    // timeout (0 disables, matching the handler-timeout semantics) so a
+    // slow-loris upload cannot stall forever.
+    let timeout_seconds = config.function.timeout_seconds;
+    let collect_fut = Limited::new(body, max_request_size + 1).collect();
+    let collect_result = if timeout_seconds == 0 {
+        collect_fut.await
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), collect_fut)
+            .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => return Ok(request_timeout_response(timeout_seconds)),
+        }
+    };
 
-    // Enforce the cap against the actual collected body (covers chunked bodies
-    // with no Content-Length, or a lying Content-Length header).
+    let body_bytes = match collect_result {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
+            // A genuine oversize body surfaces as `LengthLimitError` -> 413. Any
+            // other collect failure is a client transport error / mid-stream
+            // abort -> 400. Never fall through to processing an empty body as a
+            // legitimate request.
+            if err.downcast_ref::<LengthLimitError>().is_some() {
+                return Ok(oversize_response(max_request_size + 1, max_request_size));
+            }
+            return Ok(bad_request_response());
+        }
+    };
+
+    // Exact-boundary enforcement: `Limited` permits up to `max_request_size + 1`
+    // bytes, so a body of exactly `max_request_size + 1` collects successfully.
+    // Reject it here to preserve the `> max_request_size` cap semantics (also
+    // covers a lying Content-Length that under-declares the real body size).
     if body_bytes.len() > max_request_size {
         return Ok(oversize_response(body_bytes.len(), max_request_size));
     }
@@ -334,6 +365,56 @@ fn oversize_response(
                 .body(http_body_util::Full::new(bytes::Bytes::from(
                     "Payload Too Large",
                 )))
+                .unwrap()
+        })
+}
+
+/// Build a `408 Request Timeout` response when body ingestion exceeds the
+/// configured request timeout (e.g. a slow-loris upload that never completes).
+fn request_timeout_response(
+    timeout_seconds: u64,
+) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    error!(
+        timeout_seconds,
+        "Request body ingestion timed out before the body was fully received"
+    );
+    let body = serde_json::json!({
+        "error": format!(
+            "Request body was not fully received within {timeout_seconds} seconds"
+        )
+    })
+    .to_string();
+    hyper::Response::builder()
+        .status(408)
+        .header("content-type", "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(408)
+                .body(http_body_util::Full::new(bytes::Bytes::from(
+                    "Request Timeout",
+                )))
+                .unwrap()
+        })
+}
+
+/// Build a `400 Bad Request` response for a client transport error or
+/// mid-stream abort encountered while reading the request body. Prevents a
+/// truncated/aborted upload from being silently processed as an empty request.
+fn bad_request_response() -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    error!("Request body could not be read (client disconnect or transport error)");
+    let body = serde_json::json!({
+        "error": "Request body could not be read"
+    })
+    .to_string();
+    hyper::Response::builder()
+        .status(400)
+        .header("content-type", "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(400)
+                .body(http_body_util::Full::new(bytes::Bytes::from("Bad Request")))
                 .unwrap()
         })
 }
@@ -516,6 +597,87 @@ mod tests {
         let resp = handle_http_request(app, config, req).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(&body_bytes(resp).await[..], b"5 bytes");
+    }
+
+    #[tokio::test]
+    async fn body_at_exact_limit_is_accepted() {
+        // Streamed path (Full bodies carry no Content-Length): a body of exactly
+        // `max_request_size` bytes must NOT be rejected.
+        let app = Arc::new(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, format!("{} bytes", req.body.len()))
+        });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::from(vec![0u8; 10])))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_ne!(resp.status(), 413);
+        assert_eq!(resp.status(), 200);
+        assert_eq!(&body_bytes(resp).await[..], b"10 bytes");
+    }
+
+    #[tokio::test]
+    async fn body_one_over_limit_returns_413() {
+        // Streamed path: a body of exactly `max_request_size + 1` bytes collects
+        // under the `Limited` cap but must be rejected by the boundary check.
+        let app = Arc::new(|_req: FunctionRequest| async move { FunctionResponse::ok() });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::from(vec![0u8; 11])))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn content_length_at_exact_limit_is_accepted() {
+        // Content-Length header path: a declared length equal to the cap must
+        // pass the early check and be handled (not 413).
+        let app = Arc::new(|req: FunctionRequest| async move {
+            FunctionResponse::with_body(200, format!("{} bytes", req.body.len()))
+        });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-length", "10")
+            .body(Full::new(bytes::Bytes::from(vec![0u8; 10])))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_ne!(resp.status(), 413);
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn content_length_one_over_limit_returns_413() {
+        // Content-Length header path: a declared length one byte over the cap
+        // must be rejected early, before the body is buffered.
+        let app = Arc::new(|_req: FunctionRequest| async move { FunctionResponse::ok() });
+        let mut config = RuntimeConfig::default();
+        config.function.max_request_size = 10;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-length", "11")
+            .body(Full::new(bytes::Bytes::from_static(b"tiny")))
+            .unwrap();
+
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 413);
     }
 
     #[tokio::test]

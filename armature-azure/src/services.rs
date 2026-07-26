@@ -85,10 +85,14 @@ impl AzureServices {
         // default credential chain.
         let credential: Arc<dyn azure_core::credentials::TokenCredential> =
             match &config.credentials {
-                CredentialsSource::DefaultCredential => DeveloperToolsCredential::new(None)
-                    .map_err(|e| AzureError::Auth(e.to_string()))?,
-                CredentialsSource::Environment => DeveloperToolsCredential::new(None)
-                    .map_err(|e| AzureError::Auth(e.to_string()))?,
+                // `Environment` is a byte-identical alias of `DefaultCredential`:
+                // azure_identity 1.0 removed the standalone `EnvironmentCredential`,
+                // so both resolve via the developer-tools credential chain and share
+                // this arm.
+                CredentialsSource::DefaultCredential | CredentialsSource::Environment => {
+                    DeveloperToolsCredential::new(None)
+                        .map_err(|e| AzureError::Auth(e.to_string()))?
+                }
                 CredentialsSource::ManagedIdentity => ManagedIdentityCredential::new(None)
                     .map_err(|e| AzureError::Auth(e.to_string()))?,
                 CredentialsSource::AzureCli => {

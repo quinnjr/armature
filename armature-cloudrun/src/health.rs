@@ -234,10 +234,19 @@ impl HealthCheck {
             .map_err(|e| crate::CloudRunError::Server(format!("failed to bind {addr}: {e}")))?;
 
         loop {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .map_err(|e| crate::CloudRunError::Server(format!("accept failed: {e}")))?;
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    // A single accept() failure (transient fd exhaustion, a
+                    // per-connection error, etc.) must not tear down the health
+                    // endpoint. Log it and keep serving; a short backoff avoids
+                    // a busy-loop if the condition persists (e.g. EMFILE). Only
+                    // the initial bind above is treated as a hard failure.
+                    tracing::warn!("health-check listener accept failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
             let io = TokioIo::new(stream);
             let health = self.clone();
             tokio::spawn(async move {

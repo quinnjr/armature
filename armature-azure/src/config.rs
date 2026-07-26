@@ -12,10 +12,13 @@ pub enum CredentialsSource {
     DefaultCredential,
     /// Resolve via the developer-tools credential chain.
     ///
-    /// `azure_identity` 1.0 removed the standalone `EnvironmentCredential`, so
-    /// this variant resolves the same way as [`CredentialsSource::DefaultCredential`]
-    /// (Azure CLI / Azure Developer CLI). It is retained as a distinct name for
-    /// callers that configure it explicitly.
+    /// Despite the name, this variant does **not** read `AZURE_CLIENT_ID` /
+    /// `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` from the environment:
+    /// `azure_identity` 1.0 removed the standalone `EnvironmentCredential`, so it
+    /// currently resolves **identically** to [`CredentialsSource::DefaultCredential`]
+    /// (Azure CLI / Azure Developer CLI) and shares its match arm. It is retained
+    /// as a distinct name for callers that configure it explicitly; use
+    /// [`CredentialsSource::ServicePrincipal`] to supply client-id/secret directly.
     Environment,
     /// Use managed identity.
     ManagedIdentity,

@@ -228,9 +228,9 @@ impl CurrencyFormatter {
 
         if self.use_symbol {
             if before {
-                format!("{}{}{}", sign, &symbol, formatted)
+                format!("{}{}{}", sign, symbol, formatted)
             } else {
-                format!("{}{} {}", sign, formatted, &symbol)
+                format!("{}{} {}", sign, formatted, symbol)
             }
         } else {
             format!("{}{} {}", sign, formatted, self.currency_code)

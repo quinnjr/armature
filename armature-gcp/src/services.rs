@@ -8,6 +8,53 @@ use tracing::info;
 
 use crate::{GcpConfig, GcpError, Result};
 
+/// Generate the eager initializer, the typed accessor, and the feature-absent
+/// fallback for a REST-backed service. These three follow an identical shape;
+/// only the feature, service key, field, client type, method names, and log
+/// label differ, so a declarative macro removes the near-verbatim triplication.
+macro_rules! rest_service {
+    (
+        feature = $feature:literal,
+        service = $service:literal,
+        field = $field:ident,
+        client = $client:ty,
+        init = $init:ident,
+        accessor = $accessor:ident,
+        label = $label:literal $(,)?
+    ) => {
+        #[cfg(feature = $feature)]
+        async fn $init(&self) -> Result<()> {
+            if self.$field.read().is_some() {
+                return Ok(());
+            }
+            let built = <$client>::new(&self.config).await?;
+            let mut client = self.$field.write();
+            if client.is_none() {
+                *client = Some(built);
+                info!("{} client initialized", $label);
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = $feature)]
+        #[doc = concat!("Get the ", $label, " client.")]
+        pub fn $accessor(&self) -> Result<$client> {
+            if !self.config.is_enabled($service) {
+                return Err(GcpError::not_configured($service));
+            }
+
+            self.$field.read().clone().ok_or_else(|| {
+                GcpError::Service(concat!($label, " client not initialized").to_string())
+            })
+        }
+
+        #[cfg(not(feature = $feature))]
+        pub fn $accessor(&self) -> Result<()> {
+            Err(GcpError::not_enabled($service))
+        }
+    };
+}
+
 /// Container for GCP service clients.
 ///
 /// Which services are compiled in is controlled by Cargo feature flags; which
@@ -259,46 +306,36 @@ impl GcpServices {
         Ok(())
     }
 
-    #[cfg(feature = "secret-manager")]
-    async fn init_secret_manager(&self) -> Result<()> {
-        if self.secret_manager.read().is_some() {
-            return Ok(());
-        }
-        let built = crate::rest::SecretManagerClient::new(&self.config).await?;
-        let mut client = self.secret_manager.write();
-        if client.is_none() {
-            *client = Some(built);
-            info!("Secret Manager client initialized");
-        }
-        Ok(())
+    // REST-backed services: initializer + accessor + feature-absent fallback,
+    // generated from a single shared shape (see `rest_service!`).
+    rest_service! {
+        feature = "secret-manager",
+        service = "secret-manager",
+        field = secret_manager,
+        client = crate::rest::SecretManagerClient,
+        init = init_secret_manager,
+        accessor = secret_manager,
+        label = "Secret Manager",
     }
 
-    #[cfg(feature = "cloud-run")]
-    async fn init_cloud_run(&self) -> Result<()> {
-        if self.cloud_run.read().is_some() {
-            return Ok(());
-        }
-        let built = crate::rest::CloudRunClient::new(&self.config).await?;
-        let mut client = self.cloud_run.write();
-        if client.is_none() {
-            *client = Some(built);
-            info!("Cloud Run client initialized");
-        }
-        Ok(())
+    rest_service! {
+        feature = "cloud-run",
+        service = "cloud-run",
+        field = cloud_run,
+        client = crate::rest::CloudRunClient,
+        init = init_cloud_run,
+        accessor = cloud_run,
+        label = "Cloud Run",
     }
 
-    #[cfg(feature = "cloud-functions")]
-    async fn init_cloud_functions(&self) -> Result<()> {
-        if self.cloud_functions.read().is_some() {
-            return Ok(());
-        }
-        let built = crate::rest::CloudFunctionsClient::new(&self.config).await?;
-        let mut client = self.cloud_functions.write();
-        if client.is_none() {
-            *client = Some(built);
-            info!("Cloud Functions client initialized");
-        }
-        Ok(())
+    rest_service! {
+        feature = "cloud-functions",
+        service = "cloud-functions",
+        field = cloud_functions,
+        client = crate::rest::CloudFunctionsClient,
+        init = init_cloud_functions,
+        accessor = cloud_functions,
+        label = "Cloud Functions",
     }
 
     // Service accessors
@@ -375,57 +412,7 @@ impl GcpServices {
         Err(GcpError::not_enabled("bigquery"))
     }
 
-    /// Get the Secret Manager client.
-    #[cfg(feature = "secret-manager")]
-    pub fn secret_manager(&self) -> Result<crate::rest::SecretManagerClient> {
-        if !self.config.is_enabled("secret-manager") {
-            return Err(GcpError::not_configured("secret-manager"));
-        }
-
-        self.secret_manager
-            .read()
-            .clone()
-            .ok_or_else(|| GcpError::Service("Secret Manager client not initialized".to_string()))
-    }
-
-    #[cfg(not(feature = "secret-manager"))]
-    pub fn secret_manager(&self) -> Result<()> {
-        Err(GcpError::not_enabled("secret-manager"))
-    }
-
-    /// Get the Cloud Run client.
-    #[cfg(feature = "cloud-run")]
-    pub fn cloud_run(&self) -> Result<crate::rest::CloudRunClient> {
-        if !self.config.is_enabled("cloud-run") {
-            return Err(GcpError::not_configured("cloud-run"));
-        }
-
-        self.cloud_run
-            .read()
-            .clone()
-            .ok_or_else(|| GcpError::Service("Cloud Run client not initialized".to_string()))
-    }
-
-    #[cfg(not(feature = "cloud-run"))]
-    pub fn cloud_run(&self) -> Result<()> {
-        Err(GcpError::not_enabled("cloud-run"))
-    }
-
-    /// Get the Cloud Functions client.
-    #[cfg(feature = "cloud-functions")]
-    pub fn cloud_functions(&self) -> Result<crate::rest::CloudFunctionsClient> {
-        if !self.config.is_enabled("cloud-functions") {
-            return Err(GcpError::not_configured("cloud-functions"));
-        }
-
-        self.cloud_functions
-            .read()
-            .clone()
-            .ok_or_else(|| GcpError::Service("Cloud Functions client not initialized".to_string()))
-    }
-
-    #[cfg(not(feature = "cloud-functions"))]
-    pub fn cloud_functions(&self) -> Result<()> {
-        Err(GcpError::not_enabled("cloud-functions"))
-    }
+    // The Secret Manager / Cloud Run / Cloud Functions accessors (and their
+    // feature-absent fallbacks) are generated by the `rest_service!` invocations
+    // above.
 }

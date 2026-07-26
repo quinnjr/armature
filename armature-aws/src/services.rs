@@ -20,6 +20,43 @@ use tracing::info;
 
 use crate::{AwsConfig, AwsError, CredentialsSource, Result};
 
+/// Double-checked lazy initializer for a service client behind a `RwLock`.
+///
+/// Takes the fast path under a read lock when the client already exists, and
+/// otherwise initializes it under the write lock (re-checking so a racing
+/// writer's client is reused). `$init` is evaluated at most once and only when
+/// the slot is empty. Expands to the accessor's tail expression, returning a
+/// clone of the client wrapped in `Ok`.
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "sqs",
+    feature = "sns",
+    feature = "ses",
+    feature = "lambda",
+    feature = "secrets-manager",
+    feature = "ssm",
+    feature = "cloudwatch",
+    feature = "kinesis",
+    feature = "kms",
+    feature = "cognito"
+))]
+macro_rules! get_or_init {
+    ($lock:expr, $init:expr) => {{
+        // Fast path: already initialized — only take a read lock.
+        if let Some(client) = $lock.read().as_ref() {
+            return Ok(client.clone());
+        }
+
+        // Slow path: initialize under the write lock (double-checked).
+        let mut guard = $lock.write();
+        if guard.is_none() {
+            *guard = Some($init);
+        }
+        Ok(guard.as_ref().unwrap().clone())
+    }};
+}
+
 /// Container for AWS service clients.
 ///
 /// Services are loaded lazily based on configuration.
@@ -107,7 +144,7 @@ impl AwsServices {
 
         // Pre-initialize enabled services
         let services = Arc::new(services);
-        services.initialize_enabled_services().await;
+        services.initialize_enabled_services().await?;
 
         Ok(services)
     }
@@ -196,60 +233,61 @@ impl AwsServices {
     }
 
     /// Initialize all enabled services.
-    async fn initialize_enabled_services(&self) {
+    async fn initialize_enabled_services(&self) -> Result<()> {
         for service in &self.config.enabled_services {
             match service.as_str() {
                 #[cfg(feature = "s3")]
                 "s3" => {
-                    let _ = self.s3();
+                    self.s3()?;
                 }
                 #[cfg(feature = "dynamodb")]
                 "dynamodb" => {
-                    let _ = self.dynamodb();
+                    self.dynamodb()?;
                 }
                 #[cfg(feature = "sqs")]
                 "sqs" => {
-                    let _ = self.sqs();
+                    self.sqs()?;
                 }
                 #[cfg(feature = "sns")]
                 "sns" => {
-                    let _ = self.sns();
+                    self.sns()?;
                 }
                 #[cfg(feature = "ses")]
                 "ses" => {
-                    let _ = self.ses();
+                    self.ses()?;
                 }
                 #[cfg(feature = "lambda")]
                 "lambda" => {
-                    let _ = self.lambda();
+                    self.lambda()?;
                 }
                 #[cfg(feature = "secrets-manager")]
                 "secrets-manager" => {
-                    let _ = self.secrets_manager();
+                    self.secrets_manager()?;
                 }
                 #[cfg(feature = "ssm")]
                 "ssm" => {
-                    let _ = self.ssm();
+                    self.ssm()?;
                 }
                 #[cfg(feature = "cloudwatch")]
                 "cloudwatch" => {
-                    let _ = self.cloudwatch();
+                    self.cloudwatch()?;
                 }
                 #[cfg(feature = "kinesis")]
                 "kinesis" => {
-                    let _ = self.kinesis();
+                    self.kinesis()?;
                 }
                 #[cfg(feature = "kms")]
                 "kms" => {
-                    let _ = self.kms();
+                    self.kms()?;
                 }
                 #[cfg(feature = "cognito")]
                 "cognito" => {
-                    let _ = self.cognito();
+                    self.cognito()?;
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 
     /// Get the configuration.
@@ -276,22 +314,15 @@ impl AwsServices {
             return Err(AwsError::not_configured("s3"));
         }
 
-        // Fast path: already initialized — only take a read lock.
-        if let Some(client) = self.s3.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        // Slow path: initialize under the write lock (double-checked).
-        let mut client = self.s3.write();
-        if client.is_none() {
+        get_or_init!(self.s3, {
             let mut config = aws_sdk_s3::config::Builder::from(&self.sdk_config);
             if self.config.endpoint_url.is_some() {
                 config = config.force_path_style(true);
             }
-            *client = Some(aws_sdk_s3::Client::from_conf(config.build()));
+            let client = aws_sdk_s3::Client::from_conf(config.build());
             info!("S3 client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "s3"))]
@@ -306,16 +337,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("dynamodb"));
         }
 
-        if let Some(client) = self.dynamodb.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.dynamodb.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_dynamodb::Client::new(&self.sdk_config));
+        get_or_init!(self.dynamodb, {
+            let client = aws_sdk_dynamodb::Client::new(&self.sdk_config);
             info!("DynamoDB client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "dynamodb"))]
@@ -330,16 +356,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("sqs"));
         }
 
-        if let Some(client) = self.sqs.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.sqs.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sqs::Client::new(&self.sdk_config));
+        get_or_init!(self.sqs, {
+            let client = aws_sdk_sqs::Client::new(&self.sdk_config);
             info!("SQS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "sqs"))]
@@ -354,16 +375,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("sns"));
         }
 
-        if let Some(client) = self.sns.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.sns.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sns::Client::new(&self.sdk_config));
+        get_or_init!(self.sns, {
+            let client = aws_sdk_sns::Client::new(&self.sdk_config);
             info!("SNS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "sns"))]
@@ -378,16 +394,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("ses"));
         }
 
-        if let Some(client) = self.ses.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.ses.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_sesv2::Client::new(&self.sdk_config));
+        get_or_init!(self.ses, {
+            let client = aws_sdk_sesv2::Client::new(&self.sdk_config);
             info!("SES client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "ses"))]
@@ -402,16 +413,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("lambda"));
         }
 
-        if let Some(client) = self.lambda.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.lambda.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_lambda::Client::new(&self.sdk_config));
+        get_or_init!(self.lambda, {
+            let client = aws_sdk_lambda::Client::new(&self.sdk_config);
             info!("Lambda client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "lambda"))]
@@ -426,16 +432,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("secrets-manager"));
         }
 
-        if let Some(client) = self.secrets_manager.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.secrets_manager.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_secretsmanager::Client::new(&self.sdk_config));
+        get_or_init!(self.secrets_manager, {
+            let client = aws_sdk_secretsmanager::Client::new(&self.sdk_config);
             info!("Secrets Manager client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "secrets-manager"))]
@@ -450,16 +451,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("ssm"));
         }
 
-        if let Some(client) = self.ssm.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.ssm.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_ssm::Client::new(&self.sdk_config));
+        get_or_init!(self.ssm, {
+            let client = aws_sdk_ssm::Client::new(&self.sdk_config);
             info!("SSM client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "ssm"))]
@@ -474,16 +470,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("cloudwatch"));
         }
 
-        if let Some(client) = self.cloudwatch.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.cloudwatch.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_cloudwatch::Client::new(&self.sdk_config));
+        get_or_init!(self.cloudwatch, {
+            let client = aws_sdk_cloudwatch::Client::new(&self.sdk_config);
             info!("CloudWatch client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "cloudwatch"))]
@@ -498,16 +489,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("kinesis"));
         }
 
-        if let Some(client) = self.kinesis.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.kinesis.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_kinesis::Client::new(&self.sdk_config));
+        get_or_init!(self.kinesis, {
+            let client = aws_sdk_kinesis::Client::new(&self.sdk_config);
             info!("Kinesis client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "kinesis"))]
@@ -522,16 +508,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("kms"));
         }
 
-        if let Some(client) = self.kms.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.kms.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_kms::Client::new(&self.sdk_config));
+        get_or_init!(self.kms, {
+            let client = aws_sdk_kms::Client::new(&self.sdk_config);
             info!("KMS client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "kms"))]
@@ -546,16 +527,11 @@ impl AwsServices {
             return Err(AwsError::not_configured("cognito"));
         }
 
-        if let Some(client) = self.cognito.read().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let mut client = self.cognito.write();
-        if client.is_none() {
-            *client = Some(aws_sdk_cognito_idp::Client::new(&self.sdk_config));
+        get_or_init!(self.cognito, {
+            let client = aws_sdk_cognito_idp::Client::new(&self.sdk_config);
             info!("Cognito client initialized");
-        }
-        Ok(client.as_ref().unwrap().clone())
+            client
+        })
     }
 
     #[cfg(not(feature = "cognito"))]
