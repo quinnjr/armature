@@ -4,6 +4,7 @@ use crate::{Error, HttpRequest, HttpResponse};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -122,7 +123,16 @@ where
 ///
 /// - was produced by a method other than `GET` or `HEAD`, or
 /// - carries a `Set-Cookie` header (session/user state), or
-/// - carries `Cache-Control: private` or `Cache-Control: no-store`.
+/// - carries `Cache-Control: private` or `Cache-Control: no-store`, or
+/// - carries a non-empty `Vary` header, or
+/// - carries a non-empty `Content-Encoding` header.
+///
+/// The `Vary`/`Content-Encoding` guards exist because the cache key is built
+/// from the request line only (method, path, query) — it does not fold in
+/// request headers such as `Accept-Encoding`. A response that varies by, or
+/// is compressed according to, a header the key ignores must not be stored
+/// here: it could be replayed to a caller that never negotiated that
+/// representation.
 ///
 /// These guards are defensive, not a substitute for correct placement: only
 /// attach this interceptor to routes whose responses are identical for every
@@ -169,11 +179,21 @@ fn clone_response(response: &HttpResponse) -> HttpResponse {
     copy
 }
 
-/// Build the cache key for a request: `METHOD:path` with a canonicalized query
-/// string appended, sorted by parameter name. Sorting means logically-identical
-/// requests with different parameter orderings map to the same entry, while any
-/// difference in a query value yields a distinct entry (so `?q=cats` and
-/// `?q=dogs` never share a cached body).
+/// Build the cache key for a request: `METHOD:{path.len()}:path` with a
+/// canonicalized query string appended, sorted by parameter name. Sorting
+/// means logically-identical requests with different parameter orderings map
+/// to the same entry, while any difference in a query value yields a distinct
+/// entry (so `?q=cats` and `?q=dogs` never share a cached body).
+///
+/// The path is itself length-prefixed, not just joined after `METHOD:`. If it
+/// were joined as plain `METHOD:path`, a request whose `path` happens to
+/// contain a literal `?` could serialize to the exact same string as a
+/// different, shorter path combined with query parameters — e.g. path
+/// `"/a?1:b=1:c&"` (no query params) would collide with path `"/a"` plus query
+/// `{"b": "c"}`, since both naively join to `"GET:/a?1:b=1:c&"`.
+/// Length-prefixing the path (`{path.len()}:{path}`) fixes exactly where the
+/// path ends regardless of `?`-like bytes inside it, the same trick used
+/// below for query params, so the two can never collide.
 ///
 /// Query params are already percent-decoded by the time they reach here, so a
 /// decoded value may itself contain `&` or `=`. To keep the key injective we
@@ -185,7 +205,23 @@ fn clone_response(response: &HttpResponse) -> HttpResponse {
 /// to the literal string `a=1&b=2` under naive concatenation; length-prefixing
 /// makes them `5:1&b=2` vs. `1:1` + `1:2` under distinct keys.)
 fn cache_key(request: &HttpRequest) -> String {
-    let mut key = format!("{}:{}", request.method, request.path);
+    let method = request.method.as_str();
+    let path = request.path.as_str();
+
+    // Cheap upper-bound capacity pass so the common case (few short params)
+    // needs no reallocation while building the key below.
+    let mut capacity = method.len() + 1 + 20 + 1 + path.len() + 1;
+    for (k, v) in request.query_params.iter() {
+        capacity += 20 + 1 + k.len() + 1 + 20 + 1 + v.len() + 1;
+    }
+    let mut key = String::with_capacity(capacity);
+
+    key.push_str(method);
+    key.push(':');
+    let _ = write!(key, "{}", path.len());
+    key.push(':');
+    key.push_str(path);
+
     if request.query_params.is_empty() {
         return key;
     }
@@ -193,11 +229,11 @@ fn cache_key(request: &HttpRequest) -> String {
     params.sort_by(|a, b| a.0.cmp(b.0));
     key.push('?');
     for (k, v) in params {
-        key.push_str(&k.len().to_string());
+        let _ = write!(key, "{}", k.len());
         key.push(':');
         key.push_str(k);
         key.push('=');
-        key.push_str(&v.len().to_string());
+        let _ = write!(key, "{}", v.len());
         key.push(':');
         key.push_str(v);
         key.push('&');
@@ -211,15 +247,27 @@ fn is_cacheable_method(method: &str) -> bool {
 }
 
 /// Whether a response must not be stored in this shared, identity-agnostic
-/// cache: it carries a `Set-Cookie` (per-user session state) or a
-/// `Cache-Control` directive that forbids shared storage (`private`/`no-store`).
+/// cache: it carries a `Set-Cookie` (per-user session state), a
+/// `Cache-Control` directive that forbids shared storage
+/// (`private`/`no-store`), a non-empty `Vary` header, or a non-empty
+/// `Content-Encoding` header.
+///
+/// The `Vary`/`Content-Encoding` checks exist because [`cache_key`] never
+/// folds in request headers (there is no `Accept-Encoding`, `Accept-Language`,
+/// etc. in the key) — it only sees method, path, and query. A response that
+/// legitimately differs per the `Vary`-named request header, or that is
+/// encoded per `Content-Encoding` (e.g. `gzip`, negotiated via
+/// `Accept-Encoding`), would otherwise be cached under a key that can't tell
+/// two different negotiated variants apart, and a client that never asked for
+/// that variant could be served it verbatim from cache.
 ///
 /// `HttpResponse.headers` (`LazyHeaders`) is backed by a plain `HashMap` whose
 /// `get`/`contains_key` are case-sensitive, but HTTP header *names* are not —
 /// and nothing normalizes response header casing before it reaches here. A
 /// handler emitting `cache-control: private` or `set-cookie: ...` (any casing
-/// is legal) must be caught just like the canonically-cased form, so both
-/// checks walk `headers.iter()` and compare names with `eq_ignore_ascii_case`.
+/// is legal) must be caught just like the canonically-cased form, so every
+/// check here walks `headers.iter()` and compares names with
+/// `eq_ignore_ascii_case`.
 fn must_not_cache(response: &HttpResponse) -> bool {
     if !response.cookies.is_empty() {
         return true;
@@ -227,6 +275,12 @@ fn must_not_cache(response: &HttpResponse) -> bool {
     let mut cache_control: Option<&str> = None;
     for (name, value) in response.headers.iter() {
         if name.eq_ignore_ascii_case("set-cookie") {
+            return true;
+        }
+        if name.eq_ignore_ascii_case("vary") && !value.trim().is_empty() {
+            return true;
+        }
+        if name.eq_ignore_ascii_case("content-encoding") && !value.trim().is_empty() {
             return true;
         }
         if name.eq_ignore_ascii_case("cache-control") {
@@ -251,13 +305,16 @@ impl Interceptor for CacheInterceptor {
     ) -> Result<HttpResponse, Error> {
         let ttl = Duration::from_secs(self.ttl_seconds);
         // Only safe methods (GET/HEAD) ever read from or write to the cache.
-        let method_cacheable = is_cacheable_method(&context.request.method);
-        let cache_key = cache_key(&context.request);
+        // Build the key only when it will actually be used: for the (common)
+        // case of a non-GET/HEAD request, this skips the allocation and
+        // length-prefixing work entirely.
+        let cache_key =
+            is_cacheable_method(&context.request.method).then(|| cache_key(&context.request));
 
         // Lookup: serve a fresh hit without touching the handler.
-        if method_cacheable {
+        if let Some(key) = cache_key.as_deref() {
             let store = self.store.read();
-            if let Some((stored_at, cached)) = store.get(&cache_key)
+            if let Some((stored_at, cached)) = store.get(key)
                 && stored_at.elapsed() < ttl
             {
                 return Ok(clone_response(cached));
@@ -269,9 +326,10 @@ impl Interceptor for CacheInterceptor {
 
         // Store only when: the method is safe, caching is enabled, the response
         // is a success (2xx), and it is safe to share — i.e. it does not carry a
-        // Set-Cookie or a private/no-store Cache-Control. This keeps per-user
-        // bodies and session cookies from bleeding across callers.
-        if method_cacheable
+        // Set-Cookie, a private/no-store Cache-Control, a Vary header, or a
+        // Content-Encoding header. This keeps per-user bodies, session cookies,
+        // and negotiated/encoded representations from bleeding across callers.
+        if let Some(key) = cache_key
             && self.ttl_seconds > 0
             && (200..300).contains(&response.status)
             && !must_not_cache(&response)
@@ -280,7 +338,7 @@ impl Interceptor for CacheInterceptor {
             // Prune expired entries so a full-of-stale cache cannot grow without
             // bound on the insert path.
             store.retain(|_, (stored_at, _)| stored_at.elapsed() < ttl);
-            store.insert(cache_key, (Instant::now(), clone_response(&response)));
+            store.insert(key, (Instant::now(), clone_response(&response)));
         }
 
         Ok(response)
@@ -692,5 +750,100 @@ mod tests {
             2,
             "delimiter-colliding decoded query params must not share a cache entry"
         );
+    }
+
+    // ---- Round 2 audit fixes: C1 (Vary/Content-Encoding) & C2 (path/? key) --
+
+    /// C1 (RED->GREEN): the interceptor key never folds in request headers
+    /// (no `Accept-Encoding`), so a response carrying `Content-Encoding` is a
+    /// negotiated representation the key can't distinguish. It must never be
+    /// cached: the handler must be re-invoked on every request.
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_content_encoding() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/gz".into()));
+            interceptor
+                .intercept(ctx, header_next(calls.clone(), "Content-Encoding", "gzip"))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a Content-Encoding response must never be cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// C1 (RED->GREEN): same rationale for `Vary` — a response that varies by
+    /// a header the key ignores must not be stored here.
+    #[tokio::test]
+    async fn test_cache_interceptor_refuses_vary() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/vary".into()));
+            interceptor
+                .intercept(ctx, header_next(calls.clone(), "Vary", "Accept-Encoding"))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a Vary response must never be cached"
+        );
+        assert!(interceptor.is_empty());
+    }
+
+    /// C2 (RED->GREEN): a `path` containing a literal `?` must not collide
+    /// with a different, shorter path plus query parameters that happen to
+    /// naively join to the same string. Under the old `METHOD:path` + `?` +
+    /// length-prefixed-params join (no length prefix on the path itself),
+    /// path `"/a?1:b=1:c&"` (no query params) and path `"/a"` with query
+    /// `{"b": "c"}` both serialized to `"GET:/a?1:b=1:c&"`. Length-prefixing
+    /// the path fixes this: the two now carry different path-length prefixes
+    /// (`11` vs. `2`) and can never collide.
+    #[tokio::test]
+    async fn test_cache_interceptor_path_query_boundary_distinct() {
+        let interceptor = CacheInterceptor::new(60);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let req_literal_path = HttpRequest::new("GET".into(), "/a?1:b=1:c&".into());
+        let first = interceptor
+            .intercept(
+                ExecutionContext::new(req_literal_path),
+                counting_next(calls.clone(), 200, b"path-result"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.body_ref(), b"path-result");
+
+        let mut req_path_plus_query = HttpRequest::new("GET".into(), "/a".into());
+        req_path_plus_query
+            .query_params
+            .insert("b".into(), "c".into());
+        let second = interceptor
+            .intercept(
+                ExecutionContext::new(req_path_plus_query),
+                counting_next(calls.clone(), 200, b"query-result"),
+            )
+            .await
+            .unwrap();
+
+        // Must be the second handler's own body, not a replay of the first.
+        assert_eq!(second.body_ref(), b"query-result");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a path containing a literal '?' must not collide with a distinct path+query"
+        );
+        assert_eq!(interceptor.len(), 2);
     }
 }
