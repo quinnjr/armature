@@ -171,42 +171,18 @@ pub fn middleware_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Err(e) => return e.to_compile_error().into(),
             };
 
-            let struct_name = &item_struct.ident;
-            let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
-
-            let middlewares: Vec<_> = args.middlewares.iter().collect();
-
-            let middleware_const_name = syn::Ident::new(
-                &format!("__MIDDLEWARES_{}", struct_name.to_string().to_uppercase()),
-                struct_name.span(),
-            );
-
-            let middleware_factories: Vec<_> = middlewares
+            let constructions: Vec<proc_macro2::TokenStream> = args
+                .middlewares
                 .iter()
-                .enumerate()
-                .map(|(i, mw)| {
-                    let factory_name = syn::Ident::new(
-                        &format!("__middleware_factory_{i}"),
-                        proc_macro2::Span::call_site(),
-                    );
-                    quote! {
-                        fn #factory_name() -> Box<dyn armature_core::middleware::Middleware> {
-                            Box::new(#mw)
-                        }
-                    }
-                })
+                .map(|mw| quote! { Box::new(#mw) })
                 .collect();
 
-            let factory_names: Vec<_> = (0..middlewares.len())
-                .map(|i| {
-                    syn::Ident::new(
-                        &format!("__middleware_factory_{i}"),
-                        proc_macro2::Span::call_site(),
-                    )
-                })
-                .collect();
-
-            let middleware_count = middlewares.len();
+            let metadata_impl = crate::struct_factory::factory_metadata_impl(
+                &item_struct,
+                "middleware",
+                &quote! { armature_core::middleware::Middleware },
+                &constructions,
+            );
 
             // Re-emit the struct verbatim (preserving its exact form — unit,
             // tuple, or named — including any trailing `;`) and attach the
@@ -216,21 +192,7 @@ pub fn middleware_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! {
                 #item_struct
 
-                impl #impl_generics #struct_name #ty_generics #where_clause {
-                    /// Middleware factories for this controller.
-                    ///
-                    /// Consumed by the `#[module]` route registrar, which builds
-                    /// each middleware and wraps every route declared on this
-                    /// controller with the resulting chain.
-                    pub fn __get_middleware_factories() -> Vec<fn() -> Box<dyn armature_core::middleware::Middleware>> {
-                        vec![#(Self::#factory_names),*]
-                    }
-
-                    #(#middleware_factories)*
-                }
-
-                /// Number of middlewares for this controller
-                pub const #middleware_const_name: usize = #middleware_count;
+                #metadata_impl
             }
             .into()
         }

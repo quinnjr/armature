@@ -159,42 +159,18 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Err(e) => return e.to_compile_error().into(),
             };
 
-            let struct_name = &item_struct.ident;
-            let (impl_generics, ty_generics, where_clause) = item_struct.generics.split_for_impl();
-
-            let guards: Vec<_> = args.guards.iter().collect();
-
-            let guard_const_name = syn::Ident::new(
-                &format!("__GUARDS_{}", struct_name.to_string().to_uppercase()),
-                struct_name.span(),
-            );
-
-            let guard_factories: Vec<_> = guards
+            let constructions: Vec<TokenStream2> = args
+                .guards
                 .iter()
-                .enumerate()
-                .map(|(i, guard)| {
-                    let factory_name = syn::Ident::new(
-                        &format!("__guard_factory_{i}"),
-                        proc_macro2::Span::call_site(),
-                    );
-                    quote! {
-                        fn #factory_name() -> Box<dyn armature_core::guard::Guard> {
-                            Box::new(<#guard as Default>::default())
-                        }
-                    }
-                })
+                .map(|guard| quote! { Box::new(<#guard as Default>::default()) })
                 .collect();
 
-            let factory_names: Vec<_> = (0..guards.len())
-                .map(|i| {
-                    syn::Ident::new(
-                        &format!("__guard_factory_{i}"),
-                        proc_macro2::Span::call_site(),
-                    )
-                })
-                .collect();
-
-            let guard_count = guards.len();
+            let metadata_impl = crate::struct_factory::factory_metadata_impl(
+                &item_struct,
+                "guard",
+                &quote! { armature_core::guard::Guard },
+                &constructions,
+            );
 
             // Re-emit the struct verbatim (preserving its exact form — unit,
             // tuple, or named — including any trailing `;`) and attach the
@@ -203,21 +179,7 @@ pub fn guard_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! {
                 #item_struct
 
-                impl #impl_generics #struct_name #ty_generics #where_clause {
-                    /// Guard factories for this controller.
-                    ///
-                    /// Consumed by the `#[module]` route registrar, which builds
-                    /// each guard and runs its `can_activate` before dispatching
-                    /// any route declared on this controller.
-                    pub fn __get_guard_factories() -> Vec<fn() -> Box<dyn armature_core::guard::Guard>> {
-                        vec![#(Self::#factory_names),*]
-                    }
-
-                    #(#guard_factories)*
-                }
-
-                /// Number of guards for this controller
-                pub const #guard_const_name: usize = #guard_count;
+                #metadata_impl
             }
             .into()
         }

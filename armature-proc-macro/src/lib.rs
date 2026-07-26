@@ -16,6 +16,7 @@ mod params;
 mod route_validation;
 mod routes;
 mod routes_impl;
+mod struct_factory;
 mod timeout_attr;
 
 /// Marks a struct as injectable, allowing it to be registered in the DI container
