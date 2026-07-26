@@ -1,9 +1,12 @@
 //! Behavioral tests for the `#[use_middleware]` / `#[middleware]` decorators.
 
 use armature_core::middleware::{Middleware, Next};
-use armature_core::{Container, Error, HttpRequest, HttpResponse, Module, Router};
+use armature_core::{Error, HttpRequest, HttpResponse};
 use armature_proc_macro::{controller, middleware, module, routes, use_middleware};
 use std::collections::HashMap;
+
+mod support;
+use support::{build_router, get_request};
 
 /// Middleware that stamps a header on the response, proving the chain ran.
 struct StampMiddleware;
@@ -82,28 +85,6 @@ impl StampedController {
 #[derive(Default)]
 struct StampedModule;
 
-fn build_router<M: Module + Default>() -> Router {
-    let container = Container::new();
-    let mut router = Router::new();
-    let module = M::default();
-    for reg in module.controllers() {
-        let instance = (reg.factory)(&container).expect("controller factory");
-        (reg.route_registrar)(&container, &mut router, instance).expect("route registrar");
-    }
-    router
-}
-
-fn get_request(path: &str) -> HttpRequest {
-    HttpRequest::from_parts(
-        "GET".to_string(),
-        path.to_string(),
-        HashMap::new(),
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-    )
-}
-
 #[tokio::test]
 async fn controller_struct_middleware_wraps_route() {
     let router = build_router::<StampedModule>();
@@ -113,5 +94,84 @@ async fn controller_struct_middleware_wraps_route() {
         resp.headers.get("X-Stamp"),
         Some(&"1".to_string()),
         "controller-struct #[middleware] must wrap the route and stamp the response"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ordering contract: the first-listed struct-level middleware is the outermost
+// one, so it observes the request first. Each middleware appends its tag to an
+// `X-Order` *request* header on the way in; the handler echoes the accumulated
+// value back, making the entry order directly observable.
+// ---------------------------------------------------------------------------
+
+/// Middleware that also proves it is built once: constructing it bumps
+/// `MIDDLEWARE_CONSTRUCTED`.
+static MIDDLEWARE_CONSTRUCTED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct OrderMiddleware(&'static str);
+
+impl OrderMiddleware {
+    fn new(tag: &'static str) -> Self {
+        MIDDLEWARE_CONSTRUCTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(tag)
+    }
+}
+
+#[async_trait::async_trait]
+impl Middleware for OrderMiddleware {
+    async fn handle(&self, mut req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
+        let order = match req.headers.get("X-Order") {
+            Some(prev) => format!("{},{}", prev, self.0),
+            None => self.0.to_string(),
+        };
+        req.headers.insert("X-Order".to_string(), order);
+        next(req).await
+    }
+}
+
+#[controller("/ordered")]
+#[middleware(OrderMiddleware::new("1"), OrderMiddleware::new("2"))]
+#[derive(Default)]
+struct OrderedController;
+
+#[routes]
+impl OrderedController {
+    #[get("/thing")]
+    async fn thing(req: HttpRequest) -> Result<HttpResponse, Error> {
+        let order = req.headers.get("X-Order").cloned().unwrap_or_default();
+        Ok(HttpResponse::ok().with_header("X-Order".to_string(), order))
+    }
+}
+
+#[module(controllers: [OrderedController])]
+#[derive(Default)]
+struct OrderedModule;
+
+#[tokio::test]
+async fn controller_struct_middleware_preserves_declaration_order() {
+    let router = build_router::<OrderedModule>();
+
+    // The chain is built at registration: two middlewares, constructed once.
+    assert_eq!(
+        MIDDLEWARE_CONSTRUCTED.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "each struct-level middleware must be constructed once at registration"
+    );
+
+    for _ in 0..3 {
+        let resp = router.route(get_request("/ordered/thing")).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            resp.headers.get("X-Order"),
+            Some(&"1,2".to_string()),
+            "the first-listed middleware must run first"
+        );
+    }
+
+    assert_eq!(
+        MIDDLEWARE_CONSTRUCTED.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "middleware must not be rebuilt per request"
     );
 }
