@@ -967,6 +967,74 @@ pub(crate) async fn gzip_encode_offloaded(
     }
 }
 
+/// Gzip-encode `response`'s body at `level` (offloading per
+/// [`gzip_encode_offloaded`]) and install it, or restore the original body
+/// unchanged if encoding failed. Shared by both gzip middlewares
+/// (`Compress` here and `CompressionMiddleware` in `middleware.rs`) so the
+/// body-storage handling below only has to be correct in one place.
+///
+/// `HttpResponse` stores its body in one of two places: the legacy `pub
+/// body: Vec<u8>` field, or the zero-copy `body_bytes: Option<Bytes>`
+/// storage set by `with_bytes_body`/`with_static_body` (used by static-file
+/// serving, `FastResponse`, and `ResponseBuilder::build()`) — whichever is
+/// set, `body_ref()`/`body_len()` resolve through `body_bytes` first, and
+/// `with_body` clears `body_bytes` back to `None`. A naive
+/// `std::mem::take(&mut response.body)` therefore only ever sees the *legacy*
+/// field: for a `body_bytes`-backed response that field is already empty
+/// (`with_bytes_body`/`with_static_body` clear it), so the real content
+/// would never be read, gzip would happily encode zero bytes, and
+/// `with_body(compressed)` would then wipe out `body_bytes` and discard the
+/// actual content permanently. This reads through whichever storage is
+/// actually populated instead.
+///
+/// On the offload-failed path, a `body_bytes`-backed response needs no
+/// explicit restoration: `body_bytes()` only *clones* the `Arc`-backed
+/// `Bytes` handle (an O(1) refcount bump) to get an owned `Vec<u8>` for
+/// [`gzip_encode_offloaded`] (which needs ownership to move/share the
+/// buffer across the `spawn_blocking` boundary — this copy is unavoidable
+/// given that contract, but no worse than the copy encoding itself would
+/// perform), so `response`'s own `body_bytes` field is never touched and
+/// still holds the untouched original the whole time.
+pub(crate) async fn apply_gzip_offload(
+    mut response: HttpResponse,
+    level: CompressionLevel,
+) -> HttpResponse {
+    let had_content_length = response.headers.contains_key("Content-Length");
+    let was_bytes_backed = response.has_bytes_body();
+    let original: Vec<u8> = if was_bytes_backed {
+        response.body_bytes().to_vec()
+    } else {
+        std::mem::take(&mut response.body)
+    };
+
+    match gzip_encode_offloaded(original, level).await {
+        Ok(compressed) => {
+            response = response.with_body(compressed);
+            response
+                .headers
+                .insert("Content-Encoding".to_string(), "gzip".to_string());
+            if had_content_length {
+                response.headers.insert(
+                    "Content-Length".to_string(),
+                    response.body_len().to_string(),
+                );
+            }
+        }
+        Err(original) => {
+            // Encoding failed, or the offload task did not complete
+            // normally. If the body was legacy-`Vec`-backed we took it out
+            // via `mem::take` above, so it must be restored explicitly; if
+            // it was `body_bytes`-backed, `response` was never mutated
+            // (see doc comment) and already holds the original untouched.
+            if !was_bytes_backed {
+                response.body = original;
+            }
+        }
+    }
+
+    response
+}
+
 /// Add `Accept-Encoding` to the response's `Vary` header, *merging* with any
 /// existing value instead of clobbering it — e.g. `Vary: Origin` set upstream
 /// by CORS middleware must survive compression adding its own dimension.
@@ -1031,33 +1099,7 @@ impl Middleware for Compress {
             // and it is not already content-encoded.
             let already_encoded = response.headers.contains_key("Content-Encoding");
             if client_accepts_gzip && !already_encoded && !response.body_ref().is_empty() {
-                let had_content_length = response.headers.contains_key("Content-Length");
-                // `response` is a local, owned value here with nothing else
-                // borrowing its body, so move the body out instead of cloning
-                // it — `gzip_encode_offloaded` takes ownership precisely so
-                // this can be a move.
-                let original_body = std::mem::take(&mut response.body);
-                match gzip_encode_offloaded(original_body, level).await {
-                    Ok(compressed) => {
-                        response = response.with_body(compressed);
-                        response
-                            .headers
-                            .insert("Content-Encoding".to_string(), "gzip".to_string());
-                        if had_content_length {
-                            response.headers.insert(
-                                "Content-Length".to_string(),
-                                response.body_len().to_string(),
-                            );
-                        }
-                    }
-                    Err(original_body) => {
-                        // Encoding failed, or the offload task did not
-                        // complete normally: restore the original body so the
-                        // response still carries real content instead of the
-                        // empty `Vec` left behind by `mem::take`.
-                        response.body = original_body;
-                    }
-                }
+                response = apply_gzip_offload(response, level).await;
             }
 
             Ok(response)
@@ -1476,6 +1518,46 @@ mod tests {
         assert_eq!(
             resp.headers.get("Content-Encoding").map(String::as_str),
             Some("gzip")
+        );
+        assert_eq!(gunzip(resp.body_ref()), original);
+    }
+
+    /// Regression: `HttpResponse` stores its body in one of two places — the
+    /// legacy `body: Vec<u8>` field, or the zero-copy `body_bytes:
+    /// Option<Bytes>` storage set by `with_bytes_body` (used by static-file
+    /// serving, `FastResponse`, and `ResponseBuilder::build()`), which takes
+    /// precedence when present and leaves `body` empty. A body-storage-naive
+    /// fix that only reads/writes the legacy `body` field would see an empty
+    /// `Vec`, "successfully" gzip-encode zero bytes, and then wipe out the
+    /// real content in `body_bytes` when installing the (bogus, empty)
+    /// compressed result — silently discarding the entire response. This
+    /// proves a `body_bytes`-backed body above the offload threshold is read
+    /// and compressed correctly.
+    #[tokio::test]
+    async fn test_compress_handles_bytes_backed_body_above_offload_threshold() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+        let bytes_body = bytes::Bytes::from(original.clone());
+
+        let next: Next = Box::new(move |_req: HttpRequest| {
+            Box::pin(async move { Ok(HttpResponse::ok().with_bytes_body(bytes_body)) })
+        });
+
+        let resp = mw.call(req, next).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert!(
+            !resp.body_ref().is_empty(),
+            "compressed body must not be empty"
         );
         assert_eq!(gunzip(resp.body_ref()), original);
     }

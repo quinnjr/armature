@@ -431,33 +431,7 @@ impl Middleware for CompressionMiddleware {
 
         let already_encoded = response.headers.contains_key("Content-Encoding");
         if client_accepts_gzip && !already_encoded && response.body_ref().len() > self.min_size {
-            let had_content_length = response.headers.contains_key("Content-Length");
-            // `response` is a local, owned value here with nothing else
-            // borrowing its body, so move the body out instead of cloning
-            // it — `gzip_encode_offloaded` takes ownership precisely so this
-            // can be a move.
-            let original_body = std::mem::take(&mut response.body);
-            match crate::micro::gzip_encode_offloaded(original_body, self.level).await {
-                Ok(compressed) => {
-                    response = response.with_body(compressed);
-                    response
-                        .headers
-                        .insert("Content-Encoding".to_string(), "gzip".to_string());
-                    if had_content_length {
-                        response.headers.insert(
-                            "Content-Length".to_string(),
-                            response.body_len().to_string(),
-                        );
-                    }
-                }
-                Err(original_body) => {
-                    // Encoding failed, or the offload task did not complete
-                    // normally: restore the original body so the response
-                    // still carries real content instead of the empty `Vec`
-                    // left behind by `mem::take`.
-                    response.body = original_body;
-                }
-            }
+            response = crate::micro::apply_gzip_offload(response, self.level).await;
         }
 
         Ok(response)
@@ -815,6 +789,51 @@ mod tests {
         assert_eq!(gunzip(response.body_ref()), expected);
         // The stale eligibility-flag header must be gone.
         assert!(response.headers.get("X-Compression-Eligible").is_none());
+    }
+
+    /// Regression: `HttpResponse` stores its body in one of two places — the
+    /// legacy `body: Vec<u8>` field, or the zero-copy `body_bytes:
+    /// Option<Bytes>` storage set by `with_bytes_body` (used by static-file
+    /// serving, `FastResponse`, and `ResponseBuilder::build()`), which takes
+    /// precedence when present and leaves `body` empty. A body-storage-naive
+    /// call site that only reads/writes the legacy `body` field would see an
+    /// empty `Vec`, "successfully" gzip-encode zero bytes, and then wipe out
+    /// the real content in `body_bytes` when installing the (bogus, empty)
+    /// compressed result. This proves a `body_bytes`-backed body above the
+    /// offload threshold is read and compressed correctly by
+    /// `CompressionMiddleware` too (it shares `apply_gzip_offload` with
+    /// `micro::Compress`).
+    #[tokio::test]
+    async fn test_compression_middleware_handles_bytes_backed_body_above_offload_threshold() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original: Vec<u8> = (0..(crate::micro::GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > crate::micro::GZIP_OFFLOAD_THRESHOLD);
+        let bytes_body = bytes::Bytes::from(original.clone());
+
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_bytes_body(bytes_body)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert!(
+            !response.body_ref().is_empty(),
+            "compressed body must not be empty"
+        );
+        assert_eq!(gunzip(response.body_ref()), original);
     }
 
     /// Below `min_size`, the body must pass through uncompressed.
