@@ -430,22 +430,33 @@ impl Middleware for CompressionMiddleware {
         crate::micro::add_vary_accept_encoding(&mut response);
 
         let already_encoded = response.headers.contains_key("Content-Encoding");
-        if client_accepts_gzip
-            && !already_encoded
-            && response.body_ref().len() > self.min_size
-            && let Some(compressed) =
-                crate::micro::gzip_encode_offloaded(response.body_ref(), self.level).await
-        {
+        if client_accepts_gzip && !already_encoded && response.body_ref().len() > self.min_size {
             let had_content_length = response.headers.contains_key("Content-Length");
-            response = response.with_body(compressed);
-            response
-                .headers
-                .insert("Content-Encoding".to_string(), "gzip".to_string());
-            if had_content_length {
-                response.headers.insert(
-                    "Content-Length".to_string(),
-                    response.body_len().to_string(),
-                );
+            // `response` is a local, owned value here with nothing else
+            // borrowing its body, so move the body out instead of cloning
+            // it — `gzip_encode_offloaded` takes ownership precisely so this
+            // can be a move.
+            let original_body = std::mem::take(&mut response.body);
+            match crate::micro::gzip_encode_offloaded(original_body, self.level).await {
+                Ok(compressed) => {
+                    response = response.with_body(compressed);
+                    response
+                        .headers
+                        .insert("Content-Encoding".to_string(), "gzip".to_string());
+                    if had_content_length {
+                        response.headers.insert(
+                            "Content-Length".to_string(),
+                            response.body_len().to_string(),
+                        );
+                    }
+                }
+                Err(original_body) => {
+                    // Encoding failed, or the offload task did not complete
+                    // normally: restore the original body so the response
+                    // still carries real content instead of the empty `Vec`
+                    // left behind by `mem::take`.
+                    response.body = original_body;
+                }
             }
         }
 

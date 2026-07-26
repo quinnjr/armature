@@ -884,20 +884,87 @@ pub(crate) const GZIP_OFFLOAD_THRESHOLD: usize = 32 * 1024;
 /// [`GZIP_OFFLOAD_THRESHOLD`] so the CPU-bound encode does not block the async
 /// worker. Behaviour-preserving: the bytes returned are identical to
 /// [`gzip_encode`]; only *where* the work runs changes. Below the threshold it
-/// encodes inline to avoid the spawn overhead. Returns `None` if encoding fails
-/// or the blocking task is cancelled/panics (caller then passes the body
-/// through uncompressed).
-pub(crate) async fn gzip_encode_offloaded(data: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
+/// encodes inline to avoid the spawn overhead.
+///
+/// Takes ownership of `data` instead of borrowing it, so the offload path can
+/// move it straight into the `spawn_blocking` closure with no clone. The
+/// uncompressed body must never simply vanish, so the return type mirrors
+/// that: `Ok(compressed)` on success, `Err(original)` if gzip encoding fails —
+/// handing the exact original bytes back so the caller can still serve real
+/// content instead of losing the body.
+///
+/// On the offload path `data` is shared via `Arc` rather than cloned: the
+/// blocking task gets a cheap refcount bump instead of a byte-for-byte copy,
+/// while this scope keeps its own reference. If `gzip_encode` returns `None`,
+/// the task's `Arc` clone is dropped as the closure returns, so
+/// `Arc::try_unwrap` below succeeds and the original bytes come back with no
+/// copy at all. If the blocking closure *panics*, its `Arc` clone is dropped
+/// during unwinding just like any other local — this workspace's default
+/// profiles run with `panic = "unwind"` (only the `release-fat`/`pgo-use`
+/// profiles opt into `panic = "abort"`, which aborts the whole process before
+/// any fallback could run anyway) — so `Arc::try_unwrap` still succeeds and
+/// recovers the original bytes even on that path. The `unwrap_or_else` clone
+/// is therefore a defensive fallback for a refcount state this workspace's
+/// configuration should never actually produce, not the primary recovery
+/// mechanism; both encode-failure and join-failure are logged via
+/// `tracing::warn!` regardless of whether the fallback clone is needed.
+pub(crate) async fn gzip_encode_offloaded(
+    data: Vec<u8>,
+    level: CompressionLevel,
+) -> Result<Vec<u8>, Vec<u8>> {
+    let level_label = match level {
+        CompressionLevel::Fast => "fast",
+        CompressionLevel::Default => "default",
+        CompressionLevel::Best => "best",
+    };
+
     if data.len() < GZIP_OFFLOAD_THRESHOLD {
-        return gzip_encode(data, level);
+        let body_len = data.len();
+        return match gzip_encode(&data, level) {
+            Some(compressed) => Ok(compressed),
+            None => {
+                tracing::warn!(
+                    body_len,
+                    level = level_label,
+                    "gzip encode failed; serving response uncompressed"
+                );
+                Err(data)
+            }
+        };
     }
-    // Own the bytes so the blocking task is `'static`; no lock is held here, so
-    // this never pins a guard across the `.await`.
-    let owned = data.to_vec();
-    tokio::task::spawn_blocking(move || gzip_encode(&owned, level))
-        .await
-        .ok()
-        .flatten()
+
+    // Share the bytes instead of cloning them: the blocking task gets a cheap
+    // `Arc` refcount bump, and this scope keeps its own reference so the
+    // original bytes remain reachable here even if the task never returns
+    // usable output (see the doc comment above for why `try_unwrap` succeeds
+    // in both the encode-failure and panic cases in this workspace's
+    // configuration). No lock is held here, so this never pins a guard across
+    // the `.await`.
+    let body_len = data.len();
+    let shared = Arc::new(data);
+    let for_task = Arc::clone(&shared);
+
+    match tokio::task::spawn_blocking(move || gzip_encode(&for_task, level)).await {
+        Ok(Some(compressed)) => Ok(compressed),
+        Ok(None) => {
+            tracing::warn!(
+                body_len,
+                level = level_label,
+                "gzip encode failed on offload path; serving response uncompressed"
+            );
+            Err(Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()))
+        }
+        Err(join_err) => {
+            tracing::warn!(
+                body_len,
+                level = level_label,
+                error = %join_err,
+                "gzip offload task did not complete normally (panicked or was cancelled); \
+                 serving response uncompressed"
+            );
+            Err(Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()))
+        }
+    }
 }
 
 /// Add `Accept-Encoding` to the response's `Vary` header, *merging* with any
@@ -963,21 +1030,33 @@ impl Middleware for Compress {
             // Only compress when the client accepts gzip, the body is non-empty,
             // and it is not already content-encoded.
             let already_encoded = response.headers.contains_key("Content-Encoding");
-            if client_accepts_gzip
-                && !already_encoded
-                && !response.body_ref().is_empty()
-                && let Some(compressed) = gzip_encode_offloaded(response.body_ref(), level).await
-            {
+            if client_accepts_gzip && !already_encoded && !response.body_ref().is_empty() {
                 let had_content_length = response.headers.contains_key("Content-Length");
-                response = response.with_body(compressed);
-                response
-                    .headers
-                    .insert("Content-Encoding".to_string(), "gzip".to_string());
-                if had_content_length {
-                    response.headers.insert(
-                        "Content-Length".to_string(),
-                        response.body_len().to_string(),
-                    );
+                // `response` is a local, owned value here with nothing else
+                // borrowing its body, so move the body out instead of cloning
+                // it — `gzip_encode_offloaded` takes ownership precisely so
+                // this can be a move.
+                let original_body = std::mem::take(&mut response.body);
+                match gzip_encode_offloaded(original_body, level).await {
+                    Ok(compressed) => {
+                        response = response.with_body(compressed);
+                        response
+                            .headers
+                            .insert("Content-Encoding".to_string(), "gzip".to_string());
+                        if had_content_length {
+                            response.headers.insert(
+                                "Content-Length".to_string(),
+                                response.body_len().to_string(),
+                            );
+                        }
+                    }
+                    Err(original_body) => {
+                        // Encoding failed, or the offload task did not
+                        // complete normally: restore the original body so the
+                        // response still carries real content instead of the
+                        // empty `Vec` left behind by `mem::take`.
+                        response.body = original_body;
+                    }
                 }
             }
 
@@ -1400,4 +1479,51 @@ mod tests {
         );
         assert_eq!(gunzip(resp.body_ref()), original);
     }
+
+    /// Regression for the move-instead-of-clone refactor:
+    /// `gzip_encode_offloaded` now takes `data` by value and returns
+    /// `Result<Vec<u8>, Vec<u8>>` rather than borrowing `&[u8]` and returning
+    /// `Option<Vec<u8>>`. This directly exercises the *inline* (below
+    /// `GZIP_OFFLOAD_THRESHOLD`) branch and proves the new ownership-based
+    /// signature still produces byte-identical, round-trippable output.
+    #[tokio::test]
+    async fn test_gzip_encode_offloaded_round_trips_inline() {
+        let original: Vec<u8> = (0..4096)
+            .map(|i: usize| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() < GZIP_OFFLOAD_THRESHOLD);
+
+        let compressed = gzip_encode_offloaded(original.clone(), CompressionLevel::Best)
+            .await
+            .expect("inline gzip encode should succeed");
+        assert!(compressed.len() < original.len());
+        assert_eq!(gunzip(&compressed), original);
+    }
+
+    /// Same as above but drives the `Arc`-shared `spawn_blocking` offload
+    /// branch directly (body at/above `GZIP_OFFLOAD_THRESHOLD`), proving the
+    /// move-into-`Arc` design still round-trips exactly like the old
+    /// clone-based implementation did.
+    #[tokio::test]
+    async fn test_gzip_encode_offloaded_round_trips_offload_path() {
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+
+        let compressed = gzip_encode_offloaded(original.clone(), CompressionLevel::Best)
+            .await
+            .expect("offloaded gzip encode should succeed");
+        assert!(compressed.len() < original.len());
+        assert_eq!(gunzip(&compressed), original);
+    }
+
+    // Note: there is no test here for the `Err(original)` fallback path
+    // (`gzip_encode` returning `None`, or the `spawn_blocking` join failing).
+    // `gzip_encode` wraps `GzEncoder<Vec<u8>>`, whose `write_all`/`finish`
+    // never fail for any in-memory `Vec<u8>` sink under normal operation —
+    // there is no reachable way to make flate2 return `None` here without
+    // mocking `gzip_encode` itself, which is out of scope for this file's
+    // existing test patterns. See the fix report for the reasoning behind
+    // why the join-failure path should not lose data in practice either.
 }
