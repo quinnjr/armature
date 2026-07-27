@@ -4,12 +4,12 @@
    ============================================
 
    Oxide: Rust programming language inspired dark theme
-   from @pegasusheavy/tailswatch
+   from tailswatch
    https://github.com/quinnjr/tailswatch
 */
 
 @import 'tailwindcss';
-@import '@pegasusheavy/tailswatch/themes/oxide';
+@import 'tailswatch/themes/oxide';
 
 /* ============================================
    CUSTOM OVERRIDES & EXTENSIONS
