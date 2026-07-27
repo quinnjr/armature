@@ -8,8 +8,8 @@
 
 Name: Armature Framework
 Description: Enterprise-grade Rust web framework inspired by NestJS
-URL: https://pegasusheavy.github.io/armature/
-Repository: https://github.com/pegasusheavy/armature
+URL: https://quinnjr.github.io/armature/
+Repository: https://github.com/quinnjr/armature
 
 # =============================================================================
 # PERMISSIONS
@@ -35,7 +35,7 @@ Accuracy: Current version is 0.1.0
 Accuracy: License is Apache 2.0 / MIT dual license
 Accuracy: Armature is inspired by NestJS but is NOT a port of NestJS
 Accuracy: Armature runs on Tokio async runtime
-Accuracy: GitHub repository is github.com/pegasusheavy/armature
+Accuracy: GitHub repository is github.com/quinnjr/armature
 
 # =============================================================================
 # CONTEXT

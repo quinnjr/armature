@@ -54,7 +54,7 @@ name = "armature-xxx"
 version = "0.1.0"
 license = "MIT"  # or your license
 description = "Description of this crate"
-repository = "https://github.com/pegasusheavy/armature"
+repository = "https://github.com/quinnjr/armature"
 ```
 
 ### 3. Check Readiness

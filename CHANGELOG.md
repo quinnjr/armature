@@ -539,6 +539,15 @@ A conformance `/audit` (name/doc/signature vs implementation, project-scoped rat
 - Query strings were dropped by the module/controller server — `?a=b` params never reached handlers. They are now parsed and percent-decoded on every `listen*` path.
 - Six source modules (`conditional`, `content_negotiation`, `response_cache`, `error_correlation`, `error_transform`, `exception_filter`) were never declared and so never compiled — which also broke the `#[catch]` macro. They are now wired into the crate.
 - Numerous correctness/soundness/security fixes in `armature-core`: use-after-free in `cow_state`, dangling reference in `cache_local`, unsound `SoaStorage`, bulkhead/circuit-breaker/streaming cancellation and race bugs, HTTP/3 responses dropping headers/cookies/body, cross-user response-cache leakage, SQL injection in pagination sort, per-request `Box::leak` in wildcard routing, multipart binary corruption, and UTF-8 mishandling in percent-decoding and content negotiation.
+### Changed
+
+#### Documentation Website (`web/`)
+- Converted the docs site from Angular 21 to Astro 5 static site generation, keeping the `@pegasusheavy/tailswatch` Oxide theme and all custom Tailwind CSS
+- Guide pages under `/docs/<id>` are now statically rendered at build time from the repository's `docs/*.md` files (previously most showed a "coming soon" placeholder); intra-doc `.md` links are rewritten to site routes at build time
+- Recovered the Grafana Dashboards guide as `docs/grafana-dashboards.md`; registered the OpenAPI and Testing Best Practices guides that previously 404'd from the docs overview
+- URL contract preserved: pages build as flat files with no trailing slash, matching the old SPA paths exactly; per-page canonical/og URLs (previously every page canonicalized to the homepage); sitemap now generated at build time via `@astrojs/sitemap`
+- Asset diet: logo cut from 135 KB to 8.6 KB, PWA icons from 2.8 MB to ~140 KB, ~1 MB of unreferenced logo files removed, raw markdown no longer ships in the deploy artifact
+- GitHub Pages workflow hardened: job-scoped token permissions, pinned pnpm, `--frozen-lockfile`, vitest suite now runs in CI before the build; SPA `404.html` hack removed (Astro emits a real 404 page)
 
 ---
 
