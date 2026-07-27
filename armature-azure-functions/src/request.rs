@@ -106,7 +106,15 @@ impl FunctionRequest {
         }
     }
 
-    /// Parse from Azure Functions JSON input.
+    /// Parse from this crate's internal `FunctionRequest` JSON shape.
+    ///
+    /// Note: this deserializes the fields of [`FunctionRequest`] itself
+    /// (`method`/`url`/`path`/`query`/`headers`/`body`/`params`/`context`), not
+    /// the Azure Functions custom-handler envelope (`{"Data":{..},"Metadata":{..}}`).
+    /// The runtime never calls this — it builds requests by parsing raw hyper
+    /// requests in `handle_http_request`. This is a convenience helper for
+    /// round-tripping the internal shape (e.g. in tests), and will not parse a
+    /// genuine Azure custom-handler payload.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -167,5 +175,50 @@ impl FunctionRequest {
 impl Default for FunctionRequest {
     fn default() -> Self {
         Self::new("GET", "/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_base64_round_trips_through_serde() {
+        let mut req = FunctionRequest::new("POST", "/upload");
+        // Includes non-UTF-8 bytes to ensure base64 (not raw text) is used.
+        req.body = Bytes::from(vec![0u8, 1, 2, 250, 255]);
+
+        let json = serde_json::to_string(&req).unwrap();
+        let back = FunctionRequest::from_json(&json).unwrap();
+
+        assert_eq!(back.body, req.body);
+        assert_eq!(back.method, "POST");
+        assert_eq!(back.path, "/upload");
+    }
+
+    #[test]
+    fn empty_body_deserializes_to_empty_bytes() {
+        let req = FunctionRequest::new("GET", "/");
+        let json = serde_json::to_string(&req).unwrap();
+        let back = FunctionRequest::from_json(&json).unwrap();
+        assert!(back.body.is_empty());
+    }
+
+    #[test]
+    fn from_json_parses_internal_shape() {
+        let json = r#"{"method":"PUT","url":"/x","path":"/x","query":{},"headers":{}}"#;
+        let back = FunctionRequest::from_json(json).unwrap();
+        assert_eq!(back.method, "PUT");
+        assert_eq!(back.path, "/x");
+        assert!(back.body.is_empty());
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        let mut req = FunctionRequest::new("GET", "/");
+        req.headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        assert!(req.is_json());
+        assert_eq!(req.content_type(), Some("application/json"));
     }
 }

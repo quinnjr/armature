@@ -1,1 +1,0 @@
-//! AWS cognito integration placeholder

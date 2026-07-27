@@ -1,1 +1,0 @@
-//! AWS sqs integration placeholder

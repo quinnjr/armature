@@ -2,13 +2,12 @@
 name = "armature-mcp"
 version = "0.1.3"
 edition.workspace = true
-# Overrides the workspace MSRV (1.89): the `register_mcp_tool!` macro
-# expands to `inventory::submit!` whose body is a `static`, which in
-# turn requires `McpToolEntry::new` to be a `const fn` and therefore
-# requires `TypeId::of` in const context — stable since Rust 1.91.
-# Using this crate on an older toolchain will produce a clear compile
-# error at the macro site.
-rust-version = "1.91"
+# Inherits the workspace MSRV (1.94.1). This crate's own floor is 1.91 — the
+# `register_mcp_tool!` macro expands to an `inventory::submit!` `static` whose
+# `McpToolEntry::new` must be `const fn`, needing `TypeId::of` in const context
+# (stable since Rust 1.91) — but the workspace floor is already higher, so no
+# per-crate override is needed.
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

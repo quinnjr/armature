@@ -106,13 +106,23 @@ mod metadata;
 
 pub use config::CloudRunConfig;
 pub use error::{CloudRunError, Result};
-pub use health::{HealthCheck, HealthStatus};
+pub use health::{
+    CheckResult, FnHealthChecker, HealthCheck, HealthCheckResult, HealthChecker, HealthStatus,
+};
 pub use metadata::{InstanceMetadata, ServiceMetadata};
 
 /// Initialize tracing for Cloud Logging.
 ///
-/// This sets up structured JSON logging compatible with Google Cloud Logging.
-/// Logs will be properly formatted and correlated with Cloud Trace if available.
+/// On Cloud Run (detected via `K_SERVICE`) this installs
+/// [`tracing_stackdriver::layer()`], emitting Stackdriver-structured JSON that
+/// Cloud Logging parses into severity, message and structured fields;
+/// elsewhere it falls back to `tracing_subscriber`'s JSON formatter.
+///
+/// Note: this does **not** perform automatic Cloud Trace correlation. No
+/// `logging.googleapis.com/trace` / `spanId` fields are attached, because no
+/// trace-context is extracted from the incoming `X-Cloud-Trace-Context` /
+/// `traceparent` header here. To correlate logs with traces you must propagate
+/// the trace context yourself (e.g. via an `armature-opentelemetry` layer).
 pub fn init_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

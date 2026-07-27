@@ -128,7 +128,7 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 
 ## Key Conventions
 
-- **Rust 2024 edition**, MSRV 1.89
+- **Rust 2024 edition**, MSRV 1.94.1
 - **Async-first**: Built on Tokio + Hyper. All handlers are `async`
 - **Feature flags**: The crate uses feature flags extensively. `full` enables everything except SAML. `full-with-saml` enables everything
 - **`tokio` features**: crates declare the minimal per-crate feature subset they use (e.g. `["rt", "macros", "sync", "time"]`, plus `net`/`io-util`/`fs` as needed) — do **not** use `features = ["full"]`
