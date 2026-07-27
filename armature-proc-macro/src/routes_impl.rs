@@ -99,6 +99,7 @@ pub fn routes_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Collect route information and generate route handlers
     let mut route_handlers: Vec<TokenStream2> = Vec::new();
+    let mut route_definitions: Vec<TokenStream2> = Vec::new();
     let mut modified_items: Vec<ImplItem> = Vec::new();
 
     for item in &input.items {
@@ -107,6 +108,19 @@ pub fn routes_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let method_str = &route_info.method;
                 let path_str = &route_info.path;
                 let handler_name = &route_info.handler_name;
+
+                // Route metadata mirroring what the module route registrar
+                // registers (controller-relative paths), surfaced through
+                // `Controller::routes()`.
+                let handler_name_str = handler_name.to_string();
+                route_definitions.push(quote! {
+                    armature_core::RouteDefinition {
+                        method: armature_core::HttpMethod::from_str(#method_str)
+                            .unwrap_or(armature_core::HttpMethod::GET),
+                        path: #path_str.to_string(),
+                        handler_name: #handler_name_str.to_string(),
+                    }
+                });
 
                 // Generate the route handler registration based on method signature
                 // Four cases: (has_self, has_request_param)
@@ -253,6 +267,17 @@ pub fn routes_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     handlers.push(#route_handlers);
                 })*
                 handlers
+            }
+
+            /// Route metadata declared on this controller.
+            ///
+            /// This inherent method shadows the empty default supplied by the
+            /// `#[controller]` macro, so `Controller::routes()` reports the same
+            /// routes the module registrar registers (controller-relative paths).
+            pub fn __collect_routes() -> Vec<armature_core::RouteDefinition> {
+                vec![
+                    #(#route_definitions),*
+                ]
             }
         }
     };

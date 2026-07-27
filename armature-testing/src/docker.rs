@@ -185,10 +185,48 @@ impl DockerContainer {
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
         self.container_id = Some(container_id);
 
-        // Wait for container to be ready
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Wait for the container to report itself running, polling up to
+        // the configured `wait_timeout_secs` instead of a fixed sleep.
+        let ready = Self::poll_until_ready(
+            std::time::Duration::from_secs(self.config.wait_timeout_secs.max(1)),
+            std::time::Duration::from_millis(200),
+            || self.is_running(),
+        )
+        .await;
+
+        if !ready {
+            return Err(DockerError::StartFailed(format!(
+                "container did not report running within wait_timeout_secs ({}s)",
+                self.config.wait_timeout_secs
+            )));
+        }
 
         Ok(())
+    }
+
+    /// Poll `ready` at `poll_interval` until it returns `true` or `timeout`
+    /// elapses. Returns `true` as soon as `ready` succeeds, `false` if the
+    /// deadline passes first. Factored out of `start` so the readiness-wait
+    /// behavior (honoring a configurable timeout instead of a fixed sleep)
+    /// is testable without a real Docker daemon.
+    async fn poll_until_ready<F>(
+        timeout: std::time::Duration,
+        poll_interval: std::time::Duration,
+        mut ready: F,
+    ) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if ready() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 
     /// Stop container
@@ -253,11 +291,19 @@ impl DockerContainer {
 
 impl Drop for DockerContainer {
     fn drop(&mut self) {
-        // Stop container on drop
-        if self.container_id.is_some() {
-            let _ = tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(self.stop());
+        // Stop the container synchronously via a blocking `docker stop`
+        // command, never by spinning up a nested Tokio runtime: the
+        // documented usage is dropping a `DockerContainer` inside an async
+        // test (`#[tokio::test]`), and `Runtime::new().unwrap().block_on(..)`
+        // there panics with "Cannot start a runtime from within a runtime"
+        // instead of cleaning up.
+        if let Some(container_id) = self.container_id.take() {
+            let _ = Command::new("docker")
+                .arg("stop")
+                .arg(&container_id)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
     }
 }
@@ -360,5 +406,114 @@ mod tests {
     fn test_docker_available() {
         // This will vary by system
         let _ = DockerContainer::is_docker_available();
+    }
+
+    /// Docker-free: proves the readiness wait honors a configurable timeout
+    /// (rather than a fixed 2s sleep) by never reporting ready and checking
+    /// that `poll_until_ready` actually waited out the deadline.
+    #[tokio::test]
+    async fn poll_until_ready_honors_timeout_when_never_ready() {
+        let start = std::time::Instant::now();
+        let ready = DockerContainer::poll_until_ready(
+            std::time::Duration::from_millis(150),
+            std::time::Duration::from_millis(20),
+            || false,
+        )
+        .await;
+
+        assert!(!ready);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(150));
+    }
+
+    /// Docker-free: proves readiness is detected as soon as it flips true,
+    /// rather than always sleeping the full window.
+    #[tokio::test]
+    async fn poll_until_ready_returns_as_soon_as_ready() {
+        let mut calls = 0u32;
+        let start = std::time::Instant::now();
+
+        let ready = DockerContainer::poll_until_ready(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(10),
+            || {
+                calls += 1;
+                calls >= 3
+            },
+        )
+        .await;
+
+        assert!(ready);
+        assert!(calls >= 3);
+        // Should return well before the 5s timeout.
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// Docker-free: reproduces the exact scenario the old `Drop` impl
+    /// broke — dropping a `DockerContainer` with a live `container_id`
+    /// while already inside a Tokio runtime (`#[tokio::test]`). The old
+    /// `tokio::runtime::Runtime::new().unwrap().block_on(self.stop())`
+    /// panicked with "Cannot start a runtime from within a runtime" here,
+    /// regardless of whether a real Docker daemon or container is present
+    /// (the panic fires before any `docker` command even runs). No Docker
+    /// installation is required: the synchronous `docker stop` the new Drop
+    /// issues is allowed to fail (ignored) for a nonexistent container id.
+    #[tokio::test]
+    async fn drop_inside_tokio_runtime_does_not_panic() {
+        let container = DockerContainer {
+            config: ContainerConfig::new("redis", "7"),
+            container_id: Some("armature-testing-nonexistent-container".to_string()),
+        };
+
+        // Must not panic. If it does, the test process aborts here.
+        drop(container);
+    }
+
+    /// Docker-gated: exercises the real `start()` → readiness poll →
+    /// (implicit) `Drop` → stop lifecycle end-to-end against an actual
+    /// Docker daemon, inside a `#[tokio::test]` runtime (the documented
+    /// usage). Self-skips when Docker is unavailable so the default
+    /// `cargo test` stays Docker-free; set `ARMATURE_REQUIRE_DOCKER=1` to
+    /// turn the skip into a hard failure (e.g. in CI, where Docker should
+    /// be present).
+    #[tokio::test]
+    async fn start_and_drop_a_real_container_when_docker_is_available() {
+        if !DockerContainer::is_docker_available() {
+            if std::env::var("ARMATURE_REQUIRE_DOCKER").as_deref() == Ok("1") {
+                panic!(
+                    "ARMATURE_REQUIRE_DOCKER=1 is set but no Docker daemon is reachable: \
+                     this container-gated test must run, not skip."
+                );
+            }
+            eprintln!(
+                "skipping: Docker not available (set ARMATURE_REQUIRE_DOCKER=1 to make this a failure)"
+            );
+            return;
+        }
+
+        let config = RedisContainer::config().with_wait_timeout(15);
+        let mut container = DockerContainer::new(config);
+
+        container
+            .start()
+            .await
+            .expect("container should start and become ready within wait_timeout_secs");
+        assert!(container.is_running());
+
+        // Drop runs here, inside this test's Tokio runtime — must not
+        // panic, and must actually stop the container synchronously.
+        let container_id = container.container_id().unwrap().to_string();
+        drop(container);
+
+        let still_running = Command::new("docker")
+            .arg("inspect")
+            .arg("-f")
+            .arg("{{.State.Running}}")
+            .arg(&container_id)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "true")
+            .unwrap_or(false);
+        assert!(!still_running, "Drop should have stopped the container");
     }
 }

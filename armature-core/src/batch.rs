@@ -26,7 +26,7 @@
 //! let config = BatchConfig::builder()
 //!     .buffer_size(65536)      // 64KB read buffer
 //!     .max_requests(32)        // Max requests per batch
-//!     .parse_timeout_ms(100)   // Max time to accumulate batch
+//!     .max_request_size(1 << 20) // 1MB per-request cap
 //!     .build();
 //! ```
 
@@ -52,12 +52,6 @@ pub struct BatchConfig {
     /// Maximum number of requests per batch
     pub max_requests: usize,
 
-    /// Maximum time to wait for batch to fill (milliseconds)
-    pub parse_timeout_ms: u64,
-
-    /// Minimum number of requests before processing a batch
-    pub min_batch_size: usize,
-
     /// Maximum request size (for DoS prevention)
     pub max_request_size: usize,
 
@@ -66,9 +60,6 @@ pub struct BatchConfig {
     /// The parser uses a fixed array of [`MAX_SUPPORTED_HEADERS`] header
     /// slots, so values above that are effectively clamped to it.
     pub max_headers: usize,
-
-    /// Enable adaptive batch sizing based on load
-    pub adaptive_batching: bool,
 }
 
 impl Default for BatchConfig {
@@ -76,11 +67,8 @@ impl Default for BatchConfig {
         Self {
             buffer_size: 65536, // 64KB
             max_requests: 32,
-            parse_timeout_ms: 10,      // 10ms max wait
-            min_batch_size: 1,         // Process at least 1
             max_request_size: 1048576, // 1MB
             max_headers: 100,
-            adaptive_batching: true,
         }
     }
 }
@@ -96,11 +84,8 @@ impl BatchConfig {
         Self {
             buffer_size: 131072, // 128KB
             max_requests: 64,
-            parse_timeout_ms: 20,
-            min_batch_size: 4,
             max_request_size: 2097152, // 2MB
             max_headers: 100,
-            adaptive_batching: true,
         }
     }
 
@@ -109,11 +94,8 @@ impl BatchConfig {
         Self {
             buffer_size: 16384, // 16KB
             max_requests: 8,
-            parse_timeout_ms: 1,
-            min_batch_size: 1,
             max_request_size: 524288, // 512KB
             max_headers: 64,
-            adaptive_batching: false,
         }
     }
 
@@ -122,11 +104,8 @@ impl BatchConfig {
         Self {
             buffer_size: 32768, // 32KB
             max_requests: 16,
-            parse_timeout_ms: 5,
-            min_batch_size: 2,
             max_request_size: 524288, // 512KB
             max_headers: 50,
-            adaptive_batching: true,
         }
     }
 }
@@ -150,18 +129,6 @@ impl BatchConfigBuilder {
         self
     }
 
-    /// Set parse timeout in milliseconds
-    pub fn parse_timeout_ms(mut self, ms: u64) -> Self {
-        self.config.parse_timeout_ms = ms;
-        self
-    }
-
-    /// Set minimum batch size before processing
-    pub fn min_batch_size(mut self, min: usize) -> Self {
-        self.config.min_batch_size = min;
-        self
-    }
-
     /// Set maximum request size
     pub fn max_request_size(mut self, size: usize) -> Self {
         self.config.max_request_size = size;
@@ -174,12 +141,6 @@ impl BatchConfigBuilder {
     /// parser uses a fixed-size header array.
     pub fn max_headers(mut self, max: usize) -> Self {
         self.config.max_headers = max.min(MAX_SUPPORTED_HEADERS);
-        self
-    }
-
-    /// Enable or disable adaptive batching
-    pub fn adaptive_batching(mut self, enable: bool) -> Self {
-        self.config.adaptive_batching = enable;
         self
     }
 
@@ -859,12 +820,12 @@ mod tests {
         let config = BatchConfig::builder()
             .buffer_size(32768)
             .max_requests(16)
-            .parse_timeout_ms(5)
+            .max_request_size(2048)
             .build();
 
         assert_eq!(config.buffer_size, 32768);
         assert_eq!(config.max_requests, 16);
-        assert_eq!(config.parse_timeout_ms, 5);
+        assert_eq!(config.max_request_size, 2048);
     }
 
     #[test]

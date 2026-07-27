@@ -1,6 +1,6 @@
 [package]
 name = "armature-rhai"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,13 +13,16 @@ categories = ["web-programming", "development-tools"]
 
 [dependencies]
 # Core Armature
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
+bytes = "1.12"
 
 # Rhai scripting engine
 rhai = { version = "1.25", features = ["sync", "serde", "metadata"] }
 
 # Async runtime
-tokio = { version = "1.52", features = ["sync", "fs", "time"] }
+# `rt`/`rt-multi-thread` are required so `script_handler` can detect and
+# safely block on the caller's runtime flavor (see src/handler.rs).
+tokio = { version = "1.52", features = ["sync", "fs", "time", "rt", "rt-multi-thread"] }
 async-trait = "0.1"
 
 # Serialization

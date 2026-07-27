@@ -42,9 +42,9 @@
 //! ```
 
 use crate::{HttpRequest, HttpResponse};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
@@ -530,6 +530,14 @@ pub struct CachedResponse {
     /// be removed too. `None` for entries created outside the cache (e.g. via
     /// [`CachedResponse::new`] directly), which are never tracked there.
     pub(crate) base_key: Option<String>,
+    /// Monotonic insertion sequence used by the [`EvictionIndex`] to identify
+    /// this entry's *current* position in `order`. Each store assigns a fresh
+    /// value (see [`ResponseCache::store_with_ttl`]); a re-store (refresh)
+    /// therefore bumps it, so eviction and compaction can tell a live entry's
+    /// current `order` position from a stale duplicate left by an earlier
+    /// insert. `0` for entries created outside the cache, which never enter the
+    /// eviction index.
+    pub(crate) eviction_seq: u64,
 }
 
 /// The actual cached response data.
@@ -571,6 +579,7 @@ impl CachedResponse {
             last_modified,
             vary,
             base_key: None,
+            eviction_seq: 0,
         }
     }
 
@@ -653,6 +662,153 @@ pub struct ResponseCache {
     /// stored response was keyed with, so `get` can rebuild the full key
     /// from a request and `invalidate` can find all variants.
     vary_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Insertion-order eviction bookkeeping, guarded independently but only ever
+    /// mutated while holding the `entries` write lock (so the two stay
+    /// consistent). See [`EvictionIndex`].
+    eviction: Mutex<EvictionIndex>,
+}
+
+/// Insertion-order eviction bookkeeping kept in lockstep with `entries`.
+///
+/// `order` holds variant cache keys oldest-first. It is maintained *lazily*:
+/// keys removed by invalidation or TTL purging are left in place (as
+/// tombstones) and skipped when they surface during capacity-driven eviction,
+/// so finding the oldest live entry is O(1) amortized instead of an O(n)
+/// `min_by_key` scan of the whole map on every insert once the cache is full.
+///
+/// Two things leave tombstones in `order` without ever going through
+/// `evict_oldest`, which is the only place that used to clean them up:
+///
+/// 1. Keys removed by `purge_stale`/`invalidate`/`invalidate_prefix`/expiry —
+///    in the common regime where capacity is never hit, `evict_oldest` never
+///    runs at all, so these tombstones would otherwise accumulate forever.
+/// 2. Re-inserting an already-live key pushes a *second* `order` entry for the
+///    same key (`record_insert`'s `replaced` branch only suppresses the
+///    `base_key_counts` increment, not the push), so a single hot key
+///    re-stored repeatedly (e.g. every TTL cycle) would also grow `order`
+///    without bound.
+///
+/// Each `order` element is a `(key, seq)` pair where `seq` is a monotonic
+/// counter assigned at insert time and mirrored onto the entry's
+/// [`CachedResponse::eviction_seq`]. An `order` position is the key's *current*
+/// one only when its `seq` matches the live entry's; an older `seq` marks a
+/// stale duplicate left by a refresh. This lets a re-store reset eviction
+/// recency: `evict_oldest` skips a popped position whose `seq` no longer
+/// matches (rather than evicting the refreshed entry by its original insert
+/// time), and `compact` keeps only the current-`seq` position of each key.
+///
+/// `dead` counts how many `order` entries no longer represent a live
+/// position (tombstones from removal, or superseded duplicates from a
+/// re-insert). Whenever `dead` exceeds the number of live entries,
+/// `compact_if_needed` rebuilds `order` from scratch in a single pass over
+/// the live entries, dropping the tombstones/duplicates and resetting `dead`
+/// to 0. This keeps `order` bounded to roughly `O(live entries)` regardless
+/// of how much churn (invalidation or re-insertion) has occurred, while still
+/// keeping the common insert/evict path O(1) amortized.
+///
+/// `base_key_counts` tracks how many live variants share each base key. It lets
+/// eviction decide in O(1) whether a base key's `vary_index` record is now dead
+/// (its last variant was just evicted) instead of a second O(n) scan over every
+/// entry's `base_key`.
+#[derive(Debug, Default)]
+struct EvictionIndex {
+    order: VecDeque<(String, u64)>,
+    base_key_counts: HashMap<String, usize>,
+    /// Number of `order` entries that are tombstones (their key was removed
+    /// from `entries` elsewhere) or stale duplicates (superseded by a later
+    /// re-insert of the same key). See the struct docs.
+    dead: usize,
+    /// Monotonic source for per-insert sequence numbers. Never reset (not even
+    /// by `clear`), so a sequence value is never reused for a different insert.
+    next_seq: u64,
+}
+
+impl EvictionIndex {
+    /// Allocate the next monotonic insertion sequence. The caller stamps it onto
+    /// both the new `order` position (via [`record_insert`]) and the stored
+    /// [`CachedResponse::eviction_seq`], so the two can later be cross-checked.
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
+    /// Record a freshly inserted variant key at sequence `seq`. `replaced` is
+    /// true when an entry already existed under `key`, so its base key must not
+    /// be double-counted — and the *previous* `order` entry for `key` becomes a
+    /// dead duplicate, since the entry now carries the newer `seq`.
+    fn record_insert(&mut self, key: &str, seq: u64, base_key: &str, replaced: bool) {
+        self.order.push_back((key.to_string(), seq));
+        if replaced {
+            self.dead += 1;
+        } else {
+            *self
+                .base_key_counts
+                .entry(base_key.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Record removal of one variant with the given base key. Returns true when
+    /// that was the last live variant for the base key (its `vary_index` record
+    /// is now dead and should be pruned).
+    ///
+    /// Callers that remove an entry from `entries` outside of `evict_oldest`
+    /// (invalidation, prefix invalidation, TTL purging) must also bump `dead`
+    /// themselves — the removed key's `order` entry is left behind as a
+    /// tombstone, and this method only tracks `base_key_counts`.
+    fn record_remove(&mut self, base_key: &str) -> bool {
+        if let Some(count) = self.base_key_counts.get_mut(base_key) {
+            *count -= 1;
+            if *count == 0 {
+                self.base_key_counts.remove(base_key);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether any live variant still references `base_key`.
+    fn base_key_live(&self, base_key: &str) -> bool {
+        self.base_key_counts.contains_key(base_key)
+    }
+
+    /// Rebuild `order` from `entries`, dropping tombstones (keys no longer
+    /// present) and stale duplicates left by re-inserting an already-live key
+    /// (see `record_insert`). A position is kept only when its `seq` matches the
+    /// live entry's `eviction_seq` — i.e. it is the key's *current* position —
+    /// so a refreshed entry keeps its newer (later) position and its eviction
+    /// recency, rather than reverting to the original insert time. Single
+    /// forward pass, preserving relative order; the `seen` guard is defensive
+    /// (a matching `seq` is already unique per key).
+    fn compact(&mut self, entries: &HashMap<String, CachedResponse>) {
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut compacted = VecDeque::with_capacity(entries.len());
+        for (key, seq) in self.order.drain(..) {
+            if entries.get(&key).is_some_and(|e| e.eviction_seq == seq) && seen.insert(key.clone())
+            {
+                compacted.push_back((key, seq));
+            }
+        }
+        self.order = compacted;
+        self.dead = 0;
+    }
+
+    /// Compact `order` when dead (tombstoned or superseded) entries outnumber
+    /// live ones. Keeps `order` from growing without bound under
+    /// invalidation/re-insertion churn even when capacity is never hit (so
+    /// `evict_oldest`, the only other place that trims `order`, never runs).
+    fn compact_if_needed(&mut self, entries: &HashMap<String, CachedResponse>) {
+        if self.dead > entries.len() {
+            self.compact(entries);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.base_key_counts.clear();
+        self.dead = 0;
+    }
 }
 
 /// Configuration for the response cache.
@@ -725,6 +881,7 @@ impl ResponseCache {
             config,
             entries: Arc::new(RwLock::new(HashMap::new())),
             vary_index: Arc::new(RwLock::new(HashMap::new())),
+            eviction: Mutex::new(EvictionIndex::default()),
         }
     }
 
@@ -814,7 +971,18 @@ impl ResponseCache {
                 evicted_base_key = self.evict_oldest(&mut entries);
             }
 
-            entries.insert(key_str, cached);
+            // Track insertion order and base-key multiplicity so eviction stays
+            // O(1) amortized (see `EvictionIndex`), then compact away any
+            // tombstones/duplicates that have accumulated in `order`. The
+            // sequence is stamped onto the entry *before* it is inserted so the
+            // eviction index can later match this `order` position to the live
+            // entry (and tell it apart from a stale duplicate after a refresh).
+            let mut index = self.eviction.lock().unwrap();
+            let seq = index.next_seq();
+            cached.eviction_seq = seq;
+            let replaced = entries.insert(key_str.clone(), cached).is_some();
+            index.record_insert(&key_str, seq, &base_key, replaced);
+            index.compact_if_needed(&entries);
         }
 
         // Keep `vary_index` in lockstep with `entries`.
@@ -905,20 +1073,37 @@ impl ResponseCache {
     /// `None` when the base key is still in use (another Vary variant remains)
     /// or the entry carried no tracked base key.
     fn evict_oldest(&self, entries: &mut HashMap<String, CachedResponse>) -> Option<String> {
-        // Find the oldest entry
-        let (oldest_key, oldest_base_key) = entries
-            .iter()
-            .min_by_key(|(_, v)| v.cached_at)
-            .map(|(k, v)| (k.clone(), v.base_key.clone()))?;
+        let mut index = self.eviction.lock().unwrap();
 
-        entries.remove(&oldest_key);
-
-        // Only report the base key as dead once its last variant is gone.
-        let base_key = oldest_base_key?;
-        let still_referenced = entries
-            .values()
-            .any(|v| v.base_key.as_deref() == Some(base_key.as_str()));
-        (!still_referenced).then_some(base_key)
+        // Pop insertion-ordered positions, skipping any that are no longer the
+        // key's *current* position, until we reach the oldest live entry. This
+        // replaces the previous O(n) `min_by_key` scan on the insert path.
+        //
+        // A popped `(key, seq)` is the genuine oldest live entry only when the
+        // live entry's `eviction_seq` still equals `seq`. Otherwise it is either
+        // a tombstone (key removed elsewhere) or a stale duplicate superseded by
+        // a later re-store (refresh) — in which case the refreshed entry has a
+        // newer position further back in `order`, so evicting here would wrongly
+        // drop a recently-touched entry. Such positions are simply skipped.
+        while let Some((oldest_key, seq)) = index.order.pop_front() {
+            let is_current = entries
+                .get(&oldest_key)
+                .is_some_and(|e| e.eviction_seq == seq);
+            if is_current {
+                let removed = entries.remove(&oldest_key);
+                // Report the base key as dead only once its last variant is gone,
+                // decided in O(1) from the tracked counts rather than a second
+                // O(n) scan of every entry.
+                return match removed.and_then(|r| r.base_key) {
+                    Some(base_key) => index.record_remove(&base_key).then_some(base_key),
+                    None => None,
+                };
+            }
+            // Tombstone or stale duplicate — it is leaving `order` right now, so
+            // it stops counting as dead.
+            index.dead = index.dead.saturating_sub(1);
+        }
+        None
     }
 
     /// Remove a specific entry from the cache, including all Vary variants.
@@ -930,7 +1115,22 @@ impl ResponseCache {
 
         {
             let mut entries = self.entries.write().await;
-            entries.retain(|key, _| key != &base_key && !key.starts_with(&variant_prefix));
+            let mut removed_count = 0usize;
+            entries.retain(|key, _| {
+                if key == &base_key || key.starts_with(&variant_prefix) {
+                    removed_count += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            let mut index = self.eviction.lock().unwrap();
+            // Every removed variant shared this base key, so drop its count.
+            index.base_key_counts.remove(&base_key);
+            // Each removed variant leaves its `order` entry behind as a
+            // tombstone (see `EvictionIndex` docs).
+            index.dead += removed_count;
+            index.compact_if_needed(&entries);
         }
 
         let mut vary_index = self.vary_index.write().await;
@@ -939,8 +1139,23 @@ impl ResponseCache {
 
     /// Remove all entries matching a path prefix.
     pub async fn invalidate_prefix(&self, path_prefix: &str) {
+        let needle = format!(":{}", path_prefix);
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| !key.contains(&format!(":{}", path_prefix)));
+        let mut index = self.eviction.lock().unwrap();
+        entries.retain(|key, v| {
+            if key.contains(&needle) {
+                if let Some(bk) = &v.base_key {
+                    index.record_remove(bk);
+                }
+                // The removed key's `order` entry is left behind as a
+                // tombstone (see `EvictionIndex` docs).
+                index.dead += 1;
+                false
+            } else {
+                true
+            }
+        });
+        index.compact_if_needed(&entries);
     }
 
     /// Clear all cached responses.
@@ -948,6 +1163,7 @@ impl ResponseCache {
         {
             let mut entries = self.entries.write().await;
             entries.clear();
+            self.eviction.lock().unwrap().clear();
         }
         let mut vary_index = self.vary_index.write().await;
         vary_index.clear();
@@ -961,8 +1177,10 @@ impl ResponseCache {
     pub async fn purge_stale(&self) {
         let dead_base_keys = {
             let mut entries = self.entries.write().await;
+            let mut index = self.eviction.lock().unwrap();
 
-            // Collect base keys of the stale entries being removed.
+            // Collect base keys of the stale entries being removed, decrementing
+            // their live-variant counts as we go.
             let mut removed_base_keys: Vec<String> = Vec::new();
             entries.retain(|_, v| {
                 if v.is_fresh() {
@@ -970,17 +1188,20 @@ impl ResponseCache {
                 } else {
                     if let Some(bk) = &v.base_key {
                         removed_base_keys.push(bk.clone());
+                        index.record_remove(bk);
                     }
+                    // The removed key's `order` entry is left behind as a
+                    // tombstone (see `EvictionIndex` docs).
+                    index.dead += 1;
                     false
                 }
             });
 
-            // Keep only base keys that no surviving entry still references.
-            removed_base_keys.retain(|bk| {
-                !entries
-                    .values()
-                    .any(|v| v.base_key.as_deref() == Some(bk.as_str()))
-            });
+            // Keep only base keys that no surviving entry still references —
+            // decided in O(1) from the tracked counts instead of scanning every
+            // remaining entry.
+            removed_base_keys.retain(|bk| !index.base_key_live(bk));
+            index.compact_if_needed(&entries);
             removed_base_keys
         };
 
@@ -1503,6 +1724,85 @@ mod tests {
         );
     }
 
+    /// Eviction removes entries in insertion order: once at capacity, the
+    /// oldest-inserted entry is the one dropped to make room, and newer entries
+    /// survive.
+    #[tokio::test]
+    async fn test_evicts_in_insertion_order() {
+        let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(3));
+
+        for i in 0..3 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            cache.store(&req, &HttpResponse::ok()).await;
+        }
+        for i in 0..3 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            assert!(cache.get(&req).await.is_some(), "/p{} should be cached", i);
+        }
+
+        // A fourth insert must evict the oldest (/p0), not any newer entry.
+        let req = HttpRequest::new("GET".to_string(), "/p3".to_string());
+        cache.store(&req, &HttpResponse::ok()).await;
+
+        let p0 = HttpRequest::new("GET".to_string(), "/p0".to_string());
+        assert!(
+            cache.get(&p0).await.is_none(),
+            "oldest entry (/p0) must be evicted first"
+        );
+        for i in 1..4 {
+            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            assert!(cache.get(&req).await.is_some(), "/p{} must remain", i);
+        }
+
+        // vary_index must not outgrow the live entry set after eviction.
+        let entries_len = cache.entries.read().await.len();
+        let vary_len = cache.vary_index.read().await.len();
+        assert!(entries_len <= 3);
+        assert!(vary_len <= entries_len);
+    }
+
+    /// Regression: refreshing an entry while still under capacity must reset its
+    /// eviction recency, so a later capacity-driven eviction drops the genuinely
+    /// oldest *untouched* entry — not the refreshed one by its original insert
+    /// time. Repro: max_entries(3), store A, store B, re-store A (refresh, under
+    /// cap), store C, store D (at cap → eviction). B must be evicted and A must
+    /// survive. The old index evicted A because a refresh left the stale
+    /// front-most `order` position live.
+    #[tokio::test]
+    async fn test_eviction_refresh_resets_recency() {
+        async fn store(cache: &ResponseCache, path: &str, body: &[u8]) {
+            let req = HttpRequest::new("GET".to_string(), path.to_string());
+            let mut resp = HttpResponse::ok();
+            resp.body = body.to_vec();
+            cache.store(&req, &resp).await;
+        }
+        async fn present(cache: &ResponseCache, path: &str) -> bool {
+            cache
+                .get(&HttpRequest::new("GET".to_string(), path.to_string()))
+                .await
+                .is_some()
+        }
+
+        let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(3));
+
+        store(&cache, "/a", b"a").await;
+        store(&cache, "/b", b"b").await;
+        store(&cache, "/a", b"a2").await; // refresh while under capacity
+        store(&cache, "/c", b"c").await;
+        store(&cache, "/d", b"d").await; // at capacity → one eviction
+
+        assert!(
+            !present(&cache, "/b").await,
+            "B (the oldest untouched entry) must be evicted"
+        );
+        assert!(
+            present(&cache, "/a").await,
+            "A was refreshed under capacity and must survive"
+        );
+        assert!(present(&cache, "/c").await, "/c must remain");
+        assert!(present(&cache, "/d").await, "/d was just stored");
+    }
+
     /// Regression: TTL purging must also prune `vary_index` so expired entries
     /// do not leak their base-key records.
     #[tokio::test]
@@ -1538,6 +1838,63 @@ mod tests {
             1,
             "vary_index must shrink in lockstep with purged entries",
         );
+    }
+
+    /// Regression: repeatedly storing then invalidating keys (capacity never
+    /// hit, so `evict_oldest` never runs) must not let `order` grow without
+    /// bound. Keys removed via `invalidate` were previously left in `order`
+    /// as tombstones forever.
+    #[tokio::test]
+    async fn test_eviction_order_bounded_under_store_invalidate_churn() {
+        let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(10_000));
+
+        for i in 0..2000 {
+            let req = HttpRequest::new("GET".to_string(), format!("/churn/{}", i % 5));
+            cache.store(&req, &HttpResponse::ok()).await;
+            cache.invalidate(&req).await;
+        }
+
+        let live = cache.entries.read().await.len();
+        let order_len = cache.eviction.lock().unwrap().order.len();
+        assert!(
+            order_len <= 2 * live + 16,
+            "order ({}) grew unbounded relative to live entries ({}) under store/invalidate churn",
+            order_len,
+            live
+        );
+    }
+
+    /// Regression: re-storing the *same* key repeatedly (e.g. a hot endpoint
+    /// refreshed every TTL cycle) pushes a new `order` entry each time
+    /// (`EvictionIndex::record_insert`'s `replaced` branch only suppresses the
+    /// `base_key_counts` increment, not the push). Without compaction this
+    /// grows without bound even though only one entry is ever live.
+    #[tokio::test]
+    async fn test_eviction_order_bounded_under_repeated_restore() {
+        let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(10_000));
+        let req = HttpRequest::new("GET".to_string(), "/hot".to_string());
+
+        for i in 0..2000 {
+            let mut resp = HttpResponse::ok();
+            resp.body = format!("v{}", i).into_bytes();
+            cache.store(&req, &resp).await;
+        }
+
+        let live = cache.entries.read().await.len();
+        assert_eq!(live, 1, "only the latest write for the key should be live");
+
+        let order_len = cache.eviction.lock().unwrap().order.len();
+        assert!(
+            order_len <= 2 * live + 16,
+            "order ({}) grew unbounded across repeated re-stores of one key (live={})",
+            order_len,
+            live
+        );
+
+        // The live value must be the most recent store, not a stale one.
+        let cached = cache.get(&req).await;
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().body, b"v1999");
     }
 
     /// Regression: two responses stored at the same path with *different* Vary

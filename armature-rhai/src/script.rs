@@ -111,6 +111,11 @@ impl ScriptCache {
     }
 
     /// Remove stale scripts from the cache.
+    ///
+    /// Stats every cached script's source file, so this is O(cache size).
+    /// Prefer [`evict_if_stale`](Self::evict_if_stale) when only a single,
+    /// known path needs to be checked (e.g. on every request under
+    /// hot-reload) — it stats just that one entry.
     pub fn evict_stale(&mut self) -> Vec<PathBuf> {
         let stale: Vec<PathBuf> = self
             .scripts
@@ -120,6 +125,28 @@ impl ScriptCache {
             .collect();
 
         for path in &stale {
+            self.scripts.remove(path);
+        }
+
+        stale
+    }
+
+    /// Evict a single cached script if its source file has changed since it
+    /// was compiled.
+    ///
+    /// Unlike [`evict_stale`](Self::evict_stale), this only stats the one
+    /// entry named by `path` — not every cached script — so it's cheap
+    /// enough to call on every request. Returns `true` if the entry was
+    /// present and stale (and has been removed); `false` if it was absent
+    /// or not stale.
+    pub fn evict_if_stale(&mut self, path: &Path) -> bool {
+        let stale = self
+            .scripts
+            .get(path)
+            .map(|script| script.is_stale())
+            .unwrap_or(false);
+
+        if stale {
             self.scripts.remove(path);
         }
 
@@ -258,6 +285,7 @@ impl ScriptLoader {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -289,5 +317,54 @@ mod tests {
         assert_eq!(stats.cached_scripts, 1);
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn test_evict_if_stale_only_touches_the_requested_path() {
+        let temp = TempDir::new().unwrap();
+        let a_path = temp.path().join("a.rhai");
+        let b_path = temp.path().join("b.rhai");
+        fs::write(&a_path, "1").unwrap();
+        fs::write(&b_path, "2").unwrap();
+
+        let engine = rhai::Engine::new();
+        let a_ast = engine.compile("1").unwrap();
+        let b_ast = engine.compile("2").unwrap();
+
+        let mut cache = ScriptCache::new();
+        let a_script = Arc::new(CompiledScript::new(a_path.clone(), a_ast));
+        cache.insert(a_path.clone(), a_script.clone());
+        cache.insert(
+            b_path.clone(),
+            Arc::new(CompiledScript::new(b_path.clone(), b_ast)),
+        );
+
+        // Make `b.rhai` stale (modified after compilation) but leave
+        // `a.rhai` untouched.
+        let future = a_script.compiled_at() + Duration::from_secs(2);
+        fs::write(&b_path, "22").unwrap();
+        let file = fs::File::options().write(true).open(&b_path).unwrap();
+        file.set_modified(future).unwrap();
+
+        // Checking staleness for `a.rhai` must not evict the unrelated
+        // stale `b.rhai` entry — only a full `evict_stale()` scan does
+        // that. This is the property that makes `evict_if_stale` cheap
+        // enough to call on every request.
+        assert!(!cache.evict_if_stale(&a_path));
+        assert!(
+            cache.get(&a_path).is_some(),
+            "a.rhai was never touched, must remain cached"
+        );
+        assert!(
+            cache.get(&b_path).is_some(),
+            "evict_if_stale must not scan/evict unrelated entries"
+        );
+
+        // Checking staleness for `b.rhai` itself does evict it.
+        assert!(cache.evict_if_stale(&b_path));
+        assert!(cache.get(&b_path).is_none());
+
+        // A path that was never cached is a harmless no-op.
+        assert!(!cache.evict_if_stale(Path::new("missing.rhai")));
     }
 }

@@ -29,6 +29,16 @@ impl TemplateRegistry {
             .expect("Failed to register middleware test template");
         hbs.register_template_string("guard", GUARD_TEMPLATE)
             .expect("Failed to register guard template");
+        hbs.register_template_string("guard_auth", GUARD_AUTH_TEMPLATE)
+            .expect("Failed to register auth guard template");
+        hbs.register_template_string("guard_role", GUARD_ROLE_TEMPLATE)
+            .expect("Failed to register role guard template");
+        hbs.register_template_string("guard_permission", GUARD_PERMISSION_TEMPLATE)
+            .expect("Failed to register permission guard template");
+        hbs.register_template_string("guard_apikey", GUARD_APIKEY_TEMPLATE)
+            .expect("Failed to register apikey guard template");
+        hbs.register_template_string("guard_ratelimit", GUARD_RATELIMIT_TEMPLATE)
+            .expect("Failed to register ratelimit guard template");
         hbs.register_template_string("guard_test", GUARD_TEST_TEMPLATE)
             .expect("Failed to register guard test template");
         hbs.register_template_string("service", SERVICE_TEMPLATE)
@@ -61,6 +71,10 @@ impl TemplateRegistry {
             .expect("Failed to register GraphQL resolver test template");
         hbs.register_template_string("job", JOB_TEMPLATE)
             .expect("Failed to register job template");
+        hbs.register_template_string("job_scheduled", JOB_SCHEDULED_TEMPLATE)
+            .expect("Failed to register scheduled job template");
+        hbs.register_template_string("job_recurring", JOB_RECURRING_TEMPLATE)
+            .expect("Failed to register recurring job template");
         hbs.register_template_string("job_test", JOB_TEST_TEMPLATE)
             .expect("Failed to register job test template");
         hbs.register_template_string("event_handler", EVENT_HANDLER_TEMPLATE)
@@ -141,7 +155,7 @@ use armature::prelude::*;
 
 /// {{name_pascal}} controller handles {{name_snake}} related endpoints.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
 impl {{name_pascal}}Controller {
@@ -191,7 +205,7 @@ pub struct Update{{name_pascal}}Request {
 
 /// {{name_pascal}} controller handles {{name_snake}} CRUD operations.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
 impl {{name_pascal}}Controller {
@@ -414,6 +428,7 @@ mod tests {
 const GUARD_TEMPLATE: &str = r#"//! {{name_pascal}} guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard for route protection.
@@ -436,10 +451,10 @@ impl {{name_pascal}}Guard {
     }
 
     /// Check if the request is authorized.
-    fn is_authorized(&self, req: &HttpRequest) -> bool {
+    fn is_authorized(&self, context: &GuardContext) -> bool {
         // TODO: Implement authorization logic
         // Example: Check for a valid API key or JWT token
-        req.headers.contains_key("authorization")
+        context.get_header("authorization").is_some()
     }
 }
 
@@ -451,8 +466,8 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        if self.is_authorized(req) {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        if self.is_authorized(context) {
             Ok(true)
         } else {
             Err(Error::Unauthorized("Access denied".to_string()))
@@ -472,21 +487,244 @@ mod tests {
     #[tokio::test]
     async fn test_guard_denies_unauthorized() {
         let guard = {{name_pascal}}Guard::new();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_guard_allows_authorized() {
         let guard = {{name_pascal}}Guard::new();
-        let mut req = HttpRequest::default();
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
         req.headers.insert("authorization".to_string(), "Bearer token".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
+    }
+}
+"#;
+
+const GUARD_AUTH_TEMPLATE: &str = r#"//! {{name_pascal}} authentication guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a valid `Authorization: Bearer <token>` header.
+#[derive(Default)]
+pub struct {{name_pascal}}Guard;
+
+impl {{name_pascal}}Guard {
+    /// Create a new {{name_pascal}}Guard.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn extract_bearer<'a>(&self, context: &'a GuardContext) -> Option<&'a str> {
+        context
+            .get_header("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        match self.extract_bearer(context) {
+            // TODO: verify the JWT / session token here.
+            Some(token) if !token.is_empty() => Ok(true),
+            _ => Err(Error::Unauthorized("Missing bearer token".to_string())),
+        }
+    }
+}
+"#;
+
+const GUARD_ROLE_TEMPLATE: &str = r#"//! {{name_pascal}} role-based guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: allows requests only from users holding a required role.
+pub struct {{name_pascal}}Guard {
+    required_role: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_role`.
+    pub fn new(required_role: impl Into<String>) -> Self {
+        Self {
+            required_role: required_role.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("admin")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        // TODO: source the role from your authenticated principal.
+        let role = context.get_header("x-user-role").map(|s| s.as_str()).unwrap_or("");
+        if role == self.required_role {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires role '{}'",
+                self.required_role
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_PERMISSION_TEMPLATE: &str = r#"//! {{name_pascal}} permission-based guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: checks that the caller holds a required permission.
+pub struct {{name_pascal}}Guard {
+    required_permission: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_permission`.
+    pub fn new(required_permission: impl Into<String>) -> Self {
+        Self {
+            required_permission: required_permission.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("{{name_snake}}:read")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        // TODO: source granted permissions from your authenticated principal.
+        let granted = context
+            .get_header("x-user-permissions")
+            .map(|s| s.split(',').any(|p| p.trim() == self.required_permission))
+            .unwrap_or(false);
+        if granted {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires permission '{}'",
+                self.required_permission
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_APIKEY_TEMPLATE: &str = r#"//! {{name_pascal}} API-key guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a matching `X-API-Key` header.
+pub struct {{name_pascal}}Guard {
+    expected_key: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard expecting `expected_key`.
+    pub fn new(expected_key: impl Into<String>) -> Self {
+        Self {
+            expected_key: expected_key.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        // TODO: load the real key from configuration / environment.
+        Self::new(std::env::var("API_KEY").unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let provided = context.get_header("x-api-key").map(|s| s.as_str());
+        if !self.expected_key.is_empty() && provided == Some(self.expected_key.as_str()) {
+            Ok(true)
+        } else {
+            Err(Error::Unauthorized("Invalid API key".to_string()))
+        }
+    }
+}
+"#;
+
+const GUARD_RATELIMIT_TEMPLATE: &str = r#"//! {{name_pascal}} rate-limiting guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// {{name_pascal}} guard: rejects callers that exceed a fixed request budget per window.
+pub struct {{name_pascal}}Guard {
+    max_requests: u32,
+    window: Duration,
+    hits: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard allowing `max_requests` per `window`.
+    pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            hits: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new(60, Duration::from_secs(60))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let key = context
+            .get_header("x-forwarded-for")
+            .cloned()
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        let mut hits = self.hits.lock().unwrap();
+        let now = Instant::now();
+        let entry = hits.entry(key).or_insert((0, now));
+        if now.duration_since(entry.1) > self.window {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        if entry.0 > self.max_requests {
+            Err(Error::TooManyRequests("Rate limit exceeded".to_string()))
+        } else {
+            Ok(true)
+        }
     }
 }
 "#;
@@ -612,7 +850,7 @@ authors = ["Your Name <your.email@example.com>"]
 description = "{{description}}"
 
 [dependencies]
-armature = "0.1"
+{{{armature_dep}}}
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -620,7 +858,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
 thiserror = "2.0"
-
+{{{extra_deps}}}
 [dev-dependencies]
 tokio-test = "0.4"
 "#;
@@ -843,28 +1081,21 @@ use validator::Validate;
 #[serde(rename_all = "camelCase")]
 pub struct {{name_pascal}}Response {
     pub id: u64,
-    pub created_at: String,
+{{{response_fields}}}    pub created_at: String,
     pub updated_at: String,
-    // Add more fields as needed
 }
 
 /// Create {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Create{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: String,
-    // Add more fields as needed
-}
+{{{create_fields}}}}
 
 /// Update {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Update{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: Option<String>,
-    // Add more fields as needed
-}
+{{{update_fields}}}}
 
 /// Query parameters for listing {{name_snake}}s.
 #[derive(Debug, Clone, Deserialize)]
@@ -1298,6 +1529,121 @@ mod tests {
         assert_eq!(job.retry_delay(1), std::time::Duration::from_secs(2));
         assert_eq!(job.retry_delay(2), std::time::Duration::from_secs(4));
         assert_eq!(job.retry_delay(3), std::time::Duration::from_secs(8));
+    }
+}
+"#;
+
+const JOB_SCHEDULED_TEMPLATE: &str = r#"//! {{name_pascal}} scheduled job (runs at a fixed cron time).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
+
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
+
+/// {{name_pascal}} scheduled job.
+///
+/// Runs on a fixed cron schedule. Register it with a [`CronScheduler`] at startup,
+/// e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
+pub struct {{name_pascal}}Job;
+
+impl {{name_pascal}}Job {
+    /// Create a new scheduled job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 6-field cron expression (seconds minutes hours day-of-month month
+    /// day-of-week) controlling when this job fires. Default: every day at
+    /// midnight.
+    pub const CRON: &'static str = "0 0 0 * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running scheduled {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement scheduled work.
+        Ok(())
+    }
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+"#;
+
+const JOB_RECURRING_TEMPLATE: &str = r#"//! {{name_pascal}} recurring job (runs on a fixed cron cadence).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
+
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
+
+/// {{name_pascal}} recurring job.
+///
+/// `armature-cron` schedules jobs by 6-field cron expression rather than a
+/// raw [`std::time::Duration`], so the recurrence is expressed as a cron
+/// cadence (e.g. `"0 */5 * * * *"` for every 5 minutes). Register it with a
+/// [`CronScheduler`] at startup, e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
+pub struct {{name_pascal}}Job;
+
+impl {{name_pascal}}Job {
+    /// Create a new recurring job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 6-field cron expression controlling the recurrence cadence.
+    /// Default: every 5 minutes.
+    pub const CRON: &'static str = "0 */5 * * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running recurring {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement recurring work.
+        Ok(())
+    }
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        Self::new()
     }
 }
 "#;
@@ -1935,7 +2281,7 @@ pub struct {{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
+{{{entity_fields}}}    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -1946,7 +2292,7 @@ pub struct {{name_pascal}} {
 pub struct New{{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default = "default_active")]
+{{{new_fields}}}    #[serde(default = "default_active")]
     pub active: bool,
 }
 
@@ -1962,7 +2308,7 @@ pub struct Update{{name_pascal}} {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub active: Option<bool>,
-}
+{{{update_fields}}}}
 
 #[cfg(feature = "diesel")]
 diesel::table! {
@@ -1971,7 +2317,7 @@ diesel::table! {
         name -> Varchar,
         description -> Nullable<Text>,
         active -> Bool,
-        created_at -> Timestamptz,
+{{{diesel_cols}}}        created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
 }
@@ -1990,7 +2336,7 @@ mod sea_orm_entity {
         pub name: String,
         pub description: Option<String>,
         pub active: bool,
-        pub created_at: DateTimeUtc,
+{{{seaorm_fields}}}        pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
 
@@ -3632,6 +3978,8 @@ pub struct ControllerData {
     pub name_snake: String,
     pub name_kebab: String,
     pub base_path: String,
+    /// Optional guard attribute (e.g. `#[guard(AuthGuard)]\n`) placed on the controller.
+    pub guard_attr: String,
 }
 
 /// Template data for module generation.
@@ -3663,6 +4011,10 @@ pub struct ProjectData {
     pub description: String,
     pub curly_open: String,
     pub curly_close: String,
+    /// The `armature` dependency line (may enable features).
+    pub armature_dep: String,
+    /// Extra dependency lines (database, features, template-specific), joined with newlines.
+    pub extra_deps: String,
 }
 
 impl ProjectData {
@@ -3681,16 +4033,55 @@ impl ProjectData {
             description,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
+            // Kept in sync with the `armature` facade crate's current minor
+            // version and with `repl_init_script()` in `commands/repl.rs`.
+            armature_dep: "armature = \"0.2\"".to_string(),
+            extra_deps: String::new(),
         }
+    }
+
+    /// Set the `armature` dependency line (e.g. with feature flags).
+    pub fn with_armature_dep(mut self, dep: String) -> Self {
+        self.armature_dep = dep;
+        self
+    }
+
+    /// Set extra dependency lines injected into the generated `[dependencies]` table.
+    pub fn with_extra_deps(mut self, deps: String) -> Self {
+        self.extra_deps = deps;
+        self
     }
 }
 
-/// Template data for entity generation.
+/// Template data for entity generation, with optional user-specified fields.
 #[derive(Serialize)]
 pub struct EntityData {
     pub name_pascal: String,
     pub name_snake: String,
     pub name_kebab: String,
+    /// Extra fields for the main entity struct (`    pub x: T,\n` lines).
+    pub entity_fields: String,
+    /// Extra fields for the `New{{name}}` insertion struct.
+    pub new_fields: String,
+    /// Extra fields for the `Update{{name}}` changeset struct (all `Option<T>`).
+    pub update_fields: String,
+    /// Extra columns for the Diesel `table!` macro.
+    pub diesel_cols: String,
+    /// Extra fields for the SeaORM `Model`.
+    pub seaorm_fields: String,
+}
+
+/// Template data for DTO generation, with optional user-specified fields.
+#[derive(Serialize)]
+pub struct DtoData {
+    pub name_pascal: String,
+    pub name_snake: String,
+    /// Extra fields for the response struct.
+    pub response_fields: String,
+    /// Full body of the create-request struct (validated fields).
+    pub create_fields: String,
+    /// Full body of the update-request struct (all `Option<T>`).
+    pub update_fields: String,
 }
 
 /// Template data for Rhai script generation.
@@ -3722,6 +4113,133 @@ impl DevOpsData {
             name_kebab,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
+        }
+    }
+}
+
+// =============================================================================
+// GENERATE-JOB / GUARD-GENERATION API REGRESSION TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod job_and_guard_template_api_tests {
+    //! Regression coverage for a review finding: `job_scheduled` /
+    //! `job_recurring` used to generate code against a fabricated
+    //! `armature-cron` API (`use armature_cron::{CronJob, Schedule}`, `impl
+    //! CronJob`, `Schedule::from_cron`/`Schedule::every` — none of which
+    //! exist), and every guard template implemented
+    //! `can_activate(&self, req: &HttpRequest)` instead of the real
+    //! `Guard::can_activate(&self, context: &GuardContext)`
+    //! (`armature-core/src/guard.rs:27-30`). These tests render each
+    //! template through the real `TemplateRegistry` (the same path
+    //! `armature generate job|guard` uses) and assert on tokens from the
+    //! *real* `armature-cron`/`armature-core` APIs, so a regression back to
+    //! the fabricated API is caught here rather than only surfacing as a
+    //! compile failure inside a generated project.
+    use super::*;
+
+    fn data() -> ComponentData {
+        ComponentData {
+            name_pascal: "FooBar".to_string(),
+            name_snake: "foo_bar".to_string(),
+            name_kebab: "foo-bar".to_string(),
+        }
+    }
+
+    #[test]
+    fn job_scheduled_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_scheduled", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_scheduled", &content);
+    }
+
+    #[test]
+    fn job_recurring_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_recurring", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_recurring", &content);
+    }
+
+    fn assert_job_template_uses_real_cron_api(name: &str, content: &str) {
+        for token in [
+            "CronExpression",
+            "CronScheduler",
+            "CronResult",
+            "JobContext",
+        ] {
+            assert!(
+                content.contains(token),
+                "{name} template must reference the real armature-cron `{token}`, got:\n{content}"
+            );
+        }
+        for fabricated in [
+            "CronJob",
+            "Schedule::from_cron",
+            "Schedule::every",
+            "impl CronJob",
+            "use armature_cron::{CronJob",
+        ] {
+            assert!(
+                !content.contains(fabricated),
+                "{name} template must not reference the fabricated `{fabricated}` API, got:\n{content}"
+            );
+        }
+        // The generated file lives in an existing project via a single-file
+        // generator, so the extra `armature-cron` dependency it needs is
+        // called out as a header-comment hint (mirroring how a Cargo.toml
+        // `[dependencies]` line would read) rather than edited in.
+        assert!(
+            content.contains("armature-cron") && content.contains("[dependencies]"),
+            "{name} template must hint at the armature-cron dependency it requires, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn all_guard_templates_reference_real_guard_context() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+            "guard_test",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains("GuardContext"),
+                "{name} template must reference the real `GuardContext`, got:\n{content}"
+            );
+            assert!(
+                !content.contains("req: &HttpRequest"),
+                "{name} template must not use the fabricated `can_activate(&self, req: &HttpRequest)` signature, got:\n{content}"
+            );
+            assert!(
+                !content.contains("HttpRequest::default()"),
+                "{name} template must not call the nonexistent `HttpRequest::default()`, got:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_impl_templates_declare_real_can_activate_signature() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains(
+                    "async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error>"
+                ),
+                "{name} template must declare the real `Guard::can_activate` signature, got:\n{content}"
+            );
         }
     }
 }

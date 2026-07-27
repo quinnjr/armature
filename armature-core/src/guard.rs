@@ -29,7 +29,13 @@ pub trait Guard: Send + Sync {
     async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error>;
 }
 
-/// Authentication guard - checks for valid token
+/// Authentication guard.
+///
+/// **Presence/format check only.** This verifies that an `Authorization` header
+/// exists and begins with `Bearer `; it performs **no** token validation
+/// (signature, expiry, issuer, or audience are not checked). Use `armature-auth`
+/// for real credential validation. This guard is a lightweight gate for routes
+/// that only need to reject obviously-unauthenticated requests.
 pub struct AuthenticationGuard;
 
 #[async_trait]

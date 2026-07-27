@@ -1,6 +1,6 @@
 [package]
 name = "armature-core"
-version = "0.2.3"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["http", "async", "web", "framework"]
 categories = ["web-programming::http-server", "asynchronous"]
 
 [dependencies]
-armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
 inventory = "0.3"
 dependency-injector = "1.0.0"
 matchit = "0.9"  # High-performance router (same as Axum)

@@ -219,7 +219,8 @@ pub fn route_impl(attr: TokenStream, item: TokenStream, method: &str) -> TokenSt
         Err(e) => return e.to_compile_error().into(),
     };
 
-    // Use the validated path (may be normalized in future versions)
+    // Use the validated path verbatim (no rewriting: the router matches the
+    // `:param` form directly).
     let path_value = validated.path;
 
     let route_const_name = syn::Ident::new(

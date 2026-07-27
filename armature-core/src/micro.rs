@@ -802,9 +802,16 @@ impl Middleware for Cors {
     }
 }
 
-/// Compression middleware
+/// Gzip-compression middleware.
+///
+/// When the client's `Accept-Encoding` permits gzip, the response body is
+/// compressed with the configured [`CompressionLevel`], `Content-Encoding:
+/// gzip` is set, and `Accept-Encoding` is merged into `Vary` so downstream
+/// caches key on the negotiated encoding — merged rather than overwritten, so
+/// a pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware upstream)
+/// survives. Responses that already carry a `Content-Encoding` or have an
+/// empty body are passed through untouched (but still gain `Vary`).
 pub struct Compress {
-    #[allow(dead_code)]
     level: CompressionLevel,
 }
 
@@ -815,6 +822,244 @@ pub enum CompressionLevel {
     #[default]
     Default,
     Best,
+}
+
+impl CompressionLevel {
+    /// Map to the corresponding `flate2` compression level.
+    fn to_flate2(self) -> flate2::Compression {
+        match self {
+            CompressionLevel::Fast => flate2::Compression::fast(),
+            CompressionLevel::Default => flate2::Compression::default(),
+            CompressionLevel::Best => flate2::Compression::best(),
+        }
+    }
+}
+
+/// Whether a request's `Accept-Encoding` header permits gzip.
+///
+/// Recognises an explicit `gzip` token (or the `*` wildcard) and honours an
+/// explicit `q=0`, which disables the encoding.
+pub(crate) fn accepts_gzip(req: &HttpRequest) -> bool {
+    let Some(value) = req.headers.get("accept-encoding") else {
+        return false;
+    };
+    // Compare tokens case-insensitively in place instead of allocating a
+    // lowercased copy of the whole header value on every request.
+    value.split(',').any(|part| {
+        let mut segs = part.split(';').map(str::trim);
+        let coding = segs.next().unwrap_or("");
+        if !coding.eq_ignore_ascii_case("gzip") && coding != "*" {
+            return false;
+        }
+        // Reject `q=0`(.0…); any other q (or none) permits the encoding. The
+        // `q` parameter name is matched case-insensitively (e.g. `Q=0`).
+        !segs.any(|p| {
+            p.split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("q"))
+                .and_then(|(_, v)| v.parse::<f32>().ok())
+                .map(|q| q == 0.0)
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Gzip-encode `data` at the given level, returning `None` if encoding fails.
+pub(crate) fn gzip_encode(data: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2 + 32), level.to_flate2());
+    encoder.write_all(data).ok()?;
+    encoder.finish().ok()
+}
+
+/// Bodies at least this large are gzip-encoded on a blocking thread (via
+/// `spawn_blocking`) instead of inline on the async worker. gzip is CPU-bound,
+/// so a multi-megabyte body at `Best` can stall a tokio worker for milliseconds;
+/// small bodies compress fast enough that the spawn round-trip would cost more
+/// than it saves, so they stay inline.
+pub(crate) const GZIP_OFFLOAD_THRESHOLD: usize = 32 * 1024;
+
+/// Gzip-encode `data`, offloading to a blocking thread once the body reaches
+/// [`GZIP_OFFLOAD_THRESHOLD`] so the CPU-bound encode does not block the async
+/// worker. Behaviour-preserving: the bytes returned are identical to
+/// [`gzip_encode`]; only *where* the work runs changes. Below the threshold it
+/// encodes inline to avoid the spawn overhead.
+///
+/// Takes ownership of `data` instead of borrowing it, so the offload path can
+/// move it straight into the `spawn_blocking` closure with no clone. The
+/// uncompressed body must never simply vanish, so the return type mirrors
+/// that: `Ok(compressed)` on success, `Err(original)` if gzip encoding fails —
+/// handing the exact original bytes back so the caller can still serve real
+/// content instead of losing the body.
+///
+/// On the offload path `data` is shared via `Arc` rather than cloned: the
+/// blocking task gets a cheap refcount bump instead of a byte-for-byte copy,
+/// while this scope keeps its own reference. If `gzip_encode` returns `None`,
+/// the task's `Arc` clone is dropped as the closure returns, so
+/// `Arc::try_unwrap` below succeeds and the original bytes come back with no
+/// copy at all. If the blocking closure *panics*, its `Arc` clone is dropped
+/// during unwinding just like any other local — this workspace's default
+/// profiles run with `panic = "unwind"` (only the `release-fat`/`pgo-use`
+/// profiles opt into `panic = "abort"`, which aborts the whole process before
+/// any fallback could run anyway) — so `Arc::try_unwrap` still succeeds and
+/// recovers the original bytes even on that path. The `unwrap_or_else` clone
+/// is therefore a defensive fallback for a refcount state this workspace's
+/// configuration should never actually produce, not the primary recovery
+/// mechanism; both encode-failure and join-failure are logged via
+/// `tracing::warn!` regardless of whether the fallback clone is needed.
+pub(crate) async fn gzip_encode_offloaded(
+    data: Vec<u8>,
+    level: CompressionLevel,
+) -> Result<Vec<u8>, Vec<u8>> {
+    let level_label = match level {
+        CompressionLevel::Fast => "fast",
+        CompressionLevel::Default => "default",
+        CompressionLevel::Best => "best",
+    };
+
+    if data.len() < GZIP_OFFLOAD_THRESHOLD {
+        let body_len = data.len();
+        return match gzip_encode(&data, level) {
+            Some(compressed) => Ok(compressed),
+            None => {
+                tracing::warn!(
+                    body_len,
+                    level = level_label,
+                    "gzip encode failed; serving response uncompressed"
+                );
+                Err(data)
+            }
+        };
+    }
+
+    // Share the bytes instead of cloning them: the blocking task gets a cheap
+    // `Arc` refcount bump, and this scope keeps its own reference so the
+    // original bytes remain reachable here even if the task never returns
+    // usable output (see the doc comment above for why `try_unwrap` succeeds
+    // in both the encode-failure and panic cases in this workspace's
+    // configuration). No lock is held here, so this never pins a guard across
+    // the `.await`.
+    let body_len = data.len();
+    let shared = Arc::new(data);
+    let for_task = Arc::clone(&shared);
+
+    match tokio::task::spawn_blocking(move || gzip_encode(&for_task, level)).await {
+        Ok(Some(compressed)) => Ok(compressed),
+        Ok(None) => {
+            tracing::warn!(
+                body_len,
+                level = level_label,
+                "gzip encode failed on offload path; serving response uncompressed"
+            );
+            Err(Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()))
+        }
+        Err(join_err) => {
+            tracing::warn!(
+                body_len,
+                level = level_label,
+                error = %join_err,
+                "gzip offload task did not complete normally (panicked or was cancelled); \
+                 serving response uncompressed"
+            );
+            Err(Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()))
+        }
+    }
+}
+
+/// Gzip-encode `response`'s body at `level` (offloading per
+/// [`gzip_encode_offloaded`]) and install it, or restore the original body
+/// unchanged if encoding failed. Shared by both gzip middlewares
+/// (`Compress` here and `CompressionMiddleware` in `middleware.rs`) so the
+/// body-storage handling below only has to be correct in one place.
+///
+/// `HttpResponse` stores its body in one of two places: the legacy `pub
+/// body: Vec<u8>` field, or the zero-copy `body_bytes: Option<Bytes>`
+/// storage set by `with_bytes_body`/`with_static_body` (used by static-file
+/// serving, `FastResponse`, and `ResponseBuilder::build()`) — whichever is
+/// set, `body_ref()`/`body_len()` resolve through `body_bytes` first, and
+/// `with_body` clears `body_bytes` back to `None`. A naive
+/// `std::mem::take(&mut response.body)` therefore only ever sees the *legacy*
+/// field: for a `body_bytes`-backed response that field is already empty
+/// (`with_bytes_body`/`with_static_body` clear it), so the real content
+/// would never be read, gzip would happily encode zero bytes, and
+/// `with_body(compressed)` would then wipe out `body_bytes` and discard the
+/// actual content permanently. This reads through whichever storage is
+/// actually populated instead.
+///
+/// On the offload-failed path, a `body_bytes`-backed response needs no
+/// explicit restoration: `body_bytes()` only *clones* the `Arc`-backed
+/// `Bytes` handle (an O(1) refcount bump) to get an owned `Vec<u8>` for
+/// [`gzip_encode_offloaded`] (which needs ownership to move/share the
+/// buffer across the `spawn_blocking` boundary — this copy is unavoidable
+/// given that contract, but no worse than the copy encoding itself would
+/// perform), so `response`'s own `body_bytes` field is never touched and
+/// still holds the untouched original the whole time.
+pub(crate) async fn apply_gzip_offload(
+    mut response: HttpResponse,
+    level: CompressionLevel,
+) -> HttpResponse {
+    let had_content_length = response.headers.contains_key("Content-Length");
+    let was_bytes_backed = response.has_bytes_body();
+    let original: Vec<u8> = if was_bytes_backed {
+        response.body_bytes().to_vec()
+    } else {
+        std::mem::take(&mut response.body)
+    };
+
+    match gzip_encode_offloaded(original, level).await {
+        Ok(compressed) => {
+            response = response.with_body(compressed);
+            response
+                .headers
+                .insert("Content-Encoding".to_string(), "gzip".to_string());
+            if had_content_length {
+                response.headers.insert(
+                    "Content-Length".to_string(),
+                    response.body_len().to_string(),
+                );
+            }
+        }
+        Err(original) => {
+            // Encoding failed, or the offload task did not complete
+            // normally. If the body was legacy-`Vec`-backed we took it out
+            // via `mem::take` above, so it must be restored explicitly; if
+            // it was `body_bytes`-backed, `response` was never mutated
+            // (see doc comment) and already holds the original untouched.
+            if !was_bytes_backed {
+                response.body = original;
+            }
+        }
+    }
+
+    response
+}
+
+/// Add `Accept-Encoding` to the response's `Vary` header, *merging* with any
+/// existing value instead of clobbering it — e.g. `Vary: Origin` set upstream
+/// by CORS middleware must survive compression adding its own dimension.
+///
+/// Leaves an existing `*` wildcard alone (it already covers every header) and
+/// is a no-op if `Accept-Encoding` is already present as a token
+/// (case-insensitive), so repeated calls don't pile up duplicates.
+pub(crate) fn add_vary_accept_encoding(response: &mut HttpResponse) {
+    const TOKEN: &str = "Accept-Encoding";
+
+    let merged = match response.headers.get("Vary") {
+        None => TOKEN.to_string(),
+        Some(existing) => {
+            let already_present = existing.trim() == "*"
+                || existing
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(TOKEN));
+            if already_present {
+                return;
+            }
+            format!("{}, {}", existing, TOKEN)
+        }
+    };
+
+    response.headers.insert("Vary".to_string(), merged);
 }
 
 impl Default for Compress {
@@ -838,13 +1083,25 @@ impl Middleware for Compress {
         req: HttpRequest,
         next: Next,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
+        let level = self.level;
+        // Negotiate before `req` is consumed by the handler.
+        let client_accepts_gzip = accepts_gzip(&req);
         Box::pin(async move {
             let mut response = next(req).await?;
-            // Add Vary header for proper caching
-            response
-                .headers
-                .insert("Vary".to_string(), "Accept-Encoding".to_string());
-            // Note: Actual compression would be done at the transport layer
+
+            // Advertise that the representation varies by Accept-Encoding, even
+            // when we ultimately do not compress (so shared caches stay correct).
+            // Merges with any pre-existing `Vary` (e.g. `Vary: Origin` from CORS
+            // middleware upstream) instead of clobbering it.
+            add_vary_accept_encoding(&mut response);
+
+            // Only compress when the client accepts gzip, the body is non-empty,
+            // and it is not already content-encoded.
+            let already_encoded = response.headers.contains_key("Content-Encoding");
+            if client_accepts_gzip && !already_encoded && !response.body_ref().is_empty() {
+                response = apply_gzip_offload(response, level).await;
+            }
+
             Ok(response)
         })
     }
@@ -1142,4 +1399,213 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["error"], "Internal Server Error");
     }
+
+    fn body_next(body: Vec<u8>) -> Next {
+        Box::new(move |_req: HttpRequest| {
+            Box::pin(async move {
+                let mut resp = HttpResponse::ok();
+                resp.body = body;
+                Ok(resp)
+            })
+        })
+    }
+
+    fn gunzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).expect("valid gzip stream");
+        out
+    }
+
+    /// Regression: `Compress` must actually gzip the body (and advertise it via
+    /// `Content-Encoding: gzip`) when the client accepts gzip. The old stub
+    /// returned the body untouched and never set `Content-Encoding`.
+    #[tokio::test]
+    async fn test_compress_gzips_when_accepted() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip, deflate, br");
+
+        let original = vec![b'a'; 8192];
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(
+            resp.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
+        // Highly compressible payload must actually shrink.
+        assert!(resp.body_ref().len() < original.len());
+        assert_eq!(gunzip(resp.body_ref()), original);
+    }
+
+    /// Without `Accept-Encoding: gzip` the body must pass through uncompressed,
+    /// but `Vary: Accept-Encoding` is still set for correct downstream caching.
+    #[tokio::test]
+    async fn test_compress_skips_without_accept_encoding() {
+        let mw = Compress::default();
+        let req = HttpRequest::new("GET".into(), "/".into());
+
+        let original = vec![b'b'; 8192];
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert!(resp.headers.get("Content-Encoding").is_none());
+        assert_eq!(resp.body_ref(), original.as_slice());
+        assert_eq!(
+            resp.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
+    }
+
+    /// Regression: a pre-existing `Vary` header (e.g. `Vary: Origin` set by
+    /// CORS middleware upstream) must be preserved, not clobbered, when
+    /// `Compress` adds its own `Accept-Encoding` dimension.
+    #[tokio::test]
+    async fn test_compress_merges_vary_with_existing_value() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'c'; 8192];
+        let next: Next = Box::new(move |_req: HttpRequest| {
+            Box::pin(async move {
+                let mut resp = HttpResponse::ok();
+                resp.body = original;
+                resp.headers
+                    .insert("Vary".to_string(), "Origin".to_string());
+                Ok(resp)
+            })
+        });
+
+        let resp = mw.call(req, next).await.unwrap();
+
+        let vary = resp.headers.get("Vary").cloned().unwrap_or_default();
+        let tokens: Vec<&str> = vary.split(',').map(str::trim).collect();
+        assert!(
+            tokens.contains(&"Origin"),
+            "Vary lost pre-existing Origin token: {vary}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
+            "Vary missing Accept-Encoding token: {vary}"
+        );
+    }
+
+    /// A body larger than [`GZIP_OFFLOAD_THRESHOLD`] takes the `spawn_blocking`
+    /// offload path. The output must be byte-identical to inline encoding:
+    /// gzip-decoding it yields the original bytes exactly.
+    #[tokio::test]
+    async fn test_compress_offloads_large_body_and_round_trips() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        // Well above the offload threshold; non-repeating so it does not trivially
+        // collapse to nothing.
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+
+        let resp = mw.call(req, body_next(original.clone())).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(gunzip(resp.body_ref()), original);
+    }
+
+    /// Regression: `HttpResponse` stores its body in one of two places — the
+    /// legacy `body: Vec<u8>` field, or the zero-copy `body_bytes:
+    /// Option<Bytes>` storage set by `with_bytes_body` (used by static-file
+    /// serving, `FastResponse`, and `ResponseBuilder::build()`), which takes
+    /// precedence when present and leaves `body` empty. A body-storage-naive
+    /// fix that only reads/writes the legacy `body` field would see an empty
+    /// `Vec`, "successfully" gzip-encode zero bytes, and then wipe out the
+    /// real content in `body_bytes` when installing the (bogus, empty)
+    /// compressed result — silently discarding the entire response. This
+    /// proves a `body_bytes`-backed body above the offload threshold is read
+    /// and compressed correctly.
+    #[tokio::test]
+    async fn test_compress_handles_bytes_backed_body_above_offload_threshold() {
+        let mw = Compress::new(CompressionLevel::Best);
+        let mut req = HttpRequest::new("GET".into(), "/".into());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+        let bytes_body = bytes::Bytes::from(original.clone());
+
+        let next: Next = Box::new(move |_req: HttpRequest| {
+            Box::pin(async move { Ok(HttpResponse::ok().with_bytes_body(bytes_body)) })
+        });
+
+        let resp = mw.call(req, next).await.unwrap();
+
+        assert_eq!(
+            resp.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert!(
+            !resp.body_ref().is_empty(),
+            "compressed body must not be empty"
+        );
+        assert_eq!(gunzip(resp.body_ref()), original);
+    }
+
+    /// Regression for the move-instead-of-clone refactor:
+    /// `gzip_encode_offloaded` now takes `data` by value and returns
+    /// `Result<Vec<u8>, Vec<u8>>` rather than borrowing `&[u8]` and returning
+    /// `Option<Vec<u8>>`. This directly exercises the *inline* (below
+    /// `GZIP_OFFLOAD_THRESHOLD`) branch and proves the new ownership-based
+    /// signature still produces byte-identical, round-trippable output.
+    #[tokio::test]
+    async fn test_gzip_encode_offloaded_round_trips_inline() {
+        let original: Vec<u8> = (0..4096)
+            .map(|i: usize| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() < GZIP_OFFLOAD_THRESHOLD);
+
+        let compressed = gzip_encode_offloaded(original.clone(), CompressionLevel::Best)
+            .await
+            .expect("inline gzip encode should succeed");
+        assert!(compressed.len() < original.len());
+        assert_eq!(gunzip(&compressed), original);
+    }
+
+    /// Same as above but drives the `Arc`-shared `spawn_blocking` offload
+    /// branch directly (body at/above `GZIP_OFFLOAD_THRESHOLD`), proving the
+    /// move-into-`Arc` design still round-trips exactly like the old
+    /// clone-based implementation did.
+    #[tokio::test]
+    async fn test_gzip_encode_offloaded_round_trips_offload_path() {
+        let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > GZIP_OFFLOAD_THRESHOLD);
+
+        let compressed = gzip_encode_offloaded(original.clone(), CompressionLevel::Best)
+            .await
+            .expect("offloaded gzip encode should succeed");
+        assert!(compressed.len() < original.len());
+        assert_eq!(gunzip(&compressed), original);
+    }
+
+    // Note: there is no test here for the `Err(original)` fallback path
+    // (`gzip_encode` returning `None`, or the `spawn_blocking` join failing).
+    // `gzip_encode` wraps `GzEncoder<Vec<u8>>`, whose `write_all`/`finish`
+    // never fail for any in-memory `Vec<u8>` sink under normal operation —
+    // there is no reachable way to make flate2 return `None` here without
+    // mocking `gzip_encode` itself, which is out of scope for this file's
+    // existing test patterns. See the fix report for the reasoning behind
+    // why the join-failure path should not lose data in practice either.
 }

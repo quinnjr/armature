@@ -343,7 +343,17 @@ impl ContractManager {
         Ok(contract)
     }
 
-    /// List all contracts
+    /// List all contracts.
+    ///
+    /// Reads consumer/provider names back out of each contract file's JSON
+    /// body (`Contract::consumer`/`Contract::provider`), rather than
+    /// splitting the filename on `-`: `save()` lowercases and joins the
+    /// names with `-` to build `{consumer}-{provider}.json`, which is not
+    /// reversible by splitting when either name itself contains a hyphen
+    /// (e.g. consumer `"my-service"` -> filename `my-service-backend.json`
+    /// would misparse as consumer `"my"`, provider `"service"`). Reading the
+    /// JSON instead means the returned pairs always round-trip into
+    /// `load()`, whatever characters the original names contained.
     pub fn list(&self) -> Result<Vec<(String, String)>, ContractError> {
         let entries = std::fs::read_dir(&self.contracts_dir)
             .map_err(|e| ContractError::IoError(e.to_string()))?;
@@ -352,16 +362,18 @@ impl ContractManager {
 
         for entry in entries {
             let entry = entry.map_err(|e| ContractError::IoError(e.to_string()))?;
-            let filename = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
 
-            if filename.ends_with(".json")
-                && let Some(parts) = filename.strip_suffix(".json")
-            {
-                let parts: Vec<&str> = parts.split('-').collect();
-                if parts.len() >= 2 {
-                    contracts.push((parts[0].to_string(), parts[1].to_string()));
-                }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
             }
+
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| ContractError::IoError(e.to_string()))?;
+            let contract: Contract = serde_json::from_str(&content)
+                .map_err(|e| ContractError::SerializationError(e.to_string()))?;
+
+            contracts.push((contract.consumer.name, contract.provider.name));
         }
 
         Ok(contracts)
@@ -372,10 +384,16 @@ impl ContractManager {
 pub struct ContractVerifier;
 
 impl ContractVerifier {
-    /// Verify a contract interaction
+    /// Verify a contract interaction's expected response against an actual
+    /// response.
     ///
-    /// This is a simplified verification - in a real implementation,
-    /// you would make actual HTTP requests and compare responses.
+    /// This checks only the **response** side (status, headers, body) of
+    /// `interaction` against `actual_response`; it never inspects, sends, or
+    /// otherwise uses `interaction.request` — issuing the real HTTP call
+    /// implied by `interaction.request` and capturing its response is the
+    /// caller's responsibility, not this method's. Pact-style provider
+    /// verification (replaying the request and asserting the response
+    /// contract) is only partially covered as a result.
     pub fn verify_interaction(
         interaction: &ContractInteraction,
         actual_response: &ContractResponse,
@@ -498,5 +516,72 @@ mod tests {
         assert!(request.query.is_some());
         assert!(request.headers.is_some());
         assert!(request.body.is_some());
+    }
+
+    /// Isolated scratch directory under the OS temp dir, cleaned up on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("armature-contract-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn list_round_trips_hyphenated_consumer_and_provider_names_into_load() {
+        let dir = TempDir::new();
+        let manager = ContractManager::new(dir.0.clone());
+
+        // Both names contain hyphens, so the filename
+        // "my-service-backend-api.json" cannot be unambiguously split back
+        // into (consumer, provider) by position; list() must read the
+        // names from the JSON body instead.
+        let contract = ContractBuilder::new("my-service", "backend-api").build();
+        manager.save(&contract).unwrap();
+
+        let listed = manager.list().unwrap();
+        assert_eq!(
+            listed,
+            vec![("my-service".to_string(), "backend-api".to_string())]
+        );
+
+        let (consumer, provider) = &listed[0];
+        let loaded = manager
+            .load(consumer, provider)
+            .expect("list()'s output must round-trip into load()");
+        assert_eq!(loaded.consumer.name, "my-service");
+        assert_eq!(loaded.provider.name, "backend-api");
+    }
+
+    #[test]
+    fn list_returns_multiple_contracts_with_non_hyphenated_names_too() {
+        let dir = TempDir::new();
+        let manager = ContractManager::new(dir.0.clone());
+
+        manager
+            .save(&ContractBuilder::new("Frontend", "Backend").build())
+            .unwrap();
+        manager
+            .save(&ContractBuilder::new("Mobile", "Backend").build())
+            .unwrap();
+
+        let mut listed = manager.list().unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("Frontend".to_string(), "Backend".to_string()),
+                ("Mobile".to_string(), "Backend".to_string()),
+            ]
+        );
     }
 }

@@ -522,14 +522,25 @@ impl Application {
         container: &Container,
         router: &mut Router,
         guards: &mut Vec<ScopedGuard>,
-        visited: &mut std::collections::HashSet<&'static str>,
+        visited: &mut std::collections::HashSet<std::any::TypeId>,
         module: &dyn Module,
     ) {
-        let module_type = std::any::type_name_of_val(module);
+        // Dedup by the *concrete* module's `TypeId` (`Module::module_type_id`),
+        // not `std::any::type_name_of_val(module)`. The latter resolves its
+        // type parameter from the *static* type of the `module: &dyn Module`
+        // parameter, so it always evaluates to the trait object's own type
+        // name (the same string for every module) rather than the concrete
+        // type behind the vtable. Keyed that way, the very first module
+        // `register_module` ever touches (the root) claims the one shared
+        // key, and every module reached afterwards — any import, re-export,
+        // or sibling, not just true diamond re-imports — collides with it
+        // and is silently skipped.
+        let module_id = module.module_type_id();
+        let module_type = module.module_type_name();
 
         // Each module registers once: diamond imports must not duplicate
         // providers/routes, and cyclic imports must not recurse forever.
-        if !visited.insert(module_type) {
+        if !visited.insert(module_id) {
             debug!(
                 module_type = module_type,
                 "Module already registered, skipping"
@@ -708,8 +719,36 @@ impl Application {
     ///
     /// app.listen(8080).await?;
     /// ```
+    ///
+    /// This binds to all interfaces (`0.0.0.0`) on the given port. To bind to a
+    /// specific address (e.g. loopback only, or an ephemeral `:0` port), use
+    /// [`Application::listen_on`].
     pub async fn listen(self, port: u16) -> Result<(), Error> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        self.listen_on((std::net::Ipv4Addr::UNSPECIFIED, port))
+            .await
+    }
+
+    /// Start the HTTP server on the specified socket address.
+    ///
+    /// This is the address-accepting counterpart to [`Application::listen`],
+    /// which binds to all interfaces on a port. `listen_on` accepts anything
+    /// convertible into a [`SocketAddr`], allowing binds to a specific
+    /// interface, IPv6, or an OS-assigned ephemeral port (`:0`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use armature_core::Application;
+    /// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    ///
+    /// # async fn example(app: Application) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Loopback only, port 8080
+    /// app.listen_on(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn listen_on(self, addr: impl Into<SocketAddr>) -> Result<(), Error> {
+        let addr = addr.into();
 
         debug!(address = %addr, "Binding to address");
         let listener = TcpListener::bind(addr).await?;
@@ -1917,6 +1956,258 @@ mod tests {
 
         // No controllers to scope to → guard registers nothing.
         assert!(guards.is_empty());
+    }
+
+    // ---- register_module dedups by concrete module type, not the erased
+    // trait-object type (regression: T4b) ------------------------------
+    //
+    // `std::any::type_name_of_val(module: &dyn Module)` always evaluates to
+    // the trait object's own type name ("dyn Module"), the same string for
+    // every concrete module, because its type parameter is resolved from
+    // the *static* type of the reference, not the concrete type behind the
+    // vtable. A visited-set keyed on that string treats every module after
+    // the first one touched as a duplicate and silently drops it.
+
+    struct DistinctProviderA;
+    struct DistinctProviderB;
+
+    async fn distinct_handler_a(
+        _req: crate::HttpRequest,
+    ) -> Result<crate::HttpResponse, crate::Error> {
+        Ok(crate::HttpResponse::ok())
+    }
+
+    async fn distinct_handler_b(
+        _req: crate::HttpRequest,
+    ) -> Result<crate::HttpResponse, crate::Error> {
+        Ok(crate::HttpResponse::ok())
+    }
+
+    fn distinct_controller_registration_a() -> crate::ControllerRegistration {
+        crate::ControllerRegistration {
+            type_id: std::any::TypeId::of::<()>(),
+            type_name: "DistinctControllerA",
+            base_path: "/distinct-a",
+            factory: |_c| Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>),
+            route_registrar: |_c, r, _b| {
+                r.get("/distinct-a", distinct_handler_a);
+                Ok(())
+            },
+        }
+    }
+
+    fn distinct_controller_registration_b() -> crate::ControllerRegistration {
+        crate::ControllerRegistration {
+            type_id: std::any::TypeId::of::<()>(),
+            type_name: "DistinctControllerB",
+            base_path: "/distinct-b",
+            factory: |_c| Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>),
+            route_registrar: |_c, r, _b| {
+                r.get("/distinct-b", distinct_handler_b);
+                Ok(())
+            },
+        }
+    }
+
+    /// Imported module A: registers `DistinctProviderA` and a controller at
+    /// `/distinct-a`.
+    struct DistinctModuleA;
+    impl Module for DistinctModuleA {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![crate::ProviderRegistration {
+                type_id: std::any::TypeId::of::<DistinctProviderA>(),
+                type_name: "DistinctProviderA",
+                register_fn: |c| c.register(DistinctProviderA),
+            }]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![distinct_controller_registration_a()]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    /// Imported module B: a concrete type distinct from `DistinctModuleA`;
+    /// registers `DistinctProviderB` and a controller at `/distinct-b`.
+    struct DistinctModuleB;
+    impl Module for DistinctModuleB {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![crate::ProviderRegistration {
+                type_id: std::any::TypeId::of::<DistinctProviderB>(),
+                type_name: "DistinctProviderB",
+                register_fn: |c| c.register(DistinctProviderB),
+            }]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![distinct_controller_registration_b()]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    /// Root module with no providers/controllers of its own; everything
+    /// observable comes from its two distinct imports.
+    struct DistinctRootModule;
+    impl Module for DistinctRootModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(DistinctModuleA), Box::new(DistinctModuleB)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_register_module_registers_all_distinct_imported_modules() {
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut guards: Vec<ScopedGuard> = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        Application::register_module(
+            &container,
+            &mut router,
+            &mut guards,
+            &mut visited,
+            &DistinctRootModule,
+        );
+
+        assert!(
+            container.has::<DistinctProviderA>(),
+            "first imported module's provider must be registered"
+        );
+        assert!(
+            container.has::<DistinctProviderB>(),
+            "second imported module's provider must be registered (must not \
+             be dropped as a false-positive duplicate of the first)"
+        );
+        assert!(
+            router.routes.iter().any(|r| r.path == "/distinct-a"),
+            "first imported module's controller route must be registered"
+        );
+        assert!(
+            router.routes.iter().any(|r| r.path == "/distinct-b"),
+            "second imported module's controller route must be registered"
+        );
+    }
+
+    // ---- true diamond import: the same concrete module reached via two
+    // different parents must still register exactly once -----------------
+
+    struct SharedDiamondProvider;
+
+    static DIAMOND_PROVIDER_INIT_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    struct SharedDiamondModule;
+    impl Module for SharedDiamondModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![crate::ProviderRegistration {
+                type_id: std::any::TypeId::of::<SharedDiamondProvider>(),
+                type_name: "SharedDiamondProvider",
+                register_fn: |c| {
+                    DIAMOND_PROVIDER_INIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    c.register(SharedDiamondProvider);
+                },
+            }]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    struct DiamondLeftModule;
+    impl Module for DiamondLeftModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(SharedDiamondModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    struct DiamondRightModule;
+    impl Module for DiamondRightModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(SharedDiamondModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    struct DiamondRootModule;
+    impl Module for DiamondRootModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(DiamondLeftModule), Box::new(DiamondRightModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_register_module_diamond_import_registers_shared_module_once() {
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut guards: Vec<ScopedGuard> = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        Application::register_module(
+            &container,
+            &mut router,
+            &mut guards,
+            &mut visited,
+            &DiamondRootModule,
+        );
+
+        assert!(
+            container.has::<SharedDiamondProvider>(),
+            "shared module reachable via a diamond must still register"
+        );
+        assert_eq!(
+            DIAMOND_PROVIDER_INIT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "diamond-imported module (reached via two different parents) \
+             must register exactly once, not zero (dropped) or two \
+             (duplicated)"
+        );
     }
 
     #[test]

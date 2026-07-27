@@ -12,7 +12,7 @@ keywords = ["audit", "logging", "compliance", "security"]
 categories = ["web-programming", "development-tools::debugging"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 # Read the VERIFIED principal (UserContext) that JwtAuthMiddleware attaches to
 # request extensions, so the audit trail never trusts an unverified token.
 armature-auth = { path = "../armature-auth", version = "0.1.2" }

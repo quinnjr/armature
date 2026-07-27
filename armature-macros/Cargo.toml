@@ -1,6 +1,6 @@
 [package]
 name = "armature-macros"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,6 +12,16 @@ keywords = ["macros", "framework", "web"]
 categories = ["web-programming", "development-tools::procedural-macro-helpers"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 serde_json = "1.0"
+
+[dev-dependencies]
+# Required so `tests/macros.rs` compiles: it exercises the `log_error!`
+# macro, which expands to an unprefixed `tracing::error!(...)` call.
+# `macro_rules!` paths to external crates resolve at the *call* site, not
+# the defining crate, so callers of `log_error!` must add their own
+# `tracing` dependency (same as callers must supply `armature-core` and
+# `serde_json` for the other macros here). This crate only needs `tracing`
+# for its own integration tests.
+tracing = "0.1"
 

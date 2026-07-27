@@ -270,7 +270,10 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-/// Split a path into segments using SIMD-optimized search.
+/// Split a path into segments.
+///
+/// This is a plain scalar `str::split('/')` (no SIMD); it is listed here
+/// alongside the SIMD helpers only because it is part of the fast path API.
 ///
 /// Returns an iterator over path segments, skipping empty segments.
 ///
@@ -370,7 +373,7 @@ pub fn parse_request_line(buf: &[u8]) -> Result<(&str, &str, u8), httparse::Erro
 
 /// Check if a byte sequence contains only valid header name characters.
 ///
-/// Uses SIMD to check multiple bytes at once.
+/// Scalar validation (`iter().all(..)`); it does not use SIMD.
 #[inline]
 pub fn is_valid_header_name(name: &[u8]) -> bool {
     // Valid header name characters: a-z, A-Z, 0-9, -, _
@@ -380,8 +383,8 @@ pub fn is_valid_header_name(name: &[u8]) -> bool {
 
 /// Fast path parameter extraction.
 ///
-/// Given a route pattern and actual path, extract parameters using
-/// SIMD-optimized string operations.
+/// Given a route pattern and actual path, extract parameters using scalar
+/// string operations (segment split and comparison; no SIMD).
 ///
 /// # Example
 ///

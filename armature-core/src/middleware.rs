@@ -376,18 +376,36 @@ impl Middleware for SecurityHeadersMiddleware {
     }
 }
 
-/// Compression middleware (stub - would need compression crate)
+/// Gzip-compression middleware.
+///
+/// Compresses response bodies larger than `min_size` with gzip when the client's
+/// `Accept-Encoding` permits it, setting `Content-Encoding: gzip` and merging
+/// `Accept-Encoding` into `Vary` — merged rather than overwritten, so a
+/// pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware upstream)
+/// survives. Small bodies, bodies that are already content-encoded, and
+/// clients that do not accept gzip are passed through unchanged (but still
+/// gain `Vary`).
 pub struct CompressionMiddleware {
     min_size: usize,
+    level: crate::micro::CompressionLevel,
 }
 
 impl CompressionMiddleware {
     pub fn new() -> Self {
-        Self { min_size: 1024 } // Only compress responses > 1KB
+        Self {
+            min_size: 1024, // Only compress responses > 1KB
+            level: crate::micro::CompressionLevel::Default,
+        }
     }
 
     pub fn with_min_size(mut self, size: usize) -> Self {
         self.min_size = size;
+        self
+    }
+
+    /// Set the gzip compression level.
+    pub fn with_level(mut self, level: crate::micro::CompressionLevel) -> Self {
+        self.level = level;
         self
     }
 }
@@ -401,14 +419,19 @@ impl Default for CompressionMiddleware {
 #[async_trait]
 impl Middleware for CompressionMiddleware {
     async fn handle(&self, req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
+        // Negotiate before `req` is consumed by the handler.
+        let client_accepts_gzip = crate::micro::accepts_gzip(&req);
         let mut response = next(req).await?;
 
-        // Check if response is large enough to compress
-        if response.body.len() > self.min_size {
-            response
-                .headers
-                .insert("X-Compression-Eligible".to_string(), "true".to_string());
-            // In production: compress response.body here
+        // Advertise Accept-Encoding as a cache-varying dimension regardless of
+        // whether we compress this particular response. Merges with any
+        // pre-existing `Vary` (e.g. `Vary: Origin` from CORS middleware
+        // upstream) instead of clobbering it.
+        crate::micro::add_vary_accept_encoding(&mut response);
+
+        let already_encoded = response.headers.contains_key("Content-Encoding");
+        if client_accepts_gzip && !already_encoded && response.body_ref().len() > self.min_size {
+            response = crate::micro::apply_gzip_offload(response, self.level).await;
         }
 
         Ok(response)
@@ -723,6 +746,212 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    fn gunzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).expect("valid gzip stream");
+        out
+    }
+
+    /// Regression: a body above `min_size` is actually gzip-compressed (not just
+    /// flagged) when the client accepts gzip. The old stub only set an
+    /// `X-Compression-Eligible` header and never compressed.
+    #[tokio::test]
+    async fn test_compression_middleware_gzips_large_body() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'z'; 4096];
+        let expected = original.clone();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(
+            response.headers.get("Vary").map(String::as_str),
+            Some("Accept-Encoding")
+        );
+        assert!(response.body_ref().len() < expected.len());
+        assert_eq!(gunzip(response.body_ref()), expected);
+        // The stale eligibility-flag header must be gone.
+        assert!(response.headers.get("X-Compression-Eligible").is_none());
+    }
+
+    /// Regression: `HttpResponse` stores its body in one of two places — the
+    /// legacy `body: Vec<u8>` field, or the zero-copy `body_bytes:
+    /// Option<Bytes>` storage set by `with_bytes_body` (used by static-file
+    /// serving, `FastResponse`, and `ResponseBuilder::build()`), which takes
+    /// precedence when present and leaves `body` empty. A body-storage-naive
+    /// call site that only reads/writes the legacy `body` field would see an
+    /// empty `Vec`, "successfully" gzip-encode zero bytes, and then wipe out
+    /// the real content in `body_bytes` when installing the (bogus, empty)
+    /// compressed result. This proves a `body_bytes`-backed body above the
+    /// offload threshold is read and compressed correctly by
+    /// `CompressionMiddleware` too (it shares `apply_gzip_offload` with
+    /// `micro::Compress`).
+    #[tokio::test]
+    async fn test_compression_middleware_handles_bytes_backed_body_above_offload_threshold() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original: Vec<u8> = (0..(crate::micro::GZIP_OFFLOAD_THRESHOLD * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > crate::micro::GZIP_OFFLOAD_THRESHOLD);
+        let bytes_body = bytes::Bytes::from(original.clone());
+
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_bytes_body(bytes_body)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert!(
+            !response.body_ref().is_empty(),
+            "compressed body must not be empty"
+        );
+        assert_eq!(gunzip(response.body_ref()), original);
+    }
+
+    /// Below `min_size`, the body must pass through uncompressed.
+    #[tokio::test]
+    async fn test_compression_middleware_respects_min_size() {
+        let middleware = CompressionMiddleware::new().with_min_size(1024);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let small = b"tiny".to_vec();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(small)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers.get("Content-Encoding").is_none());
+        assert_eq!(response.body_ref(), b"tiny");
+    }
+
+    /// Without `Accept-Encoding: gzip`, a large body is left uncompressed.
+    #[tokio::test]
+    async fn test_compression_middleware_skips_without_accept_encoding() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+
+        let original = vec![b'q'; 4096];
+        let expected = original.clone();
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers.get("Content-Encoding").is_none());
+        assert_eq!(response.body_ref(), expected.as_slice());
+    }
+
+    /// Regression: a pre-existing `Vary` header (e.g. `Vary: Origin` set by
+    /// CORS middleware upstream) must be preserved, not clobbered, when
+    /// `CompressionMiddleware` adds its own `Accept-Encoding` dimension.
+    #[tokio::test]
+    async fn test_compression_middleware_merges_vary_with_existing_value() {
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        let original = vec![b'z'; 4096];
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move {
+                        let mut resp = HttpResponse::ok().with_body(original);
+                        resp.headers
+                            .insert("Vary".to_string(), "Origin".to_string());
+                        Ok(resp)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        let vary = response.headers.get("Vary").cloned().unwrap_or_default();
+        let tokens: Vec<&str> = vary.split(',').map(str::trim).collect();
+        assert!(
+            tokens.contains(&"Origin"),
+            "Vary lost pre-existing Origin token: {vary}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("Accept-Encoding")),
+            "Vary missing Accept-Encoding token: {vary}"
+        );
+    }
+
+    /// A body larger than the gzip offload threshold is encoded on the
+    /// `spawn_blocking` path; the result must be byte-identical to inline
+    /// encoding, so gzip-decoding it reproduces the original exactly.
+    #[tokio::test]
+    async fn test_compression_middleware_offloads_large_body_and_round_trips() {
+        let threshold = crate::micro::GZIP_OFFLOAD_THRESHOLD;
+        let middleware = CompressionMiddleware::new().with_min_size(16);
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        req.headers.insert("accept-encoding", "gzip");
+
+        // Well past the offload threshold, non-repeating so it does not trivially
+        // collapse to nothing.
+        let original: Vec<u8> = (0..(threshold * 4))
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert!(original.len() > threshold);
+        let expected = original.clone();
+
+        let response = middleware
+            .handle(
+                req,
+                Box::new(move |_req| {
+                    Box::pin(async move { Ok(HttpResponse::ok().with_body(original)) })
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers.get("Content-Encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(gunzip(response.body_ref()), expected);
     }
 
     #[tokio::test]

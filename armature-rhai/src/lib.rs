@@ -22,8 +22,8 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create Rhai engine with Armature bindings
 //!     let engine = RhaiEngine::new()
-//!         .with_max_operations(100_000)
-//!         .with_scripts_dir("./scripts")
+//!         .max_operations(100_000)
+//!         .scripts_dir("./scripts")
 //!         .build()?;
 //!
 //!     // Create router with script-based handlers
@@ -32,8 +32,11 @@
 //!         .route("/users/:id", "handlers/users.rhai")
 //!         .route("/api/*", "handlers/api.rhai");
 //!
-//!     // Run server
-//!     router.serve("0.0.0.0:8080").await?;
+//!     // Dispatch requests through the router — wire `router.handle(request)`
+//!     // into your HTTP server of choice (e.g. an armature-core `App`, or a
+//!     // raw Hyper/Axum service that forwards each request to it).
+//!     let request = armature_core::HttpRequest::new("GET".to_string(), "/".to_string());
+//!     let _response = router.handle(request).await;
 //!     Ok(())
 //! }
 //! ```
@@ -45,7 +48,7 @@
 //!
 //! // Access request data
 //! let user_id = request.param("id");
-//! let method = request.method();
+//! let method = request.method;
 //!
 //! // Handle different methods
 //! if method == "GET" {
@@ -70,7 +73,7 @@
 //!
 //! ```rust,ignore
 //! let engine = RhaiEngine::new()
-//!     .with_hot_reload(true)
+//!     .hot_reload(true)
 //!     .build()?;
 //! ```
 

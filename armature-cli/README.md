@@ -7,7 +7,6 @@ CLI tool for the Armature framework.
 - **Project Generation** - Create new projects
 - **Code Generation** - Generate controllers, models, etc.
 - **Development Server** - Hot reload development
-- **Database Migrations** - Run and manage migrations
 - **Build Tools** - Production builds and optimization
 
 ## Installation
@@ -34,8 +33,8 @@ armature generate controller users
 # Generate a model
 armature generate model user
 
-# Generate a migration
-armature generate migration create_users
+# Generate a full CRUD scaffold with fields
+armature generate scaffold post --fields "title:string,body:text,published:bool"
 ```
 
 ### Development Server
@@ -46,19 +45,6 @@ armature dev
 
 # Specify port
 armature dev --port 8080
-```
-
-### Database
-
-```bash
-# Run migrations
-armature db migrate
-
-# Rollback
-armature db rollback
-
-# Reset database
-armature db reset
 ```
 
 ### Build

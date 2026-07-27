@@ -98,6 +98,28 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     Ok(Box::new(instance) as Box<dyn std::any::Any + Send + Sync>)
                 },
                 route_registrar: |_container, router, controller_any| {
+                    // Fallbacks so controllers WITHOUT `#[guard]` / `#[middleware]`
+                    // still resolve the accessors below (returning empty). When
+                    // those attributes ARE present, the inherent
+                    // `__get_guard_factories` / `__get_middleware_factories`
+                    // methods generated on the struct shadow these defaults.
+                    #[allow(dead_code)]
+                    trait __ArmatureGuardMeta {
+                        fn __get_guard_factories()
+                            -> Vec<fn() -> Box<dyn armature_core::guard::Guard>> {
+                            Vec::new()
+                        }
+                    }
+                    impl<__T> __ArmatureGuardMeta for __T {}
+                    #[allow(dead_code)]
+                    trait __ArmatureMiddlewareMeta {
+                        fn __get_middleware_factories()
+                            -> Vec<fn() -> Box<dyn armature_core::middleware::Middleware>> {
+                            Vec::new()
+                        }
+                    }
+                    impl<__T> __ArmatureMiddlewareMeta for __T {}
+
                     // Get base path from constant
                     let base_path = #ty::BASE_PATH;
 
@@ -107,6 +129,32 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                     // Wrap in Arc for shared ownership
                     let controller = std::sync::Arc::new(*controller);
+
+                    // Controller-struct-level guards and middleware apply to every
+                    // route declared on this controller. Both are constructed
+                    // exactly once, here at registration time — the per-request
+                    // closures below only clone the resulting `Arc`s.
+                    let __guards: std::sync::Arc<
+                        Vec<std::sync::Arc<dyn armature_core::guard::Guard>>,
+                    > = std::sync::Arc::new(
+                        #ty::__get_guard_factories()
+                            .into_iter()
+                            .map(|__factory| {
+                                std::sync::Arc::from(__factory())
+                                    as std::sync::Arc<dyn armature_core::guard::Guard>
+                            })
+                            .collect(),
+                    );
+                    let __middlewares: Vec<
+                        std::sync::Arc<dyn armature_core::middleware::Middleware>,
+                    > = #ty::__get_middleware_factories()
+                        .into_iter()
+                        .map(|__factory| {
+                            std::sync::Arc::from(__factory())
+                                as std::sync::Arc<dyn armature_core::middleware::Middleware>
+                        })
+                        .collect();
+                    let __enforce = !__guards.is_empty() || !__middlewares.is_empty();
 
                     // Get route handlers from the controller
                     let route_handlers = #ty::__route_handlers(controller);
@@ -121,11 +169,106 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                             format!("{}/{}", base_path, path)
                         };
 
+                        // When the controller declares struct-level guards or
+                        // middleware, wrap the handler so they run per request:
+                        // guards first (a non-activating guard yields 403, an
+                        // erroring one propagates its error), then the middleware
+                        // chain around the handler. Otherwise use the plain handler
+                        // with zero overhead.
+                        let __boxed_handler = if __enforce {
+                            // Build the middleware chain ONCE, here at registration
+                            // time, from the innermost handler outward so the
+                            // first-listed middleware ends up outermost and runs
+                            // first. `HandlerFn` is `Arc`-based, so the per-request
+                            // closure below only pays a refcount bump.
+                            let mut __chain: armature_core::middleware::HandlerFn = {
+                                let __orig_handler = handler.clone();
+                                std::sync::Arc::new(move |__r: armature_core::HttpRequest| {
+                                    let __orig_handler = __orig_handler.clone();
+                                    Box::pin(async move { __orig_handler(__r).await })
+                                        as std::pin::Pin<Box<dyn std::future::Future<
+                                            Output = Result<
+                                                armature_core::HttpResponse,
+                                                armature_core::Error,
+                                            >,
+                                        > + Send>>
+                                })
+                            };
+                            for __mw in __middlewares.iter().rev().cloned() {
+                                let __next_handler = __chain.clone();
+                                __chain = std::sync::Arc::new(
+                                    move |__r: armature_core::HttpRequest| {
+                                        let __mw = __mw.clone();
+                                        let __next_handler = __next_handler.clone();
+                                        Box::pin(async move {
+                                            let __next: armature_core::middleware::Next =
+                                                Box::new(move |__rr: armature_core::HttpRequest| {
+                                                    __next_handler(__rr)
+                                                });
+                                            armature_core::middleware::Middleware::handle(
+                                                &*__mw, __r, __next,
+                                            )
+                                            .await
+                                        })
+                                            as std::pin::Pin<Box<dyn std::future::Future<
+                                                Output = Result<
+                                                    armature_core::HttpResponse,
+                                                    armature_core::Error,
+                                                >,
+                                            > + Send>>
+                                    },
+                                );
+                            }
+
+                            let __guards = __guards.clone();
+                            let __wrapped: armature_core::route_registry::RouteHandlerFn =
+                                std::sync::Arc::new(move |__req: armature_core::HttpRequest| {
+                                    let __guards = __guards.clone();
+                                    let __chain = __chain.clone();
+                                    Box::pin(async move {
+                                        // 1. Guards run before the handler. One
+                                        //    context (one request clone) is shared
+                                        //    read-only by every guard.
+                                        if !__guards.is_empty() {
+                                            let __context =
+                                                armature_core::guard::GuardContext::new(__req.clone());
+                                            for __guard in __guards.iter() {
+                                                match armature_core::guard::Guard::can_activate(
+                                                    &**__guard,
+                                                    &__context,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(true) => {}
+                                                    Ok(false) => {
+                                                        return Ok(armature_core::HttpResponse::new(403)
+                                                            .with_body(b"Forbidden".to_vec()));
+                                                    }
+                                                    Err(e) => return Err(e),
+                                                }
+                                            }
+                                        }
+
+                                        // 2. Run the pre-built middleware chain.
+                                        __chain(__req).await
+                                    })
+                                        as std::pin::Pin<Box<dyn std::future::Future<
+                                            Output = Result<
+                                                armature_core::HttpResponse,
+                                                armature_core::Error,
+                                            >,
+                                        > + Send>>
+                                });
+                            armature_core::handler::from_legacy_handler(__wrapped)
+                        } else {
+                            armature_core::handler::from_legacy_handler(handler.clone())
+                        };
+
                         let route = armature_core::routing::Route {
                             method: armature_core::HttpMethod::from_str(method)
                                 .unwrap_or(armature_core::HttpMethod::GET),
                             path: full_path,
-                            handler: armature_core::handler::from_legacy_handler(handler.clone()),
+                            handler: __boxed_handler,
                             constraints: None,
                         };
                         router.add_route(route);

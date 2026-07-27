@@ -32,6 +32,11 @@ fn main() {
 }
 ```
 
+`init()` runs automatically the first time any log macro (or `config()`) is
+used, so `ARMATURE_*` env vars take effect even if you never call it
+explicitly. Calling it eagerly, as above, is still useful to force env
+parsing to happen at a known point during startup.
+
 ## Configuration
 
 ### Environment Variables
@@ -41,7 +46,7 @@ fn main() {
 | `ARMATURE_DEBUG` | `1`, `true` | `false` |
 | `ARMATURE_LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, `error` | `info` |
 | `ARMATURE_LOG_FORMAT` | `json`, `pretty`, `compact` | `json` |
-| `ARMATURE_LOG_COLOR` | `1`, `true` | auto-detect TTY |
+| `ARMATURE_LOG_COLOR` | `1`, `true` | auto-detect TTY (real terminal check; `NO_COLOR` or `TERM=dumb` force it off) |
 
 ### Programmatic
 

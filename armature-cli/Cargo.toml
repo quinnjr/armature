@@ -1,6 +1,6 @@
 [package]
 name = "armature-cli"
-version = "0.2.3"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -47,10 +47,10 @@ openapiv3 = "2.2"
 reqwest = { version = "0.13", features = ["json"], default-features = false }
 
 # Mock server (uses armature-core)
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.3.0" }
 
 # Rhai application runner
-armature-app = { path = "../armature-app", version = "0.1.1" }
+armature-app = { path = "../armature-app", version = "0.2.0" }
 
 [dev-dependencies]
 tempfile = "3.27"
