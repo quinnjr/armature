@@ -77,7 +77,7 @@ jobs:
           body: |
             # Armature ${{ github.ref_name }}
 
-            See [CHANGELOG.md](https://github.com/pegasusheavy/armature/blob/main/CHANGELOG.md) for details.
+            See [CHANGELOG.md](https://github.com/quinnjr/armature/blob/main/CHANGELOG.md) for details.
 
             ## Installation
 

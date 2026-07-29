@@ -36,7 +36,7 @@ This is the official documentation website for the Armature Framework, built wit
 
 - **Astro**: 5.x (static site generation)
 - **Tailwind CSS**: 4.1+ (CSS-first configuration) via `@tailwindcss/vite`
-- **Theme**: [`@pegasusheavy/tailswatch`](https://github.com/quinnjr/tailswatch) Oxide theme
+- **Theme**: [`tailswatch`](https://github.com/quinnjr/tailswatch) Oxide theme
 - **SCSS**: For enhanced styling capabilities
 - **TypeScript**: 5.9+
 - **Package Manager**: pnpm
@@ -51,7 +51,7 @@ This project uses Tailwind CSS 4's CSS-first configuration approach. No `tailwin
 1. **Direct CSS Import**: Tailwind and the Tailswatch Oxide theme are imported in `src/styles/global.css`:
    ```css
    @import 'tailwindcss';
-   @import '@pegasusheavy/tailswatch/themes/oxide';
+   @import 'tailswatch/themes/oxide';
    ```
    (Keep this file plain CSS — a sass entry point would compile the imports away before Tailwind's Vite plugin runs, silently dropping every utility class.)
 

@@ -900,7 +900,7 @@ const README_TEMPLATE: &str = r#"# {{name_pascal}}
 
 {{description}}
 
-Built with [Armature](https://github.com/pegasusheavy/armature) - A modern Rust web framework.
+Built with [Armature](https://github.com/quinnjr/armature) - A modern Rust web framework.
 
 ## Getting Started
 

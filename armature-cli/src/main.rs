@@ -39,13 +39,13 @@ use error::{CliError, CliResult};
 /// Armature CLI - Modern Rust Web Framework Tools
 #[derive(Parser)]
 #[command(name = "armature")]
-#[command(author = "Pegasus Heavy Industries LLC")]
+#[command(author = "Joseph Quinn")]
 #[command(version)]
 #[command(about = "🔧 CLI tool for Armature framework - code generation and development server")]
 #[command(long_about = None)]
 #[command(propagate_version = true)]
 #[command(after_help = format!(
-    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature deploy --provider aws\n\n{}\n  {} https://github.com/pegasusheavy/armature",
+    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature deploy --provider aws\n\n{}\n  {} https://github.com/quinnjr/armature",
     "Examples:".bright_cyan().bold(),
     "$".dimmed(),
     "$".dimmed(),
@@ -2233,7 +2233,7 @@ async fn main() {
 
         Commands::Docs => {
             info("Opening documentation...");
-            let url = "https://github.com/pegasusheavy/armature";
+            let url = "https://github.com/quinnjr/armature";
             if webbrowser::open(url).is_err() {
                 println!("  {} {}", "→".cyan(), url);
             }

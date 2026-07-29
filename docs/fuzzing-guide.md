@@ -345,7 +345,7 @@ Prioritize fuzzing:
 If fuzzing discovers a security vulnerability:
 
 1. **Do not** create a public GitHub issue
-2. Email security@pegasusheavy.com with:
+2. Email quinn.josephr@proton.me with:
    - Description of the issue
    - Reproduction steps (crash input)
    - Potential impact assessment

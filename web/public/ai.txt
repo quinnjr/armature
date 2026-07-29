@@ -111,7 +111,7 @@ struct AppModule;
 # CONTACT
 # =============================================================================
 
-Contact: pegasusheavyindustries@gmail.com
-Organization: Pegasus Heavy Industries
+Contact: quinn.josephr@proton.me
+Organization: Joseph Quinn
 Maintainer: Joseph R. Quinn
 
