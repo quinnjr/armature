@@ -10,7 +10,8 @@
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Cargo.lock is committed and required for reproducible dependency
+# resolution (cargo-chef recipe generation and `cargo build` both need it)
 
 # =============================================================================
 # Git
@@ -83,7 +84,11 @@ test-results/
 # =============================================================================
 # Benchmarks
 # =============================================================================
-benches/
+# NOTE: benches/ itself must stay in the build context (not ignored) — the
+# root Cargo.toml declares explicit [[bench]] and [[bin]] targets whose
+# default paths point into benches/*.rs; Cargo fails to parse the manifest
+# at all (even for `cargo metadata`/`cargo chef prepare`) if those files are
+# missing from the context.
 criterion/
 
 # =============================================================================

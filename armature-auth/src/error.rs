@@ -60,6 +60,9 @@ pub enum AuthError {
 
     #[error("Passwordless auth error: {0}")]
     PasswordlessError(String),
+
+    #[error("SAML validation error: {0}")]
+    SamlValidation(String),
 }
 
 pub type Result<T> = std::result::Result<T, AuthError>;

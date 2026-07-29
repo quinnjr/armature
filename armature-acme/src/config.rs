@@ -62,6 +62,12 @@ pub struct AcmeConfig {
 
     /// EAB HMAC key
     pub eab_hmac_key: Option<String>,
+
+    /// Additional CA root certificate(s) (PEM) to trust for the ACME endpoint.
+    ///
+    /// Use this to talk to a private or test ACME CA (e.g. Pebble/Boulder)
+    /// whose HTTPS interface is signed by a root not in the system trust store.
+    pub ca_certificate: Option<Vec<u8>>,
 }
 
 impl AcmeConfig {
@@ -94,6 +100,7 @@ impl AcmeConfig {
             accept_tos: false,
             eab_kid: None,
             eab_hmac_key: None,
+            ca_certificate: None,
         }
     }
 
@@ -176,6 +183,15 @@ impl AcmeConfig {
     pub fn with_eab(mut self, kid: String, hmac_key: String) -> Self {
         self.eab_kid = Some(kid);
         self.eab_hmac_key = Some(hmac_key);
+        self
+    }
+
+    /// Trust an additional CA root certificate (PEM) for the ACME endpoint.
+    ///
+    /// Required to talk to a private or test ACME CA whose HTTPS interface is
+    /// signed by a root outside the system trust store.
+    pub fn with_ca_certificate(mut self, pem: Vec<u8>) -> Self {
+        self.ca_certificate = Some(pem);
         self
     }
 }

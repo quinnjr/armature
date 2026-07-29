@@ -14,7 +14,7 @@
 //!
 //! // Create i18n instance
 //! let i18n = I18n::new()
-//!     .with_default_locale(Locale::en_US())
+//!     .with_default_locale(Locale::en_us())
 //!     .with_fallback(Locale::en())
 //!     .load_from_dir("locales/")?;
 //!
@@ -36,7 +36,7 @@
 //!
 //! let header = "en-US,en;q=0.9,fr;q=0.8";
 //! let locales = parse_accept_language(header);
-//! // [Locale::en_US(), Locale::en(), Locale::fr()]
+//! // [Locale::en_us(), Locale::en(), Locale::fr()]
 //! ```
 //!
 //! # Date/Number Formatting
@@ -44,7 +44,7 @@
 //! ```rust,ignore
 //! use armature_i18n::format::{format_number, format_date, format_currency};
 //!
-//! let locale = Locale::de_DE();
+//! let locale = Locale::de_de();
 //! format_number(1234567.89, &locale);  // "1.234.567,89"
 //! format_currency(99.99, "EUR", &locale);  // "99,99 €"
 //! ```
@@ -59,8 +59,8 @@ mod plural;
 pub use bundle::FluentBundle;
 pub use error::I18nError;
 pub use format::{
-    CurrencyFormatter, DateFormatter, DateStyle, NumberFormatter, TimeStyle, format_currency,
-    format_date, format_number, format_percent,
+    CurrencyFormatter, DateFormatter, DateStyle, NumberFormatter, TimeStyle, TimeZone,
+    format_currency, format_date, format_number, format_percent,
 };
 pub use locale::{Locale, LocaleBuilder, negotiate_locale, parse_accept_language};
 pub use messages::{I18n, MessageBundle, Messages, TranslationSource};

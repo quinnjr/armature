@@ -1,6 +1,8 @@
 //! Analytics middleware for automatic request tracking
 
 use crate::{Analytics, ErrorRecord, RequestRecord};
+use armature_core::{Error, HttpRequest, HttpResponse, Middleware, Next};
+use async_trait::async_trait;
 use std::time::Instant;
 
 /// Middleware that automatically records analytics for all requests
@@ -31,59 +33,6 @@ impl AnalyticsMiddleware {
     pub fn analytics(&self) -> &Analytics {
         &self.analytics
     }
-
-    /// Record a request manually (for custom middleware implementations)
-    pub fn record_request(
-        &self,
-        method: &str,
-        path: &str,
-        status: u16,
-        start_time: Instant,
-        response_size: Option<u64>,
-        authenticated: bool,
-    ) {
-        // Check if path should be excluded
-        if self.analytics.config().should_exclude(path) {
-            return;
-        }
-
-        // Check sampling
-        if !self.analytics.config().should_sample() {
-            return;
-        }
-
-        let duration = start_time.elapsed();
-
-        let mut record =
-            RequestRecord::new(method, path, status, duration).with_authenticated(authenticated);
-
-        if let Some(size) = response_size {
-            record = record.with_response_size(size);
-        }
-
-        self.analytics.record_request(record);
-    }
-
-    /// Record an error manually
-    pub fn record_error(
-        &self,
-        error_type: &str,
-        message: &str,
-        status: Option<u16>,
-        endpoint: Option<&str>,
-    ) {
-        let mut record = ErrorRecord::new(error_type, message);
-
-        if let Some(s) = status {
-            record = record.with_status(s);
-        }
-
-        if let Some(ep) = endpoint {
-            record = record.with_endpoint(ep);
-        }
-
-        self.analytics.record_error(record);
-    }
 }
 
 /// Request context for tracking within handlers
@@ -113,9 +62,13 @@ impl AnalyticsContext {
 
     /// Complete the request tracking
     pub fn complete(self, status: u16, response_size: Option<u64>) {
-        let record =
-            RequestRecord::new(&self.method, &self.path, status, self.start_time.elapsed())
-                .with_response_size(response_size.unwrap_or(0));
+        let record = RequestRecord::new(
+            &self.method,
+            normalize_path(&self.path),
+            status,
+            self.start_time.elapsed(),
+        )
+        .with_response_size(response_size.unwrap_or(0));
 
         self.analytics.record_request(record);
     }
@@ -129,45 +82,123 @@ impl AnalyticsContext {
     }
 }
 
-/// Handler wrapper that automatically tracks analytics
-#[allow(dead_code)]
-pub struct TrackedHandler<F> {
-    handler: F,
-    analytics: Analytics,
-}
-
-impl<F> TrackedHandler<F> {
-    pub fn new(handler: F, analytics: Analytics) -> Self {
-        Self { handler, analytics }
+/// Extract a client identifier from a request for per-client tracking.
+///
+/// Prefers, in order, the `x-client-id`, `x-forwarded-for` (first hop) and
+/// `x-real-ip` headers. Returns `None` when no identifying header is present.
+fn extract_client_id(req: &HttpRequest) -> Option<String> {
+    if let Some(id) = req.headers.get("x-client-id") {
+        return Some(id.clone());
     }
+    if let Some(fwd) = req.headers.get("x-forwarded-for") {
+        // The first entry is the originating client.
+        if let Some(first) = fwd.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(ip) = req.headers.get("x-real-ip") {
+        return Some(ip.clone());
+    }
+    None
 }
 
-/// Extension trait for adding analytics to requests
-pub trait AnalyticsExt {
-    /// Start tracking analytics for this request
-    fn start_analytics(&self, analytics: &Analytics) -> AnalyticsContext;
+#[async_trait]
+impl Middleware for AnalyticsMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
+        let config = self.analytics.config();
+
+        // When analytics is disabled, act as a transparent pass-through.
+        if !config.enabled {
+            return next(req).await;
+        }
+
+        let method = req.method.clone();
+        let raw_path = req.path.clone();
+
+        // Exclusion and sampling gate what we record, but never what we return.
+        // Evaluate them first, before any normalization or allocation, so that
+        // excluded/unsampled requests skip the expensive path-normalization and
+        // query/client-id work entirely.
+        if config.should_exclude(&raw_path) || !config.should_sample() {
+            return next(req).await;
+        }
+
+        // Build the recording path (before `req` is consumed by `next`).
+        // Optionally fold query parameters into the tracked path.
+        let mut tracked_path = normalize_path(&raw_path);
+        if config.include_query_params && !req.query_params.is_empty() {
+            let mut pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let query: Vec<String> = pairs.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+            tracked_path = format!("{}?{}", tracked_path, query.join("&"));
+        }
+
+        // Capture the client id only when client tracking is enabled.
+        let client_id = if config.track_clients {
+            extract_client_id(&req)
+        } else {
+            None
+        };
+
+        let start = Instant::now();
+        let result = next(req).await;
+        let duration = start.elapsed();
+
+        match &result {
+            Ok(response) => {
+                let mut record =
+                    RequestRecord::new(method, tracked_path, response.status, duration)
+                        .with_response_size(response.body.len() as u64);
+                if let Some(cid) = client_id {
+                    record = record.with_client_id(cid);
+                }
+                self.analytics.record_request(record);
+            }
+            Err(err) => {
+                // A middleware-level failure never produced a response; record
+                // it as a 500 and capture the error for the error metrics.
+                let mut record = RequestRecord::new(&method, tracked_path.clone(), 500, duration);
+                if let Some(cid) = client_id {
+                    record = record.with_client_id(cid);
+                }
+                self.analytics.record_request(record);
+                self.analytics.record_error(
+                    ErrorRecord::new("middleware_error", err.to_string())
+                        .with_status(500)
+                        .with_endpoint(format!("{} {}", method, tracked_path)),
+                );
+            }
+        }
+
+        result
+    }
 }
 
 /// Helper to normalize request paths for aggregation
 ///
 /// Converts paths like `/users/123/posts/456` to `/users/:id/posts/:id`
 pub fn normalize_path(path: &str) -> String {
-    let segments: Vec<&str> = path.split('/').collect();
-    let normalized: Vec<String> = segments
-        .into_iter()
-        .map(|segment| {
-            // Check if segment looks like an ID
-            if segment.is_empty() {
-                String::new()
-            } else if is_likely_id(segment) {
-                ":id".to_string()
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect();
-
-    normalized.join("/")
+    // Write directly into a single pre-sized buffer, pushing either the
+    // borrowed segment or the `:id` placeholder, instead of allocating an
+    // intermediate `Vec<&str>`, a `Vec<String>` (one heap String per segment)
+    // and a joined String.
+    let mut out = String::with_capacity(path.len());
+    for (i, segment) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if segment.is_empty() {
+            // Preserve empty segments (leading/trailing/double slashes).
+        } else if is_likely_id(segment) {
+            out.push_str(":id");
+        } else {
+            out.push_str(segment);
+        }
+    }
+    out
 }
 
 /// Check if a path segment is likely an ID
@@ -226,5 +257,68 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         assert!(ctx.elapsed().as_millis() >= 10);
+    }
+
+    // Regression: AnalyticsMiddleware must implement armature_core::Middleware so
+    // that a request flowing through the chain automatically records analytics.
+    // Previously it implemented no trait and nothing was recorded unless the
+    // caller manually invoked record_*.
+    #[tokio::test]
+    async fn test_middleware_records_automatically() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let analytics = Analytics::new(AnalyticsConfig::default());
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+
+        let req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+        let next: Next = Box::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok().with_body(b"hello".to_vec())) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+
+        let resp = mw.handle(req, next).await.unwrap();
+        assert_eq!(resp.status, 200);
+
+        let snapshot = analytics.snapshot();
+        assert_eq!(
+            snapshot.requests.total, 1,
+            "middleware must record the request"
+        );
+        assert_eq!(snapshot.requests.success, 1);
+        // Path must be normalized for aggregation.
+        assert_eq!(snapshot.endpoints.len(), 1);
+        assert_eq!(snapshot.endpoints[0].path, "/api/users/:id");
+        // Response size captured from the body.
+        assert_eq!(snapshot.throughput.total_bytes_transferred, 5);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_respects_disabled_and_exclusions() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        // Disabled: nothing recorded, response still flows.
+        let analytics = Analytics::new(AnalyticsConfig::builder().enabled(false).build());
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+        let req = HttpRequest::new("GET".to_string(), "/api/x".to_string());
+        let next: Next = Box::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok()) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+        let resp = mw.handle(req, next).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(analytics.snapshot().requests.total, 0);
+
+        // Excluded path: not recorded.
+        let analytics = Analytics::new(AnalyticsConfig::default());
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+        let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+        let next: Next = Box::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok()) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+        mw.handle(req, next).await.unwrap();
+        assert_eq!(analytics.snapshot().requests.total, 0);
     }
 }

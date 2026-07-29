@@ -414,10 +414,17 @@ impl LogConfig {
                     .with_line_number(self.file_line)
                     .with_span_events(fmt_span);
 
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(layer)
-                    .init();
+                if self.timestamps {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer.without_time())
+                        .init();
+                }
             }
             LogFormat::Plain => {
                 let layer = fmt::layer()
@@ -429,10 +436,17 @@ impl LogConfig {
                     .with_ansi(self.colors)
                     .with_span_events(fmt_span);
 
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(layer)
-                    .init();
+                if self.timestamps {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer.without_time())
+                        .init();
+                }
             }
             LogFormat::Pretty => {
                 let layer = fmt::layer()
@@ -445,10 +459,17 @@ impl LogConfig {
                     .with_ansi(self.colors)
                     .with_span_events(fmt_span);
 
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(layer)
-                    .init();
+                if self.timestamps {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer.without_time())
+                        .init();
+                }
             }
             LogFormat::Compact => {
                 let layer = fmt::layer()
@@ -461,10 +482,17 @@ impl LogConfig {
                     .with_ansi(self.colors)
                     .with_span_events(fmt_span);
 
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(layer)
-                    .init();
+                if self.timestamps {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer)
+                        .init();
+                } else {
+                    tracing_subscriber::registry()
+                        .with(env_filter)
+                        .with(layer.without_time())
+                        .init();
+                }
             }
         }
     }

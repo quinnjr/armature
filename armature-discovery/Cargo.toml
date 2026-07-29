@@ -1,6 +1,6 @@
 [package]
 name = "armature-discovery"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,24 +12,18 @@ keywords = ["discovery", "microservices", "consul", "etcd"]
 categories = ["web-programming", "network-programming"]
 
 [dependencies]
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 thiserror = "2.0"
 tracing = "0.1"
 url = "2.5"
 base64 = "0.22"
-rand = "0.9"
-
-# Optional Consul support
-consul = { version = "0.4", optional = true }
-
-[features]
-default = []
-consul-client = ["consul"]
+rand = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"
+armature-testkit = { path = "../armature-testkit" }
 

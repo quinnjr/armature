@@ -145,3 +145,74 @@ impl From<Bytes> for FunctionResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn decode(body: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .unwrap()
+    }
+
+    #[test]
+    fn from_str_is_plain_200() {
+        let r: FunctionResponse = "hello".into();
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body, "hello");
+        assert!(!r.is_base64_encoded);
+    }
+
+    #[test]
+    fn from_string_is_plain_200() {
+        let r: FunctionResponse = String::from("world").into();
+        assert_eq!(r.status_code, 200);
+        assert_eq!(r.body, "world");
+        assert!(!r.is_base64_encoded);
+    }
+
+    #[test]
+    fn from_utf8_bytes_stays_plain_text() {
+        let r: FunctionResponse = Bytes::from_static(b"hi").into();
+        assert_eq!(r.body, "hi");
+        assert!(!r.is_base64_encoded);
+    }
+
+    #[test]
+    fn from_non_utf8_bytes_is_base64_encoded() {
+        let raw = vec![0u8, 159, 146, 150];
+        let r: FunctionResponse = Bytes::from(raw.clone()).into();
+        assert!(r.is_base64_encoded);
+        assert_eq!(decode(&r.body), raw);
+    }
+
+    #[test]
+    fn binary_body_sets_flag_and_encodes() {
+        let r = FunctionResponse::ok().binary_body(&[0u8, 1, 2, 3]);
+        assert!(r.is_base64_encoded);
+        assert_eq!(decode(&r.body), vec![0u8, 1, 2, 3]);
+    }
+
+    #[test]
+    fn json_sets_content_type_header() {
+        let r = FunctionResponse::json(&serde_json::json!({ "a": 1 })).unwrap();
+        assert_eq!(
+            r.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(r.status_code, 200);
+    }
+
+    #[test]
+    fn error_response_carries_status_and_json_body() {
+        let r = FunctionResponse::error(503, "down");
+        assert_eq!(r.status_code, 503);
+        assert!(r.body.contains("down"));
+        assert_eq!(
+            r.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+}

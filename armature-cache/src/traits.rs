@@ -1,6 +1,6 @@
 //! Cache store trait definition.
 
-use crate::error::CacheResult;
+use crate::error::{CacheError, CacheResult};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -91,6 +91,57 @@ pub trait CacheStore: Send + Sync {
     /// Returns the new value after decrementing.
     async fn decrement(&self, key: &str, delta: i64) -> CacheResult<i64>;
 
+    // ========== Native Batch Primitives ==========
+    //
+    // These are the low-level batch operations that backends can override with
+    // a single native command (e.g. Redis `MGET`/`MSET`/variadic `DEL`) to turn
+    // N round-trips into one. The DEFAULT implementations fall back to the
+    // per-key loop (run concurrently), so existing `CacheStore` impls keep
+    // working unchanged. The higher-level `get_many`/`set_many`/`delete_many`
+    // methods and `ParallelCacheOps` delegate here, so overriding these three
+    // methods is enough to accelerate all batch APIs.
+
+    /// Get multiple keys in a single batch operation.
+    ///
+    /// Returns a vector of `Option<String>` in the **same order** as `keys`;
+    /// `None` indicates a missing key.
+    ///
+    /// The default implementation issues one `get_json` per key concurrently;
+    /// backends should override this with a native multi-get (e.g. `MGET`).
+    async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
+        use futures::future::try_join_all;
+
+        let futures = keys.iter().map(|key| self.get_json(key));
+        try_join_all(futures).await
+    }
+
+    /// Set multiple key/value pairs in a single batch operation.
+    ///
+    /// The default implementation issues one `set_json` per pair concurrently;
+    /// backends should override this with a native multi-set (e.g. `MSET`, or a
+    /// pipeline of `SET ... EX` when a TTL is required).
+    async fn mset(&self, items: &[(&str, String)], ttl: Option<Duration>) -> CacheResult<()> {
+        use futures::future::try_join_all;
+
+        let futures = items
+            .iter()
+            .map(|(key, value)| self.set_json(key, value.clone(), ttl));
+        try_join_all(futures).await?;
+        Ok(())
+    }
+
+    /// Delete multiple keys in a single batch operation.
+    ///
+    /// The default implementation issues one `delete` per key concurrently;
+    /// backends should override this with a variadic `DEL`/`UNLINK`.
+    async fn mdel(&self, keys: &[&str]) -> CacheResult<()> {
+        use futures::future::try_join_all;
+
+        let futures = keys.iter().map(|key| self.delete(key));
+        try_join_all(futures).await?;
+        Ok(())
+    }
+
     // ========== Batch Operations (Parallel) ==========
 
     /// Get multiple keys in parallel.
@@ -129,10 +180,9 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn get_many(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
-        use futures::future::try_join_all;
-
-        let futures = keys.iter().map(|key| self.get_json(key));
-        try_join_all(futures).await
+        // Delegate to the native batch primitive so backends that override
+        // `mget` (e.g. Redis `MGET`) accelerate this path automatically.
+        self.mget(keys).await
     }
 
     /// Set multiple key-value pairs in parallel.
@@ -163,14 +213,8 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn set_many(&self, items: &[(&str, String)], ttl: Option<Duration>) -> CacheResult<()> {
-        use futures::future::try_join_all;
-
-        let futures = items
-            .iter()
-            .map(|(key, value)| self.set_json(key, value.clone(), ttl));
-
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the native batch primitive (e.g. Redis `MSET`/pipeline).
+        self.mset(items, ttl).await
     }
 
     /// Delete multiple keys in parallel.
@@ -195,11 +239,8 @@ pub trait CacheStore: Send + Sync {
     /// # }
     /// ```
     async fn delete_many(&self, keys: &[&str]) -> CacheResult<()> {
-        use futures::future::try_join_all;
-
-        let futures = keys.iter().map(|key| self.delete(key));
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the native batch primitive (e.g. Redis variadic `DEL`).
+        self.mdel(keys).await
     }
 
     /// Check existence of multiple keys in parallel.
@@ -265,5 +306,213 @@ pub trait CacheStore: Send + Sync {
 
         let futures = keys.iter().map(|key| self.ttl(key));
         try_join_all(futures).await
+    }
+
+    // ========== Set Primitives (persistent, cross-instance indexes) ==========
+    //
+    // Low-level primitives for maintaining a set-of-strings value at a given
+    // key *in the backing store itself*. These exist so higher-level indexes
+    // built on top of a `CacheStore` — e.g. `TaggedCache`'s tag -> member-key
+    // index (see `crate::invalidation`) — are visible to every process /
+    // instance sharing that store, not just the process that wrote them.
+    //
+    // The DEFAULT implementations below are a portable but NON-ATOMIC
+    // read-modify-write layered on `get_json`/`set_json`: correct for a single
+    // writer or low-contention use, but concurrent `set_add`/`set_remove`
+    // calls against the SAME `set_key` from different instances can race and
+    // lose an update (last write wins). Backends with a native set type
+    // should override these three methods for atomicity — `RedisCache` does,
+    // via `SADD`/`SREM`/`SMEMBERS`.
+
+    /// Whether this backend's [`Self::set_add`]/[`Self::set_remove`]/
+    /// [`Self::set_members`] are backed by a native, atomic set type rather
+    /// than the trait's default non-atomic read-modify-write.
+    ///
+    /// `RedisCache` overrides this to return `true` (its implementations use
+    /// `SADD`/`SREM`/`SMEMBERS`). Every other backend — including
+    /// `InMemoryCache` and `MemcachedCache` — keeps this default `false`,
+    /// since they inherit the default set primitives above.
+    ///
+    /// [`crate::invalidation::TaggedCache::new`] checks this capability and
+    /// logs a warning once, at construction time, when the backing store
+    /// answers `false` — giving operators a runtime signal (not just a doc
+    /// comment) that concurrent tag-index updates against that deployment
+    /// can race and silently lose an update.
+    fn supports_atomic_sets(&self) -> bool {
+        false
+    }
+
+    /// Add `member` to the persistent string set stored at `set_key`.
+    ///
+    /// A no-op if `member` is already present.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use armature_cache::*;
+    /// # async fn example(cache: &impl CacheStore) -> CacheResult<()> {
+    /// // Build a persisted set of member keys under "tag:users".
+    /// cache.set_add("tag:users", "user:1").await?;
+    /// cache.set_add("tag:users", "user:2").await?;
+    /// cache.set_add("tag:users", "user:1").await?; // duplicate: no-op
+    ///
+    /// let members = cache.set_members("tag:users").await?;
+    /// assert_eq!(members.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn set_add(&self, set_key: &str, member: &str) -> CacheResult<()> {
+        let mut members = self.set_members(set_key).await?;
+        if !members.iter().any(|m| m == member) {
+            members.push(member.to_string());
+            let json = serde_json::to_string(&members)
+                .map_err(|e| CacheError::Serialization(e.to_string()))?;
+            self.set_json(set_key, json, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Remove `member` from the persistent string set stored at `set_key`.
+    ///
+    /// A no-op if `set_key` or `member` doesn't exist. Deletes `set_key`
+    /// entirely once its last member is removed, so an emptied set doesn't
+    /// linger as a zero-length entry.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use armature_cache::*;
+    /// # async fn example(cache: &impl CacheStore) -> CacheResult<()> {
+    /// cache.set_add("tag:users", "user:1").await?;
+    /// cache.set_remove("tag:users", "user:1").await?;
+    ///
+    /// // The set is now empty; `set_key` itself is removed rather than left
+    /// // behind as a zero-length entry.
+    /// assert!(cache.set_members("tag:users").await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn set_remove(&self, set_key: &str, member: &str) -> CacheResult<()> {
+        let mut members = self.set_members(set_key).await?;
+        let before = members.len();
+        members.retain(|m| m != member);
+
+        if members.len() != before {
+            if members.is_empty() {
+                self.delete(set_key).await?;
+            } else {
+                let json = serde_json::to_string(&members)
+                    .map_err(|e| CacheError::Serialization(e.to_string()))?;
+                self.set_json(set_key, json, None).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read every member of the persistent string set stored at `set_key`.
+    ///
+    /// Returns an empty `Vec` if `set_key` doesn't exist.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use armature_cache::*;
+    /// # async fn example(cache: &impl CacheStore) -> CacheResult<()> {
+    /// cache.set_add("tag:users", "user:1").await?;
+    /// cache.set_add("tag:users", "user:2").await?;
+    ///
+    /// let mut members = cache.set_members("tag:users").await?;
+    /// members.sort();
+    /// assert_eq!(members, vec!["user:1".to_string(), "user:2".to_string()]);
+    ///
+    /// // A set_key that was never written returns an empty Vec.
+    /// assert!(cache.set_members("tag:unused").await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn set_members(&self, set_key: &str) -> CacheResult<Vec<String>> {
+        match self.get_json(set_key).await? {
+            Some(json) => {
+                serde_json::from_str(&json).map_err(|e| CacheError::Deserialization(e.to_string()))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiered::InMemoryCache;
+
+    // `InMemoryCache` does NOT override `mget`/`mset`/`mdel`, so these tests
+    // exercise the trait's DEFAULT (per-key loop) implementations.
+
+    #[tokio::test]
+    async fn test_mget_default_fallback_preserves_order() {
+        let cache = InMemoryCache::new();
+        cache.set_json("a", "1".to_string(), None).await.unwrap();
+        cache.set_json("c", "3".to_string(), None).await.unwrap();
+
+        let got = cache.mget(&["a", "b", "c"]).await.unwrap();
+        assert_eq!(
+            got,
+            vec![Some("1".to_string()), None, Some("3".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mset_and_mdel_default_fallback() {
+        let cache = InMemoryCache::new();
+        cache
+            .mset(&[("x", "10".to_string()), ("y", "20".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(cache.get_json("x").await.unwrap(), Some("10".to_string()));
+        assert_eq!(cache.get_json("y").await.unwrap(), Some("20".to_string()));
+
+        cache.mdel(&["x", "y"]).await.unwrap();
+        assert_eq!(cache.get_json("x").await.unwrap(), None);
+        assert_eq!(cache.get_json("y").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_public_batch_methods_delegate_to_primitives() {
+        let cache = InMemoryCache::new();
+        cache.set_json("k1", "v1".to_string(), None).await.unwrap();
+
+        // get_many delegates to mget
+        let got = cache.get_many(&["k1", "k2"]).await.unwrap();
+        assert_eq!(got, vec![Some("v1".to_string()), None]);
+
+        // set_many delegates to mset
+        cache
+            .set_many(&[("k3", "v3".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(cache.get_json("k3").await.unwrap(), Some("v3".to_string()));
+
+        // delete_many delegates to mdel
+        cache.delete_many(&["k1", "k3"]).await.unwrap();
+        assert_eq!(cache.get_json("k1").await.unwrap(), None);
+        assert_eq!(cache.get_json("k3").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_mget_empty_keys() {
+        let cache = InMemoryCache::new();
+        let got = cache.mget(&[]).await.unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// Regression for Finding 3: backends that don't override the default,
+    /// non-atomic `set_add`/`set_remove`/`set_members` must report
+    /// `supports_atomic_sets() == false` so callers (e.g. `TaggedCache::new`)
+    /// can warn operators. `InMemoryCache` never overrides these, so it must
+    /// keep the trait's default answer.
+    #[tokio::test]
+    async fn test_supports_atomic_sets_default_is_false() {
+        let cache = InMemoryCache::new();
+        assert!(!cache.supports_atomic_sets());
     }
 }

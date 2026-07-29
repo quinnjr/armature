@@ -64,7 +64,13 @@ use std::time::Duration;
 use std::net::SocketAddr;
 
 /// HTTP/3 server configuration
+///
+/// Marked `#[non_exhaustive]`: construct it with [`Http3Config::default`],
+/// one of the preset constructors, or [`Http3Config::builder`] rather than an
+/// exhaustive struct literal, so that adding fields (like
+/// `max_request_body_size`) stays backwards compatible for downstream crates.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Http3Config {
     /// Maximum concurrent bidirectional streams per connection
     /// Default: 100 - same as HTTP/2
@@ -111,6 +117,11 @@ pub struct Http3Config {
     /// QPACK blocked streams
     /// Default: 16
     pub qpack_blocked_streams: u16,
+
+    /// Maximum request body size (bytes)
+    /// Requests with larger bodies are rejected with 413 Payload Too Large
+    /// Default: 10MB
+    pub max_request_body_size: usize,
 }
 
 impl Default for Http3Config {
@@ -127,6 +138,7 @@ impl Default for Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 }
@@ -151,6 +163,7 @@ impl Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 16384,
             qpack_blocked_streams: 32,
+            max_request_body_size: 50 * 1024 * 1024, // 50MB for large transfers
         }
     }
 
@@ -168,6 +181,7 @@ impl Http3Config {
             enable_datagram: true,      // For real-time data
             qpack_max_table_capacity: 2048,
             qpack_blocked_streams: 8,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 
@@ -186,6 +200,7 @@ impl Http3Config {
             enable_datagram: false,
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
+            max_request_body_size: 10 * 1024 * 1024, // 10MB
         }
     }
 }
@@ -251,6 +266,12 @@ impl Http3ConfigBuilder {
     /// Enable DATAGRAM extension
     pub fn enable_datagram(mut self, enable: bool) -> Self {
         self.config.enable_datagram = enable;
+        self
+    }
+
+    /// Set maximum request body size in bytes
+    pub fn max_request_body_size(mut self, size: usize) -> Self {
+        self.config.max_request_body_size = size;
         self
     }
 
@@ -406,7 +427,7 @@ impl Http3Stats {
 #[cfg(feature = "http3")]
 mod server {
     use super::*;
-    use crate::{Error, HttpRequest, HttpResponse, Router};
+    use crate::{Error, HttpRequest, route_cache::OptimizedRouter};
     use bytes::{Buf, Bytes};
     use h3_quinn::quinn;
     use http::Response;
@@ -417,12 +438,12 @@ mod server {
     pub struct Http3Server {
         config: Http3Config,
         stats: Arc<Http3Stats>,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
     }
 
     impl Http3Server {
         /// Create a new HTTP/3 server
-        pub fn new(config: Http3Config, router: Arc<Router>) -> Self {
+        pub fn new(config: Http3Config, router: Arc<OptimizedRouter>) -> Self {
             Self {
                 config,
                 stats: Arc::new(Http3Stats::new()),
@@ -440,36 +461,24 @@ mod server {
             &self,
             tls_config: Arc<rustls::ServerConfig>,
         ) -> Result<quinn::ServerConfig, Error> {
-            // Create QUIC crypto config from TLS config
-            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
-                .map_err(|e| Error::Internal(format!("Failed to create QUIC crypto: {}", e)))?;
+            // Create QUIC crypto config from TLS config.
+            //
+            // 0-RTT (early data) is enabled by advertising a non-zero
+            // `max_early_data_size` on the rustls server config. The caller's
+            // `tls_config` is shared behind an `Arc`, so clone it before
+            // mutating to avoid affecting other consumers (e.g. the HTTP/2
+            // listener sharing the same certificates).
+            let crypto = if self.config.enable_0rtt {
+                let mut tls = (*tls_config).clone();
+                tls.max_early_data_size = u32::MAX;
+                quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls))
+            } else {
+                quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+            }
+            .map_err(|e| Error::Internal(format!("Failed to create QUIC crypto: {}", e)))?;
 
             let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-
-            // Configure transport
-            let mut transport = quinn::TransportConfig::default();
-
-            transport
-                .max_concurrent_bidi_streams(self.config.max_concurrent_bidi_streams.into())
-                .max_concurrent_uni_streams(self.config.max_concurrent_uni_streams.into())
-                .initial_mtu(self.config.max_udp_payload_size)
-                .max_idle_timeout(Some(
-                    self.config
-                        .max_idle_timeout
-                        .try_into()
-                        .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
-                ));
-
-            if let Some(interval) = self.config.keep_alive_interval {
-                transport.keep_alive_interval(Some(interval));
-            }
-
-            if self.config.enable_datagram {
-                transport.datagram_receive_buffer_size(Some(65536));
-                transport.datagram_send_buffer_size(65536);
-            }
-
-            server_config.transport_config(Arc::new(transport));
+            server_config.transport_config(Arc::new(build_transport(&self.config)));
 
             Ok(server_config)
         }
@@ -487,12 +496,16 @@ mod server {
 
             info!(address = %addr, "HTTP/3 server listening (QUIC/UDP)");
 
+            let max_request_body_size = self.config.max_request_body_size;
+
             while let Some(incoming) = endpoint.accept().await {
                 let stats = Arc::clone(&self.stats);
                 let router = Arc::clone(&self.router);
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(incoming, router, stats).await {
+                    if let Err(e) =
+                        handle_connection(incoming, router, stats, max_request_body_size).await
+                    {
                         error!(error = %e, "HTTP/3 connection error");
                     }
                 });
@@ -502,15 +515,73 @@ mod server {
         }
     }
 
+    /// Build the quinn transport config from an [`Http3Config`], applying every
+    /// advertised knob (stream/connection flow-control windows, concurrency
+    /// limits, idle timeout, keep-alive, and DATAGRAM buffers).
+    ///
+    /// Split out from [`Http3Server::configure_quinn`] so the mapping from
+    /// config to transport parameters is unit-testable without a TLS
+    /// certificate.
+    pub(super) fn build_transport(config: &Http3Config) -> quinn::TransportConfig {
+        let mut transport = quinn::TransportConfig::default();
+
+        transport
+            .max_concurrent_bidi_streams(config.max_concurrent_bidi_streams.into())
+            .max_concurrent_uni_streams(config.max_concurrent_uni_streams.into())
+            // Apply the advertised flow-control windows so large transfers are
+            // not throttled by quinn's conservative defaults.
+            .stream_receive_window(config.initial_stream_receive_window.into())
+            .receive_window(config.initial_connection_receive_window.into())
+            .initial_mtu(config.max_udp_payload_size)
+            .max_idle_timeout(Some(
+                config
+                    .max_idle_timeout
+                    .try_into()
+                    .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))),
+            ));
+
+        if let Some(interval) = config.keep_alive_interval {
+            transport.keep_alive_interval(Some(interval));
+        }
+
+        if config.enable_datagram {
+            transport.datagram_receive_buffer_size(Some(65536));
+            transport.datagram_send_buffer_size(65536);
+        }
+
+        transport
+    }
+
     /// Handle a single QUIC connection
     async fn handle_connection(
         incoming: quinn::Incoming,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
         stats: Arc<Http3Stats>,
+        max_request_body_size: usize,
     ) -> Result<(), Error> {
-        let conn = incoming
-            .await
-            .map_err(|e| Error::Internal(format!("Connection failed: {}", e)))?;
+        // Accept the connection. When the server config advertises early data
+        // (0-RTT enabled), `into_0rtt` succeeds and lets the peer send early
+        // data before the handshake completes; the returned future resolves to
+        // whether that early data was ultimately accepted (not replay-rejected),
+        // which is what we count. When 0-RTT is disabled, `into_0rtt` returns
+        // the `Connecting` back and we complete the handshake normally.
+        let connecting = incoming
+            .accept()
+            .map_err(|e| Error::Internal(format!("Accept failed: {}", e)))?;
+        let conn = match connecting.into_0rtt() {
+            Ok((conn, zero_rtt_accepted)) => {
+                let stats_0rtt = Arc::clone(&stats);
+                tokio::spawn(async move {
+                    if zero_rtt_accepted.await {
+                        stats_0rtt.zero_rtt_accepted();
+                    }
+                });
+                conn
+            }
+            Err(connecting) => connecting
+                .await
+                .map_err(|e| Error::Internal(format!("Connection failed: {}", e)))?,
+        };
 
         stats.connection_opened();
         let remote_addr = conn.remote_address();
@@ -530,7 +601,10 @@ mod server {
                     let stats = Arc::clone(&stats);
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_request_resolver(resolver, router, stats).await {
+                        if let Err(e) =
+                            handle_request_resolver(resolver, router, stats, max_request_body_size)
+                                .await
+                        {
                             error!(error = %e, "HTTP/3 request error");
                         }
                     });
@@ -552,11 +626,42 @@ mod server {
         Ok(())
     }
 
+    /// Convert a resolved HTTP/3 request into an Armature [`HttpRequest`],
+    /// copying method, path, headers, and — critically — percent-decoded
+    /// query parameters (mirrors `application.rs::handle_request`'s hyper
+    /// conversion, which extracts `req.uri().query()` and decodes it via
+    /// [`crate::simd_parser::parse_query_string_decoded`] before routing).
+    ///
+    /// Split out from [`handle_request_resolver`] so the conversion is
+    /// unit-testable without a live QUIC connection.
+    pub(super) fn build_armature_request(request: &http::Request<()>) -> HttpRequest {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let mut armature_req = HttpRequest::new(method, path);
+
+        // Parse and percent-decode the query string, if present. Without
+        // this, `?a=b` on a QUIC request was silently dropped: the request
+        // never reached the router with `query_params` populated.
+        if let Some(query) = request.uri().query() {
+            armature_req.query_params = crate::simd_parser::parse_query_string_decoded(query);
+        }
+
+        // Copy headers
+        for (name, value) in request.headers() {
+            if let Ok(v) = value.to_str() {
+                armature_req.headers.insert(name.to_string(), v.to_string());
+            }
+        }
+
+        armature_req
+    }
+
     /// Handle a request using the RequestResolver API (h3 0.0.8+)
     async fn handle_request_resolver(
         resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
-        router: Arc<Router>,
+        router: Arc<OptimizedRouter>,
         stats: Arc<Http3Stats>,
+        max_request_body_size: usize,
     ) -> Result<(), Error> {
         // Resolve the request to get the request and stream
         let (request, mut stream) = resolver
@@ -566,38 +671,64 @@ mod server {
 
         stats.request_processed();
 
-        // Convert to Armature request
-        let method = request.method().to_string();
-        let path = request.uri().path().to_string();
-        let mut armature_req = HttpRequest::new(method.clone(), path.clone());
+        // Convert to Armature request, including percent-decoded query
+        // parameters (see `build_armature_request`).
+        let mut armature_req = build_armature_request(&request);
 
-        // Copy headers
-        for (name, value) in request.headers() {
-            if let Ok(v) = value.to_str() {
-                armature_req.headers.insert(name.to_string(), v.to_string());
-            }
-        }
-
-        // Read body if present (using Buf trait)
+        // Read body if present (using Buf trait), enforcing the configured size limit
         let mut body: Vec<u8> = Vec::new();
+        let mut payload_too_large = false;
         while let Some(chunk) = stream
             .recv_data()
             .await
             .map_err(|e| Error::Internal(format!("Failed to read body: {}", e)))?
         {
-            body.extend_from_slice(chunk.chunk());
+            let data = chunk.chunk();
+            if body.len() + data.len() > max_request_body_size {
+                payload_too_large = true;
+                break;
+            }
+            body.extend_from_slice(data);
+        }
+
+        // Reject oversized requests with 413 Payload Too Large
+        if payload_too_large {
+            let http_response: http::Response<()> = Response::builder()
+                .status(413)
+                .body(())
+                .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))?;
+            stream
+                .send_response(http_response)
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to send response: {}", e)))?;
+            stream
+                .finish()
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to finish stream: {}", e)))?;
+            stats.stream_closed();
+            return Ok(());
         }
         armature_req.body = body;
 
-        // Route the request using the async router
-        let response = router
-            .route(armature_req)
-            .await
-            .unwrap_or_else(|_| HttpResponse::internal_server_error());
+        // Route the request using the async router. A routing error is mapped
+        // through the canonical client-safe response so HTTP/3 returns proper
+        // 404/400/403 (etc.) with a JSON body, matching HTTP/1 and HTTP/2 —
+        // rather than collapsing every error to a bare 500. 5xx messages are
+        // still redacted by `to_client_response`.
+        let response = match router.route(armature_req).await {
+            Ok(resp) => resp,
+            Err(err) => err.to_client_response(),
+        };
 
-        // Build HTTP/3 response
-        let http_response: http::Response<()> = Response::builder()
-            .status(response.status as u16)
+        // Build HTTP/3 response, copying headers and cookies
+        let mut builder = Response::builder().status(response.status);
+        for (name, value) in &response.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        for cookie in &response.cookies {
+            builder = builder.header("set-cookie", cookie.as_str());
+        }
+        let http_response: http::Response<()> = builder
             .body(())
             .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))?;
 
@@ -607,10 +738,11 @@ mod server {
             .await
             .map_err(|e| Error::Internal(format!("Failed to send response: {}", e)))?;
 
-        // Send body
-        if !response.body.is_empty() {
+        // Send body (zero-copy when the handler stored it as Bytes)
+        let body = response.into_body_bytes();
+        if !body.is_empty() {
             stream
-                .send_data(Bytes::from(response.body))
+                .send_data(body)
                 .await
                 .map_err(|e| Error::Internal(format!("Failed to send body: {}", e)))?;
         }
@@ -774,5 +906,122 @@ mod tests {
 
         let header = alt_svc_header_full(443, 86400, false);
         assert!(!header.contains("h3-29"));
+    }
+
+    /// Regression: the advertised flow-control windows must actually be applied
+    /// to the quinn transport config. Two configs that differ only in their
+    /// stream/connection receive windows must produce different transport
+    /// parameters; before the fix the knobs were dead and both were identical.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_configure_quinn_applies_flow_control_windows() {
+        let base = Http3Config::default();
+        // Same as `base` except for the two flow-control windows.
+        let widened = Http3Config::builder()
+            .initial_stream_receive_window(base.initial_stream_receive_window * 3 + 1)
+            .initial_connection_receive_window(base.initial_connection_receive_window * 3 + 1)
+            .build();
+
+        let base_transport = format!("{:?}", super::server::build_transport(&base));
+        let widened_transport = format!("{:?}", super::server::build_transport(&widened));
+
+        assert_ne!(
+            base_transport, widened_transport,
+            "flow-control windows must be reflected in the quinn transport config"
+        );
+        assert!(
+            widened_transport.contains(&widened.initial_stream_receive_window.to_string()),
+            "stream receive window must appear in the applied transport config"
+        );
+        assert!(
+            widened_transport.contains(&widened.initial_connection_receive_window.to_string()),
+            "connection receive window must appear in the applied transport config"
+        );
+    }
+
+    /// Regression: query strings must be parsed and percent-decoded on the
+    /// HTTP/3 path, just like the hyper-based `application.rs::handle_request`.
+    /// Before the fix, `handle_request_resolver` built the Armature request
+    /// from `request.uri().path()` only and never touched `.query()`, so
+    /// `?a=b` was silently dropped on every `listen_h3` / `listen_dual_stack`
+    /// QUIC request.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_decodes_query_params() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?a=b&name=hello%20world")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.method, "GET");
+        assert_eq!(armature_req.path, "/search");
+        assert_eq!(
+            armature_req.query_params.get("a").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            armature_req.query_params.get("name").map(String::as_str),
+            Some("hello world")
+        );
+    }
+
+    /// Requests without a query string must not populate `query_params`.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_without_query_string() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/no-query")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert!(armature_req.query_params.is_empty());
+    }
+
+    /// A URI ending in a bare `?` has a query string that is present but
+    /// empty (`request.uri().query()` returns `Some("")`), distinct from no
+    /// query string at all. `build_armature_request` must not panic and
+    /// must produce an empty `query_params` map in this case.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_with_empty_query_string() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?")
+            .body(())
+            .unwrap();
+
+        assert_eq!(request.uri().query(), Some(""));
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.path, "/search");
+        assert!(armature_req.query_params.is_empty());
+    }
+
+    /// Duplicate query keys: `parse_query_string_decoded` stores params in
+    /// a `HashMap`, processing segments left-to-right and inserting each
+    /// parsed pair in turn, so the last occurrence of a repeated key wins.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_with_duplicate_query_keys() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?a=1&a=2")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.query_params.len(), 1);
+        assert_eq!(
+            armature_req.query_params.get("a").map(String::as_str),
+            Some("2")
+        );
     }
 }

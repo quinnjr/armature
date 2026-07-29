@@ -8,11 +8,23 @@
 use crate::error::{McpError, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Constant-time string comparison (prevents timing attacks on secret-derived
+/// values such as API tokens).
+///
+/// Thin wrapper over the shared [`armature_core::crypto::constant_time_eq`]
+/// helper so all crates that compare secret-derived values use the same,
+/// single verified implementation.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    armature_core::crypto::constant_time_eq(a.as_bytes(), b.as_bytes())
+}
 
 /// Authentication method for MCP access
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum McpAuthMethod {
     /// No authentication required (not recommended for production)
     None,
@@ -110,7 +122,7 @@ impl ApiTokenAuth {
 }
 
 /// JWT authentication configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JwtAuth {
     /// Secret key for HMAC algorithms (HS256, HS384, HS512)
     pub secret: Option<String>,
@@ -126,6 +138,31 @@ pub struct JwtAuth {
     pub scope_claim: String,
     /// Algorithm (default: HS256)
     pub algorithm: String,
+    /// Lazily-built, cached verify-only `armature_jwt::JwtManager` for this
+    /// auth config. `JwtAuth` is a pure function of its other fields (which
+    /// never change after construction), so the manager - and the PEM
+    /// parsing / `Validation` construction it does internally - only needs
+    /// to be built once and reused across every `authenticate_jwt` call.
+    /// Wrapped in `Arc` so clones of `JwtAuth` (e.g. inside `McpAuthMethod`)
+    /// share the same cached manager rather than each re-initializing it.
+    jwt_manager: Arc<OnceLock<armature_jwt::JwtManager>>,
+}
+
+impl std::fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "public_key",
+                &self.public_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("required_scopes", &self.required_scopes)
+            .field("scope_claim", &self.scope_claim)
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 impl Default for JwtAuth {
@@ -138,6 +175,7 @@ impl Default for JwtAuth {
             required_scopes: Vec::new(),
             scope_claim: "scope".to_string(),
             algorithm: "HS256".to_string(),
+            jwt_manager: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -182,6 +220,14 @@ impl JwtAuth {
     }
 }
 
+/// A cached, successful token validation and the instant it expires.
+type CachedValidation = (McpAuthContext, Instant);
+
+/// Upper bound on the number of tokens held in the validation cache. When the
+/// cache is full, expired entries are dropped first and, failing that, the
+/// entry that expires soonest is evicted to make room.
+const OAUTH2_CACHE_MAX_ENTRIES: usize = 4096;
+
 /// OAuth2 authentication configuration
 #[derive(Debug, Clone)]
 pub struct OAuth2Auth {
@@ -197,6 +243,15 @@ pub struct OAuth2Auth {
     pub required_scopes: Vec<String>,
     /// Cache validated tokens (TTL in seconds)
     pub cache_ttl: Option<u64>,
+    /// In-memory cache of successful token validations, keyed by a hash of the
+    /// bearer token (raw tokens are never stored). Shared across clones — and
+    /// therefore across requests, since the config is cloned/held by the
+    /// long-lived service — via `Arc`. Only populated when `cache_ttl` is
+    /// `Some`; only successes are cached (fail-closed).
+    ///
+    /// This is a private field, so `OAuth2Auth` can no longer be constructed
+    /// with a struct literal; use `OAuth2Auth::new()` / the builder methods.
+    cache: Arc<Mutex<HashMap<u64, CachedValidation>>>,
 }
 
 impl Default for OAuth2Auth {
@@ -208,6 +263,7 @@ impl Default for OAuth2Auth {
             client_secret: None,
             required_scopes: Vec::new(),
             cache_ttl: Some(300), // 5 minutes default
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -252,6 +308,57 @@ impl OAuth2Auth {
         self.cache_ttl = None;
         self
     }
+
+    /// Look up a previously validated token in the cache.
+    ///
+    /// Returns the cached context only when caching is enabled (`cache_ttl` is
+    /// `Some`) and a non-expired entry exists. Expired entries are evicted
+    /// opportunistically on every lookup so the map cannot accumulate stale
+    /// tokens.
+    fn cache_lookup(&self, token: &str) -> Option<McpAuthContext> {
+        self.cache_ttl?; // caching disabled -> always a miss
+        let key = hash_token(token);
+        let now = Instant::now();
+        let mut map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Opportunistic eviction of everything that has expired.
+        map.retain(|_, (_, expiry)| *expiry > now);
+        map.get(&key).map(|(ctx, _)| ctx.clone())
+    }
+
+    /// Store a successful validation in the cache with an expiry of
+    /// `now + cache_ttl`. No-op when caching is disabled. Enforces a size cap
+    /// so the cache cannot grow without bound.
+    fn cache_store(&self, token: &str, ctx: &McpAuthContext) {
+        let Some(ttl) = self.cache_ttl else {
+            return;
+        };
+        let key = hash_token(token);
+        let now = Instant::now();
+        let expiry = now + Duration::from_secs(ttl);
+        let mut map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+
+        if map.len() >= OAUTH2_CACHE_MAX_ENTRIES {
+            // Drop expired entries first; if still full, evict the entry that
+            // expires soonest (effectively the oldest).
+            map.retain(|_, (_, e)| *e > now);
+            if map.len() >= OAUTH2_CACHE_MAX_ENTRIES
+                && let Some(oldest) = map.iter().min_by_key(|(_, (_, e))| *e).map(|(k, _)| *k)
+            {
+                map.remove(&oldest);
+            }
+        }
+
+        map.insert(key, (ctx.clone(), expiry));
+    }
+}
+
+/// Hash a bearer token to a compact cache key so raw tokens are not retained
+/// in the cache map. A non-cryptographic hash is sufficient for a lookup key.
+fn hash_token(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Authenticated user/client information
@@ -449,17 +556,100 @@ async fn authenticate_api_token(
             })?
     };
 
-    // Validate token
-    if !auth.tokens.contains(token) {
+    // Validate token in constant time. A plain `HashSet::contains` hashes the
+    // candidate then does a plaintext memcmp against whichever bucket it
+    // lands in, which leaks timing correlated with how much of the token
+    // matches a stored value once hashes collide into the same bucket.
+    // Instead, compare against every configured token (no early exit) using
+    // a constant-time comparison, trading the O(1) hash lookup for timing
+    // safety - acceptable given typical token-set sizes.
+    //
+    // NOTE: `auth.tokens` has no upper-bound enforcement here. Per-request
+    // cost is O(n) in the configured token-list size (every token is
+    // compared, unconditionally, with no early exit), so an operator who
+    // configures an unusually large token list turns each authentication
+    // attempt into a proportionally larger amount of work - a potential
+    // DoS-amplification vector if the list size is attacker-influenced or
+    // grows unbounded. This crate has no logging/metrics dependency
+    // available here to emit a runtime warning when the list exceeds a
+    // threshold (e.g. 1000 tokens); callers that configure `ApiTokenAuth`
+    // from an external or growing source should apply their own sanity
+    // limit on `tokens.len()` before constructing it.
+    let token_valid = auth.tokens.iter().fold(false, |matched, valid| {
+        matched | constant_time_eq(valid, token)
+    });
+
+    if !token_valid {
         return Err(McpError::InvalidRequest("Invalid API token".into()));
     }
 
     Ok(McpAuthContext {
-        subject: Some(format!("api-token:{}", &token[..token.len().min(8)])),
+        subject: Some(format!(
+            "api-token:{}",
+            token.chars().take(8).collect::<String>()
+        )),
         scopes: vec!["*".to_string()], // API tokens get all scopes by default
         claims: serde_json::Value::Null,
         auth_method: "api_token".to_string(),
     })
+}
+
+/// Build (on first use) and thereafter reuse the verify-only `JwtManager` for
+/// a given `JwtAuth`. The manager is a pure function of `auth`'s key
+/// material, issuer/audience, and algorithm - none of which change after
+/// construction - so it is safe to cache for the lifetime of the `JwtAuth`
+/// (and its clones, via the shared `Arc<OnceLock<_>>`).
+///
+/// Verification behavior is unchanged: same algorithm pinning, same
+/// signature/expiration checks performed by `armature_jwt`, same error
+/// mapping to `McpError::InvalidRequest` on construction failure.
+fn get_or_build_jwt_manager(auth: &JwtAuth) -> Result<&armature_jwt::JwtManager> {
+    if let Some(manager) = auth.jwt_manager.get() {
+        return Ok(manager);
+    }
+
+    let algorithm = parse_jwt_algorithm(&auth.algorithm)?;
+
+    let mut config = match algorithm {
+        armature_jwt::Algorithm::HS256
+        | armature_jwt::Algorithm::HS384
+        | armature_jwt::Algorithm::HS512 => {
+            let secret = auth.secret.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured secret".into())
+            })?;
+            armature_jwt::JwtConfig::new(secret).with_algorithm(algorithm)
+        }
+        _ => {
+            let public_key = auth.public_key.clone().ok_or_else(|| {
+                McpError::InvalidRequest("JWT auth is missing a configured public key".into())
+            })?;
+            let mut config = armature_jwt::JwtConfig::new(String::new()).with_algorithm(algorithm);
+            config.secret = None;
+            config.public_key = Some(public_key);
+            config
+        }
+    };
+
+    if let Some(iss) = &auth.issuer {
+        config = config.with_issuer(iss.clone());
+    }
+    if let Some(aud) = &auth.audience {
+        config = config.with_audience(vec![aud.clone()]);
+    }
+
+    let manager = armature_jwt::JwtManager::verify_only(config)
+        .map_err(|e| McpError::InvalidRequest(format!("Invalid JWT auth configuration: {e}")))?;
+
+    // `OnceLock::get_or_init` would require an infallible closure; since
+    // building the manager is fallible, set explicitly. If another thread
+    // won the race, `set` returns the value back as `Err`, which is fine -
+    // both are equivalent managers for the same immutable config, so we just
+    // fall back to whatever ended up in the cell.
+    let _ = auth.jwt_manager.set(manager);
+    Ok(auth
+        .jwt_manager
+        .get()
+        .expect("jwt_manager was just set or already initialized"))
 }
 
 async fn authenticate_jwt(
@@ -478,19 +668,27 @@ async fn authenticate_jwt(
         .strip_prefix("Bearer ")
         .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
 
-    // Decode JWT (without full verification for now - integrate with armature-jwt for production)
-    // This is a simplified implementation - in production, use armature-jwt's JwtManager
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
+    // Reject anything that isn't even shaped like a JWT before doing any
+    // cryptographic work.
+    if token.split('.').count() != 3 {
         return Err(McpError::InvalidRequest("Invalid JWT format".into()));
     }
 
-    // Decode payload (base64url)
-    let payload = base64_decode_url_safe(parts[1])
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload encoding".into()))?;
+    // Build a verify-only armature-jwt manager from this JwtAuth's configured
+    // key material and algorithm, then VERIFY the signature (and expiration)
+    // before trusting anything in the payload. This is the only path into
+    // the claims below - a token that fails verification never reaches it.
+    //
+    // `JwtAuth` is a pure function of its (immutable, post-construction)
+    // fields, so the manager - which re-parses PEM key material and rebuilds
+    // a `Validation` internally - only needs to be built once per `JwtAuth`
+    // and reused across every call, instead of being rebuilt (and re-logged)
+    // on every single request.
+    let manager = get_or_build_jwt_manager(auth)?;
 
-    let claims: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|_| McpError::InvalidRequest("Invalid JWT payload JSON".into()))?;
+    let claims: serde_json::Value = manager
+        .verify(token)
+        .map_err(|e| McpError::InvalidRequest(format!("JWT verification failed: {e}")))?;
 
     // Extract subject
     let subject = claims.get("sub").and_then(|v| v.as_str()).map(String::from);
@@ -563,58 +761,203 @@ async fn authenticate_oauth2(
         .strip_prefix("Bearer ")
         .ok_or_else(|| McpError::InvalidRequest("Invalid Bearer token format".into()))?;
 
-    // Validate via user info endpoint if configured
-    if let Some(user_info_url) = &auth.user_info_url {
-        return validate_oauth2_via_userinfo(user_info_url, token, auth).await;
+    // Serve a still-valid, previously validated token from the cache without
+    // an HTTP round-trip. Only successes are ever cached (fail-closed).
+    if let Some(ctx) = auth.cache_lookup(token) {
+        return Ok(ctx);
     }
 
-    // Validate via introspection endpoint if configured
-    if let Some(introspection_url) = &auth.introspection_url {
-        return validate_oauth2_via_introspection(introspection_url, token, auth).await;
-    }
+    // Validate via user info or introspection endpoint, whichever is configured.
+    let ctx = if let Some(user_info_url) = &auth.user_info_url {
+        validate_oauth2_via_userinfo(user_info_url, token, auth).await?
+    } else if let Some(introspection_url) = &auth.introspection_url {
+        validate_oauth2_via_introspection(introspection_url, token, auth).await?
+    } else {
+        return Err(McpError::InvalidRequest(
+            "OAuth2 validation endpoint not configured".into(),
+        ));
+    };
 
-    Err(McpError::InvalidRequest(
-        "OAuth2 validation endpoint not configured".into(),
-    ))
+    // Cache only on success; failures above short-circuit via `?` and are
+    // never cached, so an invalid token is never served from cache.
+    auth.cache_store(token, &ctx);
+    Ok(ctx)
 }
 
+/// Timeout applied to OAuth2 validation requests (fail closed on expiry).
+const OAUTH2_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Shared HTTP client for OAuth2 validation requests.
+fn oauth2_http_client() -> &'static armature_http_client::HttpClient {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<armature_http_client::HttpClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        armature_http_client::HttpClient::new(
+            armature_http_client::HttpClientConfig::builder()
+                .timeout(OAUTH2_HTTP_TIMEOUT)
+                .build(),
+        )
+    })
+}
+
+/// Enforce the configured required scopes against the scopes granted to the
+/// token. Fails closed: if scopes are required but none were returned by the
+/// authorization server, the request is rejected.
+fn check_required_scopes(auth: &OAuth2Auth, scopes: &[String]) -> Result<()> {
+    if !auth.required_scopes.is_empty() {
+        let has_required = auth
+            .required_scopes
+            .iter()
+            .all(|s| scopes.iter().any(|granted| granted == s || granted == "*"));
+        if !has_required {
+            return Err(McpError::InvalidRequest("Insufficient scopes".into()));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an OAuth2 access token by calling the user info endpoint.
+///
+/// A `200 OK` response means the token is valid; the JSON body is used to
+/// extract the subject (`sub`) and any advertised scopes. Any transport
+/// error, timeout, or non-success status fails closed.
 async fn validate_oauth2_via_userinfo(
     url: &str,
     token: &str,
     auth: &OAuth2Auth,
 ) -> Result<McpAuthContext> {
-    // Note: In production, use reqwest or similar HTTP client
-    // This is a placeholder that would need actual HTTP implementation
-    let _ = (url, token, auth);
+    let response = oauth2_http_client()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| McpError::InvalidRequest(format!("OAuth2 user info request failed: {}", e)))?;
 
-    // For now, return a placeholder - in real implementation:
-    // 1. Make HTTP GET to user_info_url with Bearer token
-    // 2. Parse response for user info
-    // 3. Extract subject and scopes
+    if !response.is_success() {
+        return Err(McpError::InvalidRequest(format!(
+            "OAuth2 token rejected by user info endpoint (status {})",
+            response.status().as_u16()
+        )));
+    }
 
-    Err(McpError::InvalidRequest(
-        "OAuth2 user info validation requires HTTP client integration. \
-         Consider using armature-http-client or integrating with armature-auth OAuth2 provider."
-            .into(),
-    ))
+    let claims: serde_json::Value = response
+        .json()
+        .map_err(|_| McpError::InvalidRequest("Invalid OAuth2 user info response body".into()))?;
+
+    let subject = claims.get("sub").and_then(|v| v.as_str()).map(String::from);
+    let scopes = extract_scopes(&claims, "scope");
+
+    // Note: most user info endpoints do not echo granted scopes, so
+    // configuring `required_scopes` together with user info validation will
+    // reject tokens unless the endpoint returns them (fail closed).
+    check_required_scopes(auth, &scopes)?;
+
+    Ok(McpAuthContext {
+        subject,
+        scopes,
+        claims,
+        auth_method: "oauth2_userinfo".to_string(),
+    })
 }
 
+/// Validate an OAuth2 access token via RFC 7662 token introspection.
+///
+/// POSTs `token=<token>` as a form to the introspection endpoint,
+/// authenticating with the configured client credentials (HTTP Basic) when
+/// present. The token is accepted only if the endpoint returns a JSON body
+/// with `"active": true`. Any transport error, timeout, non-success status,
+/// or malformed body fails closed.
 async fn validate_oauth2_via_introspection(
     url: &str,
     token: &str,
     auth: &OAuth2Auth,
 ) -> Result<McpAuthContext> {
-    let _ = (url, token, auth);
+    let mut request = oauth2_http_client()
+        .post(url)
+        .form(&[("token", token), ("token_type_hint", "access_token")])
+        .map_err(|e| {
+            McpError::InvalidRequest(format!(
+                "failed to build OAuth2 introspection request to {}: {}",
+                url, e
+            ))
+        })?;
 
-    // For now, return a placeholder - in real implementation:
-    // 1. Make HTTP POST to introspection_url with token and client credentials
-    // 2. Parse response for active status, subject, scopes
+    // RFC 7662 requires the caller to authenticate; use HTTP Basic with the
+    // configured client credentials when available.
+    if let Some(client_id) = &auth.client_id {
+        request = request.basic_auth(client_id, auth.client_secret.as_deref());
+    }
 
-    Err(McpError::InvalidRequest(
-        "OAuth2 introspection validation requires HTTP client integration. \
-         Consider using armature-http-client or integrating with armature-auth OAuth2 provider."
-            .into(),
-    ))
+    let response = request.send().await.map_err(|e| {
+        McpError::InvalidRequest(format!(
+            "OAuth2 introspection request to {} failed: {}",
+            url, e
+        ))
+    })?;
+
+    if !response.is_success() {
+        return Err(McpError::InvalidRequest(format!(
+            "OAuth2 introspection endpoint {} returned status {}",
+            url,
+            response.status().as_u16()
+        )));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|_| {
+        McpError::InvalidRequest(format!(
+            "Invalid OAuth2 introspection response body from {}",
+            url
+        ))
+    })?;
+
+    // RFC 7662: only an explicit `"active": true` means the token is valid.
+    if body.get("active").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(McpError::InvalidRequest(format!(
+            "OAuth2 token is not active (introspection endpoint: {})",
+            url
+        )));
+    }
+
+    let subject = body
+        .get("sub")
+        .or_else(|| body.get("username"))
+        .or_else(|| body.get("client_id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let scopes = extract_scopes(&body, "scope");
+
+    check_required_scopes(auth, &scopes)?;
+
+    Ok(McpAuthContext {
+        subject,
+        scopes,
+        claims: body,
+        auth_method: "oauth2_introspection".to_string(),
+    })
+}
+
+/// Parse a `JwtAuth::algorithm` string (e.g. `"HS256"`) into the
+/// `armature_jwt`/`jsonwebtoken` `Algorithm` enum used to actually verify
+/// tokens.
+fn parse_jwt_algorithm(algorithm: &str) -> Result<armature_jwt::Algorithm> {
+    use armature_jwt::Algorithm;
+    match algorithm {
+        "HS256" => Ok(Algorithm::HS256),
+        "HS384" => Ok(Algorithm::HS384),
+        "HS512" => Ok(Algorithm::HS512),
+        "RS256" => Ok(Algorithm::RS256),
+        "RS384" => Ok(Algorithm::RS384),
+        "RS512" => Ok(Algorithm::RS512),
+        "ES256" => Ok(Algorithm::ES256),
+        "ES384" => Ok(Algorithm::ES384),
+        "PS256" => Ok(Algorithm::PS256),
+        "PS384" => Ok(Algorithm::PS384),
+        "PS512" => Ok(Algorithm::PS512),
+        "EdDSA" => Ok(Algorithm::EdDSA),
+        other => Err(McpError::InvalidRequest(format!(
+            "Unsupported JWT algorithm: {other}"
+        ))),
+    }
 }
 
 fn extract_scopes(claims: &serde_json::Value, scope_claim: &str) -> Vec<String> {
@@ -642,47 +985,6 @@ fn parse_scope_value(value: &serde_json::Value) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-fn base64_decode_url_safe(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    // Add padding if needed
-    let padded = match input.len() % 4 {
-        2 => format!("{}==", input),
-        3 => format!("{}=", input),
-        _ => input.to_string(),
-    };
-
-    // Replace URL-safe characters
-    let standard = padded.replace('-', "+").replace('_', "/");
-
-    // Decode
-    base64_decode(&standard)
-}
-
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut output = Vec::new();
-    let mut buffer: u32 = 0;
-    let mut bits_collected = 0;
-
-    for c in input.chars() {
-        if c == '=' {
-            break;
-        }
-
-        let value = ALPHABET.iter().position(|&b| b == c as u8).ok_or(())?;
-        buffer = (buffer << 6) | (value as u32);
-        bits_collected += 6;
-
-        if bits_collected >= 8 {
-            bits_collected -= 8;
-            output.push((buffer >> bits_collected) as u8);
-            buffer &= (1 << bits_collected) - 1;
-        }
-    }
-
-    Ok(output)
 }
 
 #[cfg(test)]
@@ -729,12 +1031,6 @@ mod tests {
         assert!(!ctx.has_scope("mcp:admin"));
     }
 
-    #[test]
-    fn test_base64_decode() {
-        let decoded = base64_decode_url_safe("SGVsbG8gV29ybGQ").unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World");
-    }
-
     #[tokio::test]
     async fn test_api_token_authentication() {
         let auth = ApiTokenAuth::new()
@@ -754,6 +1050,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_api_token_authentication_multibyte_no_panic() {
+        // "1234567" is 7 ASCII bytes, followed by 'é' (U+00E9), which is
+        // encoded as the two bytes 0xC3 0xA9. A naive `&token[..8]` byte
+        // slice would land in the middle of that two-byte character (byte
+        // index 8 falls between 0xC3 and 0xA9), which is not a char
+        // boundary and panics. The fix truncates by `char`, not by byte
+        // index, so this must succeed without panicking.
+        let token = "1234567éxtra-tail-bytes";
+        assert!(!token.is_char_boundary(8), "test token must repro the bug");
+
+        let auth = ApiTokenAuth::new().with_tokens(vec![token]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_ok());
+        let ctx = result.unwrap();
+        assert_eq!(ctx.subject, Some("api-token:1234567é".to_string()));
+    }
+
+    #[tokio::test]
     async fn test_api_token_authentication_invalid() {
         let auth = ApiTokenAuth::new().with_tokens(vec!["valid-token-123"]);
 
@@ -768,12 +1086,540 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_api_token_authentication_among_many_valid() {
+        // Functional-correctness check for the constant-time, non-short-
+        // circuiting scan in `authenticate_api_token`: a token that matches
+        // one of several configured tokens (not just the first) must still
+        // authenticate successfully.
+        let auth = ApiTokenAuth::new().with_tokens(vec![
+            "token-a-11111111",
+            "token-b-22222222",
+            "token-c-33333333",
+        ]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer token-c-33333333".to_string(),
+        );
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_api_token_authentication_rejects_prefix_of_valid_token() {
+        // A token that is a strict prefix (or same-length near-miss) of a
+        // valid token must still be rejected - guards against a length- or
+        // prefix-based comparison bug creeping back in.
+        let auth = ApiTokenAuth::new().with_tokens(vec!["valid-token-123"]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer valid-token-124".to_string(),
+        );
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("valid-token-123", "valid-token-123"));
+        assert!(!constant_time_eq("valid-token-123", "valid-token-124"));
+        assert!(!constant_time_eq("valid-token-123", "valid-token-1234"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[tokio::test]
     async fn test_no_auth_allows_all() {
         let config = McpAuthConfig::none();
         let headers = std::collections::HashMap::new();
 
         let result = authenticate(&config, &headers, "tools/call").await;
         assert!(result.is_ok());
+    }
+
+    /// Mint a signed HS256 JWT via armature-jwt, carrying an `exp` claim
+    /// `seconds_from_now` seconds in the future (negative for already-expired).
+    fn mint_jwt(secret: &str, sub: &str, scope: &str, seconds_from_now: i64) -> String {
+        let config = armature_jwt::JwtConfig::new(secret.to_string());
+        let manager = armature_jwt::JwtManager::new(config).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = serde_json::json!({
+            "sub": sub,
+            "scope": scope,
+            "exp": now + seconds_from_now,
+        });
+        manager.sign(&claims).unwrap()
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_bad_signature() {
+        // JwtAuth is configured with the correct secret, but the token is
+        // signed with a different one. This must NOT be accepted just
+        // because the payload happens to decode to well-formed JSON.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let forged = mint_jwt("wrong-secret", "attacker", "mcp:read mcp:write", 3600);
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&forged)).await;
+        assert!(
+            result.is_err(),
+            "a token signed with the wrong secret must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_accepts_valid_signature_and_enforces_exp() {
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        // Correctly signed, unexpired token -> accepted with the right claims.
+        let valid = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+        let ctx = authenticate_jwt(&auth, &bearer_headers(&valid))
+            .await
+            .expect("correctly signed, unexpired token should be accepted");
+        assert_eq!(ctx.subject, Some("user-42".to_string()));
+        assert_eq!(ctx.scopes, vec!["mcp:read".to_string()]);
+        assert_eq!(ctx.auth_method, "jwt");
+
+        // Correctly signed but expired token -> rejected.
+        let expired = mint_jwt("correct-secret", "user-42", "mcp:read", -3600);
+        let result = authenticate_jwt(&auth, &bearer_headers(&expired)).await;
+        assert!(result.is_err(), "an expired token must be rejected");
+    }
+
+    /// Base64url encode (no padding), used to hand-craft JWTs that no signing
+    /// helper would ever produce (e.g. `alg:none`), so we can assert the
+    /// verifier rejects them regardless of what the header *claims*.
+    fn b64url(input: &[u8]) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+            out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(CHARS[(n & 0x3F) as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_alg_none() {
+        // Classic "alg:none" algorithm-confusion attack: a token that
+        // declares no signature algorithm and carries an empty signature
+        // segment. A JwtAuth configured for HS256 must never accept this,
+        // no matter how well-formed the claims are.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let alg_none_token = format!("{header}.{payload}.");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&alg_none_token)).await;
+        assert!(
+            result.is_err(),
+            "an alg:none token with an empty signature must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_rejects_algorithm_mismatch() {
+        // The JwtAuth is configured for HS256, but the token's header claims
+        // a different algorithm (RS256). This must be rejected even before
+        // signature verification is attempted - accepting it would open the
+        // door to classic HMAC/RSA algorithm-confusion attacks.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = b64url(
+            serde_json::json!({
+                "sub": "attacker",
+                "scope": "mcp:read mcp:write",
+                "exp": now + 3600,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        // Signature content is irrelevant - a mismatched `alg` must be
+        // rejected regardless of what's in the signature segment.
+        let mismatched_token = format!("{header}.{payload}.bm90LWEtcmVhbC1zaWc");
+
+        let result = authenticate_jwt(&auth, &bearer_headers(&mismatched_token)).await;
+        assert!(
+            result.is_err(),
+            "a token whose header alg doesn't match the configured algorithm must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_cached_manager_is_consistent() {
+        // The JwtManager backing a JwtAuth is built lazily and cached in an
+        // `Arc<OnceLock<..>>`. Repeated calls on the same JwtAuth must reuse
+        // that cached manager without capturing stale/wrong key material, so
+        // two sequential authentications of the same valid token must both
+        // succeed and produce identical claims.
+        let auth = JwtAuth::new().with_secret("correct-secret");
+        let token = mint_jwt("correct-secret", "user-42", "mcp:read", 3600);
+
+        let first = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("first call with a valid token should succeed");
+        let second = authenticate_jwt(&auth, &bearer_headers(&token))
+            .await
+            .expect("second call on the same JwtAuth with the same valid token should succeed");
+
+        assert_eq!(first.subject, second.subject);
+        assert_eq!(first.scopes, second.scopes);
+        assert_eq!(first.auth_method, second.auth_method);
+    }
+
+    /// Spawn a minimal HTTP/1.1 stub server that answers every connection
+    /// with `status` and `body`. Returns the base URL (`http://127.0.0.1:port`).
+    async fn spawn_stub_server(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    // Read the full request: headers, then Content-Length body bytes.
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let Ok(n) = socket.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+
+                        if let Some(header_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&data[..header_end]);
+                            let content_length = headers
+                                .lines()
+                                .find_map(|l| {
+                                    let (name, value) = l.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())?
+                                })
+                                .unwrap_or(0);
+                            if data.len() >= header_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+
+                    let reason = match status {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        _ => "Error",
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        reason,
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    /// Like [`spawn_stub_server`] but also returns a counter incremented once
+    /// per fully received HTTP request, so tests can assert how many times the
+    /// endpoint was actually hit.
+    async fn spawn_counting_stub_server(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter_srv = counter.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let counter_conn = counter_srv.clone();
+                tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let Ok(n) = socket.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+
+                        if let Some(header_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&data[..header_end]);
+                            let content_length = headers
+                                .lines()
+                                .find_map(|l| {
+                                    let (name, value) = l.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())?
+                                })
+                                .unwrap_or(0);
+                            if data.len() >= header_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+
+                    counter_conn.fetch_add(1, Ordering::SeqCst);
+
+                    let reason = match status {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        _ => "Error",
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        reason,
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        (format!("http://{}", addr), counter)
+    }
+
+    /// Return a URL pointing at a port with no listener.
+    async fn unreachable_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{}", addr)
+    }
+
+    fn bearer_headers(token: &str) -> std::collections::HashMap<String, String> {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+        headers
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_userinfo_valid_token() {
+        let url = spawn_stub_server(200, r#"{"sub":"user-1","scope":"mcp:read"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url);
+
+        let ctx = authenticate_oauth2(&auth, &bearer_headers("good-token"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.subject, Some("user-1".to_string()));
+        assert_eq!(ctx.scopes, vec!["mcp:read".to_string()]);
+        assert_eq!(ctx.auth_method, "oauth2_userinfo");
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_userinfo_rejected_token() {
+        let url = spawn_stub_server(401, r#"{"error":"invalid_token"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url);
+
+        let result = authenticate_oauth2(&auth, &bearer_headers("bad-token")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_userinfo_unreachable_fails_closed() {
+        let url = unreachable_url().await;
+        let auth = OAuth2Auth::new().with_user_info(url);
+
+        let result = authenticate_oauth2(&auth, &bearer_headers("any-token")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_introspection_active_token() {
+        let url = spawn_stub_server(
+            200,
+            r#"{"active":true,"sub":"svc-1","scope":"mcp:read mcp:write"}"#,
+        )
+        .await;
+        let auth = OAuth2Auth::new().with_introspection(url, "client-id", "client-secret");
+
+        let ctx = authenticate_oauth2(&auth, &bearer_headers("good-token"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.subject, Some("svc-1".to_string()));
+        assert_eq!(
+            ctx.scopes,
+            vec!["mcp:read".to_string(), "mcp:write".to_string()]
+        );
+        assert_eq!(ctx.auth_method, "oauth2_introspection");
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_introspection_inactive_token() {
+        let url = spawn_stub_server(200, r#"{"active":false}"#).await;
+        let auth = OAuth2Auth::new().with_introspection(url, "client-id", "client-secret");
+
+        let result = authenticate_oauth2(&auth, &bearer_headers("revoked-token")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_introspection_unreachable_fails_closed() {
+        let url = unreachable_url().await;
+        let auth = OAuth2Auth::new().with_introspection(url, "client-id", "client-secret");
+
+        let result = authenticate_oauth2(&auth, &bearer_headers("any-token")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_introspection_insufficient_scopes() {
+        let url = spawn_stub_server(200, r#"{"active":true,"scope":"other"}"#).await;
+        let auth = OAuth2Auth::new()
+            .with_introspection(url, "client-id", "client-secret")
+            .with_scopes(vec!["mcp:read"]);
+
+        let result = authenticate_oauth2(&auth, &bearer_headers("token")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_cache_hits_avoid_second_request() {
+        use std::sync::atomic::Ordering;
+        let (url, count) =
+            spawn_counting_stub_server(200, r#"{"sub":"user-1","scope":"mcp:read"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url).with_cache_ttl(300);
+
+        let first = authenticate_oauth2(&auth, &bearer_headers("cached-token"))
+            .await
+            .unwrap();
+        assert_eq!(first.subject, Some("user-1".to_string()));
+
+        let second = authenticate_oauth2(&auth, &bearer_headers("cached-token"))
+            .await
+            .unwrap();
+        assert_eq!(second.subject, Some("user-1".to_string()));
+
+        // Second validation was served from cache: only one HTTP request.
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_no_cache_hits_server_each_time() {
+        use std::sync::atomic::Ordering;
+        let (url, count) =
+            spawn_counting_stub_server(200, r#"{"sub":"user-1","scope":"mcp:read"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url).no_cache();
+
+        authenticate_oauth2(&auth, &bearer_headers("uncached-token"))
+            .await
+            .unwrap();
+        authenticate_oauth2(&auth, &bearer_headers("uncached-token"))
+            .await
+            .unwrap();
+
+        // Caching disabled: every request hits the endpoint.
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_expired_entry_rehits_server() {
+        use std::sync::atomic::Ordering;
+        let (url, count) =
+            spawn_counting_stub_server(200, r#"{"sub":"user-1","scope":"mcp:read"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url).with_cache_ttl(300);
+
+        // First validation populates the cache.
+        authenticate_oauth2(&auth, &bearer_headers("aging-token"))
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // Force the cached entry to be expired by rewriting its expiry into the
+        // past (the field is private but reachable from the in-module test).
+        {
+            let key = hash_token("aging-token");
+            let mut map = auth.cache.lock().unwrap();
+            let entry = map.get_mut(&key).expect("token should be cached");
+            entry.1 = Instant::now() - Duration::from_secs(1);
+        }
+
+        // Expired entry is evicted on lookup, so the endpoint is hit again.
+        authenticate_oauth2(&auth, &bearer_headers("aging-token"))
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_invalid_token_never_cached() {
+        use std::sync::atomic::Ordering;
+        // 401 => invalid token; must never be served from cache (fail-closed).
+        let (url, count) = spawn_counting_stub_server(401, r#"{"error":"invalid_token"}"#).await;
+        let auth = OAuth2Auth::new().with_user_info(url).with_cache_ttl(300);
+
+        assert!(
+            authenticate_oauth2(&auth, &bearer_headers("bad-token"))
+                .await
+                .is_err()
+        );
+        assert!(
+            authenticate_oauth2(&auth, &bearer_headers("bad-token"))
+                .await
+                .is_err()
+        );
+
+        // Both attempts hit the server: negatives are not cached.
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert!(auth.cache.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

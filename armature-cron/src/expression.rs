@@ -63,11 +63,19 @@ impl CronExpression {
     }
 
     /// Check if the expression would execute at the given time.
+    ///
+    /// This inspects `time` itself (truncated to whole seconds, since cron fires
+    /// on whole-second boundaries) rather than the next upcoming fire from *now*,
+    /// so it works for past, present, and future instants.
     pub fn matches(&self, time: DateTime<Utc>) -> bool {
+        // Truncate to whole seconds; cron only fires on second boundaries.
+        let time = DateTime::from_timestamp(time.timestamp(), 0).unwrap_or(time);
+        // `after` is exclusive, so the first fire strictly after `time - 1s` is
+        // `time` itself iff `time` is a scheduled fire time.
         self.schedule
-            .upcoming(Utc)
-            .take(1)
-            .any(|t| t.timestamp() == time.timestamp())
+            .after(&(time - chrono::Duration::seconds(1)))
+            .next()
+            == Some(time)
     }
 }
 
@@ -269,5 +277,45 @@ mod tests {
     fn test_expression_with_month_name() {
         let expr = CronExpression::parse("0 0 0 1 JAN *");
         assert!(expr.is_ok());
+    }
+
+    // 2023-01-01 00:00:00 UTC — a whole midnight (multiple of 86400).
+    const MIDNIGHT_2023: i64 = 1_672_531_200;
+
+    #[test]
+    fn test_matches_returns_true_for_past_firing_time() {
+        // Daily at midnight. This instant is in the past yet is a valid fire.
+        let expr = CronExpression::parse("0 0 0 * * *").unwrap();
+        let midnight = DateTime::from_timestamp(MIDNIGHT_2023, 0).unwrap();
+        assert!(
+            expr.matches(midnight),
+            "a past midnight should match a daily-at-midnight schedule"
+        );
+    }
+
+    #[test]
+    fn test_matches_returns_false_for_non_firing_time() {
+        let expr = CronExpression::parse("0 0 0 * * *").unwrap();
+        // Noon on the same day is not a fire for a daily-midnight schedule.
+        let noon = DateTime::from_timestamp(MIDNIGHT_2023 + 43_200, 0).unwrap();
+        assert!(
+            !expr.matches(noon),
+            "noon should not match a midnight schedule"
+        );
+    }
+
+    #[test]
+    fn test_matches_truncates_subsecond() {
+        let expr = CronExpression::parse("0 0 0 * * *").unwrap();
+        // Half a second past midnight still counts as the midnight fire.
+        let midnight_plus = DateTime::from_timestamp(MIDNIGHT_2023, 500_000_000).unwrap();
+        assert!(expr.matches(midnight_plus));
+    }
+
+    #[test]
+    fn test_matches_every_second_matches_any_whole_second() {
+        let expr = CronExpression::parse("* * * * * *").unwrap();
+        let t = DateTime::from_timestamp(MIDNIGHT_2023 + 17, 0).unwrap();
+        assert!(expr.matches(t));
     }
 }

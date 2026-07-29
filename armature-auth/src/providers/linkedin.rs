@@ -40,7 +40,7 @@ impl LinkedInProvider {
     }
 
     pub async fn get_user_info(access_token: &str) -> Result<LinkedInUser, AuthError> {
-        let client = reqwest::Client::new();
+        let client = crate::providers::shared_http_client();
 
         let mut user: LinkedInUser = client
             .get(USER_INFO_URL)

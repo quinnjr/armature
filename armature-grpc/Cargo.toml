@@ -1,6 +1,6 @@
 [package]
 name = "armature-grpc"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,15 +13,42 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 # Logging
-armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
 
 # gRPC
-tonic = { version = "0.14", features = ["gzip", "zstd"] }
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring"] }
 prost = "0.14"
-prost-types = "0.13"
+prost-types = "0.14"
+
+# rustls: explicit direct dependency so this crate can install the `ring`
+# CryptoProvider itself at TLS-setup time (see `crypto_provider::ensure_installed`).
+# Without this, rustls's automatic provider detection panics whenever this
+# crate is built alongside anything else that also compiles in the
+# `aws-lc-rs` provider (e.g. most AWS SDK crates) — Cargo unifies both
+# providers into one binary and rustls refuses to guess between them.
+#
+# NOTE: `rustls` and tonic's `tls-ring` feature are deliberately kept
+# unconditional (not behind an opt-in Cargo feature), unlike `health`/
+# `reflection`. `crypto_provider::ensure_installed` and the TLS config types
+# (`GrpcServerTlsConfig`/`GrpcClientTlsConfig`) are wired directly into the
+# non-optional server/client code paths (`server.rs`, `client.rs`,
+# `config.rs`); cfg-gating TLS out would require threading a Cargo feature
+# through those public config structs and every call site, which is a much
+# larger, riskier change than the footprint this saves. This is an accepted
+# tradeoff: every consumer pays for rustls + tonic's `tls-ring` even if they
+# never configure TLS.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Compression: used by `middleware::CompressionMiddleware` to actually
+# (de)compress gRPC message frames on the wire (see `middleware.rs`), since
+# tonic's own `accept_compressed`/`send_compressed` are inherent methods on
+# generated per-service wrapper types this crate's generic `serve<S>`/client
+# helpers never see.
+flate2 = "1.1"
+zstd = "0.13"
 
 # Async runtime
-tokio = { version = "1.35", features = ["rt-multi-thread", "net", "sync", "time"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # Tower (middleware)
@@ -29,11 +56,11 @@ tower = { version = "0.5", features = ["timeout", "limit", "load-shed"] }
 tower-service = "0.3"
 
 # HTTP
-http = "1.1"
+http = "1.4"
 http-body = "1.0"
 http-body-util = "0.1"
-bytes = "1.5"
-hyper = { version = "1.4", features = ["server", "http2"] }
+bytes = "1.12"
+hyper = { version = "1.10", features = ["server", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 # Serialization
@@ -66,6 +93,9 @@ health = ["tonic-health"]
 reflection = ["tonic-reflection"]
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 tokio-test = "0.4"
+tonic-health = { version = "0.14" }
+tonic-reflection = { version = "0.14" }
+rcgen = { version = "0.14", features = ["pem"] }
 

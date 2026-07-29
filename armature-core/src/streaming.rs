@@ -811,6 +811,60 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
 
+    #[test]
+    fn test_backpressure_concurrent_acks_do_not_underflow() {
+        // Regression test: concurrent over-acks used to double-subtract and
+        // wrap buffer_level to ~usize::MAX, pausing the controller forever.
+        let controller = Arc::new(BackpressureController::new(BackpressureConfig::default()));
+        controller.record_send(100);
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let c = Arc::clone(&controller);
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        c.record_ack(64);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(controller.buffer_level(), 0);
+        assert!(!controller.is_paused());
+    }
+
+    #[tokio::test]
+    async fn test_backpressure_wait_if_paused_resumes() {
+        let config = BackpressureConfig::new()
+            .high_watermark(10)
+            .low_watermark(2);
+        let controller = Arc::new(BackpressureController::new(config));
+
+        // Exceed high watermark to pause
+        controller.record_send(20);
+        assert!(controller.is_paused());
+
+        let waiter = {
+            let c = Arc::clone(&controller);
+            tokio::spawn(async move {
+                c.wait_if_paused().await;
+            })
+        };
+
+        // Ack below low watermark to resume; the waiter must wake up
+        tokio::task::yield_now().await;
+        controller.record_ack(20);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("wait_if_paused should resume after ack")
+            .unwrap();
+        assert!(!controller.is_paused());
+    }
+
     #[tokio::test]
     async fn test_byte_stream() {
         let (mut stream, sender) = ByteStream::new();
@@ -1380,9 +1434,15 @@ impl BackpressureController {
 
     /// Record data being acknowledged by consumer (decreases buffer level).
     pub fn record_ack(&self, bytes: usize) {
+        // Saturating subtraction via fetch_update: a plain fetch_sub of
+        // `bytes.min(buffer_level())` races with concurrent acks and can
+        // wrap the level to ~usize::MAX, pausing the controller forever.
         let old_level = self
             .buffer_level
-            .fetch_sub(bytes.min(self.buffer_level()), Ordering::AcqRel);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |level| {
+                Some(level.saturating_sub(bytes))
+            })
+            .expect("fetch_update closure never returns None");
         let new_level = old_level.saturating_sub(bytes);
         self.stats
             .bytes_acked
@@ -1397,8 +1457,15 @@ impl BackpressureController {
 
     /// Wait until not paused (for async producers).
     pub async fn wait_if_paused(&self) {
-        while self.is_paused() {
-            self.resume_notify.notified().await;
+        loop {
+            // Create the Notified future before re-checking the paused flag:
+            // checking first would lose a wakeup that fires between the check
+            // and the await, leaving the producer parked forever.
+            let notified = self.resume_notify.notified();
+            if !self.is_paused() {
+                return;
+            }
+            notified.await;
         }
     }
 

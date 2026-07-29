@@ -8,7 +8,7 @@
 //! - 🔐 **JWT Authentication** - Token-based auth with `armature-jwt`
 //! - 🌐 **OAuth2** - Google, Auth0, Microsoft, AWS Cognito, Okta
 //! - 🔑 **SAML** - Enterprise SAML 2.0 authentication (requires `saml` feature)
-//! - 🔒 **Password Hashing** - Secure bcrypt-based hashing
+//! - 🔒 **Password Hashing** - Argon2 (default) and bcrypt
 //! - 🛡️ **Guards** - Route protection with auth and role guards
 //! - 👤 **User Context** - Request-scoped user information
 //!
@@ -126,7 +126,8 @@
 //!     entity_id: "https://myapp.com".to_string(),
 //!     acs_url: "https://myapp.com/callback".to_string(),
 //!     sls_url: None,
-//!     idp_metadata: IdpMetadata::Url("https://idp.example.com/metadata".to_string()),
+//!     // IdP metadata must be provided as XML; URL-based fetching is not yet supported.
+//!     idp_metadata: IdpMetadata::Xml("<EntityDescriptor>...</EntityDescriptor>".to_string()),
 //!     sp_certificate: None,
 //!     sp_private_key: None,
 //!     contact_person: None,
@@ -134,7 +135,7 @@
 //!     required_attributes: vec![],
 //! };
 //!
-//! let provider = SamlServiceProvider::new(config);
+//! let provider = SamlServiceProvider::new("my-sp".to_string(), config)?;
 //!
 //! // Generate SAML auth request
 //! let auth_request = provider.create_auth_request()?;
@@ -146,6 +147,7 @@
 pub mod api_key;
 pub mod error;
 pub mod guard;
+pub mod middleware;
 pub mod oauth2;
 pub mod password;
 pub mod passwordless;
@@ -159,7 +161,8 @@ pub mod user;
 
 pub use api_key::{ApiKey, ApiKeyError, ApiKeyManager, ApiKeyStore};
 pub use error::{AuthError, Result};
-pub use guard::{AuthGuard, Guard, RoleGuard};
+pub use guard::{AuthGuard, Guard, PermissionGuard, RoleGuard};
+pub use middleware::JwtAuthMiddleware;
 pub use oauth2::{OAuth2Provider, OAuth2Token, OAuth2UserInfo};
 pub use password::{PasswordHasher, PasswordVerifier};
 pub use passwordless::{MagicLinkToken, PasswordlessError, WebAuthnManager};
@@ -284,7 +287,8 @@ pub mod prelude {
     pub use crate::AuthService;
     pub use crate::api_key::{ApiKey, ApiKeyManager, ApiKeyStore};
     pub use crate::error::{AuthError, Result};
-    pub use crate::guard::{AuthGuard, Guard, RoleGuard};
+    pub use crate::guard::{AuthGuard, Guard, PermissionGuard, RoleGuard};
+    pub use crate::middleware::JwtAuthMiddleware;
     pub use crate::oauth2::{OAuth2Provider, OAuth2Token, OAuth2UserInfo};
     pub use crate::password::{PasswordHasher, PasswordVerifier};
     pub use crate::strategy::{AuthStrategy, JwtStrategy, LocalStrategy};

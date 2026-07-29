@@ -47,10 +47,10 @@ updates:
       - "dependencies"
       - "web"
     groups:
-      angular:
+      astro:
         patterns:
-          - "@angular/*"
-          - "@angular-devkit/*"
+          - "astro"
+          - "@astrojs/*"
       dev-dependencies:
         dependency-type: "development"
         patterns:

@@ -177,8 +177,7 @@ let config = OpenSearchConfig::new("http://localhost:9200")
     .with_basic_auth("user", "pass")
     .with_connect_timeout(Duration::from_secs(10))
     .with_request_timeout(Duration::from_secs(30))
-    .with_compression(true)
-    .with_max_retries(3);
+    .with_compression(true);
 ```
 
 ---

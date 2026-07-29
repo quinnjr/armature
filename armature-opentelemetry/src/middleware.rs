@@ -4,24 +4,39 @@ use armature_core::{Error, HttpRequest, HttpResponse, Middleware, Next};
 use async_trait::async_trait;
 use opentelemetry::{
     Context as OtelContext, KeyValue, global,
-    trace::{SpanKind, TraceContextExt, Tracer},
+    trace::{FutureExt, SpanKind, TraceContextExt, Tracer},
 };
 use std::sync::Arc;
 use std::time::Instant;
 
 /// OpenTelemetry middleware for automatic tracing and metrics
 pub struct TelemetryMiddleware {
-    service_name: String,
+    service_name: Arc<str>,
+    /// Tracer resolved once at construction and reused for every request.
+    ///
+    /// Previously each request cloned the service name and called
+    /// `global::tracer(...)` — a provider lookup plus a boxed-tracer allocation
+    /// on the hot path. Resolving it once here removes both from per-request
+    /// handling.
+    tracer: global::BoxedTracer,
     metrics: Option<Arc<crate::metrics::HttpMetrics>>,
 }
 
 impl TelemetryMiddleware {
     /// Create a new telemetry middleware
     pub fn new(service_name: impl Into<String>) -> Self {
+        let service_name: Arc<str> = service_name.into().into();
+        let tracer = global::tracer(service_name.to_string());
         Self {
-            service_name: service_name.into(),
+            service_name,
+            tracer,
             metrics: None,
         }
+    }
+
+    /// The service name this middleware was constructed with.
+    pub fn service_name(&self) -> &str {
+        &self.service_name
     }
 
     /// Create with metrics collection
@@ -58,12 +73,35 @@ impl TelemetryMiddleware {
             KeyValue::new("http.response_content_length", res.body.len() as i64),
         ]
     }
+
+    /// Derive the `(method, route, status)` triple recorded for a completed
+    /// request.
+    ///
+    /// Both dimensions come from the real request (previously the middleware
+    /// recorded the literal strings `"method"`/`"path"`), and a value is
+    /// produced for the error path too (previously errors were never counted)
+    /// — a failed request is recorded with HTTP status 500.
+    fn recording(
+        method: &str,
+        route: &str,
+        result: &Result<HttpResponse, Error>,
+    ) -> (String, String, u16) {
+        let status = match result {
+            Ok(res) => res.status,
+            Err(_) => 500,
+        };
+        (method.to_string(), route.to_string(), status)
+    }
 }
 
 #[async_trait]
 impl Middleware for TelemetryMiddleware {
     async fn handle(&self, req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
         let start_time = Instant::now();
+
+        // Capture the real request dimensions before `req` is consumed by `next`.
+        let method = req.method.clone();
+        let route = req.path.clone();
 
         // Increment active requests
         if let Some(ref metrics) = self.metrics {
@@ -75,20 +113,25 @@ impl Middleware for TelemetryMiddleware {
             propagator.extract(&HeaderExtractor(&req.headers))
         });
 
-        // Create a span for this request
-        let service_name = self.service_name.clone();
-        let tracer = global::tracer(service_name);
+        // Create a span for this request using the cached tracer.
         let request_attrs = self.extract_attributes(&req);
-        let span = tracer
+        let span = self
+            .tracer
             .span_builder(format!("{} {}", req.method, req.path))
             .with_kind(SpanKind::Server)
             .with_attributes(request_attrs)
-            .start_with_context(&tracer, &parent_context);
+            .start_with_context(&self.tracer, &parent_context);
 
         let cx = OtelContext::current_with_span(span);
 
-        // Execute request with tracing context
-        let response_result = next(req).await;
+        // Execute request with the request's tracing context attached as the
+        // ACTIVE context. Without this, `next(req)` runs under whatever
+        // context (if any) happened to be active on the polling task, so any
+        // span application code starts during request handling — or an
+        // outbound HTTP client injecting a `traceparent` for downstream
+        // propagation — would not nest under this request's span; it would
+        // start a new, disconnected trace instead.
+        let response_result = next(req).with_context(cx.clone()).await;
 
         // Add response attributes to span
         match &response_result {
@@ -124,14 +167,10 @@ impl Middleware for TelemetryMiddleware {
         if let Some(ref metrics) = self.metrics {
             metrics.decrement_active();
 
-            if let Ok(ref res) = result {
-                metrics.record_request(
-                    result.as_ref().ok().map(|_| "method").unwrap_or("UNKNOWN"),
-                    "path",
-                    res.status,
-                    duration,
-                );
-            }
+            // Record every request — success *and* error — with the real
+            // request method and route as dimensions.
+            let (method, route, status) = Self::recording(&method, &route, &result);
+            metrics.record_request(&method, &route, status, duration);
         }
 
         result
@@ -139,7 +178,7 @@ impl Middleware for TelemetryMiddleware {
 }
 
 /// Helper to extract trace context from HTTP headers
-struct HeaderExtractor<'a>(&'a std::collections::HashMap<String, String>);
+struct HeaderExtractor<'a>(&'a armature_core::headers::HeaderMap);
 
 impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
     fn get(&self, key: &str) -> Option<&str> {
@@ -219,13 +258,200 @@ mod tests {
     #[test]
     fn test_telemetry_middleware_creation() {
         let middleware = TelemetryMiddleware::new("test-service");
-        assert_eq!(middleware.service_name, "test-service");
+        assert_eq!(middleware.service_name(), "test-service");
         assert!(middleware.metrics.is_none());
     }
 
     #[test]
+    fn recording_uses_real_request_dimensions_not_literals() {
+        // Regression: the middleware used to record the literal strings
+        // "method"/"path" regardless of the actual request.
+        let res = Ok(HttpResponse::new(201));
+        let (method, route, status) = TelemetryMiddleware::recording("GET", "/users/42", &res);
+
+        assert_eq!(method, "GET");
+        assert_eq!(route, "/users/42");
+        assert_eq!(status, 201);
+        assert_ne!(method, "method");
+        assert_ne!(route, "path");
+    }
+
+    #[test]
+    fn recording_counts_error_path_requests() {
+        // Regression: recording used to live only inside the `Ok` branch, so
+        // failed requests were never counted. Errors are recorded as HTTP 500.
+        let res: Result<HttpResponse, Error> = Err(Error::internal("boom"));
+        let (method, route, status) = TelemetryMiddleware::recording("POST", "/checkout", &res);
+
+        assert_eq!(method, "POST");
+        assert_eq!(route, "/checkout");
+        assert_eq!(status, 500);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn handle_records_real_request_dimensions_end_to_end() {
+        // Regression (end-to-end): the original bug lived at the
+        // `record_request` call site inside `handle()`, which hardcoded the
+        // literal strings "method"/"path" as the metric dimensions. The
+        // `recording` helper tests only exercise a passthrough echo, so they
+        // would stay green even if the call site were reverted to literals.
+        //
+        // This drives a REAL request through `handle()` with an in-memory
+        // OpenTelemetry metrics pipeline (no global state, fully deterministic)
+        // and asserts the exported data point carries the real
+        // `http.method`/`http.route`, guarding the actual call site.
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use std::collections::HashMap;
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let meter = provider.meter("test");
+        let metrics = Arc::new(crate::metrics::HttpMetrics::new(&meter).unwrap());
+
+        let middleware = TelemetryMiddleware::new("test-service").with_metrics(metrics);
+
+        // A `Next` that returns HTTP 201, so we also confirm the real status is
+        // propagated alongside the real method/route.
+        let req = HttpRequest::new("GET".to_string(), "/users/42".to_string());
+        let next: Next = Box::new(|_req| Box::pin(async { Ok(HttpResponse::new(201)) }));
+        let res = middleware.handle(req, next).await.unwrap();
+        assert_eq!(res.status, 201);
+
+        provider.force_flush().unwrap();
+
+        // Locate the request-count counter and collect its single data point's
+        // attributes into a key -> value map.
+        let resource_metrics = exporter.get_finished_metrics().unwrap();
+        let mut attrs: Option<HashMap<String, String>> = None;
+        for rm in &resource_metrics {
+            for sm in rm.scope_metrics() {
+                for metric in sm.metrics() {
+                    if metric.name() != "http.server.request.count" {
+                        continue;
+                    }
+                    if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data()
+                        && let Some(dp) = sum.data_points().next()
+                    {
+                        attrs = Some(
+                            dp.attributes()
+                                .map(|kv| {
+                                    (kv.key.as_str().to_string(), kv.value.as_str().to_string())
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let attrs = attrs.expect("request count metric with a data point must be recorded");
+
+        // The recorded dimensions must be the REAL request values, never the
+        // old hardcoded literals "method"/"path".
+        assert_eq!(attrs.get("http.method").map(String::as_str), Some("GET"));
+        assert_eq!(
+            attrs.get("http.route").map(String::as_str),
+            Some("/users/42")
+        );
+        assert_eq!(
+            attrs.get("http.status_code").map(String::as_str),
+            Some("201")
+        );
+        assert_ne!(attrs.get("http.method").map(String::as_str), Some("method"));
+        assert_ne!(attrs.get("http.route").map(String::as_str), Some("path"));
+    }
+
+    /// Regression: `next(req)` used to run without the request's OpenTelemetry
+    /// context attached as the ACTIVE context. As a result, any span started
+    /// by application code while handling the request (a DB call, an outbound
+    /// HTTP client injecting a `traceparent`, etc.) would not nest under the
+    /// request's root span — it would start a brand new, disconnected trace.
+    ///
+    /// This drives a real request through `handle()` with a real (in-memory)
+    /// `SdkTracerProvider` installed as the global provider, has the `Next`
+    /// closure simulate application code calling `global::tracer(...).start()`
+    /// mid-request (exactly as real handler code would), and asserts the
+    /// resulting child span's parent is the request's root span — both by
+    /// `parent_span_id` and by shared `trace_id`.
+    ///
+    /// `#[serial]`: mutates the process-global tracer provider; see the
+    /// matching note on `tracing_setup::tests::init_tracing_installs_w3c_propagator_that_parses_traceparent`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial_test::serial]
+    async fn handle_attaches_context_so_application_spans_nest_under_request_span() {
+        use opentelemetry::trace::Span as _;
+        use opentelemetry::trace::Tracer as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        global::set_tracer_provider(provider.clone());
+
+        // Constructed *after* the provider above is installed globally, so its
+        // cached tracer (see the doc comment on the `tracer` field) resolves
+        // to this test's in-memory provider.
+        let middleware = TelemetryMiddleware::new("test-service");
+
+        let req = HttpRequest::new("GET".to_string(), "/orders".to_string());
+        let next: Next = Box::new(|_req| {
+            Box::pin(async {
+                // Simulates application handler code — it has no access to
+                // the middleware's internal tracer, so like real code it goes
+                // through the global tracer, exactly like an outbound HTTP
+                // client would when injecting a `traceparent` for downstream
+                // propagation.
+                let tracer = global::tracer("app-code");
+                let mut child = tracer.start("db.query");
+                child.end();
+                Ok(HttpResponse::new(200))
+            })
+        });
+
+        let res = middleware.handle(req, next).await.unwrap();
+        assert_eq!(res.status, 200);
+
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+
+        let root = spans
+            .iter()
+            .find(|s| s.name == "GET /orders")
+            .expect("request root span must be exported");
+        let child = spans
+            .iter()
+            .find(|s| s.name == "db.query")
+            .expect("application-code span created inside next() must be exported");
+
+        assert!(
+            root.span_context.is_valid(),
+            "request root span must have a valid span context"
+        );
+        assert_eq!(
+            child.parent_span_id,
+            root.span_context.span_id(),
+            "application span created inside next() must be a direct child of the \
+             request's root span — it is not attached to the request context"
+        );
+        assert_eq!(
+            child.span_context.trace_id(),
+            root.span_context.trace_id(),
+            "application span created inside next() must share the request's trace id, \
+             not start a new, disconnected trace"
+        );
+
+        provider.shutdown().ok();
+    }
+
+    #[test]
     fn test_header_extractor() {
-        let mut headers = std::collections::HashMap::new();
+        let mut headers = armature_core::headers::HeaderMap::new();
         headers.insert("traceparent".to_string(), "00-123-456-01".to_string());
 
         let extractor = HeaderExtractor(&headers);
@@ -252,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_header_extractor_multiple_keys() {
-        let mut headers = std::collections::HashMap::new();
+        let mut headers = armature_core::headers::HeaderMap::new();
         headers.insert("key1".to_string(), "value1".to_string());
         headers.insert("key2".to_string(), "value2".to_string());
 

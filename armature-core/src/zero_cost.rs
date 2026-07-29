@@ -206,12 +206,11 @@ impl<T: serde::de::DeserializeOwned> Extract for QueryParams<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("QueryParams");
-        let query_string: String = req
-            .query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
+        // Re-encode the already-decoded params so reserved characters
+        // (`&`, `=`, `%`, `+`, ...) in keys/values survive the round-trip.
+        let pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
+        let query_string = serde_urlencoded::to_string(&pairs)
+            .map_err(|e| Error::Deserialization(format!("Query encoding error: {}", e)))?;
 
         serde_urlencoded::from_str(&query_string)
             .map(QueryParams)
@@ -983,6 +982,28 @@ mod tests {
         let req = create_request();
         let id = PathParam::<0>::extract(&req).unwrap();
         assert_eq!(&*id, "123");
+    }
+
+    #[test]
+    fn test_query_params_extract_reserved_chars() {
+        // Regression: values containing `&`, `=`, `%`, or `+` used to be
+        // spliced into a query string without re-encoding, splitting into
+        // bogus fields or mangling the value.
+        #[derive(serde::Deserialize)]
+        struct Query {
+            q: String,
+            plus: String,
+        }
+
+        let mut req = HttpRequest::new("GET".to_string(), "/search".to_string());
+        req.query_params
+            .insert("q".to_string(), "a&b=c%d".to_string());
+        req.query_params
+            .insert("plus".to_string(), "1+1".to_string());
+
+        let QueryParams(query) = QueryParams::<Query>::extract(&req).unwrap();
+        assert_eq!(query.q, "a&b=c%d");
+        assert_eq!(query.plus, "1+1");
     }
 
     #[test]

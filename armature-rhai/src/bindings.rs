@@ -1,6 +1,7 @@
 //! Rhai bindings for Armature HTTP types.
 
 use armature_core::{HttpRequest, HttpResponse};
+use bytes::Bytes;
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -91,6 +92,13 @@ impl RequestBinding {
     }
 
     /// Get a path parameter.
+    ///
+    /// Values are the raw path segment text captured by the router (see
+    /// `ScriptRouter::match_pattern`) — they are **not** percent-decoded.
+    /// A route pattern like `/users/:id` matched against
+    /// `/users/john%20doe` yields `"john%20doe"`, not `"john doe"`; decode
+    /// it in the script yourself (e.g. via a registered helper) if you need
+    /// the decoded value.
     pub fn param(&mut self, name: &str) -> Dynamic {
         self.params
             .get(name)
@@ -152,7 +160,19 @@ impl RequestBinding {
 pub struct ResponseBinding {
     status: u16,
     headers: HashMap<String, String>,
-    body: Option<Vec<u8>>,
+    /// Set-Cookie header values, mirroring `HttpResponse::cookies`. Carried
+    /// through `from_http_response`/`into_http_response` so that
+    /// round-tripping a response through a script (e.g. `call_after`) never
+    /// silently drops cookies.
+    cookies: Vec<String>,
+    /// Stored as `Bytes` (not `Vec<u8>`) so that `.clone()`-ing a
+    /// `ResponseBinding` — e.g. to seed both the `response` and
+    /// `original_response` script scope variables in `call_after` — is an
+    /// O(1) refcount bump instead of a full body memcpy. `from_http_response`
+    /// obtains its `Bytes` via `HttpResponse::body_bytes()`, which is itself
+    /// O(1) when the source response is already `Bytes`-backed and only copies
+    /// when it still holds a `Vec<u8>` body.
+    body: Option<Bytes>,
 }
 
 impl Default for ResponseBinding {
@@ -167,7 +187,28 @@ impl ResponseBinding {
         Self {
             status: 200,
             headers: HashMap::new(),
+            cookies: Vec::new(),
             body: None,
+        }
+    }
+
+    /// Build a `ResponseBinding` that mirrors an existing `HttpResponse`.
+    ///
+    /// Used to hand middleware scripts the *real* outgoing response
+    /// (status/headers/body) instead of a blank slate, so a script can
+    /// inspect it and amend it (e.g. add a header) without discarding
+    /// whatever the handler already produced.
+    pub fn from_http_response(response: &HttpResponse) -> Self {
+        let mut headers = HashMap::new();
+        for (name, value) in response.headers.iter() {
+            headers.insert(name.clone(), value.clone());
+        }
+
+        Self {
+            status: response.status,
+            headers,
+            cookies: response.cookies.clone(),
+            body: Some(response.body_bytes()),
         }
     }
 
@@ -185,7 +226,7 @@ impl ResponseBinding {
 
     /// Set body as text.
     pub fn body(&mut self, content: String) -> Self {
-        self.body = Some(content.into_bytes());
+        self.body = Some(Bytes::from(content.into_bytes()));
         self.clone()
     }
 
@@ -196,7 +237,7 @@ impl ResponseBinding {
             .map_err(|e| Box::new(EvalAltResult::from(e.to_string())))?;
         self.headers
             .insert("content-type".to_string(), "application/json".to_string());
-        self.body = Some(json.into_bytes());
+        self.body = Some(Bytes::from(json.into_bytes()));
         Ok(self.clone())
     }
 
@@ -277,8 +318,13 @@ impl ResponseBinding {
             response.headers.insert(name, value);
         }
 
+        response.cookies = self.cookies;
+
         if let Some(body) = self.body {
-            response = response.with_body(body);
+            // `with_bytes_body` stores the `Bytes` directly on
+            // `HttpResponse` (its `body_bytes` field), so this is O(1) —
+            // no `.to_vec()` copy back into a `Vec<u8>` is needed.
+            response = response.with_bytes_body(body);
         }
 
         response

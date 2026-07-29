@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, GrpcError>;
 
 /// gRPC errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GrpcError {
     /// Transport error.
     #[error("Transport error: {0}")]

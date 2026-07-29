@@ -35,7 +35,7 @@ impl DiscordProvider {
     }
 
     pub async fn get_user_info(access_token: &str) -> Result<DiscordUser, AuthError> {
-        let client = reqwest::Client::new();
+        let client = crate::providers::shared_http_client();
 
         let user: DiscordUser = client
             .get(USER_INFO_URL)

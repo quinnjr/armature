@@ -35,7 +35,7 @@ pub enum SmtpSecurity {
 }
 
 /// SMTP configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     /// SMTP server host.
     pub host: String,
@@ -49,8 +49,26 @@ pub struct SmtpConfig {
     pub password: Option<String>,
     /// Connection timeout.
     pub timeout: Duration,
-    /// Maximum connections in pool.
+    /// Maximum connections in lettre's SMTP connection pool.
+    ///
+    /// Wired through to `PoolConfig::max_size` by [`SmtpTransport::new`].
     pub pool_size: u32,
+}
+
+/// Hand-written so the SMTP password is never rendered — a derived `Debug` put
+/// the plaintext password into any `tracing::debug!(?config)`.
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("security", &self.security)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("timeout", &self.timeout)
+            .field("pool_size", &self.pool_size)
+            .finish()
+    }
 }
 
 impl SmtpConfig {
@@ -186,7 +204,15 @@ impl SmtpTransport {
             SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?,
         };
 
-        builder = builder.port(config.port).timeout(Some(config.timeout));
+        // `pool_size` was read nowhere: the pool ran at lettre's default max
+        // size regardless, so `MailerConfig::bulk_concurrency`'s "matching
+        // SmtpConfig::pool_size" rationale had nothing to match.
+        builder = builder
+            .port(config.port)
+            .timeout(Some(config.timeout))
+            .pool_config(
+                lettre::transport::smtp::PoolConfig::new().max_size(config.pool_size.max(1)),
+            );
 
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
             builder = builder.credentials(Credentials::new(username.clone(), password.clone()));
@@ -255,6 +281,34 @@ mod tests {
         assert_eq!(config.port, 587);
         assert_eq!(config.security, SmtpSecurity::StartTls);
         assert_eq!(config.username.as_deref(), Some("user"));
+    }
+
+    /// A derived `Debug` dumped the SMTP password into any
+    /// `tracing::debug!(?config)`.
+    #[test]
+    fn debug_never_renders_the_password() {
+        let rendered = format!(
+            "{:?}",
+            SmtpConfig::new("smtp.example.com").credentials("user", "hunter2-super-secret")
+        );
+
+        assert!(!rendered.contains("hunter2"), "password leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // The username is not a secret and stays legible for debugging.
+        assert!(rendered.contains("user"), "{rendered}");
+
+        // No credentials configured renders as None, not "<redacted>".
+        let rendered = format!("{:?}", SmtpConfig::new("smtp.example.com"));
+        assert!(rendered.contains("password: None"), "{rendered}");
+    }
+
+    /// `pool_size` was configured but read nowhere; it must reach lettre.
+    #[tokio::test]
+    async fn pool_size_is_wired_into_the_transport() {
+        let transport = SmtpTransport::new(SmtpConfig::new("smtp.example.com").pool_size(9))
+            .await
+            .unwrap();
+        assert_eq!(transport.config().pool_size, 9);
     }
 
     #[test]

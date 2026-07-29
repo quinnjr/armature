@@ -4,7 +4,7 @@
 //!
 //! This module provides shared functionality used across multiple examples.
 
-use rand::Rng;
+use rand::RngExt;
 use std::net::{SocketAddr, TcpListener};
 
 /// Port range for examples (50000-50999)

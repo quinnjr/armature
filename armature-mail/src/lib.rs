@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! # Armature Mail
 //!
 //! Email sending with SMTP, templates, and cloud provider integrations.
@@ -12,50 +14,60 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use armature_mail::{Mailer, SmtpConfig, Email};
+//! ```rust,no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_mail::{Email, Mailer, SmtpConfig};
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure SMTP
-//!     let config = SmtpConfig::new("smtp.example.com")
-//!         .credentials("user@example.com", "password")
-//!         .port(587)
-//!         .starttls();
+//! // Configure SMTP
+//! let config = SmtpConfig::new("smtp.example.com")
+//!     .credentials("user@example.com", "password")
+//!     .port(587)
+//!     .starttls();
 //!
-//!     let mailer = Mailer::smtp(config).await?;
+//! let mailer = Mailer::smtp(config).await?;
 //!
-//!     // Send an email
-//!     let email = Email::new()
-//!         .from("sender@example.com")
-//!         .to("recipient@example.com")
-//!         .subject("Hello from Armature!")
-//!         .text("This is a test email.")
-//!         .html("<h1>Hello!</h1><p>This is a test email.</p>");
+//! // Send an email
+//! let email = Email::new()
+//!     .from("sender@example.com")
+//!     .to("recipient@example.com")
+//!     .subject("Hello from Armature!")
+//!     .text("This is a test email.")
+//!     .html("<h1>Hello!</h1><p>This is a test email.</p>");
 //!
-//!     mailer.send(email).await?;
-//!     Ok(())
-//! }
+//! mailer.send(email).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## With Templates
 //!
-//! ```rust,ignore
-//! use armature_mail::{Mailer, SmtpConfig, TemplateEngine};
+//! `with_templates` loads a directory of Handlebars templates (it requires the
+//! `handlebars` feature); `with_template_engine` accepts any [`TemplateEngine`].
+//!
+//! ```rust,no_run
+//! # #[cfg(feature = "handlebars")]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use armature_mail::{Mailer, SmtpConfig};
 //! use serde_json::json;
 //!
-//! let mailer = Mailer::smtp(config).await?
+//! let mailer = Mailer::smtp(SmtpConfig::new("smtp.example.com"))
+//!     .await?
 //!     .with_templates("./templates")?;
 //!
-//! // Send using a template
-//! mailer.send_template(
-//!     "welcome",
-//!     "user@example.com",
-//!     json!({
-//!         "name": "John",
-//!         "activation_link": "https://example.com/activate/abc123"
-//!     }),
-//! ).await?;
+//! // Send using a template. The rendered template supplies the subject and
+//! // body, so only the recipient is passed in.
+//! mailer
+//!     .send_template(
+//!         "welcome",
+//!         "user@example.com",
+//!         json!({
+//!             "name": "John",
+//!             "activation_link": "https://example.com/activate/abc123"
+//!         }),
+//!     )
+//!     .await?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod address;
@@ -64,6 +76,16 @@ mod email;
 mod error;
 mod mailer;
 mod transport;
+
+// Gated on the transports that use it, not on `reqwest` itself: `reqwest` is
+// only ever enabled *by* `sendgrid`/`mailgun`, and both import every item in
+// here unconditionally, so gating on the feature that actually implies a caller
+// is what keeps the module from needing a blanket `#[allow(dead_code)]`.
+#[cfg(any(feature = "sendgrid", feature = "mailgun"))]
+mod http;
+
+#[cfg(any(feature = "handlebars", feature = "tera", feature = "minijinja"))]
+mod template_dir;
 
 #[cfg(feature = "handlebars")]
 mod template_handlebars;
@@ -87,8 +109,8 @@ mod mailgun;
 mod queue;
 
 pub use address::{Address, IntoAddress, Mailbox};
-pub use attachment::{Attachment, ContentDisposition};
-pub use email::{Email, EmailBuilder};
+pub use attachment::{Attachment, ContentDisposition, DEFAULT_MAX_ATTACHMENT_BYTES};
+pub use email::{Email, EmailBuilder, validate_header};
 pub use error::{MailError, Result};
 pub use mailer::{Mailer, MailerConfig};
 pub use transport::{SmtpConfig, SmtpSecurity, SmtpTransport, Transport};
@@ -114,7 +136,7 @@ pub use mailgun::{MailgunConfig, MailgunTransport};
 #[cfg(feature = "queue")]
 pub use queue::{
     EmailJob, EmailQueue, EmailQueueBackend, EmailQueueConfig, EmailQueueWorker, InMemoryBackend,
-    MailerQueueExt, QueueStats,
+    MAX_SERVER_RETRY_AFTER, MailerQueueExt, QueueStats,
 };
 
 #[cfg(feature = "redis")]
@@ -194,6 +216,12 @@ pub mod prelude {
 
     #[cfg(feature = "handlebars")]
     pub use crate::HandlebarsEngine;
+
+    #[cfg(feature = "tera")]
+    pub use crate::TeraEngine;
+
+    #[cfg(feature = "minijinja")]
+    pub use crate::MiniJinjaEngine;
 
     #[cfg(feature = "sendgrid")]
     pub use crate::sendgrid::{SendGridConfig, SendGridTransport};

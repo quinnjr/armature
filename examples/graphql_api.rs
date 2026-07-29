@@ -8,9 +8,7 @@
 // GraphQL API example with Armature
 
 use armature::prelude::*;
-use armature_graphql::{
-    EmptySubscription, ID, Object, Result as GqlResult, Schema, SimpleObject, async_graphql,
-};
+use armature_graphql::{EmptySubscription, ID, Object, Result as GqlResult, Schema, SimpleObject};
 use serde::{Deserialize, Serialize};
 
 // ========== Domain Models ==========

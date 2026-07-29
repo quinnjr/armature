@@ -20,10 +20,106 @@
 //! curl http://localhost:3000/metrics
 //! ```
 
-use armature_core::handler::from_legacy_handler;
+use armature_core::handler::handler;
 use armature_core::*;
 use armature_metrics::*;
-use std::sync::Arc;
+use armature_proc_macro::use_middleware;
+use std::sync::LazyLock;
+
+// Custom business metrics.
+//
+// These are registered once, on first access, and shared by every handler
+// below. Handlers wrapped with `#[use_middleware(...)]` are plain free
+// functions (the attribute macro only accepts `ItemFn`, not closures), so
+// they can't capture local variables the way the old inline-closure routes
+// did -- these `LazyLock` statics take the place of that captured state.
+static PAGE_VIEWS: LazyLock<Counter> = LazyLock::new(|| {
+    CounterBuilder::new("page_views_total", "Total page views")
+        .register()
+        .expect("failed to register page_views_total")
+});
+
+static ACTIVE_USERS: LazyLock<Gauge> = LazyLock::new(|| {
+    GaugeBuilder::new("active_users", "Number of active users")
+        .register()
+        .expect("failed to register active_users")
+});
+
+static API_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    HistogramBuilder::new("api_latency_seconds", "API call latency")
+        .latency_buckets()
+        .register()
+        .expect("failed to register api_latency_seconds")
+});
+
+// Route handlers.
+//
+// Each handler is wrapped in `RequestMetricsMiddleware` via the real
+// `#[use_middleware(...)]` attribute macro, so every request actually flows
+// through it -- unlike the previous version of this example, which built a
+// `RequestMetricsMiddleware` and immediately discarded it. That is what
+// makes the automatic HTTP-level metrics (`http_requests_total`,
+// `http_request_duration_seconds`, `http_requests_in_flight`,
+// `http_request_size_bytes`, `http_response_size_bytes`) genuinely populate
+// once the server is hit.
+
+/// Home endpoint.
+#[use_middleware(RequestMetricsMiddleware::new())]
+async fn home(_req: HttpRequest) -> Result<HttpResponse, Error> {
+    // Increment page views counter
+    PAGE_VIEWS.inc();
+
+    Ok(HttpResponse::ok().with_json(&serde_json::json!({
+        "message": "Metrics Example API",
+        "endpoints": {
+            "/": "Home",
+            "/api/users": "List users",
+            "/api/posts": "List posts",
+            "/metrics": "Prometheus metrics"
+        }
+    }))?)
+}
+
+/// Users endpoint.
+#[use_middleware(RequestMetricsMiddleware::new())]
+async fn list_users(_req: HttpRequest) -> Result<HttpResponse, Error> {
+    let start = std::time::Instant::now();
+
+    // Simulate some work
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Update active users gauge
+    ACTIVE_USERS.inc();
+
+    // Record API latency
+    let duration = start.elapsed().as_secs_f64();
+    API_LATENCY.observe(duration);
+
+    // Decrease active users after response
+    ACTIVE_USERS.dec();
+
+    Ok(HttpResponse::ok().with_json(&serde_json::json!({
+        "users": [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"},
+            {"id": 3, "name": "Charlie"}
+        ]
+    }))?)
+}
+
+/// Posts endpoint.
+#[use_middleware(RequestMetricsMiddleware::new())]
+async fn list_posts(_req: HttpRequest) -> Result<HttpResponse, Error> {
+    // Simulate some work
+    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+    Ok(HttpResponse::ok().with_json(&serde_json::json!({
+        "posts": [
+            {"id": 1, "title": "First Post"},
+            {"id": 2, "title": "Second Post"}
+        ]
+    }))?)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,17 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Prometheus Metrics Example");
     info!("===========================");
 
-    // Create custom business metrics
+    // Register custom business metrics up front so they show up in
+    // `/metrics` (at zero) even before the first request comes in.
     info!("\nCreating custom metrics...");
-
-    let page_views = CounterBuilder::new("page_views_total", "Total page views").register()?;
-
-    let active_users = GaugeBuilder::new("active_users", "Number of active users").register()?;
-
-    let api_latency = HistogramBuilder::new("api_latency_seconds", "API call latency")
-        .latency_buckets()
-        .register()?;
-
+    LazyLock::force(&PAGE_VIEWS);
+    LazyLock::force(&ACTIVE_USERS);
+    LazyLock::force(&API_LATENCY);
     info!("✓ Registered custom metrics");
 
     // Create router
@@ -53,23 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     router.add_route(Route {
         method: HttpMethod::GET,
         path: "/".to_string(),
-        handler: from_legacy_handler(Arc::new(move |_req: HttpRequest| {
-            let page_views = page_views.clone();
-            Box::pin(async move {
-                // Increment page views counter
-                page_views.inc();
-
-                Ok(HttpResponse::ok().with_json(&serde_json::json!({
-                    "message": "Metrics Example API",
-                    "endpoints": {
-                        "/": "Home",
-                        "/api/users": "List users",
-                        "/api/posts": "List posts",
-                        "/metrics": "Prometheus metrics"
-                    }
-                }))?)
-            })
-        })),
+        handler: handler(home),
         constraints: None,
     });
 
@@ -77,35 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     router.add_route(Route {
         method: HttpMethod::GET,
         path: "/api/users".to_string(),
-        handler: from_legacy_handler(Arc::new(move |_req: HttpRequest| {
-            let active_users = active_users.clone();
-            let api_latency = api_latency.clone();
-
-            Box::pin(async move {
-                let start = std::time::Instant::now();
-
-                // Simulate some work
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-                // Update active users gauge
-                active_users.inc();
-
-                // Record API latency
-                let duration = start.elapsed().as_secs_f64();
-                api_latency.observe(duration);
-
-                // Decrease active users after response
-                active_users.dec();
-
-                Ok(HttpResponse::ok().with_json(&serde_json::json!({
-                    "users": [
-                        {"id": 1, "name": "Alice"},
-                        {"id": 2, "name": "Bob"},
-                        {"id": 3, "name": "Charlie"}
-                    ]
-                }))?)
-            })
-        })),
+        handler: handler(list_users),
         constraints: None,
     });
 
@@ -113,19 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     router.add_route(Route {
         method: HttpMethod::GET,
         path: "/api/posts".to_string(),
-        handler: from_legacy_handler(Arc::new(|_req: HttpRequest| {
-            Box::pin(async move {
-                // Simulate some work
-                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-                Ok(HttpResponse::ok().with_json(&serde_json::json!({
-                    "posts": [
-                        {"id": 1, "title": "First Post"},
-                        {"id": 2, "title": "Second Post"}
-                    ]
-                }))?)
-            })
-        })),
+        handler: handler(list_posts),
         constraints: None,
     });
 
@@ -137,9 +172,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         constraints: None,
     });
 
-    // Add request metrics middleware
-    info!("Adding request metrics middleware...");
-    let _metrics_middleware = Arc::new(RequestMetricsMiddleware::new());
+    info!(
+        "\n✓ RequestMetricsMiddleware is wired onto every route above via #[use_middleware(...)]"
+    );
 
     // Build application
     let container = Container::new();

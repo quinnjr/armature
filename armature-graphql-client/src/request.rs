@@ -58,6 +58,7 @@ pub struct QueryBuilder<'a> {
     request: GraphQLRequest,
     timeout: Option<Duration>,
     headers: Vec<(String, String)>,
+    cacheable: bool,
 }
 
 impl<'a> QueryBuilder<'a> {
@@ -68,7 +69,16 @@ impl<'a> QueryBuilder<'a> {
             request: GraphQLRequest::new(query),
             timeout: None,
             headers: Vec::new(),
+            cacheable: true,
         }
+    }
+
+    /// Mark whether this request is eligible for response caching.
+    ///
+    /// Queries are cacheable by default; mutations must never be cached.
+    pub(crate) fn with_cacheable(mut self, cacheable: bool) -> Self {
+        self.cacheable = cacheable;
+        self
     }
 
     /// Set the operation name.
@@ -116,7 +126,7 @@ impl<'a> QueryBuilder<'a> {
     /// Execute the query and return the raw response.
     pub async fn send_raw(self) -> Result<GraphQLResponse<Value>> {
         self.client
-            .execute_request(self.request, self.headers, self.timeout)
+            .execute_request_cached(self.request, self.headers, self.timeout, self.cacheable)
             .await
     }
 
@@ -138,7 +148,7 @@ impl<'a> MutationBuilder<'a> {
     /// Create a new mutation builder.
     pub(crate) fn new(client: &'a GraphQLClient, mutation: impl Into<String>) -> Self {
         Self {
-            inner: QueryBuilder::new(client, mutation),
+            inner: QueryBuilder::new(client, mutation).with_cacheable(false),
         }
     }
 

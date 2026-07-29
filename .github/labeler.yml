@@ -12,7 +12,7 @@ core:
 macros:
   - changed-files:
       - any-glob-to-any-file:
-          - 'armature-macro/**'
+          - 'armature-proc-macro/**'
           - 'armature-macros/**'
           - 'armature-macros-utils/**'
 

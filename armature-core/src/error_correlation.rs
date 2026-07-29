@@ -34,8 +34,8 @@ use crate::{Error, HttpRequest, HttpResponse};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -157,6 +157,20 @@ impl IdGenerationStrategy {
 }
 
 /// Generate random bytes
+/// Generate a random lowercase-hex identifier of exactly `hex_len` characters.
+fn random_hex_id(hex_len: usize) -> String {
+    let mut s = String::with_capacity(hex_len);
+    while s.len() < hex_len {
+        let bytes: [u8; 16] = rand_bytes();
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+        }
+    }
+    s.truncate(hex_len);
+    s
+}
+
 fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     // Use simple PRNG based on timestamp and address
@@ -379,11 +393,10 @@ impl CorrelationContext {
         let mut ctx = Self::new();
 
         // Extract correlation ID
-        if let Some(id) = req
-            .headers
-            .get(headers::CORRELATION_ID)
-            .or_else(|| req.headers.get(headers::CORRELATION_ID.to_lowercase().as_str()))
-        {
+        if let Some(id) = req.headers.get(headers::CORRELATION_ID).or_else(|| {
+            req.headers
+                .get(headers::CORRELATION_ID.to_lowercase().as_str())
+        }) {
             ctx.correlation_id = id.clone();
         }
 
@@ -397,27 +410,27 @@ impl CorrelationContext {
         }
 
         // Extract W3C trace context
-        if let Some(traceparent) = req.headers.get(headers::TRACE_PARENT) {
-            if let Some((trace_id, span_id, sampled)) = parse_traceparent(traceparent) {
-                ctx.trace_id = Some(trace_id);
-                ctx.parent_span_id = Some(span_id);
-                ctx.sampled = sampled;
-                // Generate new span ID for this service
-                ctx.span_id = Some(IdGenerationStrategy::Short.generate());
-            }
+        if let Some(traceparent) = req.headers.get(headers::TRACE_PARENT)
+            && let Some((trace_id, span_id, sampled)) = parse_traceparent(traceparent)
+        {
+            ctx.trace_id = Some(trace_id);
+            ctx.parent_span_id = Some(span_id);
+            ctx.sampled = sampled;
+            // Generate new span ID for this service
+            ctx.span_id = Some(IdGenerationStrategy::Short.generate());
         }
 
         // Fall back to B3 headers (Zipkin)
-        if ctx.trace_id.is_none() {
-            if let Some(id) = req.headers.get(headers::B3_TRACE_ID) {
-                ctx.trace_id = Some(id.clone());
-            }
+        if ctx.trace_id.is_none()
+            && let Some(id) = req.headers.get(headers::B3_TRACE_ID)
+        {
+            ctx.trace_id = Some(id.clone());
         }
-        if ctx.span_id.is_none() {
-            if let Some(id) = req.headers.get(headers::B3_SPAN_ID) {
-                ctx.parent_span_id = Some(id.clone());
-                ctx.span_id = Some(IdGenerationStrategy::Short.generate());
-            }
+        if ctx.span_id.is_none()
+            && let Some(id) = req.headers.get(headers::B3_SPAN_ID)
+        {
+            ctx.parent_span_id = Some(id.clone());
+            ctx.span_id = Some(IdGenerationStrategy::Short.generate());
         }
 
         // Extract causation ID
@@ -435,8 +448,10 @@ impl CorrelationContext {
 
     /// Inject correlation context into HTTP request headers.
     pub fn inject_into_request(&self, req: &mut HttpRequest) {
-        req.headers
-            .insert(headers::CORRELATION_ID.to_string(), self.correlation_id.clone());
+        req.headers.insert(
+            headers::CORRELATION_ID.to_string(),
+            self.correlation_id.clone(),
+        );
         req.headers
             .insert(headers::REQUEST_ID.to_string(), self.request_id.clone());
 
@@ -444,13 +459,17 @@ impl CorrelationContext {
             let span_id = self.span_id.as_deref().unwrap_or("0000000000000000");
             let sampled = if self.sampled { "01" } else { "00" };
             let traceparent = format!("00-{}-{}-{}", trace_id, span_id, sampled);
-            req.headers.insert(headers::TRACE_PARENT.to_string(), traceparent);
+            req.headers
+                .insert(headers::TRACE_PARENT.to_string(), traceparent);
 
             // Also add B3 headers for Zipkin compatibility
-            req.headers.insert(headers::B3_TRACE_ID.to_string(), trace_id.clone());
-            req.headers.insert(headers::B3_SPAN_ID.to_string(), span_id.to_string());
+            req.headers
+                .insert(headers::B3_TRACE_ID.to_string(), trace_id.clone());
+            req.headers
+                .insert(headers::B3_SPAN_ID.to_string(), span_id.to_string());
             if let Some(ref parent) = self.parent_span_id {
-                req.headers.insert(headers::B3_PARENT_SPAN_ID.to_string(), parent.clone());
+                req.headers
+                    .insert(headers::B3_PARENT_SPAN_ID.to_string(), parent.clone());
             }
             req.headers.insert(
                 headers::B3_SAMPLED.to_string(),
@@ -471,8 +490,10 @@ impl CorrelationContext {
 
     /// Inject correlation context into HTTP response headers.
     pub fn inject_into_response(&self, res: &mut HttpResponse) {
-        res.headers
-            .insert(headers::CORRELATION_ID.to_string(), self.correlation_id.clone());
+        res.headers.insert(
+            headers::CORRELATION_ID.to_string(),
+            self.correlation_id.clone(),
+        );
         res.headers
             .insert(headers::REQUEST_ID.to_string(), self.request_id.clone());
 
@@ -480,7 +501,8 @@ impl CorrelationContext {
             let span_id = self.span_id.as_deref().unwrap_or("0000000000000000");
             let sampled = if self.sampled { "01" } else { "00" };
             let traceparent = format!("00-{}-{}-{}", trace_id, span_id, sampled);
-            res.headers.insert(headers::TRACE_PARENT.to_string(), traceparent);
+            res.headers
+                .insert(headers::TRACE_PARENT.to_string(), traceparent);
         }
     }
 
@@ -752,14 +774,41 @@ impl ErrorRegistry {
 
         // Check size limit
         let mut errors = self.errors.write().await;
-        if errors.len() >= self.max_size {
+        let evicted = if errors.len() >= self.max_size {
             // Remove oldest error (simple LRU would be better)
-            if let Some(oldest_id) = errors.keys().next().cloned() {
-                errors.remove(&oldest_id);
-            }
-        }
+            errors
+                .keys()
+                .next()
+                .cloned()
+                .and_then(|id| errors.remove(&id).map(|e| (id, e)))
+        } else {
+            None
+        };
         errors.insert(error_id.clone(), error);
         drop(errors);
+
+        // Drop the evicted error's index entries so the indexes stay bounded
+        // by max_size alongside the error store itself.
+        if let Some((evicted_id, evicted)) = evicted {
+            let mut by_correlation = self.by_correlation.write().await;
+            if let Some(ids) = by_correlation.get_mut(&evicted.context.correlation_id) {
+                ids.retain(|id| id != &evicted_id);
+                if ids.is_empty() {
+                    by_correlation.remove(&evicted.context.correlation_id);
+                }
+            }
+            drop(by_correlation);
+
+            if let Some(ref evicted_trace) = evicted.context.trace_id {
+                let mut by_trace = self.by_trace.write().await;
+                if let Some(ids) = by_trace.get_mut(evicted_trace) {
+                    ids.retain(|id| id != &evicted_id);
+                    if ids.is_empty() {
+                        by_trace.remove(evicted_trace);
+                    }
+                }
+            }
+        }
 
         // Index by correlation ID
         let mut by_correlation = self.by_correlation.write().await;
@@ -825,10 +874,7 @@ impl ErrorRegistry {
             }
         }
 
-        Some(ErrorTree {
-            error,
-            children,
-        })
+        Some(ErrorTree { error, children })
     }
 
     /// Clear all errors.
@@ -972,19 +1018,17 @@ impl Middleware for CorrelationMiddleware {
         let mut ctx = CorrelationContext::from_request(&req);
 
         // Generate new IDs if not present
-        if req.headers.get(&self.config.correlation_header).is_none() {
+        if !req.headers.contains_key(&self.config.correlation_header) {
             ctx.correlation_id = self.config.id_strategy.generate();
         }
         ctx.request_id = self.config.id_strategy.generate();
 
-        // Generate trace ID if configured and not present
+        // Generate trace ID if configured and not present. W3C trace/span IDs
+        // are fixed-length lowercase hex, independent of the configured ID
+        // strategy (whose output may be shorter than the required length).
         if self.config.generate_trace_id && ctx.trace_id.is_none() {
-            ctx.trace_id = Some(format!(
-                "{}{}",
-                self.config.id_strategy.generate(),
-                self.config.id_strategy.generate()
-            ).replace("-", "")[..32].to_string());
-            ctx.span_id = Some(self.config.id_strategy.generate()[..16].to_string());
+            ctx.trace_id = Some(random_hex_id(32));
+            ctx.span_id = Some(random_hex_id(16));
         }
 
         // Add service info
@@ -1047,23 +1091,29 @@ impl CorrelatedRequest for HttpRequest {
     fn correlation_id(&self) -> Option<String> {
         self.headers
             .get(headers::CORRELATION_ID)
-            .or_else(|| self.headers.get(headers::CORRELATION_ID.to_lowercase().as_str()))
+            .or_else(|| {
+                self.headers
+                    .get(headers::CORRELATION_ID.to_lowercase().as_str())
+            })
             .cloned()
     }
 
     fn request_id(&self) -> Option<String> {
         self.headers
             .get(headers::REQUEST_ID)
-            .or_else(|| self.headers.get(headers::REQUEST_ID.to_lowercase().as_str()))
+            .or_else(|| {
+                self.headers
+                    .get(headers::REQUEST_ID.to_lowercase().as_str())
+            })
             .cloned()
     }
 
     fn trace_id(&self) -> Option<String> {
         // Try W3C traceparent first
-        if let Some(traceparent) = self.headers.get(headers::TRACE_PARENT) {
-            if let Some((trace_id, _, _)) = parse_traceparent(traceparent) {
-                return Some(trace_id);
-            }
+        if let Some(traceparent) = self.headers.get(headers::TRACE_PARENT)
+            && let Some((trace_id, _, _)) = parse_traceparent(traceparent)
+        {
+            return Some(trace_id);
         }
         // Fall back to B3
         self.headers.get(headers::B3_TRACE_ID).cloned()
@@ -1071,10 +1121,10 @@ impl CorrelatedRequest for HttpRequest {
 
     fn span_id(&self) -> Option<String> {
         // Try W3C traceparent first
-        if let Some(traceparent) = self.headers.get(headers::TRACE_PARENT) {
-            if let Some((_, span_id, _)) = parse_traceparent(traceparent) {
-                return Some(span_id);
-            }
+        if let Some(traceparent) = self.headers.get(headers::TRACE_PARENT)
+            && let Some((_, span_id, _)) = parse_traceparent(traceparent)
+        {
+            return Some(span_id);
         }
         // Fall back to B3
         self.headers.get(headers::B3_SPAN_ID).cloned()
@@ -1158,14 +1208,10 @@ mod tests {
     #[test]
     fn test_correlation_context_from_request() {
         let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
-        req.headers.insert(
-            headers::CORRELATION_ID.to_string(),
-            "corr-123".to_string(),
-        );
-        req.headers.insert(
-            headers::REQUEST_ID.to_string(),
-            "req-456".to_string(),
-        );
+        req.headers
+            .insert(headers::CORRELATION_ID.to_string(), "corr-123".to_string());
+        req.headers
+            .insert(headers::REQUEST_ID.to_string(), "req-456".to_string());
         req.headers.insert(
             headers::TRACE_PARENT.to_string(),
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
@@ -1175,7 +1221,10 @@ mod tests {
 
         assert_eq!(ctx.correlation_id, "corr-123");
         assert_eq!(ctx.request_id, "req-456");
-        assert_eq!(ctx.trace_id, Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()));
+        assert_eq!(
+            ctx.trace_id,
+            Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string())
+        );
         assert_eq!(ctx.parent_span_id, Some("00f067aa0ba902b7".to_string()));
         assert!(ctx.sampled);
     }
@@ -1215,8 +1264,7 @@ mod tests {
 
     #[test]
     fn test_retry_info() {
-        let error = CorrelatedError::new("Temporary failure")
-            .retryable(1000, 3);
+        let error = CorrelatedError::new("Temporary failure").retryable(1000, 3);
 
         let retry = error.retry_info.unwrap();
         assert!(retry.retryable);
@@ -1249,14 +1297,10 @@ mod tests {
     #[test]
     fn test_correlated_request_extension() {
         let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
-        req.headers.insert(
-            headers::CORRELATION_ID.to_string(),
-            "corr-123".to_string(),
-        );
-        req.headers.insert(
-            headers::REQUEST_ID.to_string(),
-            "req-456".to_string(),
-        );
+        req.headers
+            .insert(headers::CORRELATION_ID.to_string(), "corr-123".to_string());
+        req.headers
+            .insert(headers::REQUEST_ID.to_string(), "req-456".to_string());
 
         assert_eq!(req.correlation_id(), Some("corr-123".to_string()));
         assert_eq!(req.request_id(), Some("req-456".to_string()));
@@ -1288,9 +1332,15 @@ mod tests {
         let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
         ctx.inject_into_request(&mut req);
 
-        assert_eq!(req.headers.get(headers::CORRELATION_ID), Some(&"corr-123".to_string()));
+        assert_eq!(
+            req.headers.get(headers::CORRELATION_ID),
+            Some(&"corr-123".to_string())
+        );
         assert!(req.headers.get(headers::TRACE_PARENT).is_some());
-        assert_eq!(req.headers.get(headers::SESSION_ID), Some(&"session-abc".to_string()));
+        assert_eq!(
+            req.headers.get(headers::SESSION_ID),
+            Some(&"session-abc".to_string())
+        );
     }
 
     #[test]
@@ -1320,5 +1370,3 @@ mod tests {
         assert!(json.contains("400"));
     }
 }
-
-

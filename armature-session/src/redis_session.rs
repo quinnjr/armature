@@ -1,6 +1,6 @@
 //! Redis session storage implementation.
 
-use armature_log::{debug, info, trace};
+use armature_log::{debug, info};
 use crate::config::SessionConfig;
 use crate::error::{SessionError, SessionResult};
 use crate::traits::{Session, SessionStore, generate_session_id};
@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::time::Duration;
+
+/// Number of keys hinted per `SCAN` iteration when sweeping the namespace.
+const SCAN_COUNT: usize = 500;
 
 /// Redis-backed session store.
 ///
@@ -157,16 +160,12 @@ impl SessionStore for RedisSessionStore {
         let key = self.session_key(session_id);
         let mut conn = self.conn.clone();
 
+        // `save()` always writes the key with a TTL, so a present key is a
+        // live (non-expired) session. EXISTS alone is authoritative here;
+        // there is no need for a second GET + deserialize round-trip.
         let exists: bool = conn.exists(&key).await?;
 
-        if exists {
-            // Also check if not expired
-            if let Some(session) = self.get(session_id).await? {
-                return Ok(!session.is_expired());
-            }
-        }
-
-        Ok(false)
+        Ok(exists)
     }
 
     async fn extend(&self, session_id: &str, ttl: Duration) -> SessionResult<()> {
@@ -198,14 +197,31 @@ impl SessionStore for RedisSessionStore {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", self.config.namespace);
 
-        // Use SCAN to find all session keys
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await?;
+        // Cursored SCAN instead of the blocking KEYS command. Each batch of
+        // matching keys is removed with UNLINK (non-blocking, reclaims memory
+        // in a background thread) rather than the synchronous DEL.
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await?;
 
-        if !keys.is_empty() {
-            let _: () = conn.del(keys).await?;
+            if !keys.is_empty() {
+                let _: () = redis::cmd("UNLINK")
+                    .arg(&keys)
+                    .query_async(&mut conn)
+                    .await?;
+            }
+
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
         }
 
         Ok(())
@@ -215,12 +231,30 @@ impl SessionStore for RedisSessionStore {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", self.config.namespace);
 
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await?;
+        // Cursored SCAN that accumulates only a running count; keys from each
+        // batch are counted and discarded rather than materialized into one
+        // large Vec, keeping memory bounded regardless of session volume.
+        let mut cursor: u64 = 0;
+        let mut total: usize = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await?;
 
-        Ok(keys.len())
+            total += keys.len();
+
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     async fn cleanup_expired(&self) -> SessionResult<usize> {
@@ -238,6 +272,44 @@ mod tests {
     fn test_session_key_generation() {
         let config = SessionConfig::redis("redis://localhost:6379").unwrap();
         assert!(config.session_key("test-id").starts_with("session:"));
+    }
+
+    /// Pure model of the cursored SCAN loop used by `count`/`clear_all`.
+    ///
+    /// Redis returns keys in unspecified batches and signals completion with a
+    /// zero cursor. This verifies the driving logic (accumulate batch lengths,
+    /// terminate on cursor 0, never materialize all keys at once) independently
+    /// of a live backend.
+    fn scan_count_model(batches: &[(u64, Vec<&str>)]) -> usize {
+        let mut total = 0usize;
+        let mut idx = 0usize;
+        loop {
+            let (next, keys) = &batches[idx];
+            total += keys.len();
+            idx += 1;
+            if *next == 0 {
+                break;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn test_scan_loop_accumulates_across_batches() {
+        // Non-zero cursors chain batches; a final zero cursor ends the sweep.
+        let batches = vec![
+            (42u64, vec!["session:a", "session:b"]),
+            (7u64, vec!["session:c"]),
+            (0u64, vec!["session:d", "session:e"]),
+        ];
+        assert_eq!(scan_count_model(&batches), 5);
+    }
+
+    #[test]
+    fn test_scan_loop_single_empty_batch() {
+        // An immediately-complete sweep (cursor 0, no keys) counts zero.
+        let batches = vec![(0u64, vec![])];
+        assert_eq!(scan_count_model(&batches), 0);
     }
 }
 

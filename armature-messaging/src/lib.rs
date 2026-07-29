@@ -55,6 +55,18 @@ use uuid::Uuid;
 pub mod config;
 pub mod error;
 
+/// Shared bounded-concurrency dispatch helpers used by the aws/nats/rabbitmq/
+/// mq_bridge backends. Not compiled at all unless at least one of those
+/// backends is enabled, so it never contributes unused-code warnings on its
+/// own.
+#[cfg(any(
+    feature = "aws",
+    feature = "nats",
+    feature = "rabbitmq",
+    feature = "mq-bridge"
+))]
+pub(crate) mod dispatch;
+
 #[cfg(feature = "rabbitmq")]
 pub mod rabbitmq;
 

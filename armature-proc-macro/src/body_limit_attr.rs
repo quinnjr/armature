@@ -1,6 +1,26 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Expr, ItemFn, Lit, Token, parse::Parse, parse::ParseStream, parse_macro_input};
+use syn::{
+    Expr, FnArg, ItemFn, Lit, Pat, Token, parse::Parse, parse::ParseStream, parse_macro_input,
+};
+
+/// Find the identifier of the handler's first non-receiver parameter — the
+/// request binding — so generated code refers to it by its real name instead
+/// of assuming `req`.
+fn request_ident(input: &ItemFn) -> syn::Ident {
+    input
+        .sig
+        .inputs
+        .iter()
+        .find_map(|arg| match arg {
+            FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .unwrap_or_else(|| syn::Ident::new("req", proc_macro2::Span::call_site()))
+}
 
 /// Arguments for the body_limit attribute
 /// Parses: #[body_limit(1mb)] or #[body_limit(1024)] or #[body_limit(kb = 512)]
@@ -177,6 +197,7 @@ pub fn body_limit_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Create the inner handler name
     let inner_fn_name = syn::Ident::new(&format!("__{}_inner", func_name), func_name.span());
+    let req_ident = request_ident(&input);
 
     let expanded = quote! {
         #(#func_attrs)*
@@ -184,10 +205,10 @@ pub fn body_limit_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             const __BODY_LIMIT: usize = #limit_bytes;
 
             // Check body size
-            if req.body.len() > __BODY_LIMIT {
+            if #req_ident.body.len() > __BODY_LIMIT {
                 return Err(armature_core::Error::PayloadTooLarge(format!(
                     "Request body size ({} bytes) exceeds maximum allowed size ({})",
-                    req.body.len(),
+                    #req_ident.body.len(),
                     #limit_display
                 )));
             }
@@ -196,7 +217,7 @@ pub fn body_limit_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #async_marker fn #inner_fn_name(#func_inputs) #func_output
                 #func_body
 
-            #inner_fn_name(req).await
+            #inner_fn_name(#req_ident).await
         }
     };
 

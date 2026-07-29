@@ -6,13 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Tenant information
+///
+/// Marked `#[non_exhaustive]` so new fields can be added without breaking
+/// downstream callers that construct or match on `Tenant`. Downstream code
+/// must build a `Tenant` via [`Tenant::new`] plus the `with_*` builder
+/// methods rather than a struct literal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tenant {
     /// Unique tenant identifier
     pub id: String,
 
     /// Tenant name/slug
     pub name: String,
+
+    /// Human-readable display name (distinct from the slug in `name`)
+    pub display_name: Option<String>,
 
     /// Tenant domain (if using subdomain isolation)
     pub domain: Option<String>,
@@ -44,12 +53,19 @@ impl Tenant {
         Self {
             id: id.into(),
             name: name.into(),
+            display_name: None,
             domain: None,
             database: None,
             schema: None,
             active: true,
             metadata: HashMap::new(),
         }
+    }
+
+    /// Set the human-readable display name
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
     }
 
     /// Set tenant domain
@@ -84,6 +100,24 @@ impl Tenant {
 
     /// Get cache key prefix for this tenant
     ///
+    /// The `id` segment is length-prefixed (`"tenant:{id.len()}:{id}:{key}"`)
+    /// specifically so that no `id`/`key` content can ever produce a
+    /// colliding key, regardless of what characters `id` or `key` contain
+    /// (including `':'`). This matters because [`Tenant::new`] accepts any
+    /// caller-supplied `id` with no validation, and
+    /// [`crate::cache::TenantCache::clear_tenant`] (plus any other consumer
+    /// that treats `cache_key` output as a prefix) matches keys with a
+    /// plain `starts_with` test.
+    ///
+    /// Without the length prefix, two different `(id, key)` pairs could
+    /// format to the same string whenever one `id` embeds a `':'` — e.g.
+    /// `id = "x"`, `key = "y:z"` and `id = "x:y"`, `key = "z"` would both
+    /// produce `"tenant:x:y:z"`. Prefixing the `id` segment with its own
+    /// length makes that impossible: two ids of different lengths always
+    /// diverge at the length prefix, and two ids of the same length can
+    /// only produce equal output if the ids (and therefore the keys) are
+    /// themselves equal.
+    ///
     /// # Examples
     ///
     /// ```
@@ -91,10 +125,10 @@ impl Tenant {
     ///
     /// let tenant = Tenant::new("tenant-123", "acme-corp");
     /// let key = tenant.cache_key("users:1");
-    /// assert_eq!(key, "tenant:tenant-123:users:1");
+    /// assert_eq!(key, "tenant:10:tenant-123:users:1");
     /// ```
     pub fn cache_key(&self, key: &str) -> String {
-        format!("tenant:{}:{}", self.id, key)
+        format!("tenant:{}:{}:{}", self.id.len(), self.id, key)
     }
 }
 
@@ -174,7 +208,27 @@ mod tests {
     fn test_cache_key() {
         let tenant = Tenant::new("tenant-123", "acme");
         let key = tenant.cache_key("users:1");
-        assert_eq!(key, "tenant:tenant-123:users:1");
+        assert_eq!(key, "tenant:10:tenant-123:users:1");
+    }
+
+    #[test]
+    fn test_cache_key_collision_resistant_to_colon_in_id() {
+        // Under the old `format!("tenant:{}:{}", self.id, key)` scheme,
+        // these two (id, key) pairs both formatted to the identical string
+        // "tenant:x:y:z", which would let one tenant's cache operations
+        // (including `TenantCache::clear_tenant`'s prefix scan) collide
+        // with another's. The length-prefixed scheme must keep them apart.
+        let tenant_a = Tenant::new("x", "tenant-a");
+        let tenant_b = Tenant::new("x:y", "tenant-b");
+
+        let key_a = tenant_a.cache_key("y:z");
+        let key_b = tenant_b.cache_key("z");
+
+        assert_ne!(
+            key_a, key_b,
+            "cache keys for distinct (id, key) pairs must never collide, \
+             even when id contains ':'"
+        );
     }
 
     #[test]

@@ -1,13 +1,127 @@
 //! Code generation commands.
 
 use colored::Colorize;
+use heck::ToSnakeCase;
 
 use crate::error::{CliError, CliResult};
 use crate::generators::{NameCases, ensure_dir, get_src_dir, update_mod_file, write_file};
-use crate::templates::{ComponentData, ControllerData, ModuleData, TemplateRegistry};
+use crate::templates::{
+    ComponentData, ControllerData, DtoData, EntityData, ModelData, ModuleData, TemplateRegistry,
+};
+
+/// A single user-specified field parsed from a `--fields` spec.
+struct FieldDef {
+    snake: String,
+    rust_type: &'static str,
+}
+
+/// Map a field type token (e.g. `string`, `i32`, `bool`) to a Rust type.
+fn rust_type_for(spec: &str) -> &'static str {
+    match spec.trim().to_lowercase().as_str() {
+        "string" | "str" | "text" | "varchar" | "uuid" => "String",
+        "int" | "integer" | "i32" => "i32",
+        "i64" | "long" | "bigint" => "i64",
+        "u32" => "u32",
+        "u64" => "u64",
+        "float" | "f64" | "double" | "decimal" => "f64",
+        "f32" => "f32",
+        "bool" | "boolean" => "bool",
+        "date" | "datetime" | "timestamp" => "String",
+        "json" => "serde_json::Value",
+        _ => "String",
+    }
+}
+
+/// Single source-of-truth table mapping a Rust type (as produced by
+/// [`rust_type_for`]) to its Diesel type name and plain SQL column type.
+///
+/// Keeping both mappings in one table prevents the two from silently
+/// diverging (e.g. missing arms like the `serde_json::Value` -> `JSONB` case).
+const TYPE_MAPPINGS: &[(&str, &str, &str)] = &[
+    // (rust_type, diesel_type, sql_type)
+    ("String", "Text", "VARCHAR"),
+    ("i32", "Integer", "INTEGER"),
+    ("i64", "BigInt", "BIGINT"),
+    ("u32", "BigInt", "BIGINT"),
+    ("u64", "BigInt", "BIGINT"),
+    ("f64", "Double", "DOUBLE PRECISION"),
+    ("f32", "Double", "DOUBLE PRECISION"),
+    ("bool", "Bool", "BOOLEAN"),
+    ("serde_json::Value", "Text", "JSONB"),
+];
+
+/// Default Diesel type for a Rust type with no explicit mapping.
+const DEFAULT_DIESEL_TYPE: &str = "Text";
+/// Default SQL type for a Rust type with no explicit mapping.
+const DEFAULT_SQL_TYPE: &str = "TEXT";
+
+/// Map a Rust type to a Diesel SQL column type.
+fn diesel_type_for(rust_type: &str) -> &'static str {
+    TYPE_MAPPINGS
+        .iter()
+        .find(|(rt, _, _)| *rt == rust_type)
+        .map(|(_, diesel, _)| *diesel)
+        .unwrap_or(DEFAULT_DIESEL_TYPE)
+}
+
+/// Map a Rust type to a plain SQL column type (used for generated migrations).
+fn sql_type_for(rust_type: &str) -> &'static str {
+    TYPE_MAPPINGS
+        .iter()
+        .find(|(rt, _, _)| *rt == rust_type)
+        .map(|(_, _, sql)| *sql)
+        .unwrap_or(DEFAULT_SQL_TYPE)
+}
+
+/// Field names already declared by the base model struct / migration SQL
+/// (see `MODEL_TEMPLATE` and `generate_migration` in `templates.rs`).
+///
+/// A user-supplied `--fields` entry that collides with one of these produces
+/// a duplicate struct field / SQL column, so it must be rejected up front.
+const RESERVED_FIELD_NAMES: &[&str] = &["id", "name", "created_at", "updated_at"];
+
+/// Parse a `--fields` spec like `name:string,email:string` into field definitions.
+///
+/// Invalid or empty entries are skipped; a bare `name` (no type) defaults to `String`.
+fn parse_fields(spec: Option<&str>) -> Vec<FieldDef> {
+    let Some(spec) = spec else {
+        return Vec::new();
+    };
+    spec.split(',')
+        .filter_map(|pair| {
+            let mut it = pair.splitn(2, ':');
+            let name = it.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let ty = it.next().unwrap_or("string");
+            Some(FieldDef {
+                snake: name.to_snake_case(),
+                rust_type: rust_type_for(ty),
+            })
+        })
+        .collect()
+}
+
+/// Reject `--fields` entries that collide with the reserved column/field
+/// names already hardcoded into the base model template and migration SQL
+/// (`id`, `name`, `created_at`, `updated_at`). Without this check, a field
+/// like `--fields name:string` produces a struct/table with a duplicate
+/// field and fails to compile/run.
+fn check_reserved_field_names(fields: &[FieldDef]) -> CliResult<()> {
+    for field in fields {
+        if RESERVED_FIELD_NAMES.contains(&field.snake.as_str()) {
+            return Err(CliError::InvalidArgument(format!(
+                "field name '{}' collides with a column already provided by the base model template; choose a different name",
+                field.snake
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Generate a controller.
-pub async fn controller(name: &str, crud: bool, skip_tests: bool) -> CliResult<()> {
+pub async fn controller(name: &str, crud: bool, skip_tests: bool, auth: bool) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let controllers_dir = src_dir.join("controllers");
@@ -22,11 +136,19 @@ pub async fn controller(name: &str, crud: bool, skip_tests: bool) -> CliResult<(
         names.kebab.clone()
     };
 
+    // When --auth is set, attach an authentication guard to the controller.
+    let guard_attr = if auth {
+        "#[guard(AuthGuard)]\n".to_string()
+    } else {
+        String::new()
+    };
+
     let data = ControllerData {
         name_pascal: names.pascal.clone(),
         name_snake: names.snake.clone(),
         name_kebab: names.kebab.clone(),
         base_path,
+        guard_attr,
     };
 
     // Generate controller file
@@ -158,9 +280,21 @@ pub async fn middleware(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("middleware", name, skip_tests).await
 }
 
-/// Generate a guard.
-pub async fn guard(name: &str, skip_tests: bool) -> CliResult<()> {
-    generate_component("guard", name, skip_tests).await
+/// Generate a guard, choosing the implementation from `guard_type`.
+///
+/// `guard_type` is one of `custom`, `auth`, `role`, `permission`, `apikey`,
+/// `ratelimit`. Each renders a distinct guard implementation.
+pub async fn guard(name: &str, skip_tests: bool, guard_type: &str) -> CliResult<()> {
+    let (template, test_template): (&str, Option<&str>) = match guard_type {
+        "auth" => ("guard_auth", Some("guard_test")),
+        "role" => ("guard_role", None),
+        "permission" => ("guard_permission", None),
+        "apikey" => ("guard_apikey", None),
+        "ratelimit" => ("guard_ratelimit", None),
+        // "custom" and anything else fall back to the generic guard.
+        _ => ("guard", Some("guard_test")),
+    };
+    generate_component_templated("guards", "Guard", template, test_template, name, skip_tests).await
 }
 
 /// Generate a service.
@@ -184,7 +318,7 @@ pub async fn resource(name: &str, crud: bool) -> CliResult<()> {
 
     // Generate controller
     println!("  {} Generating controller...", "2/3".dimmed());
-    controller(name, crud, false).await?;
+    controller(name, crud, false, false).await?;
     println!();
 
     // Generate module
@@ -209,8 +343,8 @@ pub async fn repository(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("repository", name, skip_tests).await
 }
 
-/// Generate DTOs (Data Transfer Objects).
-pub async fn dto(name: &str) -> CliResult<()> {
+/// Generate DTOs (Data Transfer Objects), optionally injecting `--fields`.
+pub async fn dto(name: &str, fields: Option<&str>) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let dto_dir = src_dir.join("dto");
@@ -218,10 +352,49 @@ pub async fn dto(name: &str) -> CliResult<()> {
 
     let templates = TemplateRegistry::new();
 
-    let data = ComponentData {
+    let parsed = parse_fields(fields);
+
+    // Response struct: extra fields between `id` and the timestamps.
+    let response_fields = parsed
+        .iter()
+        .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+        .collect::<String>();
+
+    // Create request: validated fields (defaults to a single `name` field).
+    let create_fields = if parsed.is_empty() {
+        "    #[validate(length(min = 1, max = 255, message = \"Name must be between 1 and 255 characters\"))]\n    pub name: String,\n".to_string()
+    } else {
+        parsed
+            .iter()
+            .map(|f| {
+                if f.rust_type == "String" {
+                    format!(
+                        "    #[validate(length(min = 1, message = \"{} is required\"))]\n    pub {}: {},\n",
+                        f.snake, f.snake, f.rust_type
+                    )
+                } else {
+                    format!("    pub {}: {},\n", f.snake, f.rust_type)
+                }
+            })
+            .collect::<String>()
+    };
+
+    // Update request: every field optional.
+    let update_fields = if parsed.is_empty() {
+        "    pub name: Option<String>,\n".to_string()
+    } else {
+        parsed
+            .iter()
+            .map(|f| format!("    pub {}: Option<{}>,\n", f.snake, f.rust_type))
+            .collect::<String>()
+    };
+
+    let data = DtoData {
         name_pascal: names.pascal.clone(),
         name_snake: names.snake.clone(),
-        name_kebab: names.kebab.clone(),
+        response_fields,
+        create_fields,
+        update_fields,
     };
 
     let content = templates.render("dto", &data).map_err(CliError::Template)?;
@@ -242,6 +415,106 @@ pub async fn dto(name: &str) -> CliResult<()> {
     Ok(())
 }
 
+/// Generate a plain data model (see [`ModelData`]), optionally injecting
+/// `--fields` and, when `migration` is set, a paired up/down SQL migration.
+pub async fn model(name: &str, fields: Option<&str>, migration: bool) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let models_dir = src_dir.join("models");
+    ensure_dir(&models_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let parsed = parse_fields(fields);
+    check_reserved_field_names(&parsed)?;
+    let model_fields = parsed
+        .iter()
+        .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+        .collect::<String>();
+
+    let data = ModelData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+        model_fields,
+    };
+
+    let content = templates
+        .render("model", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = models_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&models_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        models_dir.join("mod.rs").display()
+    );
+
+    if migration {
+        let (up_file, down_file) = generate_migration(&names, &parsed)?;
+        println!("  {} {}", "CREATE".green().bold(), up_file.display());
+        println!("  {} {}", "CREATE".green().bold(), down_file.display());
+    }
+
+    println!("\n{} Generated {}Model", "✓".green().bold(), names.pascal);
+    Ok(())
+}
+
+/// Generate a Diesel-style up/down SQL migration for a model.
+///
+/// Mirrors the directory layout `diesel_migrations::embed_migrations!` expects
+/// (see `docs/diesel-guide.md`): a `migrations/<timestamp>_create_<table>/`
+/// directory at the project root containing `up.sql` and `down.sql`.
+/// Returns the paths of the two files written.
+fn generate_migration(
+    names: &NameCases,
+    fields: &[FieldDef],
+) -> CliResult<(std::path::PathBuf, std::path::PathBuf)> {
+    let src_dir = get_src_dir()?;
+    let project_root = src_dir.parent().unwrap_or(&src_dir).to_path_buf();
+    let table = format!("{}s", names.snake);
+
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d-%H%M%S");
+    let migration_dir = project_root
+        .join("migrations")
+        .join(format!("{}_create_{}", timestamp, table));
+    ensure_dir(&migration_dir)?;
+
+    let columns = fields
+        .iter()
+        .map(|f| format!("    {} {} NOT NULL,\n", f.snake, sql_type_for(f.rust_type)))
+        .collect::<String>();
+
+    let up_sql = format!(
+        "-- Create {table} table\nCREATE TABLE {table} (\n    id BIGSERIAL PRIMARY KEY,\n    name VARCHAR NOT NULL,\n{columns}    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n",
+        table = table,
+        columns = columns,
+    );
+    let down_sql = format!(
+        "-- Drop {table} table\nDROP TABLE IF EXISTS {table};\n",
+        table = table
+    );
+
+    let up_file = migration_dir.join("up.sql");
+    let down_file = migration_dir.join("down.sql");
+    // `migration_dir` is timestamp-named and freshly created by this call above,
+    // so on a partial write it's always safe to remove wholesale rather than
+    // leaving an orphaned up.sql with no down.sql behind.
+    if let Err(e) =
+        write_file(&up_file, &up_sql, false).and_then(|_| write_file(&down_file, &down_sql, false))
+    {
+        let _ = std::fs::remove_dir_all(&migration_dir); // best-effort cleanup of partial write
+        return Err(e);
+    }
+
+    Ok((up_file, down_file))
+}
+
 /// Generate a WebSocket handler.
 pub async fn websocket(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("websocket", name, skip_tests).await
@@ -252,9 +525,18 @@ pub async fn graphql_resolver(name: &str, skip_tests: bool) -> CliResult<()> {
     generate_component("graphql_resolver", name, skip_tests).await
 }
 
-/// Generate a background job.
-pub async fn job(name: &str, skip_tests: bool) -> CliResult<()> {
-    generate_component("job", name, skip_tests).await
+/// Generate a background job, choosing the implementation from `job_type`.
+///
+/// `job_type` is one of `async` (queue processor), `scheduled` (cron), or
+/// `recurring` (fixed interval).
+pub async fn job(name: &str, skip_tests: bool, job_type: &str) -> CliResult<()> {
+    let (template, test_template): (&str, Option<&str>) = match job_type {
+        "scheduled" => ("job_scheduled", None),
+        "recurring" => ("job_recurring", None),
+        // "async" (default) is a queue processor and ships with a test.
+        _ => ("job", Some("job_test")),
+    };
+    generate_component_templated("jobs", "Job", template, test_template, name, skip_tests).await
 }
 
 /// Generate an event handler.
@@ -341,11 +623,11 @@ impl std::str::FromStr for OrmType {
 
 /// Generate a database entity.
 pub async fn entity(name: &str) -> CliResult<()> {
-    entity_with_orm(name, OrmType::Generic).await
+    entity_with_orm(name, OrmType::Generic, None).await
 }
 
-/// Generate a database entity with specific ORM support.
-pub async fn entity_with_orm(name: &str, orm: OrmType) -> CliResult<()> {
+/// Generate a database entity with specific ORM support, optionally injecting `--fields`.
+pub async fn entity_with_orm(name: &str, orm: OrmType, fields: Option<&str>) -> CliResult<()> {
     let names = NameCases::from(name);
     let src_dir = get_src_dir()?;
     let entities_dir = src_dir.join("entities");
@@ -353,20 +635,48 @@ pub async fn entity_with_orm(name: &str, orm: OrmType) -> CliResult<()> {
 
     let templates = TemplateRegistry::new();
 
-    let data = ComponentData {
-        name_pascal: names.pascal.clone(),
-        name_snake: names.snake.clone(),
-        name_kebab: names.kebab.clone(),
+    // The Prax ORM sources fields from `schema.prax`, so it uses the plain template.
+    let content = if matches!(orm, OrmType::Prax) {
+        let data = ComponentData {
+            name_pascal: names.pascal.clone(),
+            name_snake: names.snake.clone(),
+            name_kebab: names.kebab.clone(),
+        };
+        templates
+            .render("entity_prax", &data)
+            .map_err(CliError::Template)?
+    } else {
+        let parsed = parse_fields(fields);
+        let entity_fields = parsed
+            .iter()
+            .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let update_fields = parsed
+            .iter()
+            .map(|f| format!("    pub {}: Option<{}>,\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let diesel_cols = parsed
+            .iter()
+            .map(|f| format!("        {} -> {},\n", f.snake, diesel_type_for(f.rust_type)))
+            .collect::<String>();
+        let seaorm_fields = parsed
+            .iter()
+            .map(|f| format!("        pub {}: {},\n", f.snake, f.rust_type))
+            .collect::<String>();
+        let data = EntityData {
+            name_pascal: names.pascal.clone(),
+            name_snake: names.snake.clone(),
+            name_kebab: names.kebab.clone(),
+            entity_fields: entity_fields.clone(),
+            new_fields: entity_fields,
+            update_fields,
+            diesel_cols,
+            seaorm_fields,
+        };
+        templates
+            .render("entity", &data)
+            .map_err(CliError::Template)?
     };
-
-    let template_name = match orm {
-        OrmType::Prax => "entity_prax",
-        _ => "entity",
-    };
-
-    let content = templates
-        .render(template_name, &data)
-        .map_err(CliError::Template)?;
 
     let file_path = entities_dir.join(format!("{}.rs", names.snake));
     write_file(&file_path, &content, false)?;
@@ -513,7 +823,7 @@ pub async fn prax_module(name: &str) -> CliResult<()> {
 
     // 2. Generate entity
     println!("  {} Generating entity...", "2/5".dimmed());
-    entity_with_orm(name, OrmType::Prax).await?;
+    entity_with_orm(name, OrmType::Prax, None).await?;
     println!();
 
     // 3. Generate repository
@@ -646,6 +956,72 @@ pub async fn health_controller() -> CliResult<()> {
     Ok(())
 }
 
+/// Generate a component from an explicit template + directory + test template.
+///
+/// Used by generators whose implementation varies (e.g. guards by `--guard-type`,
+/// jobs by `--job-type`). `test_template` is `None` when the variant ships no test.
+async fn generate_component_templated(
+    dir_name: &str,
+    type_name: &str,
+    template_name: &str,
+    test_template: Option<&str>,
+    name: &str,
+    skip_tests: bool,
+) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+
+    let component_dir = src_dir.join(dir_name);
+    ensure_dir(&component_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let data = ComponentData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+    };
+
+    let content = templates
+        .render(template_name, &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = component_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&component_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        component_dir.join("mod.rs").display()
+    );
+
+    if !skip_tests && let Some(test_template) = test_template {
+        let test_content = templates
+            .render(test_template, &data)
+            .map_err(CliError::Template)?;
+
+        let tests_dir = component_dir.join("tests");
+        ensure_dir(&tests_dir)?;
+
+        let test_file = tests_dir.join(format!("{}_test.rs", names.snake));
+        write_file(&test_file, &test_content, false)?;
+
+        println!("  {} {}", "CREATE".green().bold(), test_file.display());
+    }
+
+    println!(
+        "\n{} Generated {}{}",
+        "✓".green().bold(),
+        names.pascal,
+        type_name
+    );
+
+    Ok(())
+}
+
 /// Generic component generator for middleware, guards, services, and more.
 async fn generate_component(component_type: &str, name: &str, skip_tests: bool) -> CliResult<()> {
     let names = NameCases::from(name);
@@ -743,4 +1119,35 @@ async fn generate_component(component_type: &str, name: &str, skip_tests: bool) 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_reserved_field_names_rejects_collisions_with_base_template() {
+        // `MODEL_TEMPLATE` (templates.rs) hardcodes `id`, `name`, `created_at`,
+        // and `updated_at`; user-supplied fields with these names must be
+        // rejected instead of silently producing a struct/table with a
+        // duplicate field.
+        for reserved in RESERVED_FIELD_NAMES {
+            let fields = parse_fields(Some(&format!("{reserved}:string")));
+            let result = check_reserved_field_names(&fields);
+            assert!(
+                result.is_err(),
+                "expected field name '{reserved}' to be rejected as reserved, got: {result:?}"
+            );
+            assert!(
+                matches!(result, Err(CliError::InvalidArgument(_))),
+                "expected a CliError::InvalidArgument for reserved field '{reserved}', got: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_reserved_field_names_allows_non_colliding_names() {
+        let fields = parse_fields(Some("email:string,age:i32,active:bool"));
+        assert!(check_reserved_field_names(&fields).is_ok());
+    }
 }

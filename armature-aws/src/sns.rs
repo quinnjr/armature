@@ -1,1 +1,0 @@
-//! AWS sns integration placeholder

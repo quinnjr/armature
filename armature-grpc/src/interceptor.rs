@@ -13,9 +13,25 @@ pub type AuthValidatorFn =
 pub type MetricsCallbackFn = Arc<dyn Fn(&str, u64, bool) + Send + Sync>;
 
 /// Interceptor trait for gRPC requests.
+///
+/// **This trait is a standalone helper, NOT an automatically-applied
+/// pipeline.** Implementing it does not wire the interceptor into any request
+/// path — the crate's server/client code never calls
+/// [`Interceptor::intercept`]. To use an implementation you must invoke
+/// `.intercept(request).await` yourself at the point you want it to run
+/// (typically inside your own service method or client wrapper). The
+/// [`LoggingInterceptor`], [`MetricsInterceptor`] and [`RequestIdInterceptor`]
+/// impls below are inert until called this way.
+///
+/// The one interceptor that IS wired into a request path is
+/// [`AuthInterceptor::server_interceptor`], which returns a
+/// `tonic::service::Interceptor` closure you can hand to
+/// `InterceptedService`/`with_interceptor`; that is a separate mechanism from
+/// this trait.
 #[async_trait]
 pub trait Interceptor: Send + Sync {
-    /// Intercept an incoming request.
+    /// Intercept an incoming request. Call this manually — see the trait-level
+    /// note: nothing invokes it for you.
     async fn intercept<T>(&self, request: Request<T>) -> Result<Request<T>, Status>
     where
         T: Send;
@@ -38,6 +54,10 @@ pub trait ResponseInterceptor: Send + Sync {
 }
 
 /// Logging interceptor that logs requests.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] on it yourself. It is not part of any
+/// automatically-applied request pipeline (see the [`Interceptor`] trait note).
 pub struct LoggingInterceptor {
     log_metadata: bool,
 }
@@ -96,11 +116,45 @@ impl Interceptor for LoggingInterceptor {
     }
 }
 
+/// Compare two byte strings for equality in constant time (with respect to
+/// their content — not their length), to avoid leaking how many leading
+/// bytes of a submitted credential matched the expected value via a timing
+/// side-channel.
+///
+/// A shared implementation now lives at `armature_core::crypto::constant_time_eq`
+/// (used by `armature-security`, `armature-auth`, and `armature-mcp`), but this
+/// crate keeps its own copy rather than depending on it: `armature-grpc` has no
+/// other need for `armature-core`, and pulling in the whole crate just to reuse
+/// this one function would be a disproportionately heavy dependency for a
+/// 10-line, easily-audited helper. Keep this implementation in sync with the
+/// shared one if either changes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Authentication interceptor.
+///
+/// This type is deliberately direction-agnostic: it can attach credentials to
+/// outgoing (client-side) requests via [`AuthInterceptor::add_auth`], or
+/// validate incoming (server-side) requests via [`AuthInterceptor::validate`]
+/// / [`AuthInterceptor::server_interceptor`].
+/// The blanket [`Interceptor`] impl below is the **client-side** behavior only —
+/// it attaches credentials and never rejects a request. Do not use it as a
+/// `tonic::service::Interceptor` on the server; use [`AuthInterceptor::server_interceptor`]
+/// for that, which actually validates and rejects unauthenticated requests.
+#[derive(Clone)]
 pub struct AuthInterceptor {
     auth_type: AuthType,
 }
 
+#[derive(Clone)]
 enum AuthType {
     Bearer(String),
     ApiKey { header: String, key: String },
@@ -145,7 +199,7 @@ impl AuthInterceptor {
                     .and_then(|v| v.strip_prefix("Bearer "))
                     .ok_or_else(|| Status::unauthenticated("Missing bearer token"))?;
 
-                if token != expected {
+                if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
                     return Err(Status::unauthenticated("Invalid token"));
                 }
                 Ok(())
@@ -156,7 +210,7 @@ impl AuthInterceptor {
                     .and_then(|v| v.to_str().ok())
                     .ok_or_else(|| Status::unauthenticated("Missing API key"))?;
 
-                if provided != key {
+                if !constant_time_eq(provided.as_bytes(), key.as_bytes()) {
                     return Err(Status::unauthenticated("Invalid API key"));
                 }
                 Ok(())
@@ -187,21 +241,42 @@ impl AuthInterceptor {
         }
         request
     }
+
+    /// Build a `tonic::service::Interceptor` suitable for **server-side** use
+    /// (e.g. via `InterceptedService::new` or a generated server's
+    /// `with_interceptor` constructor). Unlike the client-side [`Interceptor`]
+    /// impl on this type, this closure actually validates the request's
+    /// metadata and rejects it with `Status::unauthenticated` on failure.
+    pub fn server_interceptor(
+        self,
+    ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
+        move |request: Request<()>| -> Result<Request<()>, Status> {
+            self.validate(request.metadata())?;
+            Ok(request)
+        }
+    }
 }
 
+/// **Client-side** behavior: attaches credentials to the outgoing request.
+/// This impl never rejects a request — it is not authentication, it is
+/// credential attachment. For server-side authentication/rejection, use
+/// [`AuthInterceptor::server_interceptor`] instead.
 #[async_trait]
 impl Interceptor for AuthInterceptor {
     async fn intercept<T>(&self, request: Request<T>) -> Result<Request<T>, Status>
     where
         T: Send,
     {
-        // For server-side: validate
-        // For client-side: add auth
         Ok(self.add_auth(request))
     }
 }
 
 /// Metrics interceptor that records request timing.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] (or [`MetricsInterceptor::record`]) on it
+/// yourself. It is not part of any automatically-applied request pipeline (see
+/// the [`Interceptor`] trait note).
 pub struct MetricsInterceptor {
     on_complete: MetricsCallbackFn,
 }
@@ -237,6 +312,10 @@ impl Interceptor for MetricsInterceptor {
 }
 
 /// Request ID interceptor that adds/propagates request IDs.
+///
+/// Standalone helper: it does nothing until you call
+/// [`Interceptor::intercept`] on it yourself. It is not part of any
+/// automatically-applied request pipeline (see the [`Interceptor`] trait note).
 pub struct RequestIdInterceptor {
     header_name: String,
 }

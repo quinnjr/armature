@@ -269,8 +269,16 @@ impl Job {
 
     /// Calculate backoff delay for retry.
     pub fn backoff_delay(&self) -> chrono::Duration {
-        // Exponential backoff: 2^attempts seconds
-        let seconds = 2_i64.pow(self.attempts.saturating_sub(1));
+        // Exponential backoff: 2^(attempts-1) seconds, capped at 1 hour.
+        //
+        // The exponent is clamped to 20 (2^20 == 1_048_576, comfortably above
+        // the 3600s cap) before the power is taken, and `saturating_pow` is
+        // used besides, so an unbounded `attempts` (e.g. a job retried past
+        // `u32::MAX / 2` times) can never overflow `i64` or wrap negative --
+        // which would otherwise defeat the cap by making the "backoff" a
+        // negative/zero delay and triggering an immediate retry storm.
+        let exponent = self.attempts.saturating_sub(1).min(20);
+        let seconds = 2_i64.saturating_pow(exponent);
         chrono::Duration::seconds(seconds.min(3600)) // Max 1 hour
     }
 }
@@ -351,6 +359,21 @@ mod tests {
 
         job.attempts = 10;
         assert_eq!(job.backoff_delay(), chrono::Duration::seconds(512));
+    }
+
+    #[test]
+    fn test_backoff_delay_large_attempts_does_not_panic() {
+        // Pre-fix this computed 2_i64.pow(attempts - 1) BEFORE the .min(3600)
+        // cap, so attempts >= 63 would overflow i64 (panic in debug, wrap to
+        // negative in release). Confirm the cap holds even at absurd attempt
+        // counts, with no panic.
+        let mut job = Job::new("default", "task", serde_json::json!({}));
+
+        job.attempts = 100;
+        assert_eq!(job.backoff_delay(), chrono::Duration::seconds(3600));
+
+        job.attempts = u32::MAX;
+        assert_eq!(job.backoff_delay(), chrono::Duration::seconds(3600));
     }
 
     #[test]

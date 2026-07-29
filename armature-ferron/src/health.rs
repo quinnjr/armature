@@ -302,33 +302,44 @@ impl HealthState {
     }
 
     /// Check health of a backend and update state
+    ///
+    /// A backend only flips to [`HealthStatus::Unhealthy`] once consecutive
+    /// failures reach `unhealthy_threshold` (staying `Degraded` below that),
+    /// and only flips back to [`HealthStatus::Healthy`] once consecutive
+    /// successes reach `healthy_threshold` (staying `Degraded` while
+    /// recovering). Both thresholds are compared directly against the
+    /// running counters, independent of the previous status.
     pub async fn check_backend(&self, url: &str) -> HealthCheckResult {
         let mut result = self.checker.check(url, &self.config).await;
 
-        // Update consecutive counters based on previous state
         let mut results = self.results.write().await;
-        if let Some(prev) = results.get(url) {
-            if result.status == HealthStatus::Healthy {
-                result.consecutive_successes = prev.consecutive_successes + 1;
-                result.consecutive_failures = 0;
+        let prev_failures = results
+            .get(url)
+            .map(|p| p.consecutive_failures)
+            .unwrap_or(0);
+        let prev_successes = results
+            .get(url)
+            .map(|p| p.consecutive_successes)
+            .unwrap_or(0);
 
-                // Check if we've reached healthy threshold
-                if result.consecutive_successes < self.config.healthy_threshold
-                    && prev.status == HealthStatus::Unhealthy
-                {
-                    result.status = HealthStatus::Unhealthy;
-                }
+        if result.status == HealthStatus::Healthy {
+            result.consecutive_successes = prev_successes + 1;
+            result.consecutive_failures = 0;
+
+            result.status = if result.consecutive_successes >= self.config.healthy_threshold {
+                HealthStatus::Healthy
             } else {
-                result.consecutive_failures = prev.consecutive_failures + 1;
-                result.consecutive_successes = 0;
+                HealthStatus::Degraded
+            };
+        } else {
+            result.consecutive_failures = prev_failures + 1;
+            result.consecutive_successes = 0;
 
-                // Check if we've reached unhealthy threshold
-                if result.consecutive_failures < self.config.unhealthy_threshold
-                    && prev.status == HealthStatus::Healthy
-                {
-                    result.status = HealthStatus::Degraded;
-                }
-            }
+            result.status = if result.consecutive_failures >= self.config.unhealthy_threshold {
+                HealthStatus::Unhealthy
+            } else {
+                HealthStatus::Degraded
+            };
         }
 
         results.insert(url.to_string(), result.clone());
@@ -434,5 +445,87 @@ mod tests {
         // Initially no results
         let results = state.get_all_results().await;
         assert!(results.is_empty());
+    }
+
+    /// A deterministic, offline [`HealthCheck`] whose outcomes are scripted
+    /// up front, so `HealthState::check_backend` transitions can be tested
+    /// without any real network calls.
+    struct ScriptedChecker {
+        outcomes: std::sync::Mutex<std::collections::VecDeque<bool>>,
+    }
+
+    impl ScriptedChecker {
+        fn new(outcomes: Vec<bool>) -> Self {
+            Self {
+                outcomes: std::sync::Mutex::new(outcomes.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HealthCheck for ScriptedChecker {
+        async fn check(&self, url: &str, _config: &HealthCheckConfig) -> HealthCheckResult {
+            let healthy = self
+                .outcomes
+                .lock()
+                .expect("mutex poisoned")
+                .pop_front()
+                .unwrap_or(false);
+
+            if healthy {
+                HealthCheckResult::healthy(url.to_string(), 1, 200)
+            } else {
+                HealthCheckResult::unhealthy(url.to_string(), "scripted failure")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_health_transitions_at_exact_thresholds() {
+        // unhealthy_threshold=3: the backend must stay Degraded through the
+        // first two consecutive failures and only flip to Unhealthy on the
+        // third. healthy_threshold=2 mirrors this for recovery.
+        let config = HealthCheckConfig::new()
+            .unhealthy_threshold(3)
+            .healthy_threshold(2);
+        let checker: Arc<dyn HealthCheck> =
+            Arc::new(ScriptedChecker::new(vec![false, false, false, true, true]));
+        let state = HealthState::with_checker(config, checker);
+
+        let r1 = state.check_backend("http://backend").await;
+        assert_eq!(r1.status, HealthStatus::Degraded, "1st failure");
+        assert_eq!(r1.consecutive_failures, 1);
+
+        let r2 = state.check_backend("http://backend").await;
+        assert_eq!(
+            r2.status,
+            HealthStatus::Degraded,
+            "2nd failure must stay Degraded, not jump to Unhealthy"
+        );
+        assert_eq!(r2.consecutive_failures, 2);
+
+        let r3 = state.check_backend("http://backend").await;
+        assert_eq!(
+            r3.status,
+            HealthStatus::Unhealthy,
+            "3rd failure reaches unhealthy_threshold"
+        );
+        assert_eq!(r3.consecutive_failures, 3);
+
+        let r4 = state.check_backend("http://backend").await;
+        assert_eq!(
+            r4.status,
+            HealthStatus::Degraded,
+            "1st success while recovering must stay Degraded"
+        );
+        assert_eq!(r4.consecutive_successes, 1);
+
+        let r5 = state.check_backend("http://backend").await;
+        assert_eq!(
+            r5.status,
+            HealthStatus::Healthy,
+            "2nd success reaches healthy_threshold"
+        );
+        assert_eq!(r5.consecutive_successes, 2);
     }
 }

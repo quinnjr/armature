@@ -95,10 +95,45 @@ impl CacheStore for MemcachedCache {
         .await
         .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))?;
 
-        match result {
-            Ok(Some(value)) => Ok(Some(value)),
-            Ok(None) | Err(_) => Ok(None),
+        // The `memcache` crate's own ascii/binary protocol implementations of
+        // `get` already distinguish a genuine cache miss from an operational
+        // failure: both return `Ok(None)` for an absent key (there is no
+        // "NOT_FOUND" error response for `get`, unlike `delete`/`incr`/`touch`)
+        // and only ever return `Err` for real I/O, parse, client, or server
+        // errors. So there is nothing to narrow-match here — every `Err` is a
+        // genuine failure and must propagate, not collapse into `Ok(None)`
+        // indistinguishable from a miss.
+        result.map_err(CacheError::from)
+    }
+
+    async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // Prefix-map every key, then fetch them all with memcached's native
+        // multi-get (`gets`) in a single round-trip inside one `spawn_blocking`.
+        // The default `mget` (traits.rs) issues one `get_json` per key, and
+        // although those futures are joined, they all contend on the single
+        // `Arc<Mutex<Client>>`, degrading to N serial round-trips. This is N->1.
+        let prefixed: Vec<String> = keys.iter().map(|k| self.build_key(k)).collect();
+        let client = self.client.clone();
+
+        let found: std::collections::HashMap<String, String> =
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = prefixed.iter().map(|s| s.as_str()).collect();
+                let client = client.blocking_lock();
+                client.gets::<String>(&refs)
+            })
+            .await
+            .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))?
+            .map_err(|e| CacheError::Other(format!("memcached mget failed: {}", e)))?;
+
+        // Reassemble in input order; absent keys become `None`.
+        Ok(keys
+            .iter()
+            .map(|k| found.get(&self.build_key(k)).cloned())
+            .collect())
     }
 
     async fn set_json(&self, key: &str, value: String, ttl: Option<Duration>) -> CacheResult<()> {
@@ -138,6 +173,19 @@ impl CacheStore for MemcachedCache {
         Ok(result.is_some())
     }
 
+    /// Clear this cache.
+    ///
+    /// **Protocol limitation, unscoped:** unlike `RedisCache::clear()` (which
+    /// scopes to `key_prefix` via `SCAN`+`UNLINK`), this always issues
+    /// memcached's `flush_all`, which invalidates **every** key on the
+    /// memcached server/pool — `key_prefix` is not, and cannot be, applied
+    /// here. The memcached text/binary protocols expose no key-enumeration
+    /// primitive (no `SCAN`/`KEYS` equivalent; `stats cachedump` is a
+    /// non-standard admin extension that isn't reliably available across
+    /// servers and isn't exposed by the `memcache` crate this backend uses),
+    /// so there is no way to discover "just this cache's keys" to delete
+    /// individually. A `MemcachedCache` sharing a memcached instance with
+    /// other services/tenants should not call `clear()`.
     async fn clear(&self) -> CacheResult<()> {
         let client = self.client.clone();
 
@@ -152,19 +200,34 @@ impl CacheStore for MemcachedCache {
     }
 
     async fn ttl(&self, key: &str) -> CacheResult<Option<Duration>> {
-        // Memcached doesn't support TTL retrieval
-        // This is a limitation of the protocol
+        // Protocol limitation, stated honestly: the memcached text/binary
+        // protocols expose no way to read an item's remaining TTL. `GET`
+        // returns only the value (and flags/CAS), never the expiry, and there
+        // is no `TTL`/`PTTL` equivalent. We therefore always return `Ok(None)`
+        // — "no known expiration" — rather than pretending to have queried it.
+        // Callers needing TTL visibility must track expirations out-of-band or
+        // use a backend (e.g. Redis) that supports `TTL`.
         let _ = key;
         Ok(None)
     }
 
     async fn expire(&self, key: &str, ttl: Duration) -> CacheResult<()> {
-        // Memcached doesn't support updating expiration without resetting the value
-        // We need to get the value first, then set it again with new TTL
-        let value = self.get_json(key).await?;
+        // Use memcached's native `touch`, which updates an item's expiration in
+        // place: one round-trip, no payload transfer, and no get->set race. The
+        // old read-then-write did two round-trips and re-uploaded the full
+        // value. `touch` returns Ok(false) when the key is absent -> NotFound.
+        let full_key = self.build_key(key);
+        let client = self.client.clone();
+        let expiration = Self::duration_to_expiration(Some(ttl));
 
-        if let Some(value) = value {
-            self.set_json(key, value, Some(ttl)).await?;
+        let touched = tokio::task::spawn_blocking(move || {
+            let client = client.blocking_lock();
+            client.touch(&full_key, expiration)
+        })
+        .await
+        .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
+
+        if touched {
             Ok(())
         } else {
             Err(CacheError::NotFound(key.to_string()))
@@ -173,35 +236,62 @@ impl CacheStore for MemcachedCache {
 
     async fn increment(&self, key: &str, delta: i64) -> CacheResult<i64> {
         let key = self.build_key(key);
-        let key_clone = key.clone();
         let client = self.client.clone();
+        // Apply the configured default TTL to keys we create at zero, matching
+        // `set_json`'s expiry semantics.
+        let expiration = Self::duration_to_expiration(self.config.default_ttl);
+        let magnitude = delta.unsigned_abs();
+        let is_increment = delta >= 0;
 
-        if delta >= 0 {
-            let delta = delta as u64;
-            tokio::task::spawn_blocking(move || {
+        // Perform the whole read-modify-write on the memcached server via its
+        // native atomic `incr`/`decr`, returning the authoritative new value
+        // directly — no lossy second `GET`, and crucially no `delta.abs()`
+        // fabrication when a re-read fails to parse.
+        //
+        // memcached's create-at-zero semantics: the binary protocol
+        // auto-creates a missing counter at 0 (the delta is not applied on
+        // creation) and returns 0. The ASCII protocol instead returns
+        // `KeyNotFound`; we mirror the binary behaviour there by adding the key
+        // at 0 and returning 0, retrying once if we lose the create race.
+        let new_value =
+            tokio::task::spawn_blocking(move || -> Result<u64, memcache::MemcacheError> {
                 let client = client.blocking_lock();
-                client.increment(&key, delta)
+
+                let apply = |client: &memcache::Client| -> Result<u64, memcache::MemcacheError> {
+                    if is_increment {
+                        client.increment(&key, magnitude)
+                    } else {
+                        client.decrement(&key, magnitude)
+                    }
+                };
+
+                match apply(&client) {
+                    Ok(value) => Ok(value),
+                    Err(memcache::MemcacheError::CommandError(
+                        memcache::CommandError::KeyNotFound,
+                    )) => {
+                        // Create the counter at zero (matching the binary protocol),
+                        // returning 0.
+                        match client.add(&key, 0u64, expiration) {
+                            Ok(()) => Ok(0),
+                            // Lost the create race: another client added it first.
+                            // Retry the atomic op against the now-present key.
+                            Err(memcache::MemcacheError::CommandError(
+                                memcache::CommandError::KeyExists,
+                            )) => apply(&client),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .await
             .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
-        } else {
-            let delta = (-delta) as u64;
-            tokio::task::spawn_blocking(move || {
-                let client = client.blocking_lock();
-                client.decrement(&key, delta)
-            })
-            .await
-            .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
-        }
 
-        // Get the new value
-        let new_value = self
-            .get_json(&key_clone)
-            .await?
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(delta.abs());
-
-        Ok(new_value)
+        // Preserve the exact server value across the u64 -> i64 boundary. Note
+        // this is a lossless bit-cast: counters above `i64::MAX` become
+        // negative, but never the old `delta.abs()` fabrication.
+        Ok(new_value as i64)
     }
 
     async fn decrement(&self, key: &str, delta: i64) -> CacheResult<i64> {

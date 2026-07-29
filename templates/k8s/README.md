@@ -1,6 +1,6 @@
 # Kubernetes Manifests
 
-Production-ready Kubernetes templates for deploying Armature applications.
+Kubernetes templates, with production-oriented defaults (non-root, resource limits, health probes), for deploying Armature applications.
 
 ## Quick Start
 
@@ -32,11 +32,11 @@ kubectl apply -f service.yaml
 
 ## Customization
 
-These templates use placeholder values (`{{ .Values.* }}`). Replace them with your actual values or use with:
+These manifests are plain, template-free YAML with sensible static defaults (app name `armature-api`, namespace `armature`, container port `3000`, image `ghcr.io/armature-rs/armature-api:latest`). They are syntactically validated in CI and can be applied directly with `kubectl apply -k .`, or customized with:
 
-- **Kustomize**: Use overlays to patch values
-- **Helm**: See `../helm/armature/` for the Helm chart
-- **envsubst**: Simple variable substitution
+- **Kustomize**: Use overlays to patch values (see below) — this is the recommended approach
+- **Helm**: See `../helm/armature/` for a fully parameterized Helm chart instead
+- **Manual edits**: Just edit the YAML directly for one-off changes
 
 ### Using Kustomize
 

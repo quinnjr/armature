@@ -8,7 +8,10 @@
 //! - **JSON by default**: Production-ready structured logging
 //! - **Pretty printing**: Human-readable output for development
 //! - **Environment-controlled**: Configure via environment variables
-//! - **Zero-cost when disabled**: Debug macros compile to no-ops in release
+//! - **Runtime-gated**: `debug!`/`trace!` are skipped via a cheap runtime
+//!   check (`is_debug_enabled()`/`is_level_enabled()`), not compiled out —
+//!   the branch and its argument formatting are always present in release
+//!   builds
 //! - **Runtime configurable**: Change format/level at runtime
 //!
 //! # Quick Start
@@ -76,7 +79,7 @@
 //!
 //! ## Pretty
 //! ```text
-//! 2024-12-20 12:00:00.123 INFO  my_app Server started
+//! 2024-12-20 12:00:00.123 INFO  [my_app] Server started
 //! ```
 //!
 //! ## Compact
@@ -87,6 +90,7 @@
 use once_cell::sync::Lazy;
 use std::env;
 use std::io::Write;
+use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // ============================================================================
@@ -247,6 +251,13 @@ impl Default for LogConfig {
 
 impl LogConfig {
     /// Create config from environment variables.
+    ///
+    /// This is a pure computation — it reads the current `ARMATURE_*`
+    /// environment variables and returns a [`LogConfig`], but it does not
+    /// mutate any global state. Syncing the runtime atomics that the
+    /// `log`/`trace`/`debug`/`info`/`warn`/`error` macros actually read is
+    /// the job of the crate's one-time `ensure_init` routine, invoked
+    /// automatically from every public entry point (see [`init`]).
     pub fn from_env() -> Self {
         let debug = env::var("ARMATURE_DEBUG")
             .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -274,10 +285,6 @@ impl LogConfig {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(true);
 
-        // Update global atomics
-        DEBUG_ENABLED.store(debug, Ordering::SeqCst);
-        LOG_LEVEL.store(level as u8, Ordering::SeqCst);
-
         Self {
             debug,
             level,
@@ -289,15 +296,55 @@ impl LogConfig {
     }
 }
 
-/// Check if TTY (for color detection fallback).
+/// Real TTY detection (for color detection fallback), used when
+/// `ARMATURE_LOG_COLOR` is not explicitly set.
 mod atty {
+    use std::io::IsTerminal;
+
+    /// The stream color output would be written to.
+    ///
+    /// Only `Stderr` is used today (every call site in this crate logs to
+    /// stderr), but the type stays stream-specific rather than collapsing
+    /// to a bare `bool`/no-op so a real per-stream check is actually
+    /// possible to add here if a stdout-writing path is introduced later.
     pub enum Stream {
         Stderr,
     }
 
-    pub fn is(_stream: Stream) -> bool {
-        // Simple check - assume color if not explicitly disabled
-        std::env::var("NO_COLOR").is_err() && std::env::var("TERM").is_ok()
+    impl Stream {
+        fn is_terminal(&self) -> bool {
+            match self {
+                Stream::Stderr => std::io::stderr().is_terminal(),
+            }
+        }
+    }
+
+    /// Whether ANSI colors should be used when writing to `stream`.
+    ///
+    /// Performs a real terminal check via [`std::io::IsTerminal`] on the
+    /// requested stream, honoring which stream was actually passed in.
+    /// `NO_COLOR` (<https://no-color.org/>) and `TERM=dumb` are applied as
+    /// overrides *on top of* that check: they can only turn color off, and
+    /// can never force color on for a stream that isn't really a terminal.
+    pub fn is(stream: Stream) -> bool {
+        should_color(stream.is_terminal())
+    }
+
+    /// Pure override-composition logic, split out from the actual terminal
+    /// probe so the `NO_COLOR`/`TERM` behavior can be unit-tested
+    /// deterministically without depending on the test process's real fd
+    /// state (which varies across CI/interactive runs).
+    pub(crate) fn should_color(is_terminal: bool) -> bool {
+        if !is_terminal {
+            return false;
+        }
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
+        if std::env::var_os("TERM").as_deref() == Some(std::ffi::OsStr::new("dumb")) {
+            return false;
+        }
+        true
     }
 }
 
@@ -305,33 +352,74 @@ mod atty {
 // Public API
 // ============================================================================
 
+/// Process-wide guard for [`ensure_init`].
+static INIT: Once = Once::new();
+
+/// Perform the one-time global initialization of the logging system: force
+/// the [`CONFIG`] lazy (which reads the `ARMATURE_*` environment variables)
+/// and sync *every* runtime atomic — level, debug, format, color,
+/// timestamps, and module path — from it in one atomic-consistent step.
+///
+/// This is invoked automatically from every public entry point that reads
+/// or writes logging state: [`init`], [`config`], [`is_level_enabled`],
+/// [`is_debug_enabled`], [`log`], [`current_level`], [`current_format`],
+/// and the `set_*` runtime setters. That means the very first touch of
+/// this crate — whether it's the first use of a `trace!`/`debug!`/`info!`/
+/// `warn!`/`error!` macro, or a direct call to `config()`/`init()`, or an
+/// eager `set_level()`/`configure()...apply()` call at startup — is enough
+/// to make `ARMATURE_*` env vars take effect, with no explicit `init()`
+/// call required.
+///
+/// It's guarded by a [`Once`], so repeated calls are cheap no-ops after the
+/// first. Because every setter also calls this *before* applying its own
+/// explicit store, an explicit override always wins regardless of whether
+/// it happens before or after the env-derived seed: if the setter is the
+/// first thing to run, this seeds the atomics from env and the setter's
+/// own store immediately overwrites that one field; if this has already
+/// run (e.g. via an earlier macro use), the setter's store simply applies
+/// on top of the already-seeded atomics.
+fn ensure_init() {
+    INIT.call_once(|| {
+        let config = Lazy::force(&CONFIG);
+        DEBUG_ENABLED.store(config.debug, Ordering::SeqCst);
+        LOG_LEVEL.store(config.level as u8, Ordering::SeqCst);
+        LOG_FORMAT.store(config.format as u8, Ordering::SeqCst);
+        LOG_COLOR.store(config.color, Ordering::SeqCst);
+        LOG_TIMESTAMPS.store(config.timestamps, Ordering::SeqCst);
+        LOG_MODULE_PATH.store(config.module_path, Ordering::SeqCst);
+    });
+}
+
 /// Initialize the logging system.
 ///
-/// This is called automatically when first log macro is used,
-/// but can be called explicitly for eager initialization.
+/// This runs automatically the first time a log macro (or any other public
+/// entry point, such as [`config`]) is used, so `ARMATURE_*` environment
+/// variables take effect without calling this explicitly. Calling it
+/// explicitly is still useful for eager initialization — e.g. to force env
+/// parsing to happen at a known point during startup, before any logging
+/// occurs. It is idempotent: only the first call (from *any* entry point)
+/// has an effect.
 pub fn init() {
-    let config = Lazy::force(&CONFIG);
-    // Initialize runtime atomics from config
-    LOG_FORMAT.store(config.format as u8, Ordering::SeqCst);
-    LOG_COLOR.store(config.color, Ordering::SeqCst);
-    LOG_TIMESTAMPS.store(config.timestamps, Ordering::SeqCst);
-    LOG_MODULE_PATH.store(config.module_path, Ordering::SeqCst);
+    ensure_init();
 }
 
 /// Check if debug logging is enabled.
 #[inline]
 pub fn is_debug_enabled() -> bool {
+    ensure_init();
     DEBUG_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Check if a log level is enabled.
 #[inline]
 pub fn is_level_enabled(level: Level) -> bool {
+    ensure_init();
     level as u8 >= LOG_LEVEL.load(Ordering::Relaxed)
 }
 
 /// Get current log level.
 pub fn current_level() -> Level {
+    ensure_init();
     match LOG_LEVEL.load(Ordering::Relaxed) {
         0 => Level::Trace,
         1 => Level::Debug,
@@ -344,11 +432,13 @@ pub fn current_level() -> Level {
 
 /// Set log level at runtime.
 pub fn set_level(level: Level) {
+    ensure_init();
     LOG_LEVEL.store(level as u8, Ordering::SeqCst);
 }
 
 /// Enable or disable debug mode at runtime.
 pub fn set_debug(enabled: bool) {
+    ensure_init();
     DEBUG_ENABLED.store(enabled, Ordering::SeqCst);
     if enabled && current_level() > Level::Debug {
         set_level(Level::Debug);
@@ -356,7 +446,15 @@ pub fn set_debug(enabled: bool) {
 }
 
 /// Get the global configuration.
+///
+/// This performs the same full atomic initialization as [`init`] (via the
+/// crate's internal `ensure_init` routine) — level, debug, format, color,
+/// timestamps, and module path are all synced from `ARMATURE_*` env vars on
+/// first call, so calling `config()` alone (without ever calling `init()`)
+/// still leaves the runtime in a fully-initialized state rather than a
+/// partial one.
 pub fn config() -> &'static LogConfig {
+    ensure_init();
     &CONFIG
 }
 
@@ -380,6 +478,7 @@ static LOG_MODULE_PATH: AtomicBool = AtomicBool::new(true);
 
 /// Get the current log format.
 pub fn current_format() -> Format {
+    ensure_init();
     match LOG_FORMAT.load(Ordering::Relaxed) {
         0 => Format::Pretty,
         1 => Format::Compact,
@@ -401,6 +500,7 @@ pub fn current_format() -> Format {
 /// set_format(Format::Json);
 /// ```
 pub fn set_format(format: Format) {
+    ensure_init();
     LOG_FORMAT.store(format as u8, Ordering::SeqCst);
     // Also update color based on format
     if format == Format::Pretty {
@@ -412,16 +512,19 @@ pub fn set_format(format: Format) {
 
 /// Set whether colors are enabled.
 pub fn set_color(enabled: bool) {
+    ensure_init();
     LOG_COLOR.store(enabled, Ordering::SeqCst);
 }
 
 /// Set whether timestamps are included.
 pub fn set_timestamps(enabled: bool) {
+    ensure_init();
     LOG_TIMESTAMPS.store(enabled, Ordering::SeqCst);
 }
 
 /// Set whether module path is included.
 pub fn set_module_path(enabled: bool) {
+    ensure_init();
     LOG_MODULE_PATH.store(enabled, Ordering::SeqCst);
 }
 
@@ -597,6 +700,7 @@ pub fn preset_quiet() {
 /// Log a message with the given level.
 #[doc(hidden)]
 pub fn log(level: Level, target: &str, message: &str) {
+    ensure_init();
     if !is_level_enabled(level) {
         return;
     }
@@ -616,29 +720,6 @@ pub fn log(level: Level, target: &str, message: &str) {
     }
 }
 
-#[allow(dead_code)]
-fn log_pretty(level: Level, target: &str, message: &str, config: &LogConfig) {
-    log_pretty_runtime(
-        level,
-        target,
-        message,
-        config.color,
-        config.timestamps,
-        config.module_path,
-    );
-}
-
-#[allow(dead_code)]
-fn log_compact(level: Level, target: &str, message: &str, config: &LogConfig) {
-    log_compact_runtime(
-        level,
-        target,
-        message,
-        config.timestamps,
-        config.module_path,
-    );
-}
-
 // Runtime-configurable versions
 
 fn log_pretty_runtime(
@@ -650,25 +731,49 @@ fn log_pretty_runtime(
     module_path: bool,
 ) {
     let mut stderr = std::io::stderr().lock();
+    write_pretty(
+        &mut stderr,
+        level,
+        target,
+        message,
+        color,
+        timestamps,
+        module_path,
+    );
+}
 
+/// Render a single Pretty-format log line into `w`.
+///
+/// Split out from [`log_pretty_runtime`] (which always writes to process
+/// stderr) so tests can capture the exact emitted bytes via an in-memory
+/// writer without any new public API.
+fn write_pretty<W: Write>(
+    w: &mut W,
+    level: Level,
+    target: &str,
+    message: &str,
+    color: bool,
+    timestamps: bool,
+    module_path: bool,
+) {
     // Timestamp
     if timestamps {
         let now = chrono::Local::now();
-        let _ = write!(stderr, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"));
+        let _ = write!(w, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"));
     }
 
     // Level
     #[cfg(feature = "color")]
     if color {
-        let _ = write!(stderr, "{:5} ", level.colored());
+        let _ = write!(w, "{:5} ", level.colored());
     } else {
-        let _ = write!(stderr, "{:5} ", level.as_str());
+        let _ = write!(w, "{:5} ", level.as_str());
     }
 
     #[cfg(not(feature = "color"))]
     {
         let _ = color; // suppress warning
-        let _ = write!(stderr, "{:5} ", level.as_str());
+        let _ = write!(w, "{:5} ", level.as_str());
     }
 
     // Target
@@ -676,17 +781,17 @@ fn log_pretty_runtime(
         #[cfg(feature = "color")]
         if color {
             use colored::Colorize;
-            let _ = write!(stderr, "{} ", target.dimmed());
+            let _ = write!(w, "{} ", target.dimmed());
         } else {
-            let _ = write!(stderr, "[{}] ", target);
+            let _ = write!(w, "[{}] ", target);
         }
 
         #[cfg(not(feature = "color"))]
-        let _ = write!(stderr, "[{}] ", target);
+        let _ = write!(w, "[{}] ", target);
     }
 
     // Message
-    let _ = writeln!(stderr, "{}", message);
+    let _ = writeln!(w, "{}", message);
 }
 
 fn log_compact_runtime(
@@ -697,23 +802,50 @@ fn log_compact_runtime(
     module_path: bool,
 ) {
     let mut stderr = std::io::stderr().lock();
-
-    if timestamps {
-        let now = chrono::Local::now();
-        let _ = write!(stderr, "{} ", now.format("%H:%M:%S"));
-    }
-
-    let _ = write!(stderr, "{} ", level.as_str().chars().next().unwrap_or('?'));
-
-    if module_path && !target.is_empty() {
-        let _ = write!(stderr, "{}: ", target);
-    }
-
-    let _ = writeln!(stderr, "{}", message);
+    write_compact(&mut stderr, level, target, message, timestamps, module_path);
 }
 
-#[cfg(feature = "json")]
+/// Render a single Compact-format log line into `w`.
+///
+/// Split out from [`log_compact_runtime`] for the same testability reason
+/// as [`write_pretty`].
+fn write_compact<W: Write>(
+    w: &mut W,
+    level: Level,
+    target: &str,
+    message: &str,
+    timestamps: bool,
+    module_path: bool,
+) {
+    if timestamps {
+        let now = chrono::Local::now();
+        let _ = write!(w, "{} ", now.format("%H:%M:%S"));
+    }
+
+    let _ = write!(w, "{} ", level.as_str().chars().next().unwrap_or('?'));
+
+    if module_path && !target.is_empty() {
+        let _ = write!(w, "{}: ", target);
+    }
+
+    let _ = writeln!(w, "{}", message);
+}
+
 fn log_json(level: Level, target: &str, message: &str) {
+    if let Some(json) = render_json(level, target, message) {
+        eprintln!("{}", json);
+    }
+}
+
+/// Render a single JSON-format log line (no trailing newline).
+///
+/// Split out from [`log_json`] (which always writes to process stderr via
+/// `eprintln!`) so tests can assert on the emitted shape/fields directly.
+/// Returns `None` only if serialization somehow fails (practically
+/// unreachable for this all-string payload) — matching `log_json`'s prior
+/// "emit nothing on serialization error" behavior.
+#[cfg(feature = "json")]
+fn render_json(level: Level, target: &str, message: &str) -> Option<String> {
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -731,22 +863,20 @@ fn log_json(level: Level, target: &str, message: &str) {
         message,
     };
 
-    if let Ok(json) = serde_json::to_string(&entry) {
-        eprintln!("{}", json);
-    }
+    serde_json::to_string(&entry).ok()
 }
 
 #[cfg(not(feature = "json"))]
-fn log_json(level: Level, target: &str, message: &str) {
+fn render_json(level: Level, target: &str, message: &str) -> Option<String> {
     // Fallback without serde - manually escape JSON strings
     let timestamp = chrono::Utc::now().to_rfc3339();
-    eprintln!(
+    Some(format!(
         r#"{{"timestamp":"{}","level":"{}","target":"{}","message":"{}"}}"#,
         timestamp,
         level.as_str(),
         escape_json(target),
         escape_json(message)
-    );
+    ))
 }
 
 #[cfg(not(feature = "json"))]
@@ -906,6 +1036,16 @@ pub mod tracing_compat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::IsTerminal;
+    use std::sync::Mutex;
+
+    /// `std::env` and the crate's runtime atomics are process-global, and
+    /// `ensure_init()` reads env exactly once per process (guarded by a
+    /// `Once`). Serialize every test that touches either so they don't
+    /// race against each other under `cargo test`'s default parallelism —
+    /// otherwise one test's transient env mutation could get baked into
+    /// the one-time global init by a concurrently-running test.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_level_ordering() {
@@ -935,6 +1075,7 @@ mod tests {
 
     #[test]
     fn test_set_level() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let original = current_level();
 
         set_level(Level::Error);
@@ -948,6 +1089,7 @@ mod tests {
 
     #[test]
     fn test_debug_flag() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let original = is_debug_enabled();
 
         set_debug(true);
@@ -961,6 +1103,8 @@ mod tests {
 
     #[test]
     fn test_macros_compile() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Just verify macros compile correctly
         trace!("trace message");
         debug!("debug message");
@@ -976,5 +1120,349 @@ mod tests {
 
         let x = 42;
         debug!("formatted: {}", x);
+    }
+
+    // ------------------------------------------------------------------
+    // `LogConfig::from_env()` — pure parsing, no global side effects
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn from_env_parses_all_fields_from_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: guarded by ENV_LOCK against other tests in this module
+        // that also mutate process env vars.
+        unsafe {
+            env::set_var("ARMATURE_DEBUG", "1");
+            env::set_var("ARMATURE_LOG_LEVEL", "trace");
+            env::set_var("ARMATURE_LOG_FORMAT", "pretty");
+            env::set_var("ARMATURE_LOG_COLOR", "1");
+            env::set_var("ARMATURE_LOG_TIMESTAMPS", "0");
+            env::set_var("ARMATURE_LOG_MODULE", "0");
+        }
+
+        let config = LogConfig::from_env();
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("ARMATURE_DEBUG");
+            env::remove_var("ARMATURE_LOG_LEVEL");
+            env::remove_var("ARMATURE_LOG_FORMAT");
+            env::remove_var("ARMATURE_LOG_COLOR");
+            env::remove_var("ARMATURE_LOG_TIMESTAMPS");
+            env::remove_var("ARMATURE_LOG_MODULE");
+        }
+
+        assert!(config.debug);
+        assert_eq!(config.level, Level::Trace);
+        assert_eq!(config.format, Format::Pretty);
+        assert!(config.color);
+        assert!(!config.timestamps);
+        assert!(!config.module_path);
+    }
+
+    #[test]
+    fn from_env_defaults_level_to_debug_when_armature_debug_set_without_explicit_level() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::set_var("ARMATURE_DEBUG", "true");
+            env::remove_var("ARMATURE_LOG_LEVEL");
+        }
+
+        let config = LogConfig::from_env();
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("ARMATURE_DEBUG");
+        }
+
+        assert!(config.debug);
+        assert_eq!(config.level, Level::Debug);
+    }
+
+    #[test]
+    fn from_env_does_not_mutate_runtime_atomics() {
+        // Regression for the "config() partially initializes" finding at
+        // its root: from_env() must be a pure computation. Previously it
+        // had a side effect of storing straight into the DEBUG_ENABLED /
+        // LOG_LEVEL atomics itself, which is what made `config()`'s atomic
+        // sync inconsistent depending on whether `init()` had also run
+        // (init() additionally synced format/color/timestamps/module_path,
+        // from_env() only synced level/debug). All atomic syncing now
+        // happens solely in `ensure_init()`.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        set_level(Level::Warn); // explicit baseline via the public setter
+        let before = current_level();
+        assert_eq!(before, Level::Warn);
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::set_var("ARMATURE_LOG_LEVEL", "trace");
+        }
+        let _ = LogConfig::from_env(); // must NOT touch the LOG_LEVEL atomic
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("ARMATURE_LOG_LEVEL");
+        }
+
+        assert_eq!(
+            current_level(),
+            before,
+            "from_env() must not mutate global atomics as a side effect"
+        );
+
+        set_level(before); // restore
+    }
+
+    // ------------------------------------------------------------------
+    // `atty::should_color` — NO_COLOR/TERM override composition
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn should_color_false_when_not_a_terminal_regardless_of_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("NO_COLOR");
+            env::set_var("TERM", "xterm-256color");
+        }
+
+        assert!(!atty::should_color(false));
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("TERM");
+        }
+    }
+
+    #[test]
+    fn should_color_true_when_terminal_and_no_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("NO_COLOR");
+            env::set_var("TERM", "xterm-256color");
+        }
+
+        assert!(atty::should_color(true));
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("TERM");
+        }
+    }
+
+    #[test]
+    fn should_color_no_color_env_disables_even_on_a_real_terminal() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::set_var("NO_COLOR", "1");
+            env::set_var("TERM", "xterm-256color");
+        }
+
+        assert!(!atty::should_color(true));
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("NO_COLOR");
+            env::remove_var("TERM");
+        }
+    }
+
+    #[test]
+    fn should_color_term_dumb_disables_even_on_a_real_terminal() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("NO_COLOR");
+            env::set_var("TERM", "dumb");
+        }
+
+        assert!(!atty::should_color(true));
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("TERM");
+        }
+    }
+
+    #[test]
+    fn atty_is_honors_the_real_terminal_state_of_the_requested_stream() {
+        // Regression: previously `atty::is` ignored its `Stream` argument
+        // entirely and returned `NO_COLOR unset && TERM set` regardless of
+        // whether the stream was actually a terminal — meaning color could
+        // be auto-enabled for a piped/redirected stderr. It must now agree
+        // with a real `IsTerminal` check whenever no override is active.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("NO_COLOR");
+            env::set_var("TERM", "xterm-256color");
+        }
+
+        let real_tty = std::io::stderr().is_terminal();
+        let result = atty::is(atty::Stream::Stderr);
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            env::remove_var("TERM");
+        }
+
+        assert_eq!(
+            result, real_tty,
+            "atty::is must reflect the stream's real terminal status, not \
+             a NO_COLOR/TERM heuristic"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Output-format renderers — assert emitted shape/fields
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_json_includes_all_expected_fields() {
+        let json = render_json(Level::Info, "my_target", "hello world")
+            .expect("render_json should succeed for plain string payloads");
+
+        assert!(
+            json.contains("\"timestamp\":\""),
+            "missing timestamp field: {json}"
+        );
+        assert!(
+            json.contains("\"level\":\"INFO\""),
+            "missing/wrong level field: {json}"
+        );
+        assert!(
+            json.contains("\"target\":\"my_target\""),
+            "missing/wrong target field: {json}"
+        );
+        assert!(
+            json.contains("\"message\":\"hello world\""),
+            "missing/wrong message field: {json}"
+        );
+        assert!(json.starts_with('{') && json.ends_with('}'));
+    }
+
+    #[test]
+    fn render_json_escapes_special_characters_in_message() {
+        let json = render_json(Level::Error, "t", "line1\nline2 \"quoted\"")
+            .expect("render_json should succeed");
+
+        // Must not contain a literal unescaped newline or quote breaking
+        // the JSON structure.
+        assert!(!json.contains("line1\nline2"));
+        assert!(json.contains("\\n"));
+        assert!(json.contains("\\\"quoted\\\""));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn render_json_is_valid_parseable_json() {
+        let json =
+            render_json(Level::Warn, "svc::mod", "boom").expect("render_json should succeed");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("render_json output must be valid JSON");
+
+        assert_eq!(value["level"], "WARN");
+        assert_eq!(value["target"], "svc::mod");
+        assert_eq!(value["message"], "boom");
+        assert!(value["timestamp"].is_string());
+        assert_eq!(
+            value.as_object().map(|o| o.len()),
+            Some(4),
+            "expected exactly timestamp/level/target/message, got: {value}"
+        );
+    }
+
+    #[test]
+    fn write_pretty_renders_expected_shape_without_timestamp() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_pretty(
+            &mut buf,
+            Level::Warn,
+            "my::target",
+            "careful now",
+            false,
+            false,
+            true,
+        );
+        let out = String::from_utf8(buf).unwrap();
+
+        assert_eq!(out, "WARN  [my::target] careful now\n");
+    }
+
+    #[test]
+    fn write_pretty_includes_timestamp_when_enabled() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_pretty(&mut buf, Level::Info, "", "started", false, true, true);
+        let out = String::from_utf8(buf).unwrap();
+
+        // "YYYY-MM-DD HH:MM:SS.mmm " prefix before the level.
+        assert!(
+            out.contains("INFO  started"),
+            "expected level+message, got: {out:?}"
+        );
+        let ts_prefix = out.split("INFO").next().unwrap();
+        assert!(
+            ts_prefix.len() >= 20,
+            "expected a timestamp-shaped prefix, got: {ts_prefix:?}"
+        );
+    }
+
+    #[test]
+    fn write_pretty_omits_target_when_module_path_disabled() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_pretty(
+            &mut buf,
+            Level::Error,
+            "should::not::appear",
+            "oops",
+            false,
+            false,
+            false,
+        );
+        let out = String::from_utf8(buf).unwrap();
+
+        assert_eq!(out, "ERROR oops\n");
+        assert!(!out.contains("should::not::appear"));
+    }
+
+    #[test]
+    fn write_compact_renders_expected_shape_without_timestamp() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_compact(&mut buf, Level::Debug, "svc", "message here", false, true);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert_eq!(out, "D svc: message here\n");
+    }
+
+    #[test]
+    fn write_compact_omits_target_when_module_path_disabled() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_compact(&mut buf, Level::Trace, "svc", "hi", false, false);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert_eq!(out, "T hi\n");
+    }
+
+    #[test]
+    fn write_compact_includes_timestamp_when_enabled() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_compact(&mut buf, Level::Info, "", "go", true, true);
+        let out = String::from_utf8(buf).unwrap();
+
+        // "HH:MM:SS " prefix (8 chars + space) before the level letter.
+        assert!(out.contains("I go"), "expected level+message, got: {out:?}");
+        let ts_prefix = out.split('I').next().unwrap();
+        assert_eq!(
+            ts_prefix.len(),
+            9,
+            "expected an 'HH:MM:SS ' shaped prefix, got: {ts_prefix:?}"
+        );
     }
 }

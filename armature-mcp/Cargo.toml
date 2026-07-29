@@ -1,14 +1,13 @@
 [package]
 name = "armature-mcp"
-version = "0.1.2"
+version = "0.1.4"
 edition.workspace = true
-# Overrides the workspace MSRV (1.89): the `register_mcp_tool!` macro
-# expands to `inventory::submit!` whose body is a `static`, which in
-# turn requires `McpToolEntry::new` to be a `const fn` and therefore
-# requires `TypeId::of` in const context — stable since Rust 1.91.
-# Using this crate on an older toolchain will produce a clear compile
-# error at the macro site.
-rust-version = "1.95"
+# Inherits the workspace MSRV (1.94.1). This crate's own floor is 1.91 — the
+# `register_mcp_tool!` macro expands to an `inventory::submit!` `static` whose
+# `McpToolEntry::new` must be `const fn`, needing `TypeId::of` in const context
+# (stable since Rust 1.91) — but the workspace floor is already higher, so no
+# per-crate override is needed.
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -18,15 +17,17 @@ keywords = ["mcp", "ai", "llm", "tools", "armature"]
 categories = ["web-programming", "development-tools"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
-armature-proc-macro = { path = "../armature-proc-macro", version = "0.1.2" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
+armature-http-client = { path = "../armature-http-client", version = "0.2.0" }
+armature-proc-macro = { path = "../armature-proc-macro", version = "0.2.0" }
+armature-jwt = { path = "../armature-jwt", version = "0.2.0" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 async-trait = "0.1"
 
 # Error handling
@@ -36,10 +37,10 @@ thiserror = "2.0"
 inventory = "0.3"
 
 # Schema generation
-schemars = "0.8"
+schemars = "1.2"
 
 # UUID for request IDs
-uuid = { version = "1.6", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

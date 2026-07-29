@@ -143,11 +143,80 @@ impl RateLimitCheckResult {
     }
 }
 
+/// How often the background prune task calls [`RateLimitStore::cleanup`].
+///
+/// The in-memory store retains an entry per distinct rate-limit key and only
+/// reclaims idle entries when `cleanup` runs, so this task must run for the
+/// store to stay bounded. Sixty seconds keeps memory pressure low without
+/// meaningful overhead (cleanup is O(keys) over cheap timestamp comparisons).
+const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Owns a background task that periodically calls [`RateLimitStore::cleanup`]
+/// on the limiter's store, evicting idle/expired entries so the store cannot
+/// grow without bound.
+///
+/// The task is tied to the lifetime of this handle: dropping the handle (which
+/// happens when the owning [`RateLimiter`] is dropped) signals the task to stop
+/// and aborts it, so it never outlives the limiter or leaks.
+struct PruneTask {
+    shutdown: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl PruneTask {
+    /// Spawn a prune task that calls `store.cleanup()` every `interval`.
+    ///
+    /// Must be called from within a Tokio runtime (see the guarded call site
+    /// in [`RateLimiter::new`]).
+    fn spawn(store: Arc<dyn RateLimitStore>, interval: Duration) -> Self {
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let task_shutdown = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Don't fire a burst of catch-up ticks if the task is starved.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick completes immediately; consume it so cleanup runs
+            // one full interval after startup rather than right away.
+            ticker.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Err(e) = store.cleanup().await {
+                            warn!(error = %e, "Rate limit store cleanup failed");
+                        }
+                    }
+                    _ = task_shutdown.notified() => {
+                        debug!("Rate limit prune task shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { shutdown, handle }
+    }
+}
+
+impl Drop for PruneTask {
+    fn drop(&mut self) {
+        // Ask the task to stop gracefully, then abort in case it is currently
+        // parked in `store.cleanup()` and can't observe the notification.
+        self.shutdown.notify_waiters();
+        self.handle.abort();
+    }
+}
+
 /// The main rate limiter
 pub struct RateLimiter {
     store: Arc<dyn RateLimitStore>,
     algorithm: Algorithm,
     config: RateLimitConfig,
+    /// Background task that periodically prunes idle store entries. Kept alive
+    /// for as long as the limiter lives; dropped (and stopped) with it. `None`
+    /// only when the limiter is constructed outside a Tokio runtime.
+    _prune_task: Option<PruneTask>,
 }
 
 impl RateLimiter {
@@ -166,10 +235,27 @@ impl RateLimiter {
             algorithm = ?algorithm,
             "Creating new rate limiter"
         );
+
+        // Schedule periodic pruning of the store so idle per-key entries are
+        // reclaimed and the store cannot grow without bound. Spawning requires
+        // a Tokio runtime; `new` is normally reached via the async `build`, but
+        // guard against direct calls made outside a runtime so we never panic.
+        let prune_task = match tokio::runtime::Handle::try_current() {
+            Ok(_) => Some(PruneTask::spawn(store.clone(), DEFAULT_PRUNE_INTERVAL)),
+            Err(_) => {
+                debug!(
+                    "No Tokio runtime available; rate limit store prune task not \
+                     scheduled (call RateLimiter within a runtime to enable it)"
+                );
+                None
+            }
+        };
+
         Self {
             store,
             algorithm,
             config,
+            _prune_task: prune_task,
         }
     }
 
@@ -269,7 +355,10 @@ impl RateLimiter {
                 reset_at,
             ))
         } else {
-            let retry_after = Duration::from_secs(1);
+            // Retry after the configured window (the worst-case time until the
+            // oldest logged request falls out of the sliding window), not a
+            // hardcoded 1s.
+            let retry_after = window;
             warn!(key = %key, retry_after = ?retry_after, "Sliding window: request denied");
             Ok(RateLimitCheckResult::denied(
                 max_requests,
@@ -291,12 +380,17 @@ impl RateLimiter {
             .fixed_window_check(key, max_requests, window)
             .await?;
 
-        let now = std::time::SystemTime::now()
+        // Compute the window boundary in milliseconds so sub-second windows
+        // (e.g. 500ms) never trigger an integer divide-by-zero: `window.as_secs()`
+        // truncates to 0 for any window under a second, and `now / 0` panics.
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        let window_secs = window.as_secs();
-        let reset_at = ((now / window_secs) + 1) * window_secs;
+            .as_millis();
+        let window_ms = window.as_millis().max(1);
+        let reset_at_ms = ((now_ms / window_ms) + 1) * window_ms;
+        // X-RateLimit-Reset is a Unix timestamp in seconds.
+        let reset_at = (reset_at_ms / 1000) as u64;
 
         if result.0 {
             debug!(key = %key, remaining = result.1, "Fixed window: request allowed");
@@ -306,7 +400,9 @@ impl RateLimiter {
                 reset_at,
             ))
         } else {
-            let retry_after = Duration::from_secs(reset_at - now);
+            // Time until the current window rolls over. Millisecond-precise so
+            // sub-second windows report a real (non-zero, non-panicking) delay.
+            let retry_after = Duration::from_millis((reset_at_ms - now_ms) as u64);
             warn!(key = %key, retry_after = ?retry_after, "Fixed window: request denied");
             Ok(RateLimitCheckResult::denied(
                 max_requests,
@@ -345,6 +441,45 @@ impl std::fmt::Debug for RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_limiter_schedules_prune_task() {
+        // Built inside a Tokio runtime, so the background prune task must be
+        // wired up and owned by the limiter.
+        let limiter = RateLimiter::builder()
+            .token_bucket(5, 1.0)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            limiter._prune_task.is_some(),
+            "prune task should be scheduled when constructed within a runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_task_runs_cleanup() {
+        use crate::stores::{MemoryStore, RateLimitStore};
+
+        // Idle TTL of ~1ms means the entry is immediately eligible for eviction.
+        let store = Arc::new(MemoryStore::new().with_idle_ttl(Duration::from_millis(1)));
+        store.token_bucket_check("k", 5, 1.0).await.unwrap();
+        assert!(store.key_count() > 0);
+
+        let dyn_store: Arc<dyn RateLimitStore> = store.clone();
+        let task = PruneTask::spawn(dyn_store, Duration::from_millis(20));
+
+        // Wait for at least one prune tick to fire and reclaim the idle entry.
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert_eq!(
+            store.key_count(),
+            0,
+            "scheduled prune task should have evicted the idle entry"
+        );
+
+        // Dropping the handle must stop the background task.
+        drop(task);
+    }
 
     #[tokio::test]
     async fn test_token_bucket_basic() {
@@ -463,6 +598,30 @@ mod tests {
             .build()
             .await;
         assert!(result.is_err(), "build should reject NaN refill_rate");
+    }
+
+    /// Regression: a sub-second fixed window (e.g. 500ms) used to panic with an
+    /// integer divide-by-zero in `check_fixed_window` because `window.as_secs()`
+    /// truncated to 0 and `now / 0` panicked. It must now return a decision.
+    #[tokio::test]
+    async fn test_fixed_window_sub_second_does_not_panic() {
+        let limiter = RateLimiter::builder()
+            .fixed_window(2, Duration::from_millis(500))
+            .build()
+            .await
+            .unwrap();
+
+        // First two allowed, third denied — and crucially no panic on the
+        // sub-second window arithmetic.
+        let r1 = limiter.check("k").await.unwrap();
+        assert!(r1.allowed);
+        let r2 = limiter.check("k").await.unwrap();
+        assert!(r2.allowed);
+        let r3 = limiter.check("k").await.unwrap();
+        assert!(!r3.allowed);
+        // A denied sub-second window reports a real, bounded retry delay.
+        let retry = r3.retry_after.expect("denied result carries retry_after");
+        assert!(retry <= Duration::from_millis(500));
     }
 
     /// Boundary: a tiny but finite positive rate should still build

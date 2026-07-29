@@ -11,165 +11,323 @@ Armature provides built-in support for two real-time communication patterns:
 
 ## WebSocket Support
 
+WebSocket support lives in the standalone `armature-websocket` crate. It is a
+genuine `tokio-tungstenite`-based server: it binds its own TCP listener,
+performs the WebSocket upgrade handshake, and manages connections and rooms
+directly. It runs *alongside* your Armature HTTP application rather than as
+an upgrade path off an existing HTTP route — the two share state (e.g. a
+`RoomManager`) so an HTTP endpoint and a real WebSocket client can interact
+with the same rooms.
+
+The runnable reference for everything in this section is
+[`examples/websocket_chat.rs`](../examples/websocket_chat.rs), a chat server
+that was built against and tested with a real WebSocket client. Run it with:
+
+```bash
+cargo run --example websocket_chat
+```
+
 ### Core Components
 
-#### WebSocketMessage
+#### Message
 
-Enum representing different message types:
+The wire-level message type. It carries a `message_type` and a `payload`, with
+constructors and helpers for each kind:
 
 ```rust
-pub enum WebSocketMessage {
-    Text(String),
-    Binary(Vec<u8>),
-    Ping(Vec<u8>),
-    Pong(Vec<u8>),
-    Close,
+use armature_websocket::Message;
+
+let text = Message::text("Hello!");
+let binary = Message::binary(vec![1, 2, 3]);
+let json = Message::json(&my_value)?; // serializes to a Text message
+
+// Inspecting a received message
+if let Some(text) = message.as_text() {
+    // ...
+}
+let bytes: &[u8] = message.as_bytes();
+message.is_text();
+message.is_binary();
+message.is_ping();
+message.is_pong();
+message.is_close();
+
+// Deserializing a JSON payload
+let value: MyType = message.parse_json()?;
+```
+
+#### Connection
+
+A handle to a single, live WebSocket connection. Connections are created
+internally by the server as clients connect; you get one back from a
+`RoomManager` by connection ID:
+
+```rust
+use armature_websocket::RoomManager;
+
+if let Some(connection) = room_manager.get_connection(connection_id) {
+    connection.send_text("Private message")?;
+    connection.send_json(&payload)?;
+    connection.is_open();
+    connection.close();
 }
 ```
 
-#### WebSocketConnection
+`Connection::send`, `send_text`, `send_binary`, and `send_json` are all
+synchronous — they hand the message to an internal channel that a background
+writer task drains, so there is no `.await` on the send side.
 
-Handle for a single WebSocket connection:
+#### Room and RoomManager
 
-```rust
-let (connection, receiver) = WebSocketConnection::new("conn-123".to_string());
-
-// Send text message
-connection.send_text("Hello!".to_string()).await?;
-
-// Send JSON
-connection.send_json(&data).await?;
-```
-
-#### WebSocketRoom
-
-Broadcast to multiple connections in a room:
+`Room` tracks membership for a single named room; `RoomManager` owns every
+room and connection and is the type you actually interact with:
 
 ```rust
-let room = WebSocketRoom::new("chat-room".to_string());
+use armature_websocket::RoomManager;
+use std::sync::Arc;
 
-// Add connection
-room.add_connection(id, tx).await;
+let rooms = Arc::new(RoomManager::new());
 
-// Broadcast to all
-room.broadcast_text("Hello everyone!".to_string()).await?;
-room.broadcast_json(&data).await?;
+// Membership
+rooms.join_room(connection_id, "lobby")?;   // creates "lobby" if needed
+rooms.leave_room(connection_id, "lobby")?;
 
-// Get connection count
-let count = room.connection_count().await;
-```
+// Broadcasting
+let sent = rooms.broadcast_to_room("lobby", Message::text("hi"))?;           // -> usize delivered
+let sent = rooms.broadcast_to_room_except("lobby", message, connection_id)?; // skip the sender
+let sent = rooms.broadcast_all(message);                                     // every connection, every room
 
-#### WebSocketManager
-
-Manage multiple rooms:
-
-```rust
-let manager = WebSocketManager::new();
-
-// Get or create room
-let room = manager.get_or_create_room("lobby").await;
-
-// Get existing room
-if let Some(room) = manager.get_room("lobby").await {
-    // Use room
+// Inspecting a room
+if let Some(room) = rooms.get_room("lobby") {
+    let member_count = room.len();
+    let member_ids = room.members();
 }
 
-// Remove room
-manager.remove_room("lobby").await;
+// Bookkeeping
+rooms.room_ids();
+rooms.connection_ids();
+rooms.connection_count();
+rooms.room_count();
+```
+
+`join_room`/`leave_room`/`broadcast_to_room`/`broadcast_to_room_except` are all
+synchronous and return a `WebSocketResult<T>` (`Err(WebSocketError::RoomNotFound(_))`
+or `Err(WebSocketError::ConnectionNotFound(_))` on bad IDs) — there is no `.await`.
+
+#### WebSocketHandler
+
+Your application logic lives in a `WebSocketHandler` implementation. Only
+`on_message` is required; the rest have no-op or sensible default
+implementations:
+
+```rust
+use armature_websocket::{Message, WebSocketError, WebSocketHandler};
+use async_trait::async_trait;
+
+#[derive(Clone, Default)]
+struct ChatHandler;
+
+#[async_trait]
+impl WebSocketHandler for ChatHandler {
+    async fn on_connect(&self, connection_id: &str) {
+        println!("{connection_id} connected");
+    }
+
+    async fn on_message(&self, connection_id: &str, message: Message) {
+        // Handle an incoming frame (see examples/websocket_chat.rs for a
+        // full join/chat/leave protocol built on top of this).
+    }
+
+    async fn on_disconnect(&self, connection_id: &str) {
+        println!("{connection_id} disconnected");
+    }
+
+    async fn on_error(&self, connection_id: &str, error: &WebSocketError) {
+        eprintln!("{connection_id} error: {error}");
+    }
+}
+```
+
+`armature_websocket::LoggingHandler` is a ready-made no-op handler that just
+logs connect/message/disconnect events, useful for smoke-testing a server.
+
+#### WebSocketServer
+
+Ties a `WebSocketHandler` to a bound TCP listener and drives the accept loop:
+
+```rust
+use armature_websocket::{RoomManager, WebSocketServerBuilder};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+let bind_addr: SocketAddr = "0.0.0.0:3006".parse().unwrap();
+let server = WebSocketServerBuilder::new()
+    .bind_addr(bind_addr)
+    .max_message_size(64 * 1024)
+    .build(ChatHandler::default());
+
+// The server owns a RoomManager; clone the Arc out so other parts of your
+// app (e.g. an HTTP controller) can join/broadcast into the same rooms.
+let rooms: Arc<RoomManager> = Arc::clone(server.room_manager());
+
+tokio::spawn(async move {
+    if let Err(e) = server.run().await {
+        eprintln!("WebSocket server error: {e}");
+    }
+});
 ```
 
 ### Usage Example
 
-#### 1. Create a WebSocket Service
+The pattern below mirrors `examples/websocket_chat.rs`: a real
+`WebSocketServer` running next to the Armature HTTP application, sharing one
+`RoomManager` so an HTTP-posted message reaches connected WebSocket clients
+and vice versa.
+
+#### 1. Define the handler
 
 ```rust
-#[injectable]
-#[derive(Clone)]
-struct ChatService {
-    manager: Arc<WebSocketManager>,
+use armature_websocket::{Message, RoomManager, WebSocketError, WebSocketHandler};
+use async_trait::async_trait;
+use std::sync::{Arc, OnceLock};
+
+static CHAT_ROOMS: OnceLock<Arc<RoomManager>> = OnceLock::new();
+
+fn chat_rooms() -> &'static Arc<RoomManager> {
+    CHAT_ROOMS.get().expect("WebSocket server must be started first")
 }
 
-impl Default for ChatService {
-    fn default() -> Self {
-        Self {
-            manager: Arc::new(WebSocketManager::new()),
+#[derive(Clone, Default)]
+struct ChatHandler;
+
+#[async_trait]
+impl WebSocketHandler for ChatHandler {
+    async fn on_message(&self, connection_id: &str, message: Message) {
+        let Some(text) = message.as_text() else { return };
+        // Parse `text` into your own protocol and call
+        // chat_rooms().join_room(...) / .broadcast_to_room(...) as needed.
+    }
+
+    async fn on_disconnect(&self, connection_id: &str) {
+        // RoomManager::unregister_connection (called by the server right
+        // after this hook returns) already removes the connection from
+        // every room it was a member of.
+    }
+}
+```
+
+#### 2. Start the WebSocket server and publish its RoomManager
+
+```rust
+use armature_websocket::WebSocketServerBuilder;
+use std::net::SocketAddr;
+
+fn start_ws_server() {
+    let bind_addr = SocketAddr::from(([0, 0, 0, 0], 3006));
+    let server = WebSocketServerBuilder::new()
+        .bind_addr(bind_addr)
+        .build(ChatHandler::default());
+
+    CHAT_ROOMS
+        .set(Arc::clone(server.room_manager()))
+        .expect("start_ws_server must only be called once");
+
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+}
+```
+
+#### 3. Create an injectable service and controller that share the same rooms
+
+```rust
+use armature::prelude::*;
+
+#[injectable]
+#[derive(Default, Clone)]
+struct ChatService;
+
+impl ChatService {
+    async fn broadcast_to_room(&self, room: &str, text: &str) -> Result<usize, Error> {
+        let payload = Message::text(text);
+        match chat_rooms().broadcast_to_room(room, payload) {
+            Ok(sent) => Ok(sent),
+            Err(WebSocketError::RoomNotFound(_)) => Ok(0), // no clients yet, not an error
+            Err(e) => Err(Error::Internal(e.to_string())),
         }
     }
 }
 
-impl ChatService {
-    async fn get_room(&self, name: &str) -> Arc<WebSocketRoom> {
-        self.manager.get_or_create_room(name).await
-    }
-
-    async fn broadcast(&self, room: &str, msg: &str) -> Result<(), Error> {
-        let room = self.get_room(room).await;
-        room.broadcast_text(msg.to_string()).await
-    }
-}
-```
-
-#### 2. Create a WebSocket Controller
-
-```rust
-#[controller("/ws")]
+#[controller("/chat")]
 #[derive(Default, Clone)]
-struct WebSocketController {
+struct ChatController {
     chat_service: ChatService,
 }
 
-impl WebSocketController {
-    async fn handle_chat(&self, room_name: String) -> Result<(), Error> {
-        let room = self.chat_service.get_room(&room_name).await;
-
-        // In full implementation, this would:
-        // 1. Upgrade HTTP connection to WebSocket
-        // 2. Handle incoming messages
-        // 3. Broadcast to room
-
-        Ok(())
+#[routes]
+impl ChatController {
+    #[post("/:room/message")]
+    async fn send_message(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+        let room = req.param("room").ok_or_else(|| Error::Validation("Missing room".into()))?;
+        let body: serde_json::Value = req.json()?;
+        let delivered = self.chat_service.broadcast_to_room(room, &body.to_string()).await?;
+        HttpResponse::json(&serde_json::json!({ "delivered_to": delivered }))
     }
 }
 ```
 
-#### 3. Register in Module
+#### 4. Register in the module and start both servers
 
 ```rust
 #[module(
     providers: [ChatService],
-    controllers: [WebSocketController]
+    controllers: [ChatController]
 )]
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AppModule;
+
+#[tokio::main]
+async fn main() {
+    start_ws_server();
+
+    let app = Application::create::<AppModule>().await;
+    app.listen(3005).await.unwrap();
+}
 ```
+
+See `examples/websocket_chat.rs` for the complete, working version of this
+example, including a full JSON-based join/chat/leave protocol.
 
 ### Broadcasting Patterns
 
 #### Room-based Broadcasting
 
 ```rust
-// Send to specific room
-let room = manager.get_or_create_room("room-1").await;
-room.broadcast_json(&message).await?;
+// Send to everyone in a specific room
+let sent = rooms.broadcast_to_room("room-1", Message::json(&event)?)?;
 ```
 
 #### Targeted Messaging
 
 ```rust
-// Send to specific connection
-let (connection, _rx) = WebSocketConnection::new(id);
-connection.send_text("Private message".to_string()).await?;
+// Send to one specific, already-connected client
+if let Some(connection) = rooms.get_connection(connection_id) {
+    connection.send_text("Private message")?;
+}
+```
+
+#### Excluding the Sender
+
+```rust
+// Notify everyone in the room except the connection that triggered it
+let sent = rooms.broadcast_to_room_except("room-1", Message::json(&event)?, connection_id)?;
 ```
 
 #### Global Broadcasting
 
 ```rust
-// Broadcast to all rooms
-for room_name in ["room-1", "room-2", "room-3"] {
-    if let Some(room) = manager.get_room(room_name).await {
-        room.broadcast_json(&message).await?;
-    }
-}
+// Broadcast to every connection on the server, regardless of room
+let sent = rooms.broadcast_all(Message::json(&event)?);
 ```
 
 ## Server-Sent Events (SSE)
@@ -359,20 +517,29 @@ curl -N http://localhost:3000/events/stocks
 ### WebSocket Best Practices
 
 1. **Connection Management**
-```rust
-// Track connections
-let mut connections = HashMap::new();
 
-// Clean up on disconnect
-connections.remove(&conn_id);
+`RoomManager` already tracks every registered connection and its room
+memberships for you (`register_connection`/`unregister_connection`, called by
+`WebSocketServer` itself). Keep any *application-level* per-connection state
+(like `examples/websocket_chat.rs`'s `Session`) in your own map keyed by
+connection ID, and clean it up in `on_disconnect`:
+
+```rust
+// Application-level session state, separate from RoomManager's own bookkeeping
+let mut sessions: HashMap<String, Session> = HashMap::new();
+
+// Clean up in WebSocketHandler::on_disconnect
+sessions.remove(connection_id);
 ```
 
 2. **Error Handling**
 ```rust
-// Handle send errors gracefully
-if let Err(e) = connection.send_text(msg).await {
+// Connection::send_text is synchronous - no `.await`
+if let Err(e) = connection.send_text(msg) {
     eprintln!("Failed to send: {}", e);
-    // Remove connection
+    // The connection is almost certainly closed/dead; no need to manually
+    // remove it from RoomManager - on_disconnect + unregister_connection
+    // handles that once the server's connection loop notices.
 }
 ```
 
@@ -387,9 +554,9 @@ if last_message.elapsed() < Duration::from_millis(100) {
 
 4. **Authentication**
 ```rust
-// Validate on connection
-fn validate_connection(req: &HttpRequest) -> Result<UserId, Error> {
-    let token = req.headers.get("Authorization")?;
+// Validate before allowing a connection to join a room, e.g. as part of
+// handling a `join` message in WebSocketHandler::on_message.
+fn validate_connection(token: &str) -> Result<UserId, Error> {
     verify_token(token)
 }
 ```
@@ -460,20 +627,25 @@ Use Redis pub/sub for multi-server setups:
 let mut pubsub = redis_client.get_async_connection().await?;
 pubsub.subscribe("chat:room1").await?;
 
-// Forward to WebSocket/SSE
-while let Some(msg) = pubsub.on_message().next().await {
-    room.broadcast_text(msg.get_payload()).await?;
+// Forward to WebSocket clients in the matching local room. RoomManager's
+// broadcast methods are synchronous, so no `.await` here.
+let mut stream = pubsub.on_message();
+while let Some(msg) = stream.next().await {
+    let payload: String = msg.get_payload()?;
+    rooms.broadcast_to_room("room1", Message::text(payload))?;
 }
 ```
 
 #### Connection Limits
 
 ```rust
-// Limit connections per room
+// Limit connections per room. Room::len() is synchronous.
 const MAX_CONNECTIONS: usize = 1000;
 
-if room.connection_count().await >= MAX_CONNECTIONS {
-    return Err(Error::Internal("Room full".into()));
+if let Some(room) = rooms.get_room(room_id) {
+    if room.len() >= MAX_CONNECTIONS {
+        return Err(Error::Internal("Room full".into()));
+    }
 }
 ```
 
@@ -481,18 +653,45 @@ if room.connection_count().await >= MAX_CONNECTIONS {
 
 ### Unit Testing
 
+`Connection`s are created internally by `WebSocketServer` as clients connect
+(there is no public constructor), so exercising room/broadcast logic in a
+unit test means spinning up a real server on a loopback port and connecting
+with a WebSocket client, exactly like `armature-websocket`'s own test suite
+does:
+
 ```rust
+use armature_websocket::{Message, WebSocketServerBuilder};
+use tokio::net::TcpListener;
+
 #[tokio::test]
 async fn test_websocket_broadcast() {
-    let room = WebSocketRoom::new("test".to_string());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
 
-    let (conn1, _) = WebSocketConnection::new("1".to_string());
-    let (conn2, _) = WebSocketConnection::new("2".to_string());
+    let server = WebSocketServerBuilder::new()
+        .bind_addr(addr)
+        .build(ChatHandler::default());
+    let rooms = Arc::clone(server.room_manager());
 
-    // Test broadcast
-    room.broadcast_text("Hello".to_string()).await.unwrap();
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
 
-    assert_eq!(room.connection_count().await, 2);
+    let url = format!("ws://{addr}");
+    let (mut ws1, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // Wait for both connections to register, then join them to a room
+    // (in a real handler this happens in response to a client message).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for id in rooms.connection_ids() {
+        rooms.join_room(&id, "test").unwrap();
+    }
+
+    assert_eq!(rooms.get_room("test").unwrap().len(), 2);
+
+    let sent = rooms.broadcast_to_room("test", Message::text("Hello")).unwrap();
+    assert_eq!(sent, 2);
 }
 ```
 
@@ -549,7 +748,6 @@ Planned features:
 - [ ] Rate limiting decorators
 - [ ] Redis adapter for clustering
 - [ ] Compression support
-- [ ] Binary WebSocket frames
 - [ ] GraphQL subscription support
 
 ## Summary

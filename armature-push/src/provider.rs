@@ -1,10 +1,16 @@
 //! Push notification provider trait and service.
 
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt};
 use std::sync::Arc;
 use tracing::debug;
 
 use crate::{DeviceToken, Notification, Platform, PushError, Result, Subscription};
+
+/// Maximum number of in-flight requests when fanning a batch send out
+/// concurrently. Bounded so a large token slice can't open an unbounded
+/// number of simultaneous connections to the provider.
+pub(crate) const BATCH_CONCURRENCY: usize = 32;
 
 /// Push provider trait.
 #[async_trait]
@@ -13,12 +19,22 @@ pub trait PushProvider: Send + Sync {
     async fn send(&self, token: &str, notification: &Notification) -> Result<()>;
 
     /// Send to multiple tokens.
+    ///
+    /// Requests are issued with bounded concurrency (`BATCH_CONCURRENCY` in
+    /// flight at a time) so independent HTTP round-trips overlap instead of
+    /// serializing one after another, while still returning one `Result` per
+    /// input token in the original order.
     async fn send_batch(&self, tokens: &[String], notification: &Notification) -> Vec<Result<()>> {
-        let mut results = Vec::with_capacity(tokens.len());
-        for token in tokens {
-            results.push(self.send(token, notification).await);
-        }
-        results
+        // Map over indices rather than `&String` items directly: mapping
+        // over borrowed items ties the closure to a for-any-lifetime bound
+        // that `self.send`'s (async-trait-generated) borrowed future can't
+        // satisfy. Indices are `Copy` and lifetime-free, so the closure just
+        // captures `self`/`tokens`/`notification` once at a single lifetime.
+        stream::iter(0..tokens.len())
+            .map(|i| self.send(&tokens[i], notification))
+            .buffered(BATCH_CONCURRENCY)
+            .collect()
+            .await
     }
 
     /// Get the platform this provider handles.
@@ -75,10 +91,29 @@ impl PushService {
         Ok(Self::new().add_provider(provider))
     }
 
-    /// Send a notification to a device token.
+    /// Send a notification to a device token, trying every provider in turn.
+    ///
+    /// # This is best-effort fallthrough, not routing
+    ///
+    /// A bare token carries no platform information, so this method has
+    /// nothing to dispatch on: it tries each provider in insertion order until
+    /// one succeeds. With several providers configured that means an iOS token
+    /// costs a wasted authenticated round-trip to FCM before it reaches APNS.
+    ///
+    /// **Prefer [`PushService::send_to_device`]** with a platform-tagged
+    /// [`DeviceToken`] whenever you know the platform — which is essentially
+    /// always, since the platform is recorded when the token is registered.
+    /// This method is appropriate for a single-provider service.
+    ///
+    /// On total failure the returned error is chosen deliberately: the first
+    /// error that does *not* claim the device should be removed wins. A
+    /// removal claim from a provider the token was never issued by is
+    /// meaningless — FCM failing transiently followed by APNS reporting
+    /// `InvalidSubscription` for a token that was never an APNS token would
+    /// otherwise hand the caller a `should_remove_device()` error and get a
+    /// perfectly valid Android registration deleted.
     pub async fn send(&self, token: &str, notification: Notification) -> Result<()> {
-        // Try each provider until one succeeds
-        let mut last_error = None;
+        let mut errors: Vec<PushError> = Vec::new();
 
         for provider in &self.providers {
             match provider.send(token, &notification).await {
@@ -89,20 +124,56 @@ impl PushService {
                         error = %e,
                         "Provider failed, trying next"
                     );
-                    last_error = Some(e);
+                    errors.push(e);
                 }
             }
         }
 
-        Err(last_error
-            .unwrap_or_else(|| PushError::Config("No push providers configured".to_string())))
+        Err(Self::select_error(errors))
+    }
+
+    /// Pick the error to surface when every provider failed.
+    ///
+    /// Prefers the first error that does not assert the device should be
+    /// removed, so a spurious removal verdict from a mismatched provider
+    /// cannot cause a caller to prune a valid token. If every provider
+    /// asserted removal, that verdict is consistent and is passed through.
+    fn select_error(errors: Vec<PushError>) -> PushError {
+        // One pass, no `expect`: take the first error; if it is already not a
+        // removal verdict it wins outright, otherwise scan on for the first
+        // non-removal error, falling back to the first when every provider
+        // agreed on removal.
+        let mut errors = errors.into_iter();
+
+        let Some(first) = errors.next() else {
+            return PushError::Config("No push providers configured".to_string());
+        };
+
+        if !first.should_remove_device() {
+            return first;
+        }
+
+        errors.find(|e| !e.should_remove_device()).unwrap_or(first)
     }
 
     /// Send to a device token with platform hint.
+    ///
+    /// This is the only method that routes by platform; prefer it over
+    /// [`PushService::send`] whenever the platform is known.
     pub async fn send_to_device(
         &self,
         device: &DeviceToken,
         notification: Notification,
+    ) -> Result<()> {
+        self.send_to_device_ref(device, &notification).await
+    }
+
+    /// Borrowing form of [`PushService::send_to_device`], so batch fan-out does
+    /// not clone the (recipient-invariant) notification once per device.
+    async fn send_to_device_ref(
+        &self,
+        device: &DeviceToken,
+        notification: &Notification,
     ) -> Result<()> {
         let provider = self
             .providers
@@ -112,7 +183,7 @@ impl PushService {
                 PushError::Config(format!("No provider for platform {:?}", device.platform))
             })?;
 
-        provider.send(&device.token, &notification).await
+        provider.send(&device.token, notification).await
     }
 
     /// Send to a web push subscription.
@@ -133,21 +204,30 @@ impl PushService {
     }
 
     /// Send to multiple devices.
+    ///
+    /// Requests are issued with bounded concurrency (see `BATCH_CONCURRENCY`)
+    /// so N devices cost roughly one round-trip instead of N serial ones,
+    /// while results are still returned in the original device order.
+    ///
+    /// The notification does not vary per recipient, so it is borrowed by the
+    /// fan-out rather than cloned once per device.
     pub async fn send_batch(
         &self,
         devices: &[DeviceToken],
         notification: Notification,
     ) -> Vec<Result<()>> {
-        let mut results = Vec::with_capacity(devices.len());
-
-        for device in devices {
-            results.push(self.send_to_device(device, notification.clone()).await);
-        }
-
-        results
+        let notification = &notification;
+        stream::iter(0..devices.len())
+            .map(|i| self.send_to_device_ref(&devices[i], notification))
+            .buffered(BATCH_CONCURRENCY)
+            .collect()
+            .await
     }
 
     /// Send to multiple tokens with a single platform.
+    ///
+    /// Delegates to the platform provider's `send_batch`, which fans requests
+    /// out with bounded concurrency rather than sending them one at a time.
     pub async fn send_to_tokens(
         &self,
         platform: Platform,

@@ -10,8 +10,8 @@
 - **Language**: Rust
 - **Category**: Web Framework / HTTP Server
 - **License**: Apache 2.0 / MIT
-- **Repository**: https://github.com/pegasusheavy/armature
-- **Documentation**: https://pegasusheavy.github.io/armature/docs
+- **Repository**: https://github.com/quinnjr/armature
+- **Documentation**: https://quinnjr.github.io/armature/docs
 - **Version**: 0.1.0
 - **Status**: 98% Feature Complete, Production Ready
 
@@ -186,15 +186,15 @@ Armature is built on Tokio and delivers exceptional performance:
 
 ## Links
 
-- Website: https://pegasusheavy.github.io/armature/
-- GitHub: https://github.com/pegasusheavy/armature
-- Documentation: https://pegasusheavy.github.io/armature/docs
-- Getting Started: https://pegasusheavy.github.io/armature/getting-started
+- Website: https://quinnjr.github.io/armature/
+- GitHub: https://github.com/quinnjr/armature
+- Documentation: https://quinnjr.github.io/armature/docs
+- Getting Started: https://quinnjr.github.io/armature/getting-started
 - Crates.io: https://crates.io/crates/armature (coming soon)
 
 ## Contact
 
 - Author: Joseph R. Quinn
-- Organization: Pegasus Heavy Industries
-- Email: pegasusheavyindustries@gmail.com
+- Organization: Joseph Quinn
+- Email: quinn.josephr@proton.me
 

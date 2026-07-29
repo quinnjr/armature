@@ -1,6 +1,6 @@
 [package]
 name = "armature-macros-utils"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,4 +18,15 @@ proc-macro = true
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
+
+[dev-dependencies]
+# The generated macro code targets these crates; tests exercise the real
+# expansions, so they are pulled in as dev-dependencies only. Callers of the
+# macros must depend on the same crates themselves (see the crate docs — in
+# particular `validate_email!` requires the caller to depend on `regex`).
+armature-core = { path = "../armature-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1"
+trybuild = "1"
 

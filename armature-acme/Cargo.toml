@@ -1,6 +1,6 @@
 [package]
 name = "armature-acme"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,21 +12,24 @@ keywords = ["acme", "tls", "certificates", "letsencrypt"]
 categories = ["web-programming", "cryptography"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 # HTTP client for ACME protocol
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # Cryptography
 rustls = "0.23"
-rustls-pemfile = "2.0"
+rustls-pemfile = "2.2"
 rcgen = { version = "0.14", features = ["pem"] }
 ring = "0.17"
 base64 = "0.22"
+
+# X.509 parsing (certificate expiry for renewal checks)
+x509-parser = "0.18"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -43,3 +46,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Pebble ACME test CA (Docker-gated end-to-end tests)
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
+# Certificate validity offsets in should_renew boundary tests
+time = "0.3"

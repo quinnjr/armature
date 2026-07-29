@@ -27,7 +27,18 @@
 use crate::Error;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+/// Pre-compiled UUID regex (8-4-4-4-12 format), compiled once on first use.
+static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        .expect("UUID regex is valid")
+});
+
+/// Pre-compiled basic email regex, compiled once on first use.
+static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").expect("email regex is valid")
+});
 
 /// Trait for validating route parameters
 pub trait RouteConstraint: Send + Sync {
@@ -134,12 +145,7 @@ pub struct UuidConstraint;
 impl RouteConstraint for UuidConstraint {
     fn validate(&self, value: &str) -> Result<(), String> {
         // Simple UUID validation (8-4-4-4-12 format)
-        let uuid_regex = Regex::new(
-            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-        )
-        .unwrap();
-
-        if uuid_regex.is_match(value) {
+        if UUID_REGEX.is_match(value) {
             Ok(())
         } else {
             Err(format!("'{}' is not a valid UUID", value))
@@ -158,9 +164,7 @@ pub struct EmailConstraint;
 impl RouteConstraint for EmailConstraint {
     fn validate(&self, value: &str) -> Result<(), String> {
         // Basic email validation
-        let email_regex = Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-
-        if email_regex.is_match(value) {
+        if EMAIL_REGEX.is_match(value) {
             Ok(())
         } else {
             Err(format!("'{}' is not a valid email address", value))

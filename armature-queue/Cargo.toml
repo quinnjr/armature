@@ -1,6 +1,6 @@
 [package]
 name = "armature-queue"
-version = "0.1.2"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,24 +13,25 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Logging
-armature-log = { path = "../armature-log", version = "0.1.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
 
 # Core dependencies
 async-trait = "0.1"
 thiserror = "2.0"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.6", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 # Redis for queue backend - uses armature-redis for DI integration
-armature-redis = { path = "../armature-redis", version = "0.1.0" }
-redis = { version = "1.0", features = ["tokio-comp", "connection-manager"] }
+armature-redis = { path = "../armature-redis", version = "0.2.0" }
+redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
 
 # DI integration
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 

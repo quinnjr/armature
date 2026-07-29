@@ -39,13 +39,11 @@ fn test_cef_formatting() {
         .action("login")
         .message("User logged in");
 
-    let config = SiemConfig {
-        provider: SiemProvider::ArcSight,
-        cef_vendor: "TestVendor".to_string(),
-        cef_product: "TestProduct".to_string(),
-        cef_version: "1.0".to_string(),
-        ..Default::default()
-    };
+    let mut config = SiemConfig::default();
+    config.provider = SiemProvider::ArcSight;
+    config.cef_vendor = "TestVendor".to_string();
+    config.cef_product = "TestProduct".to_string();
+    config.cef_version = "1.0".to_string();
 
     let formatter = get_formatter(EventFormat::Cef);
     let result = formatter.format(&event, &config).unwrap();
@@ -67,13 +65,11 @@ fn test_leef_formatting() {
         .action("login")
         .message("Authentication failed");
 
-    let config = SiemConfig {
-        provider: SiemProvider::QRadar,
-        cef_vendor: "Armature".to_string(),
-        cef_product: "Security".to_string(),
-        cef_version: "1.0".to_string(),
-        ..Default::default()
-    };
+    let mut config = SiemConfig::default();
+    config.provider = SiemProvider::QRadar;
+    config.cef_vendor = "Armature".to_string();
+    config.cef_product = "Security".to_string();
+    config.cef_version = "1.0".to_string();
 
     let formatter = get_formatter(EventFormat::Leef);
     let result = formatter.format(&event, &config).unwrap();
@@ -94,12 +90,10 @@ fn test_syslog_formatting() {
         .action("create")
         .message("Session started");
 
-    let config = SiemConfig {
-        provider: SiemProvider::Syslog,
-        app_name: "testapp".to_string(),
-        syslog_facility: SyslogFacility::Local0,
-        ..Default::default()
-    };
+    let mut config = SiemConfig::default();
+    config.provider = SiemProvider::Syslog;
+    config.app_name = "testapp".to_string();
+    config.syslog_facility = SyslogFacility::Local0;
 
     let formatter = get_formatter(EventFormat::Syslog);
     let result = formatter.format(&event, &config).unwrap();
@@ -145,13 +139,11 @@ fn test_json_formatting_splunk() {
         .category(EventCategory::Web)
         .action("test");
 
-    let config = SiemConfig {
-        provider: SiemProvider::Splunk,
-        source: Some("armature".to_string()),
-        source_type: Some("security".to_string()),
-        index: Some("main".to_string()),
-        ..Default::default()
-    };
+    let mut config = SiemConfig::default();
+    config.provider = SiemProvider::Splunk;
+    config.source = Some("armature".to_string());
+    config.source_type = Some("security".to_string());
+    config.index = Some("main".to_string());
 
     let formatter = get_formatter(EventFormat::Json);
     let result = formatter.format(&event, &config).unwrap();
@@ -251,10 +243,8 @@ fn test_batch_formatting() {
         SiemEvent::new("event.3").action("test3"),
     ];
 
-    let config = SiemConfig {
-        provider: SiemProvider::Splunk,
-        ..Default::default()
-    };
+    let mut config = SiemConfig::default();
+    config.provider = SiemProvider::Splunk;
 
     let formatter = get_formatter(EventFormat::Json);
     let result = formatter.format_batch(&events, &config).unwrap();

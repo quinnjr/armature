@@ -1,6 +1,6 @@
 [package]
 name = "armature-aws"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,33 +13,33 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["sync"] }
+tokio = { version = "1.52", features = ["sync"] }
 async-trait = "0.1"
 
 # AWS SDK - core
-aws-config = { version = "1.5", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-config = { version = "1.8" }
 aws-credential-types = { version = "1.2" }
 aws-types = { version = "1.3" }
 
 # AWS SDK - services (all optional)
-aws-sdk-s3 = { version = "1.61", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-dynamodb = { version = "1.55", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-sqs = { version = "1.51", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-sns = { version = "1.52", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-sesv2 = { version = "1.60", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-lambda = { version = "1.56", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-secretsmanager = { version = "1.55", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-ssm = { version = "1.55", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-cloudwatch = { version = "1.57", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-kinesis = { version = "1.52", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-eventbridge = { version = "1.54", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-ecs = { version = "1.57", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-ecr = { version = "1.54", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-rds = { version = "1.62", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-elasticache = { version = "1.56", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-cognito-idp = { version = "1.57", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true, package = "aws-sdk-cognitoidentityprovider" }
-aws-sdk-kms = { version = "1.52", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-sdk-sts = { version = "1.52", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-sdk-s3 = { version = "1.122", optional = true }
+aws-sdk-dynamodb = { version = "1.104", optional = true }
+aws-sdk-sqs = { version = "1.93", optional = true }
+aws-sdk-sns = { version = "1.94", optional = true }
+aws-sdk-sesv2 = { version = "1.112", optional = true }
+aws-sdk-lambda = { version = "1.115", optional = true }
+aws-sdk-secretsmanager = { version = "1.99", optional = true }
+aws-sdk-ssm = { version = "1.103", optional = true }
+aws-sdk-cloudwatch = { version = "1.102", optional = true }
+aws-sdk-kinesis = { version = "1.99", optional = true }
+aws-sdk-eventbridge = { version = "1.100", optional = true }
+aws-sdk-ecs = { version = "1.111", optional = true }
+aws-sdk-ecr = { version = "1.106", optional = true }
+aws-sdk-rds = { version = "1.125", optional = true }
+aws-sdk-elasticache = { version = "1.99", optional = true }
+aws-sdk-cognito-idp = { version = "1.108", optional = true, package = "aws-sdk-cognitoidentityprovider" }
+aws-sdk-kms = { version = "1.99", optional = true }
+aws-sdk-sts = { version = "1.97", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -53,7 +53,7 @@ tracing = "0.1"
 parking_lot = "0.12"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 
 [features]
 default = []

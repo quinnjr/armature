@@ -85,19 +85,21 @@
 //! ## Azure Functions Features
 //!
 //! This crate helps with:
-//! - **HTTP Triggers**: Handle HTTP requests in Azure Functions
-//! - **Application Insights**: Structured logging for monitoring
-//! - **Bindings**: Access Azure services through bindings
-//! - **Configuration**: Read from Azure App Configuration
+//! - **HTTP Triggers**: Handle HTTP requests in Azure Functions via the
+//!   custom-handler HTTP server
+//! - **Application Insights**: Structured JSON logging for monitoring
+//! - **Configuration**: Read runtime settings from environment variables
+//!   ([`FunctionConfig::from_env`])
+//!
+//! Only HTTP triggers are supported. Non-HTTP triggers (Timer/Queue/Blob) and
+//! binding-based Azure service I/O are not dispatched by the runtime.
 
-mod bindings;
 mod config;
 mod error;
 mod request;
 mod response;
 mod runtime;
 
-pub use bindings::{InputBinding, OutputBinding};
 pub use config::FunctionConfig;
 pub use error::{AzureFunctionsError, Result};
 pub use request::FunctionRequest;

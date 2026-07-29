@@ -216,13 +216,24 @@ impl WebhookDelivery {
     }
 }
 
-/// Truncate a string to a maximum length
+/// Truncate a string to a maximum length (in bytes), respecting UTF-8 char boundaries
+///
+/// This is fed untrusted response bodies from external webhook targets, which may
+/// contain multibyte UTF-8 characters. Slicing on a raw byte index can land in the
+/// middle of a multibyte character and panic, so we find the largest valid char
+/// boundary at or before `max_len - 3` (reserving 3 bytes for the "..." suffix).
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+        return s.to_string();
     }
+
+    let target = max_len.saturating_sub(3);
+    let mut boundary = target.min(s.len());
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+
+    format!("{}...", &s[..boundary])
 }
 
 #[cfg(test)]
@@ -254,6 +265,34 @@ mod tests {
         assert!(WebhookDeliveryStatus::PermanentlyFailed.is_terminal());
         assert!(!WebhookDeliveryStatus::Failed.is_terminal());
         assert!(!WebhookDeliveryStatus::Pending.is_terminal());
+    }
+
+    #[test]
+    fn test_truncate_string_does_not_panic_on_multibyte_boundary() {
+        // Each '€' is 3 bytes in UTF-8; with max_len=10 the naive byte-slice
+        // `&s[..7]` would land mid-character and panic.
+        let body: String = std::iter::repeat_n('€', 20).collect();
+        let truncated = truncate_string(&body, 10);
+
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 10);
+        // Result must be valid UTF-8 (guaranteed by type), and must not have
+        // corrupted the euro signs into replacement bytes.
+        assert!(truncated.chars().all(|c| c == '€' || c == '.'));
+    }
+
+    #[test]
+    fn test_truncate_string_via_mark_succeeded_multibyte_response() {
+        let payload = WebhookPayload::new("test");
+        let mut delivery = WebhookDelivery::new(payload, "https://example.com/webhook");
+
+        let body: String = std::iter::repeat_n('日', 2000).collect();
+        // Should not panic.
+        delivery.mark_succeeded(200, Some(body));
+
+        let truncated = delivery.last_response_body.unwrap();
+        assert!(truncated.len() <= 1024);
+        assert!(truncated.ends_with("..."));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::engine::RhaiEngine;
 use crate::error::Result;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;

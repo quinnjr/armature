@@ -39,6 +39,10 @@ use super::RateLimitAlgorithm;
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
 
+/// Default hard cap on retained keys; see `token_bucket::DEFAULT_MAX_KEYS`.
+/// Bounds memory against untrusted, high-cardinality keys.
+const DEFAULT_MAX_KEYS: usize = 100_000;
+
 /// Window state for a key
 #[derive(Debug, Clone)]
 struct WindowState {
@@ -56,6 +60,8 @@ pub struct FixedWindow {
     window: Duration,
     /// State per key
     windows: DashMap<String, WindowState>,
+    /// Hard cap on retained keys; evict the oldest when a new key would exceed it.
+    max_keys: usize,
 }
 
 impl FixedWindow {
@@ -77,12 +83,37 @@ impl FixedWindow {
             max_requests,
             window,
             windows: DashMap::new(),
+            max_keys: DEFAULT_MAX_KEYS,
+        }
+    }
+
+    /// Override the hard cap on retained keys (default [`DEFAULT_MAX_KEYS`]).
+    pub fn with_max_keys(mut self, max_keys: usize) -> Self {
+        self.max_keys = max_keys.max(1);
+        self
+    }
+
+    /// Evict the single least-recently-started window to make room for a new key.
+    fn evict_oldest(&self) {
+        if let Some(oldest) = self
+            .windows
+            .iter()
+            .min_by_key(|e| e.value().window_start)
+            .map(|e| e.key().clone())
+        {
+            self.windows.remove(&oldest);
         }
     }
 
     /// Try to record a request
     pub fn try_acquire(&self, key: &str) -> (bool, u64) {
         let now = Instant::now();
+
+        // Bound memory: evict the oldest entry before admitting a new key that
+        // would exceed the cap.
+        if !self.windows.contains_key(key) && self.windows.len() >= self.max_keys {
+            self.evict_oldest();
+        }
 
         let mut entry = self
             .windows

@@ -845,7 +845,10 @@ impl<T: Recyclable + Default> RecyclePool<T> {
     /// Release an object back to the pool.
     #[inline]
     fn release(&mut self, index: usize) {
-        if index < self.capacity {
+        // Guard against objects.len(), not capacity: shrink() may lower
+        // capacity while handles to high-index slots are still outstanding,
+        // and those slots must still return to the pool.
+        if index < self.objects.len() {
             // Reset object for reuse
             self.objects[index].reset();
             self.free_indices.push(index);
@@ -905,14 +908,21 @@ impl<T: Recyclable + Default> RecyclePool<T> {
     pub fn shrink(&mut self, min_capacity: usize) {
         let target = min_capacity.max(self.active());
         if target < self.capacity {
-            // Only shrink if we have excess free slots
-            while self.capacity > target && !self.free_indices.is_empty() {
-                if let Some(index) = self.free_indices.pop() {
+            // Only retire free slots at indices >= target: low-index free
+            // slots stay usable, and active high-index slots keep counting
+            // toward capacity until their handles release them.
+            let before = self.free_indices.len();
+            let objects = &mut self.objects;
+            self.free_indices.retain(|&index| {
+                if index >= target {
                     // Mark as removed (but keep in vec to avoid reindexing)
-                    self.objects[index].reset();
+                    objects[index].reset();
+                    false
+                } else {
+                    true
                 }
-                self.capacity -= 1;
-            }
+            });
+            self.capacity -= before - self.free_indices.len();
         }
     }
 
@@ -2008,6 +2018,46 @@ mod tests {
 
         assert_eq!(pool.capacity(), 5);
         assert_eq!(pool.available(), 5);
+    }
+
+    #[test]
+    fn test_recycle_pool_shrink_only_drops_high_free_indices() {
+        let mut pool: RecyclePool<RecyclableConnection> = RecyclePool::new(4);
+
+        pool.shrink(2);
+        assert_eq!(pool.capacity(), 2);
+        assert_eq!(pool.available(), 2);
+        assert_eq!(pool.active(), 0);
+
+        // Remaining free slots must be the low indices
+        {
+            let h = pool.acquire().unwrap();
+            assert!(h.index() < 2);
+        }
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn test_recycle_pool_release_after_shrink_and_grow() {
+        // Regression test: after shrink + grow, handles with indices beyond
+        // the shrunken capacity must still return to the pool on drop.
+        let mut pool: RecyclePool<RecyclableConnection> = RecyclePool::new(4);
+
+        pool.shrink(2);
+        pool.grow(2);
+        assert_eq!(pool.capacity(), 4);
+        assert_eq!(pool.available(), 4);
+
+        // grow() appends slots at high indices; acquire pops the highest
+        let index = {
+            let h = pool.acquire().unwrap();
+            h.index()
+        };
+        assert!(index >= 4); // beyond original capacity
+
+        // Slot must have been returned, not silently leaked
+        assert_eq!(pool.available(), 4);
+        assert_eq!(pool.active(), 0);
     }
 
     #[test]

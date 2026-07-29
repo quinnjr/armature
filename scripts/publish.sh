@@ -10,25 +10,44 @@
 #   ./scripts/publish.sh [OPTIONS]
 #
 # Options:
-#   --dry-run       Show publish order without actually publishing
-#   --check         Verify all crates are ready to publish
-#   --single CRATE  Publish only the specified crate
-#   --from CRATE    Publish starting from the specified crate
-#   --skip CRATE    Skip the specified crate (can be used multiple times)
-#   --no-verify     Skip cargo publish verification step
-#   --delay SECS    Delay between publishes (default: 30)
-#   --burst N       Publish N crates then pause longer (default: 5)
-#   --burst-delay S Delay after burst (default: 120)
-#   --help          Show this help message
+#   --dry-run          Show publish order without actually publishing
+#   --check            Verify all crates are ready to publish
+#   --single CRATE     Publish only the specified crate
+#   --from CRATE       Publish starting from the specified crate
+#   --skip CRATE       Skip the specified crate (can be used multiple times)
+#   --no-verify        Skip cargo publish verification step
+#   --yes, -y          Skip the interactive confirmation prompt (for CI/non-interactive use)
+#   --delay SECS       Delay between publishes (default: 60)
+#   --burst N          Publish N crates then pause longer (default: 5)
+#   --burst-delay S    Delay after burst (default: 120)
+#   --new-crate-delay S Delay after a burst of brand-new-crate publishes (default: 600)
+#   --help             Show this help message
 #
 # Environment:
 #   CARGO_REGISTRY_TOKEN  Required for publishing (or use `cargo login`)
 #
 # Rate Limiting:
-#   crates.io has rate limits on publishing. This script handles them by:
-#   - Waiting between each publish (--delay, default 30s)
+#   crates.io enforces two separate publish rate limits (see
+#   https://crates.io/data-access#rate-limiting):
+#     - Publishing a brand-new crate (one that has never been published
+#       before): burst of 5, refilling at 1 per 10 minutes.
+#     - Publishing a new version of an already-published crate: burst of 30,
+#       refilling at 1 per minute.
+#   This script handles both by:
+#   - Waiting between each publish (--delay, default 60s — matches the
+#     sustained 1/min refill rate for new-version publishes, the common case
+#     for this workspace)
 #   - Taking longer breaks after bursts (--burst, --burst-delay)
-#   - Automatically retrying with exponential backoff on rate limit errors
+#   - Applying a much longer wait after every 5 brand-new-crate publishes
+#     (--new-crate-delay, default 600s), since that bucket refills far slower
+#   - Parsing the exact retry time crates.io reports (either a `Retry-After`
+#     response header on the read-only version-check API, or the "try again
+#     after <timestamp>" text crates.io embeds in publish rate-limit errors)
+#     and waiting exactly that long instead of guessing via backoff alone
+#   - Falling back to exponential backoff when no explicit retry time is
+#     available
+#   - Identifying itself with a proper contact-bearing User-Agent on every
+#     crates.io API request, per crates.io's API access policy
 #
 # =============================================================================
 
@@ -50,19 +69,33 @@ SINGLE_CRATE=""
 FROM_CRATE=""
 NO_VERIFY=false
 FORCE=false
+ASSUME_YES=false
 SKIP_CRATES=()
 CRATES_IO_API="https://crates.io/api/v1/crates"
+# crates.io's API access policy (https://crates.io/data-access) requires a
+# descriptive User-Agent that includes a way to contact the operator.
+USER_AGENT="armature-publish-script/1.0 (+https://github.com/quinnjr/armature)"
 
 # Rate limiting configuration
-PUBLISH_DELAY=30       # Delay between publishes (seconds)
-BURST_SIZE=5           # Number of crates to publish before longer pause
-BURST_DELAY=120        # Delay after burst (seconds)
-MAX_RETRIES=0          # Maximum retries on rate limit (0 = unlimited)
-INITIAL_BACKOFF=60     # Initial backoff on rate limit (seconds)
-MAX_BACKOFF=600        # Maximum backoff (10 minutes)
+PUBLISH_DELAY=60         # Delay between publishes (seconds) — matches
+                         # crates.io's 1/min sustained refill for new-version
+                         # publishes (the common case for this workspace).
+BURST_SIZE=5             # Number of crates to publish before longer pause
+BURST_DELAY=120          # Delay after burst (seconds)
+NEW_CRATE_BURST=5        # crates.io allows a burst of 5 brand-new-crate
+                         # publishes before the strict 1-per-10-min limit
+                         # kicks in.
+NEW_CRATE_DELAY=600      # Delay after a burst of brand-new-crate publishes
+                         # (seconds) — matches crates.io's 1-per-10-min
+                         # refill rate for that bucket.
+MAX_RETRIES=0            # Maximum retries on rate limit (0 = unlimited)
+INITIAL_BACKOFF=60       # Initial backoff on rate limit (seconds), used only
+                         # when crates.io didn't tell us an explicit retry time.
+MAX_BACKOFF=600          # Maximum backoff (10 minutes)
 
 # Tracking
 BURST_COUNT=0
+NEW_CRATE_COUNT=0
 TOTAL_WAIT_TIME=0
 START_TIME=$(date +%s)
 
@@ -156,10 +189,12 @@ wait_with_countdown() {
     printf "\r  ✓ Wait complete.        \n"
 }
 
-# Handle rate limit with exponential backoff
+# Handle rate limit with exponential backoff, or an explicit wait time if
+# one was parsed from crates.io's response (see parse_retry_after_seconds).
 handle_rate_limit() {
     local attempt=$1
     local crate=$2
+    local explicit_wait=$3   # optional: exact seconds crates.io told us to wait
 
     # MAX_RETRIES=0 means unlimited
     if [[ $MAX_RETRIES -gt 0 && $attempt -ge $MAX_RETRIES ]]; then
@@ -167,10 +202,24 @@ handle_rate_limit() {
         return 1
     fi
 
-    # Exponential backoff: initial * 2^attempt, capped at max
-    local backoff=$((INITIAL_BACKOFF * (2 ** attempt)))
-    if [[ $backoff -gt $MAX_BACKOFF ]]; then
-        backoff=$MAX_BACKOFF
+    local backoff
+    local reason
+    if [[ -n "$explicit_wait" && $explicit_wait -gt 0 ]]; then
+        # crates.io told us exactly how long to wait — trust it rather than
+        # guessing, but still cap it so a huge/garbled value can't hang the
+        # script indefinitely.
+        backoff=$explicit_wait
+        if [[ $backoff -gt $((MAX_BACKOFF * 4)) ]]; then
+            backoff=$((MAX_BACKOFF * 4))
+        fi
+        reason="Rate limit backoff (crates.io asked us to wait this long)"
+    else
+        # No explicit time available — exponential backoff: initial * 2^attempt.
+        backoff=$((INITIAL_BACKOFF * (2 ** attempt)))
+        if [[ $backoff -gt $MAX_BACKOFF ]]; then
+            backoff=$MAX_BACKOFF
+        fi
+        reason="Rate limit backoff (exponential, no explicit retry time given)"
     fi
 
     if [[ $MAX_RETRIES -eq 0 ]]; then
@@ -178,19 +227,105 @@ handle_rate_limit() {
     else
         log_warn "Rate limited! Attempt $((attempt + 1))/$MAX_RETRIES"
     fi
-    wait_with_countdown $backoff "Rate limit backoff"
+    wait_with_countdown $backoff "$reason"
     return 0
 }
 
-# Check if cargo publish output indicates rate limiting
+# Check if cargo publish (or a curl-based crates.io API call) output/status
+# indicates rate limiting.
+#
+# crates.io's actual rate-limit error text doesn't always contain the literal
+# phrase "too many requests" — publish-specific errors say things like "You
+# have published too many new crates" / "...too many new versions of this
+# crate", so match on the "too many" pattern broadly rather than one exact
+# phrase, and also recognize the "try again after" wording crates.io embeds
+# in these errors.
 is_rate_limited() {
     local output="$1"
+    local http_code="${2:-}"
 
-    # crates.io rate limit messages
-    if echo "$output" | grep -qiE "rate.?limit|too many requests|429|slow down"; then
+    if [[ "$http_code" == "429" ]]; then
+        return 0
+    fi
+    if echo "$output" | grep -qiE "rate.?limit|too many (requests|new|updates|versions|crates)|\b429\b|slow down|try again after"; then
         return 0
     fi
     return 1
+}
+
+# Extract an explicit retry time from a rate-limit response, in seconds from
+# now. Checks two sources, in order:
+#   1. A raw HTTP `Retry-After` header (either as a delay-in-seconds, or an
+#      HTTP-date), as captured by curl_with_headers.
+#   2. crates.io's publish-error text, which embeds an RFC 3339 timestamp
+#      after the phrase "try again after".
+# Echoes the number of whole seconds to wait, or nothing if no explicit time
+# could be determined (caller should fall back to exponential backoff).
+parse_retry_after_seconds() {
+    local output="$1"
+    local retry_after_header="${2:-}"
+
+    if [[ -n "$retry_after_header" ]]; then
+        # Retry-After is either an integer number of seconds, or an HTTP-date.
+        if [[ "$retry_after_header" =~ ^[0-9]+$ ]]; then
+            echo "$retry_after_header"
+            return 0
+        fi
+        local target_epoch
+        target_epoch=$(date -d "$retry_after_header" +%s 2>/dev/null) || target_epoch=""
+        if [[ -n "$target_epoch" ]]; then
+            local now_epoch
+            now_epoch=$(date +%s)
+            local diff=$((target_epoch - now_epoch))
+            if [[ $diff -gt 0 ]]; then
+                echo "$diff"
+                return 0
+            fi
+        fi
+    fi
+
+    # Fall back to parsing an embedded "try again after <timestamp>" from the
+    # response body / cargo output text.
+    local embedded_ts
+    embedded_ts=$(echo "$output" | grep -oiE 'try again after [^.[:space:]]+' | head -1 | sed -E 's/^try again after //i')
+    if [[ -n "$embedded_ts" ]]; then
+        local target_epoch
+        target_epoch=$(date -d "$embedded_ts" +%s 2>/dev/null) || target_epoch=""
+        if [[ -n "$target_epoch" ]]; then
+            local now_epoch
+            now_epoch=$(date +%s)
+            local diff=$((target_epoch - now_epoch))
+            if [[ $diff -gt 0 ]]; then
+                echo "$diff"
+                return 0
+            fi
+        fi
+    fi
+
+    # Nothing usable found.
+    return 1
+}
+
+# curl wrapper for crates.io API calls: always sends the required User-Agent,
+# and captures the response body, HTTP status code, and Retry-After header
+# (if present) so callers can make correct rate-limit decisions instead of
+# treating a 429 the same as any other error.
+#
+# Sets three globals on return: CURL_BODY, CURL_HTTP_CODE, CURL_RETRY_AFTER.
+curl_crates_io() {
+    local url="$1"
+    local headers_file
+    headers_file=$(mktemp)
+
+    CURL_BODY=$(curl -s -w "\n%{http_code}" -D "$headers_file" \
+        -H "User-Agent: $USER_AGENT" \
+        "$url" 2>/dev/null)
+
+    CURL_HTTP_CODE=$(echo "$CURL_BODY" | tail -1)
+    CURL_BODY=$(echo "$CURL_BODY" | sed '$d')
+    CURL_RETRY_AFTER=$(grep -i '^retry-after:' "$headers_file" 2>/dev/null | tail -1 | sed -E 's/^[Rr]etry-[Aa]fter:[[:space:]]*//' | tr -d '\r')
+
+    rm -f "$headers_file"
 }
 
 show_help() {
@@ -211,28 +346,46 @@ OPTIONS:
     --skip CRATE    Skip the specified crate (can be repeated)
     --no-verify     Skip cargo publish verification step
     --force         Publish even if version already exists on crates.io
+    --yes, -y       Skip the interactive confirmation prompt (for CI/non-interactive use)
     --help          Show this help message
 
 RATE LIMITING OPTIONS:
-    --delay SECS    Delay between each publish (default: 30)
-    --burst N       Publish N crates then take a longer break (default: 5)
-    --burst-delay S Delay after each burst of publishes (default: 120)
-    --fast          Fast mode: minimal delays (5s/3/30s) - risky!
-    --safe          Safe mode: conservative delays (60s/3/300s)
+    --delay SECS         Delay between each publish (default: 60)
+    --burst N            Publish N crates then take a longer break (default: 5)
+    --burst-delay S      Delay after each burst of publishes (default: 120)
+    --new-crate-delay S  Delay after a burst of brand-new-crate publishes
+                         (default: 600) — crates.io's limit for genuinely
+                         new crate names is far stricter than for new
+                         versions of an existing crate.
+    --fast               Fast mode: minimal delays (5s/3/30s) - risky!
+    --safe               Safe mode: conservative delays (60s/3/300s, 900s
+                         for new-crate bursts)
 
 ENVIRONMENT:
     CARGO_REGISTRY_TOKEN  API token for crates.io (or use `cargo login`)
 
 RATE LIMITING:
-    crates.io enforces rate limits on publishing. This script handles them by:
+    crates.io enforces two separate publish rate limits (see
+    https://crates.io/data-access#rate-limiting): a strict one for brand-new
+    crate names (burst 5, refill 1/10min) and a looser one for new versions
+    of a crate that's already published (burst 30, refill 1/min). This
+    script handles both by:
 
     1. Standard Delay: Waits --delay seconds between each publish
     2. Burst Control: After --burst publishes, waits --burst-delay seconds
-    3. Auto-Retry: On rate limit errors, retries with exponential backoff
+    3. New-Crate Burst Control: After --new-crate-burst brand-new-crate
+       publishes, waits --new-crate-delay seconds (much longer, since that
+       bucket refills far slower)
+    4. Explicit Retry-After: When crates.io tells us exactly how long to
+       wait (via an HTTP Retry-After header on API calls, or the "try again
+       after <time>" text crates.io embeds in publish rate-limit errors),
+       waits exactly that long instead of guessing
+    5. Auto-Retry: Otherwise, retries with exponential backoff
 
-    Default timing for ~50 crates:
-    - Normal: ~30 min (30s delays, 2min burst pauses)
-    - Safe:   ~60 min (60s delays, 5min burst pauses)
+    Default timing for ~50 crates (assuming all are new versions, not
+    brand-new crate names):
+    - Normal: ~55 min (60s delays, 2min burst pauses)
+    - Safe:   ~65 min (60s delays, 5min burst pauses)
     - Fast:   ~15 min (5s delays, 30s burst pauses) - may hit limits!
 
 EXAMPLES:
@@ -259,6 +412,9 @@ EXAMPLES:
 
     # Skip problematic crates
     ./scripts/publish.sh --skip armature-cli --skip armature-ferron
+
+    # Non-interactive (e.g. CI): skip the "Continue? [y/N]" prompt
+    ./scripts/publish.sh --yes
 
 DEPENDENCY ORDER:
     The script automatically determines the correct publish order by
@@ -299,6 +455,10 @@ while [[ $# -gt 0 ]]; do
             FORCE=true
             shift
             ;;
+        --yes|-y)
+            ASSUME_YES=true
+            shift
+            ;;
         --delay)
             PUBLISH_DELAY="$2"
             shift 2
@@ -309,6 +469,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --burst-delay)
             BURST_DELAY="$2"
+            shift 2
+            ;;
+        --new-crate-delay)
+            NEW_CRATE_DELAY="$2"
+            shift 2
+            ;;
+        --new-crate-burst)
+            NEW_CRATE_BURST="$2"
             shift 2
             ;;
         --fast)
@@ -322,6 +490,7 @@ while [[ $# -gt 0 ]]; do
             PUBLISH_DELAY=60
             BURST_SIZE=3
             BURST_DELAY=300
+            NEW_CRATE_DELAY=900
             INITIAL_BACKOFF=120
             shift
             ;;
@@ -566,6 +735,12 @@ get_crate_version() {
 
 # Check if a specific version is published on crates.io
 # Returns: "published", "not_found", or "error"
+#
+# Retries on 429 (rate limited), honoring an explicit Retry-After if crates.io
+# sent one, instead of immediately giving up and reporting "error" — a
+# silent-on-rate-limit read path here would make the pre-publish summary and
+# the just-before-publish "already published?" check both unreliable exactly
+# when the script has been hammering the API hardest.
 check_crates_io_version() {
     local crate=$1
     local version=$2
@@ -573,34 +748,45 @@ check_crates_io_version() {
     # Convert underscores to hyphens for crates.io lookup
     local crate_name="${crate//_/-}"
 
-    # Query crates.io API
-    local response
-    local http_code
+    local attempt=0
+    local max_read_retries=5
+    while [[ $attempt -lt $max_read_retries ]]; do
+        curl_crates_io "$CRATES_IO_API/$crate_name"
 
-    # Use curl with proper User-Agent (required by crates.io API)
-    response=$(curl -s -w "\n%{http_code}" \
-        -H "User-Agent: armature-publish-script/1.0" \
-        "$CRATES_IO_API/$crate_name" 2>/dev/null)
+        if [[ "$CURL_HTTP_CODE" == "404" ]]; then
+            echo "not_found"
+            return
+        fi
 
-    http_code=$(echo "$response" | tail -1)
-    local body=$(echo "$response" | sed '$d')
+        if [[ "$CURL_HTTP_CODE" == "200" ]]; then
+            if echo "$CURL_BODY" | grep -q "\"num\":\"$version\""; then
+                echo "published"
+            else
+                echo "not_published"
+            fi
+            return
+        fi
 
-    if [[ "$http_code" == "404" ]]; then
-        echo "not_found"
-        return
-    fi
+        if is_rate_limited "$CURL_BODY" "$CURL_HTTP_CODE"; then
+            local wait_secs
+            wait_secs=$(parse_retry_after_seconds "$CURL_BODY" "$CURL_RETRY_AFTER") || wait_secs=""
+            log_warn "Rate limited while checking $crate on crates.io (attempt $((attempt + 1))/$max_read_retries)"
+            if [[ -n "$wait_secs" ]]; then
+                wait_with_countdown "$wait_secs" "crates.io asked us to wait before checking $crate"
+            else
+                wait_with_countdown $((INITIAL_BACKOFF * (2 ** attempt))) "Rate limit backoff while checking $crate"
+            fi
+            ((++attempt))
+            continue
+        fi
 
-    if [[ "$http_code" != "200" ]]; then
+        # Some other, non-rate-limit error — no point retrying immediately.
         echo "error"
         return
-    fi
+    done
 
-    # Check if the specific version exists
-    if echo "$body" | grep -q "\"num\":\"$version\""; then
-        echo "published"
-    else
-        echo "not_published"
-    fi
+    log_warn "Still rate limited after $max_read_retries attempts checking $crate — giving up on this check"
+    echo "error"
 }
 
 # Get all published versions for a crate
@@ -608,18 +794,15 @@ get_published_versions() {
     local crate=$1
     local crate_name="${crate//_/-}"
 
-    local response
-    response=$(curl -s \
-        -H "User-Agent: armature-publish-script/1.0" \
-        "$CRATES_IO_API/$crate_name/versions" 2>/dev/null)
+    curl_crates_io "$CRATES_IO_API/$crate_name/versions"
 
-    if [[ $? -ne 0 ]]; then
+    if [[ "$CURL_HTTP_CODE" != "200" ]]; then
         echo ""
         return
     fi
 
     # Extract version numbers (requires jq or simple parsing)
-    echo "$response" | grep -oE '"num":"[^"]*"' | sed 's/"num":"//g; s/"//g' | head -10
+    echo "$CURL_BODY" | grep -oE '"num":"[^"]*"' | sed 's/"num":"//g; s/"//g' | head -10
 }
 
 # Check if crate needs publishing
@@ -656,8 +839,13 @@ needs_publishing() {
 
 # Publish a single crate with retry logic
 # Returns: 0 = published, 1 = error, 2 = skipped (already published)
+#
+# Sets the global WAS_NEW_CRATE=true/false on a successful publish (0), so
+# callers can apply the stricter new-crate pacing (crates.io's burst-5,
+# refill-1-per-10-min bucket) instead of the looser new-version pacing.
 publish_crate() {
     local crate=$1
+    WAS_NEW_CRATE=false
 
     # Get version
     local version
@@ -668,11 +856,17 @@ publish_crate() {
         return 1
     fi
 
-    # Check if already published (unless --force)
-    if [[ "$FORCE" != "true" ]]; then
-        local pub_status
-        pub_status=$(check_crates_io_version "$crate" "$version")
+    # Check if already published (unless --force). This also tells us
+    # whether this is a genuinely brand-new crate (crates.io has never seen
+    # this name before) vs. a new version of one it already knows, which
+    # determines which of crates.io's two publish rate-limit buckets applies.
+    local pub_status
+    pub_status=$(check_crates_io_version "$crate" "$version")
+    if [[ "$pub_status" == "not_found" ]]; then
+        WAS_NEW_CRATE=true
+    fi
 
+    if [[ "$FORCE" != "true" ]]; then
         if [[ "$pub_status" == "published" ]]; then
             echo -e "  ${CYAN}⊘${NC} $crate v$version - already on crates.io, skipping"
             return 2
@@ -713,7 +907,12 @@ publish_crate() {
 
         # Check if rate limited
         if is_rate_limited "$output"; then
-            if handle_rate_limit $attempt "$crate"; then
+            # cargo publish's own output doesn't expose raw HTTP headers, but
+            # crates.io's rate-limit error text embeds an explicit
+            # "try again after <timestamp>" — prefer that over guessing.
+            local explicit_wait
+            explicit_wait=$(parse_retry_after_seconds "$output" "") || explicit_wait=""
+            if handle_rate_limit $attempt "$crate" "$explicit_wait"; then
                 ((++attempt))
                 continue
             else
@@ -805,6 +1004,7 @@ publish_all() {
     echo "  • Delay between publishes: ${PUBLISH_DELAY}s"
     echo "  • Burst size: $BURST_SIZE crates"
     echo "  • Burst delay: ${BURST_DELAY}s"
+    echo "  • New-crate burst: $NEW_CRATE_BURST crates, then ${NEW_CRATE_DELAY}s"
     if [[ $MAX_RETRIES -eq 0 ]]; then
         echo "  • Max retries on rate limit: unlimited"
     else
@@ -831,7 +1031,7 @@ publish_all() {
     fi
 
     # Confirm before publishing
-    if [[ -z "$SINGLE_CRATE" ]]; then
+    if [[ -z "$SINGLE_CRATE" && "$ASSUME_YES" != "true" ]]; then
         echo -e "${YELLOW}This will publish $to_publish crates to crates.io.${NC}"
         echo -n "Continue? [y/N] "
         read -r confirm
@@ -887,10 +1087,15 @@ publish_all() {
         local result
         publish_crate "$crate" && result=0 || result=$?
 
+        local was_new_crate=false
         case $result in
             0)
                 ((++published))
                 ((++BURST_COUNT))
+                if [[ "$WAS_NEW_CRATE" == "true" ]]; then
+                    was_new_crate=true
+                    ((++NEW_CRATE_COUNT))
+                fi
                 ;;
             1)
                 ((++failed))
@@ -908,8 +1113,14 @@ publish_all() {
 
         # Rate limiting: delay after each publish
         if [[ "$DRY_RUN" != "true" && $result -eq 0 ]]; then
-            # Check if we need a burst delay
-            if [[ $BURST_COUNT -ge $BURST_SIZE ]]; then
+            # crates.io's brand-new-crate bucket (burst 5, refill 1/10min) is
+            # far stricter than the new-version bucket (burst 30, refill
+            # 1/min) — check that one first so a run of first-time publishes
+            # doesn't just eat 429s and rely entirely on retry/backoff.
+            if [[ "$was_new_crate" == "true" && $NEW_CRATE_COUNT -ge $NEW_CRATE_BURST ]]; then
+                NEW_CRATE_COUNT=0
+                wait_with_countdown $NEW_CRATE_DELAY "New-crate burst limit reached ($NEW_CRATE_BURST brand-new crates)"
+            elif [[ $BURST_COUNT -ge $BURST_SIZE ]]; then
                 BURST_COUNT=0
                 wait_with_countdown $BURST_DELAY "Burst limit reached ($BURST_SIZE crates)"
             else
@@ -938,6 +1149,10 @@ publish_all() {
     echo "  ⏱  Total time:          $(format_time $elapsed)"
     echo "  ⏳ Wait time:           $(format_time $TOTAL_WAIT_TIME)"
     echo ""
+
+    if [[ $failed -gt 0 ]]; then
+        return 1
+    fi
 }
 
 # =============================================================================

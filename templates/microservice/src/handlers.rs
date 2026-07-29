@@ -2,7 +2,7 @@
 
 use crate::jobs::{EmailJob, NotificationJob, ProcessDataJob};
 use serde_json::Value;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Job handler registry
 pub struct JobHandlers;
@@ -33,7 +33,7 @@ impl JobHandlers {
     async fn handle_notification(payload: Value) -> Result<(), String> {
         let job: NotificationJob = serde_json::from_value(payload).map_err(|e| e.to_string())?;
 
-        info!(user_id = %job.user_id, channel = %job.channel, "Sending notification");
+        info!(user_id = %job.user_id, channel = ?job.channel, "Sending notification");
 
         // Simulate notification sending
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

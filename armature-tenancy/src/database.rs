@@ -102,15 +102,20 @@ impl<P: DatabaseProvider> TenantDatabaseManager<P> {
             }
         }
 
-        // Create new connection
+        // Cache miss: take the write lock and re-check before opening a
+        // connection (double-checked locking). Without the re-check, two
+        // concurrent first-requests for the same database would both open a
+        // connection and one would overwrite the other, leaking a connection.
+        // Holding the write lock across the provider call single-flights
+        // creation so exactly one connection per tenant database is opened.
+        let mut cache = self.connection_cache.write().await;
+        if let Some(conn) = cache.get(database_name) {
+            return Ok(Arc::clone(conn));
+        }
+
         let connection = self.provider.get_connection(database_name).await?;
         let arc_conn = Arc::new(connection);
-
-        // Cache it
-        {
-            let mut cache = self.connection_cache.write().await;
-            cache.insert(database_name.clone(), Arc::clone(&arc_conn));
-        }
+        cache.insert(database_name.clone(), Arc::clone(&arc_conn));
 
         Ok(arc_conn)
     }
@@ -262,6 +267,68 @@ mod tests {
         assert_eq!(db_name, "tenant_tenant-123");
         assert!(config.auto_create);
         assert_eq!(config.max_connections, Some(20));
+    }
+
+    #[tokio::test]
+    async fn test_get_connection_no_stampede() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Provider that counts how many times it actually opens a connection
+        // and yields mid-call to widen the race window.
+        struct CountingProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl DatabaseProvider for CountingProvider {
+            type Connection = String;
+
+            async fn get_connection(
+                &self,
+                database_name: &str,
+            ) -> Result<Self::Connection, TenantError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Simulate slow connection establishment so concurrent callers
+                // overlap on the cache miss.
+                tokio::task::yield_now().await;
+                Ok(format!("Connection to {database_name}"))
+            }
+
+            async fn database_exists(&self, _database_name: &str) -> Result<bool, TenantError> {
+                Ok(true)
+            }
+        }
+
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let manager = Arc::new(TenantDatabaseManager::new(Arc::clone(&provider)));
+
+        // Fire many concurrent first-requests for the same tenant database.
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let manager = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move {
+                let tenant = Tenant::new("tenant-1", "acme").with_database("acme_db");
+                manager.get_connection(&tenant).await.unwrap()
+            }));
+        }
+
+        let mut conns = Vec::new();
+        for handle in handles {
+            conns.push(handle.await.unwrap());
+        }
+
+        // Double-checked locking must open the connection exactly once...
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "connection should be created exactly once despite concurrent first-requests"
+        );
+        // ...and every caller must observe that same shared connection.
+        for conn in &conns {
+            assert!(Arc::ptr_eq(&conns[0], conn));
+        }
     }
 
     #[tokio::test]

@@ -4,11 +4,8 @@ Distributed system primitives for the Armature framework.
 
 ## Features
 
-- **Distributed Locks** - Coordinated access control
-- **Leader Election** - Single leader among instances
-- **Rate Limiting** - Distributed rate limits
-- **Caching** - Distributed cache invalidation
-- **Circuit Breaker** - Shared circuit state
+- **Distributed Locks** - Redis-based distributed locks with token-guarded, auto-renewing leases
+- **Leader Election** - Automatic leader election with callbacks
 
 ## Installation
 
@@ -21,45 +18,61 @@ armature-distributed = "0.1"
 
 ### Distributed Lock
 
-```rust
-use armature_distributed::DistributedLock;
+```rust,ignore
+use armature_distributed::{DistributedLock, RedisLock};
+use std::time::Duration;
 
-let lock = DistributedLock::redis("redis://localhost:6379").await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = redis::Client::open("redis://127.0.0.1/")?;
+    let conn = client.get_connection_manager().await?;
 
-// Acquire lock
-let guard = lock.acquire("resource-key", Duration::from_secs(30)).await?;
+    let lock = RedisLock::new("my-resource", Duration::from_secs(30), conn);
 
-// Do exclusive work...
+    // Acquire lock (blocks until available)
+    let guard = lock.acquire().await?;
 
-// Lock released when guard is dropped
+    // Do exclusive work...
+
+    // Lock is automatically released when guard is dropped
+    drop(guard);
+
+    Ok(())
+}
 ```
 
 ### Leader Election
 
-```rust
+```rust,ignore
 use armature_distributed::LeaderElection;
+use std::sync::Arc;
+use std::time::Duration;
 
-let election = LeaderElection::redis("redis://localhost:6379").await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = redis::Client::open("redis://127.0.0.1/")?;
+    let conn = client.get_connection_manager().await?;
 
-election.run("my-service", || async {
-    // This only runs on the leader
-    process_jobs().await
-}).await?;
-```
+    let election = Arc::new(
+        LeaderElection::new("my-service-leader", Duration::from_secs(30), conn)
+            .on_elected(|| async {
+                println!("I am the leader!");
+            })
+            .on_revoked(|| async {
+                println!("I lost leadership");
+            }),
+    );
 
-### Distributed Rate Limiter
+    // Start election (runs in background)
+    let election_clone = election.clone();
+    tokio::spawn(async move { election_clone.start().await });
 
-```rust
-use armature_distributed::DistributedRateLimiter;
+    // Check leadership status
+    if election.is_leader() {
+        println!("This node is the leader");
+    }
 
-let limiter = DistributedRateLimiter::redis(
-    "redis://localhost:6379",
-    100,  // requests
-    Duration::from_secs(60),  // window
-).await?;
-
-if limiter.check("user:123").await? {
-    // Allow request
+    Ok(())
 }
 ```
 

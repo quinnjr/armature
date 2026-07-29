@@ -26,9 +26,6 @@ pub struct TelemetryConfig {
     /// Enable metrics
     pub enable_metrics: bool,
 
-    /// Enable logging
-    pub enable_logging: bool,
-
     /// Tracing configuration
     pub tracing: TracingConfig,
 
@@ -87,7 +84,9 @@ pub struct MetricsConfig {
     /// OTLP endpoint (if using OTLP)
     pub otlp_endpoint: Option<String>,
 
-    /// Prometheus endpoint (if using Prometheus)
+    /// Deprecated: the Prometheus exporter was discontinued and this field is
+    /// ignored. It is retained only to preserve the deserialization surface;
+    /// the `Prometheus` exporter arm hard-errors and never reads this value.
     pub prometheus_endpoint: Option<String>,
 
     /// Metrics collection interval in seconds
@@ -115,7 +114,6 @@ impl Default for TelemetryConfig {
             environment: Some("development".to_string()),
             enable_tracing: true,
             enable_metrics: true,
-            enable_logging: false,
             tracing: TracingConfig::default(),
             metrics: MetricsConfig::default(),
             resource_attributes: Vec::new(),
@@ -273,7 +271,6 @@ mod tests {
         assert_eq!(config.service_name, "armature-service");
         assert!(config.enable_tracing);
         assert!(config.enable_metrics);
-        assert!(!config.enable_logging);
     }
 
     #[test]

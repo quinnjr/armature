@@ -19,17 +19,17 @@ pub struct DatabaseConfig {
 
     /// Connection timeout.
     #[serde(default = "default_connect_timeout")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub connect_timeout: Duration,
 
     /// Idle timeout for connections.
     #[serde(default = "default_idle_timeout")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub idle_timeout: Duration,
 
     /// Maximum lifetime of a connection.
     #[serde(default = "default_max_lifetime")]
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "duration_secs_serde")]
     pub max_lifetime: Duration,
 
     /// Enable SQLx logging.
@@ -37,16 +37,17 @@ pub struct DatabaseConfig {
     pub sqlx_logging: bool,
 
     /// SQLx log level.
+    ///
+    /// Parsed (case-insensitively) into a [`log::LevelFilter`] and applied via
+    /// [`sea_orm::ConnectOptions::sqlx_logging_level`] in [`Self::to_connect_options`].
+    /// Recognized values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Unrecognized
+    /// values fall back to `debug`.
     #[serde(default = "default_sqlx_log_level")]
     pub sqlx_log_level: String,
 
     /// Schema name (for PostgreSQL).
     #[serde(default)]
     pub schema: Option<String>,
-
-    /// Set SQLx statement cache capacity.
-    #[serde(default = "default_statement_cache_capacity")]
-    pub statement_cache_capacity: usize,
 }
 
 fn default_max_connections() -> u32 {
@@ -73,8 +74,18 @@ fn default_sqlx_log_level() -> String {
     "debug".to_string()
 }
 
-fn default_statement_cache_capacity() -> usize {
-    100
+/// Parse a SQLx log level string (case-insensitive) into a [`log::LevelFilter`].
+///
+/// Falls back to [`log::LevelFilter::Debug`] for unrecognized values.
+fn parse_sqlx_log_level(level: &str) -> log::LevelFilter {
+    match level.to_ascii_lowercase().as_str() {
+        "off" => log::LevelFilter::Off,
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "trace" => log::LevelFilter::Trace,
+        _ => log::LevelFilter::Debug,
+    }
 }
 
 impl DatabaseConfig {
@@ -90,7 +101,6 @@ impl DatabaseConfig {
             sqlx_logging: false,
             sqlx_log_level: default_sqlx_log_level(),
             schema: None,
-            statement_cache_capacity: default_statement_cache_capacity(),
         }
     }
 
@@ -125,6 +135,13 @@ impl DatabaseConfig {
             config.connect_timeout = Duration::from_secs(timeout.parse().map_err(|_| {
                 crate::SeaOrmError::Config("Invalid DATABASE_CONNECT_TIMEOUT".into())
             })?);
+        }
+
+        if let Ok(timeout) = std::env::var("DATABASE_IDLE_TIMEOUT") {
+            config.idle_timeout =
+                Duration::from_secs(timeout.parse().map_err(|_| {
+                    crate::SeaOrmError::Config("Invalid DATABASE_IDLE_TIMEOUT".into())
+                })?);
         }
 
         if let Ok(logging) = std::env::var("DATABASE_SQLX_LOGGING") {
@@ -186,7 +203,8 @@ impl DatabaseConfig {
             .connect_timeout(self.connect_timeout)
             .idle_timeout(self.idle_timeout)
             .max_lifetime(self.max_lifetime)
-            .sqlx_logging(self.sqlx_logging);
+            .sqlx_logging(self.sqlx_logging)
+            .sqlx_logging_level(parse_sqlx_log_level(&self.sqlx_log_level));
 
         if let Some(ref schema) = self.schema {
             options.set_schema_search_path(schema.clone());
@@ -202,8 +220,9 @@ impl Default for DatabaseConfig {
     }
 }
 
-/// Humantime serde module for duration serialization.
-mod humantime_serde {
+/// Serde helper: (de)serializes a `Duration` as an integer number of
+/// seconds (not humantime strings).
+mod duration_secs_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 
@@ -220,5 +239,100 @@ mod humantime_serde {
     {
         let secs = u64::deserialize(deserializer)?;
         Ok(Duration::from_secs(secs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// `std::env` is process-global; serialize tests that mutate it so they
+    /// don't race against each other under `cargo test`'s default parallelism.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn to_connect_options_applies_sqlx_log_level() {
+        let mut config = DatabaseConfig::new("postgres://localhost/test").sqlx_logging(true);
+        config.sqlx_log_level = "warn".to_string();
+
+        let options = config.to_connect_options();
+        assert_eq!(options.get_sqlx_logging_level(), log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn to_connect_options_defaults_unrecognized_log_level_to_debug() {
+        let mut config = DatabaseConfig::new("postgres://localhost/test");
+        config.sqlx_log_level = "not-a-real-level".to_string();
+
+        let options = config.to_connect_options();
+        assert_eq!(options.get_sqlx_logging_level(), log::LevelFilter::Debug);
+    }
+
+    #[test]
+    fn to_connect_options_applies_all_recognized_levels() {
+        let cases = [
+            ("off", log::LevelFilter::Off),
+            ("error", log::LevelFilter::Error),
+            ("warn", log::LevelFilter::Warn),
+            ("info", log::LevelFilter::Info),
+            ("debug", log::LevelFilter::Debug),
+            ("trace", log::LevelFilter::Trace),
+            ("TRACE", log::LevelFilter::Trace),
+        ];
+
+        for (level, expected) in cases {
+            let mut config = DatabaseConfig::new("postgres://localhost/test");
+            config.sqlx_log_level = level.to_string();
+            let options = config.to_connect_options();
+            assert_eq!(
+                options.get_sqlx_logging_level(),
+                expected,
+                "level {level} should map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_reads_database_idle_timeout() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: guarded by ENV_LOCK to serialize against other tests in this
+        // module that also mutate process env vars.
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://localhost/idle_timeout_test");
+            std::env::set_var("DATABASE_IDLE_TIMEOUT", "45");
+        }
+
+        let config = DatabaseConfig::from_env().expect("from_env should succeed");
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_IDLE_TIMEOUT");
+        }
+
+        assert_eq!(config.idle_timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_database_idle_timeout() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://localhost/idle_timeout_bad");
+            std::env::set_var("DATABASE_IDLE_TIMEOUT", "not-a-number");
+        }
+
+        let result = DatabaseConfig::from_env();
+
+        // SAFETY: guarded by ENV_LOCK
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_IDLE_TIMEOUT");
+        }
+
+        assert!(result.is_err());
     }
 }

@@ -29,6 +29,16 @@ impl TemplateRegistry {
             .expect("Failed to register middleware test template");
         hbs.register_template_string("guard", GUARD_TEMPLATE)
             .expect("Failed to register guard template");
+        hbs.register_template_string("guard_auth", GUARD_AUTH_TEMPLATE)
+            .expect("Failed to register auth guard template");
+        hbs.register_template_string("guard_role", GUARD_ROLE_TEMPLATE)
+            .expect("Failed to register role guard template");
+        hbs.register_template_string("guard_permission", GUARD_PERMISSION_TEMPLATE)
+            .expect("Failed to register permission guard template");
+        hbs.register_template_string("guard_apikey", GUARD_APIKEY_TEMPLATE)
+            .expect("Failed to register apikey guard template");
+        hbs.register_template_string("guard_ratelimit", GUARD_RATELIMIT_TEMPLATE)
+            .expect("Failed to register ratelimit guard template");
         hbs.register_template_string("guard_test", GUARD_TEST_TEMPLATE)
             .expect("Failed to register guard test template");
         hbs.register_template_string("service", SERVICE_TEMPLATE)
@@ -51,6 +61,8 @@ impl TemplateRegistry {
             .expect("Failed to register repository test template");
         hbs.register_template_string("dto", DTO_TEMPLATE)
             .expect("Failed to register DTO template");
+        hbs.register_template_string("model", MODEL_TEMPLATE)
+            .expect("Failed to register model template");
         hbs.register_template_string("websocket", WEBSOCKET_TEMPLATE)
             .expect("Failed to register WebSocket template");
         hbs.register_template_string("websocket_test", WEBSOCKET_TEST_TEMPLATE)
@@ -61,6 +73,10 @@ impl TemplateRegistry {
             .expect("Failed to register GraphQL resolver test template");
         hbs.register_template_string("job", JOB_TEMPLATE)
             .expect("Failed to register job template");
+        hbs.register_template_string("job_scheduled", JOB_SCHEDULED_TEMPLATE)
+            .expect("Failed to register scheduled job template");
+        hbs.register_template_string("job_recurring", JOB_RECURRING_TEMPLATE)
+            .expect("Failed to register recurring job template");
         hbs.register_template_string("job_test", JOB_TEST_TEMPLATE)
             .expect("Failed to register job test template");
         hbs.register_template_string("event_handler", EVENT_HANDLER_TEMPLATE)
@@ -99,6 +115,10 @@ impl TemplateRegistry {
             .expect("Failed to register health controller template");
         hbs.register_template_string("dockerfile", DOCKERFILE_TEMPLATE)
             .expect("Failed to register Dockerfile template");
+        hbs.register_template_string("dockerfile_lambda", LAMBDA_DOCKERFILE_TEMPLATE)
+            .expect("Failed to register Lambda Dockerfile template");
+        hbs.register_template_string("dockerfile_cloudrun", CLOUDRUN_DOCKERFILE_TEMPLATE)
+            .expect("Failed to register Cloud Run Dockerfile template");
         hbs.register_template_string("docker_compose", DOCKER_COMPOSE_TEMPLATE)
             .expect("Failed to register docker-compose template");
         hbs.register_template_string("github_actions", GITHUB_ACTIONS_TEMPLATE)
@@ -141,9 +161,10 @@ use armature::prelude::*;
 
 /// {{name_pascal}} controller handles {{name_snake}} related endpoints.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
+#[routes]
 impl {{name_pascal}}Controller {
     /// Get all {{name_snake}}s.
     #[get("/")]
@@ -191,9 +212,10 @@ pub struct Update{{name_pascal}}Request {
 
 /// {{name_pascal}} controller handles {{name_snake}} CRUD operations.
 #[controller("/{{base_path}}")]
-#[derive(Default)]
+{{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
+#[routes]
 impl {{name_pascal}}Controller {
     /// List all {{name_snake}}s.
     ///
@@ -414,6 +436,7 @@ mod tests {
 const GUARD_TEMPLATE: &str = r#"//! {{name_pascal}} guard.
 
 use armature::prelude::*;
+use armature::{Guard, GuardContext};
 use async_trait::async_trait;
 
 /// {{name_pascal}} guard for route protection.
@@ -436,10 +459,10 @@ impl {{name_pascal}}Guard {
     }
 
     /// Check if the request is authorized.
-    fn is_authorized(&self, req: &HttpRequest) -> bool {
+    fn is_authorized(&self, context: &GuardContext) -> bool {
         // TODO: Implement authorization logic
         // Example: Check for a valid API key or JWT token
-        req.headers.contains_key("authorization")
+        context.get_header("authorization").is_some()
     }
 }
 
@@ -451,8 +474,8 @@ impl Default for {{name_pascal}}Guard {
 
 #[async_trait]
 impl Guard for {{name_pascal}}Guard {
-    async fn can_activate(&self, req: &HttpRequest) -> Result<bool, Error> {
-        if self.is_authorized(req) {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        if self.is_authorized(context) {
             Ok(true)
         } else {
             Err(Error::Unauthorized("Access denied".to_string()))
@@ -472,21 +495,244 @@ mod tests {
     #[tokio::test]
     async fn test_guard_denies_unauthorized() {
         let guard = {{name_pascal}}Guard::new();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_guard_allows_authorized() {
         let guard = {{name_pascal}}Guard::new();
-        let mut req = HttpRequest::default();
+        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
         req.headers.insert("authorization".to_string(), "Bearer token".to_string());
+        let context = GuardContext::new(req);
 
-        let result = guard.can_activate(&req).await;
+        let result = guard.can_activate(&context).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
+    }
+}
+"#;
+
+const GUARD_AUTH_TEMPLATE: &str = r#"//! {{name_pascal}} authentication guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a valid `Authorization: Bearer <token>` header.
+#[derive(Default)]
+pub struct {{name_pascal}}Guard;
+
+impl {{name_pascal}}Guard {
+    /// Create a new {{name_pascal}}Guard.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn extract_bearer<'a>(&self, context: &'a GuardContext) -> Option<&'a str> {
+        context
+            .get_header("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        match self.extract_bearer(context) {
+            // TODO: verify the JWT / session token here.
+            Some(token) if !token.is_empty() => Ok(true),
+            _ => Err(Error::Unauthorized("Missing bearer token".to_string())),
+        }
+    }
+}
+"#;
+
+const GUARD_ROLE_TEMPLATE: &str = r#"//! {{name_pascal}} role-based guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: allows requests only from users holding a required role.
+pub struct {{name_pascal}}Guard {
+    required_role: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_role`.
+    pub fn new(required_role: impl Into<String>) -> Self {
+        Self {
+            required_role: required_role.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("admin")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        // TODO: source the role from your authenticated principal.
+        let role = context.get_header("x-user-role").map(|s| s.as_str()).unwrap_or("");
+        if role == self.required_role {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires role '{}'",
+                self.required_role
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_PERMISSION_TEMPLATE: &str = r#"//! {{name_pascal}} permission-based guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: checks that the caller holds a required permission.
+pub struct {{name_pascal}}Guard {
+    required_permission: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard requiring `required_permission`.
+    pub fn new(required_permission: impl Into<String>) -> Self {
+        Self {
+            required_permission: required_permission.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new("{{name_snake}}:read")
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        // TODO: source granted permissions from your authenticated principal.
+        let granted = context
+            .get_header("x-user-permissions")
+            .map(|s| s.split(',').any(|p| p.trim() == self.required_permission))
+            .unwrap_or(false);
+        if granted {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "Requires permission '{}'",
+                self.required_permission
+            )))
+        }
+    }
+}
+"#;
+
+const GUARD_APIKEY_TEMPLATE: &str = r#"//! {{name_pascal}} API-key guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+
+/// {{name_pascal}} guard: requires a matching `X-API-Key` header.
+pub struct {{name_pascal}}Guard {
+    expected_key: String,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard expecting `expected_key`.
+    pub fn new(expected_key: impl Into<String>) -> Self {
+        Self {
+            expected_key: expected_key.into(),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        // TODO: load the real key from configuration / environment.
+        Self::new(std::env::var("API_KEY").unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let provided = context.get_header("x-api-key").map(|s| s.as_str());
+        if !self.expected_key.is_empty() && provided == Some(self.expected_key.as_str()) {
+            Ok(true)
+        } else {
+            Err(Error::Unauthorized("Invalid API key".to_string()))
+        }
+    }
+}
+"#;
+
+const GUARD_RATELIMIT_TEMPLATE: &str = r#"//! {{name_pascal}} rate-limiting guard.
+
+use armature::prelude::*;
+use armature::{Guard, GuardContext};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// {{name_pascal}} guard: rejects callers that exceed a fixed request budget per window.
+pub struct {{name_pascal}}Guard {
+    max_requests: u32,
+    window: Duration,
+    hits: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl {{name_pascal}}Guard {
+    /// Create a new guard allowing `max_requests` per `window`.
+    pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            hits: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for {{name_pascal}}Guard {
+    fn default() -> Self {
+        Self::new(60, Duration::from_secs(60))
+    }
+}
+
+#[async_trait]
+impl Guard for {{name_pascal}}Guard {
+    async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error> {
+        let key = context
+            .get_header("x-forwarded-for")
+            .cloned()
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        let mut hits = self.hits.lock().unwrap();
+        let now = Instant::now();
+        let entry = hits.entry(key).or_insert((0, now));
+        if now.duration_since(entry.1) > self.window {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        if entry.0 > self.max_requests {
+            Err(Error::TooManyRequests("Rate limit exceeded".to_string()))
+        } else {
+            Ok(true)
+        }
     }
 }
 "#;
@@ -612,7 +858,12 @@ authors = ["Your Name <your.email@example.com>"]
 description = "{{description}}"
 
 [dependencies]
-armature = "0.1"
+{{{armature_dep}}}
+# Required by Armature's attribute macros (#[module], #[controller], #[get],
+# etc.), which expand to `armature_core::...` paths. Those paths aren't
+# re-exported through the `armature` facade crate, so `armature-core` must
+# also be a direct dependency for the generated code to resolve.
+armature-core = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -620,7 +871,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
 thiserror = "2.0"
-
+{{{extra_deps}}}
 [dev-dependencies]
 tokio-test = "0.4"
 "#;
@@ -649,7 +900,7 @@ const README_TEMPLATE: &str = r#"# {{name_pascal}}
 
 {{description}}
 
-Built with [Armature](https://github.com/pegasusheavy/armature) - A modern Rust web framework.
+Built with [Armature](https://github.com/quinnjr/armature) - A modern Rust web framework.
 
 ## Getting Started
 
@@ -843,28 +1094,21 @@ use validator::Validate;
 #[serde(rename_all = "camelCase")]
 pub struct {{name_pascal}}Response {
     pub id: u64,
-    pub created_at: String,
+{{{response_fields}}}    pub created_at: String,
     pub updated_at: String,
-    // Add more fields as needed
 }
 
 /// Create {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Create{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: String,
-    // Add more fields as needed
-}
+{{{create_fields}}}}
 
 /// Update {{name_pascal}} request DTO.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct Update{{name_pascal}}Request {
-    #[validate(length(min = 1, max = 255, message = "Name must be between 1 and 255 characters"))]
-    pub name: Option<String>,
-    // Add more fields as needed
-}
+{{{update_fields}}}}
 
 /// Query parameters for listing {{name_snake}}s.
 #[derive(Debug, Clone, Deserialize)]
@@ -919,6 +1163,29 @@ impl<T> Paginated<T> {
             total_pages,
         }
     }
+}
+"#;
+
+// =============================================================================
+// MODEL TEMPLATES
+// =============================================================================
+
+const MODEL_TEMPLATE: &str = r#"//! {{name_pascal}} model.
+
+use serde::{Deserialize, Serialize};
+
+/// {{name_pascal}} domain model.
+///
+/// A plain data struct: unlike `entity` (see `armature generate entity`),
+/// it carries no ORM derives or table mapping, and unlike `dto` it is not
+/// split into request/response variants. Use it for in-memory data or as
+/// the type your repository/service layer works with internally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct {{name_pascal}} {
+    pub id: i64,
+    pub name: String,
+{{{model_fields}}}    pub created_at: String,
+    pub updated_at: String,
 }
 "#;
 
@@ -1298,6 +1565,121 @@ mod tests {
         assert_eq!(job.retry_delay(1), std::time::Duration::from_secs(2));
         assert_eq!(job.retry_delay(2), std::time::Duration::from_secs(4));
         assert_eq!(job.retry_delay(3), std::time::Duration::from_secs(8));
+    }
+}
+"#;
+
+const JOB_SCHEDULED_TEMPLATE: &str = r#"//! {{name_pascal}} scheduled job (runs at a fixed cron time).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
+
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
+
+/// {{name_pascal}} scheduled job.
+///
+/// Runs on a fixed cron schedule. Register it with a [`CronScheduler`] at startup,
+/// e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
+pub struct {{name_pascal}}Job;
+
+impl {{name_pascal}}Job {
+    /// Create a new scheduled job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 6-field cron expression (seconds minutes hours day-of-month month
+    /// day-of-week) controlling when this job fires. Default: every day at
+    /// midnight.
+    pub const CRON: &'static str = "0 0 0 * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running scheduled {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement scheduled work.
+        Ok(())
+    }
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+"#;
+
+const JOB_RECURRING_TEMPLATE: &str = r#"//! {{name_pascal}} recurring job (runs on a fixed cron cadence).
+//!
+//! Requires the `armature-cron` crate. Add it to this project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! armature-cron = "0.2"
+//! ```
+
+use armature_cron::{CronExpression, CronResult, CronScheduler, JobContext};
+
+/// {{name_pascal}} recurring job.
+///
+/// `armature-cron` schedules jobs by 6-field cron expression rather than a
+/// raw [`std::time::Duration`], so the recurrence is expressed as a cron
+/// cadence (e.g. `"0 */5 * * * *"` for every 5 minutes). Register it with a
+/// [`CronScheduler`] at startup, e.g. `{{name_pascal}}Job::register(&mut scheduler).await?;`.
+pub struct {{name_pascal}}Job;
+
+impl {{name_pascal}}Job {
+    /// Create a new recurring job.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 6-field cron expression controlling the recurrence cadence.
+    /// Default: every 5 minutes.
+    pub const CRON: &'static str = "0 */5 * * * *";
+
+    /// Parse [`Self::CRON`] into a [`CronExpression`], e.g. to validate it at
+    /// startup before registering the job.
+    pub fn cron_expression() -> CronExpression {
+        CronExpression::parse(Self::CRON).expect("{{name_pascal}}Job::CRON must be a valid cron expression")
+    }
+
+    /// Register this job with `scheduler`.
+    pub async fn register(scheduler: &mut CronScheduler) -> CronResult<()> {
+        scheduler.add_job("{{name_snake}}", Self::CRON, Self::run).await
+    }
+
+    /// Job body, invoked by the scheduler on each fire.
+    async fn run(ctx: JobContext) -> CronResult<()> {
+        tracing::info!(
+            "Running recurring {{name_pascal}}Job (execution #{})",
+            ctx.execution_count
+        );
+        // TODO: implement recurring work.
+        Ok(())
+    }
+}
+
+impl Default for {{name_pascal}}Job {
+    fn default() -> Self {
+        Self::new()
     }
 }
 "#;
@@ -1935,7 +2317,7 @@ pub struct {{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
+{{{entity_fields}}}    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -1946,7 +2328,7 @@ pub struct {{name_pascal}} {
 pub struct New{{name_pascal}} {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default = "default_active")]
+{{{new_fields}}}    #[serde(default = "default_active")]
     pub active: bool,
 }
 
@@ -1962,7 +2344,7 @@ pub struct Update{{name_pascal}} {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub active: Option<bool>,
-}
+{{{update_fields}}}}
 
 #[cfg(feature = "diesel")]
 diesel::table! {
@@ -1971,7 +2353,7 @@ diesel::table! {
         name -> Varchar,
         description -> Nullable<Text>,
         active -> Bool,
-        created_at -> Timestamptz,
+{{{diesel_cols}}}        created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
 }
@@ -1990,7 +2372,7 @@ mod sea_orm_entity {
         pub name: String,
         pub description: Option<String>,
         pub active: bool,
-        pub created_at: DateTimeUtc,
+{{{seaorm_fields}}}        pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
 
@@ -2702,6 +3084,7 @@ impl HealthController {
     }
 }
 
+#[routes]
 impl HealthController {
     /// Basic health check (liveness probe).
     ///
@@ -2840,6 +3223,39 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Run the application
 CMD ["/app/{{name_kebab}}"]
 "#;
+
+/// The real Lambda container-runtime Dockerfile (Lambda Runtime Interface
+/// Client base image, `cargo-lambda` build), hand-crafted and verified via a
+/// real `docker build` in `templates/lambda/Dockerfile`.
+///
+/// This is a byte-for-byte copy kept at `assets/dockerfiles/lambda/Dockerfile`
+/// *inside this crate* (see `sync_with_canonical_template` below) rather than
+/// an `include_str!` reaching up to the workspace-root `templates/` directory:
+/// `templates/` lives outside the `armature-cli` package root, so `cargo
+/// package`/`cargo publish` silently drops files referenced from there —
+/// `include_str!("../../templates/...")` builds fine in this workspace but
+/// fails to compile from the published crate ("No such file or directory").
+/// Embedded verbatim: it has no per-project fields to substitute, since
+/// `cargo-lambda` locates the built binary itself via the
+/// `target/lambda/*/bootstrap` glob regardless of crate name.
+const LAMBDA_DOCKERFILE_TEMPLATE: &str = include_str!("../assets/dockerfiles/lambda/Dockerfile");
+
+/// The real Cloud Run distroless Dockerfile, hand-crafted and verified via a
+/// real `docker build` in `templates/cloudrun/Dockerfile`.
+///
+/// A byte-for-byte copy kept inside this crate — see
+/// [`LAMBDA_DOCKERFILE_TEMPLATE`] for why. The caller (`commands/new.rs`)
+/// rewrites the `ARG BIN_NAME=app` default to the generated project's actual
+/// crate name so `docker build` with no extra flags produces a working image.
+const CLOUDRUN_DOCKERFILE_TEMPLATE: &str =
+    include_str!("../assets/dockerfiles/cloudrun/Dockerfile");
+
+// Note: `templates/azure-container/Dockerfile` has no counterpart here.
+// Unlike `lambda`/`cloudrun`, `armature new` has no azure-container template
+// or `--template azure-container` case — `templates/azure-container/` is a
+// standalone reference example (deployable via its own README, never
+// generated by the CLI), so there's no `dockerfile_azure_container` template
+// string to embed and nothing for the drift-detection tests below to guard.
 
 const DOCKER_COMPOSE_TEMPLATE: &str = r#"version: '3.8'
 
@@ -3632,6 +4048,8 @@ pub struct ControllerData {
     pub name_snake: String,
     pub name_kebab: String,
     pub base_path: String,
+    /// Optional guard attribute (e.g. `#[guard(AuthGuard)]\n`) placed on the controller.
+    pub guard_attr: String,
 }
 
 /// Template data for module generation.
@@ -3663,6 +4081,10 @@ pub struct ProjectData {
     pub description: String,
     pub curly_open: String,
     pub curly_close: String,
+    /// The `armature` dependency line (may enable features).
+    pub armature_dep: String,
+    /// Extra dependency lines (database, features, template-specific), joined with newlines.
+    pub extra_deps: String,
 }
 
 impl ProjectData {
@@ -3681,16 +4103,72 @@ impl ProjectData {
             description,
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
+            // Kept in sync with the `armature` facade crate's current minor
+            // version and with `repl_init_script()` in `commands/repl.rs`.
+            //
+            // NOTE: the crate name `armature` on crates.io is squatted by an
+            // unrelated actor-framework crate; this project's crate is
+            // published as `armature-framework`, so `package = "armature-framework"`
+            // is required to rename it back to `armature` for `use armature::...`
+            // to resolve.
+            armature_dep: "armature = { version = \"0.2\", package = \"armature-framework\" }"
+                .to_string(),
+            extra_deps: String::new(),
         }
+    }
+
+    /// Set the `armature` dependency line (e.g. with feature flags).
+    pub fn with_armature_dep(mut self, dep: String) -> Self {
+        self.armature_dep = dep;
+        self
+    }
+
+    /// Set extra dependency lines injected into the generated `[dependencies]` table.
+    pub fn with_extra_deps(mut self, deps: String) -> Self {
+        self.extra_deps = deps;
+        self
     }
 }
 
-/// Template data for entity generation.
+/// Template data for entity generation, with optional user-specified fields.
 #[derive(Serialize)]
 pub struct EntityData {
     pub name_pascal: String,
     pub name_snake: String,
     pub name_kebab: String,
+    /// Extra fields for the main entity struct (`    pub x: T,\n` lines).
+    pub entity_fields: String,
+    /// Extra fields for the `New{{name}}` insertion struct.
+    pub new_fields: String,
+    /// Extra fields for the `Update{{name}}` changeset struct (all `Option<T>`).
+    pub update_fields: String,
+    /// Extra columns for the Diesel `table!` macro.
+    pub diesel_cols: String,
+    /// Extra fields for the SeaORM `Model`.
+    pub seaorm_fields: String,
+}
+
+/// Template data for DTO generation, with optional user-specified fields.
+#[derive(Serialize)]
+pub struct DtoData {
+    pub name_pascal: String,
+    pub name_snake: String,
+    /// Extra fields for the response struct.
+    pub response_fields: String,
+    /// Full body of the create-request struct (validated fields).
+    pub create_fields: String,
+    /// Full body of the update-request struct (all `Option<T>`).
+    pub update_fields: String,
+}
+
+/// Template data for model generation, with optional user-specified fields.
+#[derive(Serialize)]
+pub struct ModelData {
+    pub name_pascal: String,
+    pub name_snake: String,
+    pub name_kebab: String,
+    /// Extra fields for the model struct (`    pub x: T,\n` lines).
+    pub model_fields: String,
 }
 
 /// Template data for Rhai script generation.
@@ -3723,5 +4201,297 @@ impl DevOpsData {
             curly_open: "{".to_string(),
             curly_close: "}".to_string(),
         }
+    }
+}
+
+// =============================================================================
+// GENERATE-JOB / GUARD-GENERATION API REGRESSION TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod job_and_guard_template_api_tests {
+    //! Regression coverage for a review finding: `job_scheduled` /
+    //! `job_recurring` used to generate code against a fabricated
+    //! `armature-cron` API (`use armature_cron::{CronJob, Schedule}`, `impl
+    //! CronJob`, `Schedule::from_cron`/`Schedule::every` — none of which
+    //! exist), and every guard template implemented
+    //! `can_activate(&self, req: &HttpRequest)` instead of the real
+    //! `Guard::can_activate(&self, context: &GuardContext)`
+    //! (`armature-core/src/guard.rs:27-30`). These tests render each
+    //! template through the real `TemplateRegistry` (the same path
+    //! `armature generate job|guard` uses) and assert on tokens from the
+    //! *real* `armature-cron`/`armature-core` APIs, so a regression back to
+    //! the fabricated API is caught here rather than only surfacing as a
+    //! compile failure inside a generated project.
+    use super::*;
+
+    fn data() -> ComponentData {
+        ComponentData {
+            name_pascal: "FooBar".to_string(),
+            name_snake: "foo_bar".to_string(),
+            name_kebab: "foo-bar".to_string(),
+        }
+    }
+
+    #[test]
+    fn job_scheduled_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_scheduled", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_scheduled", &content);
+    }
+
+    #[test]
+    fn job_recurring_template_targets_real_cron_api() {
+        let registry = TemplateRegistry::new();
+        let content = registry.render("job_recurring", &data()).unwrap();
+        assert_job_template_uses_real_cron_api("job_recurring", &content);
+    }
+
+    fn assert_job_template_uses_real_cron_api(name: &str, content: &str) {
+        for token in [
+            "CronExpression",
+            "CronScheduler",
+            "CronResult",
+            "JobContext",
+        ] {
+            assert!(
+                content.contains(token),
+                "{name} template must reference the real armature-cron `{token}`, got:\n{content}"
+            );
+        }
+        for fabricated in [
+            "CronJob",
+            "Schedule::from_cron",
+            "Schedule::every",
+            "impl CronJob",
+            "use armature_cron::{CronJob",
+        ] {
+            assert!(
+                !content.contains(fabricated),
+                "{name} template must not reference the fabricated `{fabricated}` API, got:\n{content}"
+            );
+        }
+        // The generated file lives in an existing project via a single-file
+        // generator, so the extra `armature-cron` dependency it needs is
+        // called out as a header-comment hint (mirroring how a Cargo.toml
+        // `[dependencies]` line would read) rather than edited in.
+        assert!(
+            content.contains("armature-cron") && content.contains("[dependencies]"),
+            "{name} template must hint at the armature-cron dependency it requires, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn all_guard_templates_reference_real_guard_context() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+            "guard_test",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains("GuardContext"),
+                "{name} template must reference the real `GuardContext`, got:\n{content}"
+            );
+            assert!(
+                !content.contains("req: &HttpRequest"),
+                "{name} template must not use the fabricated `can_activate(&self, req: &HttpRequest)` signature, got:\n{content}"
+            );
+            assert!(
+                !content.contains("HttpRequest::default()"),
+                "{name} template must not call the nonexistent `HttpRequest::default()`, got:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_impl_templates_declare_real_can_activate_signature() {
+        let registry = TemplateRegistry::new();
+        for name in [
+            "guard",
+            "guard_auth",
+            "guard_role",
+            "guard_permission",
+            "guard_apikey",
+            "guard_ratelimit",
+        ] {
+            let content = registry.render(name, &data()).unwrap();
+            assert!(
+                content.contains(
+                    "async fn can_activate(&self, context: &GuardContext) -> Result<bool, Error>"
+                ),
+                "{name} template must declare the real `Guard::can_activate` signature, got:\n{content}"
+            );
+        }
+    }
+}
+
+// =============================================================================
+// LAMBDA / CLOUD RUN DOCKERFILE EMBEDDING REGRESSION TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod dockerfile_embedding_tests {
+    //! Regression coverage for a review finding: `armature new --template
+    //! lambda --docker` / `--template cloudrun --docker` used to emit the
+    //! generic `DOCKERFILE_TEMPLATE` (a plain `debian:bookworm-slim` image)
+    //! regardless of which template was chosen, rather than the real,
+    //! deployment-correct Lambda Runtime Interface Client / Cloud Run
+    //! distroless images hand-crafted and `docker build`-verified in
+    //! `templates/lambda/Dockerfile` / `templates/cloudrun/Dockerfile`.
+    //!
+    //! `include_str!` can't reach those files directly, though: `templates/`
+    //! lives outside the `armature-cli` package root, so `cargo
+    //! package`/`cargo publish` silently drops anything referenced from
+    //! there — it builds fine in this workspace checkout but fails to
+    //! compile from the published crate. So `LAMBDA_DOCKERFILE_TEMPLATE` /
+    //! `CLOUDRUN_DOCKERFILE_TEMPLATE` instead embed byte-for-byte copies kept
+    //! *inside* this crate, at `assets/dockerfiles/{lambda,cloudrun}/Dockerfile`.
+    //! These tests catch the two ways that can go stale: the in-crate copies
+    //! drifting from the canonical `templates/` originals, and the generator
+    //! (`commands/new.rs`) silently falling back to the generic template.
+    //!
+    //! `templates/azure-container/Dockerfile` is intentionally *not* covered
+    //! here: it's a standalone reference example, not something `armature
+    //! new` ever generates (no azure-container template exists in this
+    //! crate), so there's nothing for a drift-detection test to guard.
+    use super::*;
+    use std::path::Path;
+
+    /// Read a file relative to the workspace root (the parent of this
+    /// crate's `CARGO_MANIFEST_DIR`). Only meaningful when run inside this
+    /// git checkout (i.e. `cargo test`, not a build from a published
+    /// tarball) — exactly the environment these drift-detection tests need.
+    fn read_workspace_file(relative: &str) -> Option<String> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = Path::new(manifest_dir).join("..").join(relative);
+        std::fs::read_to_string(&path).ok()
+    }
+
+    /// Whether we're running inside a real git checkout of the workspace
+    /// (as opposed to a build from a published crate tarball, where the
+    /// sibling `templates/` directory doesn't exist). Used to distinguish
+    /// "legitimately can't compare, skip" from "should have been able to
+    /// compare but the canonical file is missing — fail loudly".
+    fn in_git_checkout() -> bool {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        Path::new(manifest_dir).join("..").join(".git").exists()
+    }
+
+    #[test]
+    fn lambda_dockerfile_copy_matches_canonical_template() {
+        let Some(canonical) = read_workspace_file("templates/lambda/Dockerfile") else {
+            // Not running inside the workspace checkout (e.g. building from
+            // a published crate tarball, where `templates/` doesn't exist).
+            // Nothing to compare against; skip rather than false-fail.
+            assert!(
+                !in_git_checkout(),
+                "templates/lambda/Dockerfile is missing even though this is a git \
+                 checkout — the drift-detection test cannot silently skip here"
+            );
+            eprintln!(
+                "skipping lambda_dockerfile_copy_matches_canonical_template: not in a \
+                 git checkout, templates/lambda/Dockerfile is unavailable"
+            );
+            return;
+        };
+        assert_eq!(
+            LAMBDA_DOCKERFILE_TEMPLATE, canonical,
+            "armature-cli/assets/dockerfiles/lambda/Dockerfile has drifted from \
+             templates/lambda/Dockerfile — re-sync the in-crate copy"
+        );
+    }
+
+    #[test]
+    fn cloudrun_dockerfile_copy_matches_canonical_template() {
+        let Some(canonical) = read_workspace_file("templates/cloudrun/Dockerfile") else {
+            assert!(
+                !in_git_checkout(),
+                "templates/cloudrun/Dockerfile is missing even though this is a git \
+                 checkout — the drift-detection test cannot silently skip here"
+            );
+            eprintln!(
+                "skipping cloudrun_dockerfile_copy_matches_canonical_template: not in a \
+                 git checkout, templates/cloudrun/Dockerfile is unavailable"
+            );
+            return;
+        };
+        assert_eq!(
+            CLOUDRUN_DOCKERFILE_TEMPLATE, canonical,
+            "armature-cli/assets/dockerfiles/cloudrun/Dockerfile has drifted from \
+             templates/cloudrun/Dockerfile — re-sync the in-crate copy"
+        );
+    }
+
+    #[test]
+    fn dockerfile_lambda_template_is_registered_and_distinct_from_generic() {
+        let registry = TemplateRegistry::new();
+        let lambda = registry
+            .render(
+                "dockerfile_lambda",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert!(
+            lambda.contains("public.ecr.aws/lambda/provided") && lambda.contains("cargo-lambda"),
+            "dockerfile_lambda must render the real Lambda Runtime Interface Client \
+             image, got:\n{lambda}"
+        );
+        let generic = registry
+            .render(
+                "dockerfile",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            lambda, generic,
+            "dockerfile_lambda must not be the same content as the generic dockerfile template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_cloudrun_template_is_registered_and_distinct_from_generic() {
+        let registry = TemplateRegistry::new();
+        let cloudrun = registry
+            .render(
+                "dockerfile_cloudrun",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert!(
+            cloudrun.contains("distroless") && cloudrun.contains("ARG BIN_NAME"),
+            "dockerfile_cloudrun must render the real distroless Cloud Run image, got:\n{cloudrun}"
+        );
+        let generic = registry
+            .render(
+                "dockerfile",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            cloudrun, generic,
+            "dockerfile_cloudrun must not be the same content as the generic dockerfile template"
+        );
     }
 }

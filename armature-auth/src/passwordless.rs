@@ -30,7 +30,7 @@
 //! ```
 
 use chrono::{DateTime, Duration, Utc};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -224,7 +224,9 @@ impl WebAuthnManager {
         username: &str,
         display_name: &str,
     ) -> Result<(CreationChallengeResponse, PasskeyRegistration), PasswordlessError> {
-        let user_unique_id = UserId::from(user_id);
+        // webauthn-rs 0.5 uses a Uuid for the user handle.
+        let user_unique_id = Uuid::from_slice(user_id)
+            .map_err(|e| PasswordlessError::WebAuthn(format!("user_id must be 16 bytes: {e}")))?;
 
         let (ccr, reg_state) = self
             .webauthn

@@ -141,25 +141,32 @@ impl SseBroadcaster {
     }
 
     /// Register a new client
+    ///
+    /// Prunes any senders whose receiver has been dropped before pushing the
+    /// new client, so an application that registers frequently but rarely
+    /// broadcasts does not accumulate dead senders (they would otherwise only
+    /// be reaped during [`broadcast`](Self::broadcast) or keep-alive).
     pub async fn register(&self) -> ReceiverStream<Result<String, Error>> {
         let (tx, rx) = mpsc::channel(100);
         let mut clients = self.clients.write().await;
+        clients.retain(|tx| !tx.is_closed());
         clients.push(tx);
         ReceiverStream::new(rx)
     }
 
     /// Broadcast an event to all clients
+    ///
+    /// Uses non-blocking sends so the client list lock is never held across
+    /// an `.await`. Slow clients whose channel buffer is full are
+    /// disconnected (dropped from the list) so a single stalled client
+    /// cannot block broadcasts or new registrations.
     pub async fn broadcast(&self, event: ServerSentEvent) -> Result<(), Error> {
         let data_str = event.to_string();
         let mut clients = self.clients.write().await;
 
-        // Remove disconnected clients
-        clients.retain(|tx| !tx.is_closed());
-
-        // Send to all clients
-        for tx in clients.iter() {
-            let _ = tx.send(Ok(data_str.clone())).await;
-        }
+        // Send to all clients, removing those that are disconnected or
+        // whose channel is full (slow consumers).
+        clients.retain(|tx| tx.try_send(Ok(data_str.clone())).is_ok());
 
         Ok(())
     }
@@ -182,6 +189,10 @@ impl SseBroadcaster {
     }
 
     /// Start a keep-alive task
+    ///
+    /// Like [`broadcast`](Self::broadcast), keep-alives use non-blocking
+    /// sends: clients that are disconnected or whose channel is full are
+    /// removed so a stalled client cannot deadlock the broadcaster.
     pub fn start_keep_alive(
         self: std::sync::Arc<Self>,
         interval: Duration,
@@ -192,10 +203,7 @@ impl SseBroadcaster {
                 interval_timer.tick().await;
                 let comment_str = ": keep-alive\n\n".to_string();
                 let mut clients = self.clients.write().await;
-                clients.retain(|tx| !tx.is_closed());
-                for tx in clients.iter() {
-                    let _ = tx.send(Ok(comment_str.clone())).await;
-                }
+                clients.retain(|tx| tx.try_send(Ok(comment_str.clone())).is_ok());
             }
         })
     }
@@ -204,5 +212,71 @@ impl SseBroadcaster {
 impl Default for SseBroadcaster {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_broadcast_does_not_block_on_stalled_client() {
+        let broadcaster = SseBroadcaster::new();
+
+        // Register a client that never consumes its stream.
+        let _stalled_rx = broadcaster.register().await;
+
+        // Fill the stalled client's bounded channel (capacity 100) and keep
+        // going; before the fix this deadlocked on a full channel.
+        for i in 0..150 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                broadcaster.broadcast_message(format!("event {}", i)),
+            )
+            .await;
+            assert!(result.is_ok(), "broadcast deadlocked on a stalled client");
+        }
+
+        // The stalled client should have been disconnected once its channel
+        // filled.
+        assert_eq!(broadcaster.client_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_register_prunes_closed_senders() {
+        let broadcaster = SseBroadcaster::new();
+
+        // Register three clients, then drop two of their receivers.
+        let rx1 = broadcaster.register().await;
+        let rx2 = broadcaster.register().await;
+        let keep = broadcaster.register().await;
+        assert_eq!(broadcaster.client_count().await, 3);
+
+        drop(rx1);
+        drop(rx2);
+
+        // Registering a new client should reap the two dead senders first, so
+        // we end with the live `keep` client, the newly registered one, and no
+        // dead senders left behind.
+        let _new = broadcaster.register().await;
+        assert_eq!(broadcaster.client_count().await, 2);
+
+        drop(keep);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_reaches_active_client() {
+        use tokio_stream::StreamExt;
+
+        let broadcaster = SseBroadcaster::new();
+        let mut rx = broadcaster.register().await;
+
+        broadcaster
+            .broadcast_message("hello".to_string())
+            .await
+            .unwrap();
+
+        let received = rx.next().await.unwrap().unwrap();
+        assert!(received.contains("data: hello"));
     }
 }

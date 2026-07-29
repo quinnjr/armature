@@ -43,6 +43,10 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+/// Default hard cap on retained keys; see `token_bucket::DEFAULT_MAX_KEYS`.
+/// Bounds memory against untrusted, high-cardinality keys.
+const DEFAULT_MAX_KEYS: usize = 100_000;
+
 /// Sliding window log rate limiter
 pub struct SlidingWindowLog {
     /// Maximum requests allowed in the window
@@ -51,6 +55,8 @@ pub struct SlidingWindowLog {
     window: Duration,
     /// Request timestamps per key
     logs: DashMap<String, VecDeque<Instant>>,
+    /// Hard cap on retained keys; evict the oldest when a new key would exceed it.
+    max_keys: usize,
 }
 
 impl SlidingWindowLog {
@@ -72,6 +78,27 @@ impl SlidingWindowLog {
             max_requests,
             window,
             logs: DashMap::new(),
+            max_keys: DEFAULT_MAX_KEYS,
+        }
+    }
+
+    /// Override the hard cap on retained keys (default [`DEFAULT_MAX_KEYS`]).
+    pub fn with_max_keys(mut self, max_keys: usize) -> Self {
+        self.max_keys = max_keys.max(1);
+        self
+    }
+
+    /// Evict the entry whose most recent request is oldest, to make room for a
+    /// new key.
+    fn evict_oldest(&self) {
+        if let Some(oldest) = self
+            .logs
+            .iter()
+            .filter_map(|e| e.value().back().map(|last| (e.key().clone(), *last)))
+            .min_by_key(|(_, last)| *last)
+            .map(|(k, _)| k)
+        {
+            self.logs.remove(&oldest);
         }
     }
 
@@ -98,6 +125,12 @@ impl SlidingWindowLog {
     pub fn try_acquire(&self, key: &str) -> (bool, u64) {
         let now = Instant::now();
         let cutoff = now - self.window;
+
+        // Bound memory: evict the oldest entry before admitting a new key that
+        // would exceed the cap.
+        if !self.logs.contains_key(key) && self.logs.len() >= self.max_keys {
+            self.evict_oldest();
+        }
 
         let mut entry = self.logs.entry(key.to_string()).or_default();
 

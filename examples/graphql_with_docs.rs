@@ -8,7 +8,7 @@
 /// Example demonstrating GraphQL with documentation and configurable playgrounds
 use armature::prelude::*;
 use armature_graphql::{
-    EmptyMutation, EmptySubscription, GraphQLConfig, Object, Schema, SimpleObject, async_graphql,
+    EmptyMutation, EmptySubscription, GraphQLConfig, Object, Schema, SimpleObject,
     generate_schema_docs_html, graphiql_html, graphql_playground_html,
 };
 

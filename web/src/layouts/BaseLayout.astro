@@ -1,0 +1,122 @@
+---
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import { url } from '../lib/url';
+import {
+  SOFTWARE_APPLICATION_SCHEMA,
+  ORGANIZATION_SCHEMA,
+  WEBSITE_SCHEMA,
+  FAQ_PAGE_SCHEMA,
+  BREADCRUMB_SCHEMA,
+} from '../lib/schema';
+import '../styles/global.css';
+
+interface Props {
+  title?: string;
+  description?: string;
+  /** Site-absolute path (without base) to canonicalize this page to, e.g. '/docs'. */
+  canonicalPath?: string;
+  /** Emit the home-page-only schemas (SoftwareApplication, FAQPage, BreadcrumbList). */
+  richSchemas?: boolean;
+}
+
+const {
+  title = 'Armature Framework - Enterprise Rust Web Framework | NestJS Alternative',
+  description = 'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Build production-ready APIs with dependency injection, decorators, JWT/OAuth2 auth, and 150+ features. 8-15x faster than Node.js.',
+  canonicalPath,
+  richSchemas = false,
+} = Astro.props;
+
+const site = Astro.site ?? new URL('https://quinnjr.github.io');
+const canonical = new URL(canonicalPath ? url(canonicalPath) : Astro.url.pathname, site).href;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{title}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Primary Meta Tags -->
+    <meta name="title" content={title} />
+    <meta name="description" content={description} />
+    <meta
+      name="keywords"
+      content="rust web framework, nestjs rust, nestjs alternative, express rust alternative, rust http server, async rust framework, dependency injection rust, rust api framework, type-safe rust, rust backend, rust microservices, actix-web alternative, axum alternative, rocket alternative, rust enterprise framework, rust production framework"
+    />
+    <meta name="author" content="Joseph R. Quinn" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="language" content="English" />
+    <meta name="revisit-after" content="7 days" />
+    <meta name="rating" content="General" />
+    <meta name="distribution" content="global" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:title" content="Armature Framework - Enterprise Rust Web Framework" />
+    <meta
+      property="og:description"
+      content="Batteries-included Rust web framework with NestJS-style architecture. Dependency injection, decorators, JWT/OAuth2, GraphQL, and 150+ enterprise features. 8-15x faster than Node.js."
+    />
+    <meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework" />
+    <meta property="og:site_name" content="Armature Framework" />
+    <meta property="og:locale" content="en_US" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content={canonical} />
+    <meta name="twitter:title" content="Armature Framework - Enterprise Rust Web Framework" />
+    <meta
+      name="twitter:description"
+      content="Batteries-included Rust web framework with NestJS-style architecture. 8-15x faster than Node.js with 150+ enterprise features."
+    />
+    <meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png" />
+    <meta name="twitter:creator" content="@quinnjr" />
+
+    <!-- Canonical URL -->
+    <link rel="canonical" href={canonical} />
+
+    <!-- Alternate Languages (if applicable) -->
+    <link rel="alternate" hreflang="en" href={canonical} />
+    <link rel="alternate" hreflang="x-default" href={canonical} />
+
+    <!-- Favicon and Icons -->
+    <link rel="icon" type="image/x-icon" href={url('/favicon.ico')} />
+    <link rel="icon" type="image/png" sizes="32x32" href={url('/assets/icons/icon-32x32.png')} />
+    <link rel="icon" type="image/png" sizes="16x16" href={url('/assets/icons/icon-16x16.png')} />
+    <link rel="apple-touch-icon" sizes="180x180" href={url('/apple-touch-icon.png')} />
+    <link rel="manifest" href={url('/manifest.webmanifest')} />
+    <meta name="theme-color" content="#CE422B" />
+    <meta name="msapplication-TileColor" content="#CE422B" />
+
+    <!-- Preconnect for Performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://github.com" />
+
+    <!-- Google Fonts - Inter & Fira Code -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Structured Data / JSON-LD for Search Engines and LLMs -->
+    {richSchemas && <script type="application/ld+json" set:html={SOFTWARE_APPLICATION_SCHEMA} />}
+    <script type="application/ld+json" set:html={ORGANIZATION_SCHEMA} />
+    <script type="application/ld+json" set:html={WEBSITE_SCHEMA} />
+    {richSchemas && <script type="application/ld+json" set:html={FAQ_PAGE_SCHEMA} />}
+    {richSchemas && <script type="application/ld+json" set:html={BREADCRUMB_SCHEMA} />}
+  </head>
+  <body>
+    <Nav />
+    <main>
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

@@ -563,3 +563,12 @@ impl AssetController {
 5. **Private data** - Use `private` or `no-store` for sensitive content
 
 
+
+## Caching QUERY Requests
+
+The IETF `QUERY` method (`#[query(...)]`) is a safe, idempotent read whose parameters
+travel in the request body. Because the body is what distinguishes one query from another,
+the response cache includes a hash of the request body in the cache key for `QUERY`
+requests (it does not for other methods). `QUERY` is a cacheable method by default, so two
+`QUERY` requests to the same path with different bodies are cached and served as distinct
+entries, exactly as two GETs with different query strings would be.

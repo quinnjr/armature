@@ -100,75 +100,96 @@ fn register_app_api_types(engine: &mut Engine) {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceContext — ctx.call("Service", "method", ...args)
+// ServiceContext — ctx.invoke("Service", "method", ...args)
 // ---------------------------------------------------------------------------
-
+//
+// This was originally documented as `ctx.call(...)` (see the Critical
+// finding at the top of this file's history). That name is *not*
+// achievable: `call` is Rhai's own reserved keyword for invoking a
+// function pointer (`rhai::engine::KEYWORD_FN_PTR_CALL`), and both
+// call-styles — `ctx.call(...)` (method style) and `call(ctx, ...)` (plain
+// style) — are intercepted unconditionally in
+// `rhai::func::call::{make_method_call, make_function_call}` *before* any
+// user-registered function named "call" is ever consulted, regardless of
+// its signature or arity. Concretely: `ctx.call("Service", "method")`
+// makes Rhai try to `try_cast::<FnPtr>()` the string `"Service"` (since
+// `ctx` itself isn't an `FnPtr`, Rhai falls into its
+// `obj.call(fn_ptr, ...args)` generic-dispatch mechanism, which requires
+// the *first argument* to already be a function pointer) — it fails with
+// "Data type incorrect: string (expecting Fn)" and never reaches this
+// module's code at all. There is no engine flag to opt out of this; it is
+// baked into Rhai's core dispatch.
+//
+// So `invoke` is the one real, working name — matching the audit
+// finding's own documented fallback ("or update every doc/comment/example
+// to say invoke"). All doc references (this file, `types::ServiceContext`,
+// and the crate Quick Start in `lib.rs`) say `ctx.invoke(...)`.
 fn register_service_context_api(engine: &mut Engine) {
     engine.register_type_with_name::<ServiceContext>("ServiceContext");
 
-    // 0 extra args: ctx.call("Service", "method")
-    engine.register_fn(
-        "invoke",
-        |context: NativeCallContext,
-         ctx: &mut ServiceContext,
-         svc: String,
-         method: String|
-         -> Result<Dynamic, Box<EvalAltResult>> {
-            let fn_ptr = ctx
-                .get_method(&svc, &method)
-                .map_err(|e| Box::new(EvalAltResult::from(e)))?;
-            fn_ptr.call_within_context::<Dynamic>(&context, ())
-        },
-    );
+    // 0 extra args: ctx.invoke("Service", "method")
+    engine.register_fn("invoke", call_0);
 
-    // 1 extra arg: ctx.call("Service", "method", arg1)
-    engine.register_fn(
-        "invoke",
-        |context: NativeCallContext,
-         ctx: &mut ServiceContext,
-         svc: String,
-         method: String,
-         arg1: Dynamic|
-         -> Result<Dynamic, Box<EvalAltResult>> {
-            let fn_ptr = ctx
-                .get_method(&svc, &method)
-                .map_err(|e| Box::new(EvalAltResult::from(e)))?;
-            fn_ptr.call_within_context::<Dynamic>(&context, (arg1,))
-        },
-    );
+    // 1 extra arg: ctx.invoke("Service", "method", arg1)
+    engine.register_fn("invoke", call_1);
 
-    // 2 extra args: ctx.call("Service", "method", arg1, arg2)
-    engine.register_fn(
-        "invoke",
-        |context: NativeCallContext,
-         ctx: &mut ServiceContext,
-         svc: String,
-         method: String,
-         arg1: Dynamic,
-         arg2: Dynamic|
-         -> Result<Dynamic, Box<EvalAltResult>> {
-            let fn_ptr = ctx
-                .get_method(&svc, &method)
-                .map_err(|e| Box::new(EvalAltResult::from(e)))?;
-            fn_ptr.call_within_context::<Dynamic>(&context, (arg1, arg2))
-        },
-    );
+    // 2 extra args: ctx.invoke("Service", "method", arg1, arg2)
+    engine.register_fn("invoke", call_2);
 
-    // 3 extra args: ctx.call("Service", "method", arg1, arg2, arg3)
-    engine.register_fn(
-        "invoke",
-        |context: NativeCallContext,
-         ctx: &mut ServiceContext,
-         svc: String,
-         method: String,
-         arg1: Dynamic,
-         arg2: Dynamic,
-         arg3: Dynamic|
-         -> Result<Dynamic, Box<EvalAltResult>> {
-            let fn_ptr = ctx
-                .get_method(&svc, &method)
-                .map_err(|e| Box::new(EvalAltResult::from(e)))?;
-            fn_ptr.call_within_context::<Dynamic>(&context, (arg1, arg2, arg3))
-        },
-    );
+    // 3 extra args: ctx.invoke("Service", "method", arg1, arg2, arg3)
+    engine.register_fn("invoke", call_3);
+}
+
+fn call_0(
+    context: NativeCallContext,
+    ctx: &mut ServiceContext,
+    svc: String,
+    method: String,
+) -> Result<Dynamic, Box<EvalAltResult>> {
+    let fn_ptr = ctx
+        .get_method(&svc, &method)
+        .map_err(|e| Box::new(EvalAltResult::from(e)))?;
+    fn_ptr.call_within_context::<Dynamic>(&context, ())
+}
+
+fn call_1(
+    context: NativeCallContext,
+    ctx: &mut ServiceContext,
+    svc: String,
+    method: String,
+    arg1: Dynamic,
+) -> Result<Dynamic, Box<EvalAltResult>> {
+    let fn_ptr = ctx
+        .get_method(&svc, &method)
+        .map_err(|e| Box::new(EvalAltResult::from(e)))?;
+    fn_ptr.call_within_context::<Dynamic>(&context, (arg1,))
+}
+
+fn call_2(
+    context: NativeCallContext,
+    ctx: &mut ServiceContext,
+    svc: String,
+    method: String,
+    arg1: Dynamic,
+    arg2: Dynamic,
+) -> Result<Dynamic, Box<EvalAltResult>> {
+    let fn_ptr = ctx
+        .get_method(&svc, &method)
+        .map_err(|e| Box::new(EvalAltResult::from(e)))?;
+    fn_ptr.call_within_context::<Dynamic>(&context, (arg1, arg2))
+}
+
+fn call_3(
+    context: NativeCallContext,
+    ctx: &mut ServiceContext,
+    svc: String,
+    method: String,
+    arg1: Dynamic,
+    arg2: Dynamic,
+    arg3: Dynamic,
+) -> Result<Dynamic, Box<EvalAltResult>> {
+    let fn_ptr = ctx
+        .get_method(&svc, &method)
+        .map_err(|e| Box::new(EvalAltResult::from(e)))?;
+    fn_ptr.call_within_context::<Dynamic>(&context, (arg1, arg2, arg3))
 }

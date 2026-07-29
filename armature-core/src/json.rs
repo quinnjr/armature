@@ -229,6 +229,37 @@ pub fn from_slice<T: DeserializeOwned>(slice: &[u8]) -> Result<T> {
     }
 }
 
+/// Deserialize a value from an owned JSON byte buffer, parsing in place.
+///
+/// This is the zero-copy counterpart to [`from_slice`]. When built with the
+/// `simd-json` feature, `simd-json` parses directly inside the caller-owned
+/// `buf` (mutating it in place) instead of first cloning the input with
+/// `slice.to_vec()`. This avoids a full copy of the request body on the
+/// deserialization hot path.
+///
+/// Prefer this over [`from_slice`] whenever you already own the byte buffer
+/// (e.g. a request body you can move by value).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // `body` is an owned `Vec<u8>` (e.g. request.body)
+/// let data: User = json::from_owned(body)?;
+/// ```
+#[inline]
+pub fn from_owned<T: DeserializeOwned>(buf: Vec<u8>) -> Result<T> {
+    #[cfg(feature = "simd-json")]
+    {
+        // Parse in place: no copy, buffer is consumed and mutated by simd-json.
+        let mut buf = buf;
+        simd_json::from_slice(&mut buf).map_err(Into::into)
+    }
+    #[cfg(not(feature = "simd-json"))]
+    {
+        serde_json::from_slice(&buf).map_err(Into::into)
+    }
+}
+
 /// Deserialize a value from a mutable JSON byte slice (zero-copy with simd-json).
 ///
 /// This is the most efficient deserialization method when using `simd-json`,
@@ -427,6 +458,34 @@ mod tests {
         let user: TestUser = from_str(json_str).unwrap();
         assert_eq!(user.name, "Alice");
         assert_eq!(user.age, 28);
+    }
+
+    #[test]
+    fn test_from_owned() {
+        let bytes = br#"{"name":"Dana","age":22,"email":"dana@test.com"}"#.to_vec();
+        let user: TestUser = from_owned(bytes).unwrap();
+        assert_eq!(user.name, "Dana");
+        assert_eq!(user.age, 22);
+        assert_eq!(user.email, "dana@test.com");
+    }
+
+    #[test]
+    fn test_from_owned_roundtrip_with_to_vec() {
+        let user = TestUser {
+            name: "Eve".to_string(),
+            age: 33,
+            email: "eve@example.com".to_string(),
+        };
+        let bytes = to_vec(&user).unwrap();
+        let parsed: TestUser = from_owned(bytes).unwrap();
+        assert_eq!(user, parsed);
+    }
+
+    #[test]
+    fn test_from_owned_error() {
+        let bad = b"{ not json }".to_vec();
+        let result: Result<TestUser> = from_owned(bad);
+        assert!(result.is_err());
     }
 
     #[test]

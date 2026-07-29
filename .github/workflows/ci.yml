@@ -126,6 +126,211 @@ jobs:
       - name: Run doc tests with SAML
         run: cargo test --doc --features full-with-saml
 
+  # ============================================================================
+  # TEST (per-member crates not reachable from the root `full` feature)
+  #
+  # The root package's `full` feature does not depend on the delivery-provider
+  # crates, so `cargo test --features full` never compiles them and the
+  # coverage job (`--workspace`) builds each member with only its *default*
+  # features. Both leave whole test suites — mail queue/Redis, files PDF, push
+  # APNS/Web-Push, storage S3/GCS/Azure — silently unexecuted. Test them
+  # explicitly with every feature enabled, and again with a *minimal* feature
+  # set so documented off-paths (e.g. `armature-files` without `embedded-font`,
+  # `armature-mail` with no template engine) are compiled rather than assumed.
+  #
+  # COVERAGE GAP: this matrix covers 26 of the workspace's 62 members; the
+  # rest are built only with default features. Rationale, the uncovered list,
+  # and the regeneration command live in TODO.md ("CI covers N of 63 workspace
+  # members") — keep the counts above in sync with it, and do not restate the
+  # list here.
+  #
+  # Members are added here with an explicit `minimal` feature string because
+  # some crates have no testable surface with zero features. Crates with *no*
+  # cargo features use `minimal: ""`, which skips the minimal step entirely:
+  # `--no-default-features` would select an identical set to `--all-features`
+  # and merely re-run the same (often container-backed) suite.
+  # ============================================================================
+
+  test-members:
+    name: Test member crates (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: armature-payments
+            minimal: "--no-default-features"
+          - crate: armature-mail
+            minimal: "--no-default-features"
+          - crate: armature-files
+            # `images` on, `embedded-font` off: the documented path where a
+            # TextWatermark without a font must error cleanly instead of
+            # panicking. Plain `--no-default-features` compiles no image code
+            # at all and would not cover it.
+            minimal: "--no-default-features --features images"
+          - crate: armature-push
+            minimal: "--no-default-features"
+          - crate: armature-storage
+            minimal: "--no-default-features"
+          # armature-queue and armature-distributed have Redis/testcontainer
+          # suites and no cargo features, so `--no-default-features` selects an
+          # identical set to `--all-features`; they are here for the Docker
+          # enforcement, which the `--all-features` step already applies.
+          - crate: armature-queue
+            minimal: ""
+          - crate: armature-distributed
+            minimal: ""
+          # The shared container harness itself. Its containers.rs/acme.rs
+          # tests call skip_if_no_docker!, so without this row the enforcement
+          # mechanism is never exercised under enforcement. They are all
+          # `#[ignore = "requires Docker"]`, so the row is pointless without
+          # --include-ignored: a plain `cargo test` would filter them out and
+          # report a green pass having run no container at all.
+          #
+          # `extra` is only threaded into the --all-features "Run tests" step
+          # below, not the minimal-features step: the `containers` feature
+          # that gates every ignored test is off under `--no-default-features`,
+          # so `--include-ignored` would be a no-op there.
+          - crate: armature-testkit
+            minimal: "--no-default-features"
+            extra: "-- --include-ignored"
+          - crate: armature-redis
+            minimal: "--no-default-features"
+          - crate: armature-seaorm
+            minimal: "--no-default-features"
+          # --all-features turns on both the postgres and mysql backends, which
+          # link libpq and libmysqlclient respectively.
+          - crate: armature-diesel
+            minimal: "--no-default-features"
+            apt: "libpq-dev libmysqlclient-dev"
+          # No cargo features. Its Pebble end-to-end suite is entirely
+          # Docker-gated via skip_if_no_docker!, so ARMATURE_REQUIRE_DOCKER=1
+          # protects it rather than breaking it.
+          - crate: armature-acme
+            minimal: ""
+          # Cloud Platform crates (Workflow 5). Their default feature set is
+          # empty and every conformance suite is feature-gated (s3, servicebus,
+          # secret-manager, cloud-run, …), so they run nowhere without an
+          # --all-features row here — the coverage job builds members with
+          # default features only. Tests are credential-free (loopback stubs /
+          # connection-refused); any live path is Docker-gated.
+          - crate: armature-aws
+            minimal: "--no-default-features"
+          - crate: armature-azure
+            minimal: "--no-default-features"
+          - crate: armature-gcp
+            minimal: "--no-default-features"
+          - crate: armature-lambda
+            minimal: "--no-default-features"
+          - crate: armature-cloudrun
+            minimal: "--no-default-features"
+          - crate: armature-azure-functions
+            minimal: "--no-default-features"
+          # armature-core gates HTTP/3 (quinn/h3), io_uring, self-signed cert
+          # generation (rcgen), and simd-json behind non-default features
+          # that no root `full`/`full-with-saml` feature reaches. This row
+          # closes that gap by exercising it with --all-features. `default =
+          # []`, so `--no-default-features` would be identical to the plain
+          # default build already covered by the root `full` jobs and the
+          # coverage job; minimal is skipped.
+          - crate: armature-core
+            minimal: ""
+          # The crates below have feature-gated surfaces that are reachable
+          # only via --all-features, since none of them are pulled into the
+          # root `full`/`full-with-saml` feature: armature-siem's `http`
+          # client, armature-collab's `websocket` transport, armature-
+          # opensearch's `aws-auth`, armature-rhai's `hot-reload`/`stdlib`/
+          # `http-client`/`validation`, armature-i18n's `icu` formatting,
+          # armature-features' `launchdarkly` provider, and armature-toon's
+          # `http`/`streaming` integrations.
+          - crate: armature-siem
+            minimal: ""
+          - crate: armature-collab
+            minimal: "--no-default-features"
+          - crate: armature-opensearch
+            minimal: "--no-default-features"
+          - crate: armature-rhai
+            minimal: ""
+          - crate: armature-i18n
+            minimal: "--no-default-features"
+          - crate: armature-features
+            minimal: ""
+          - crate: armature-toon
+            minimal: ""
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        # Docker is present on ubuntu-latest, so container-gated suites must
+        # actually run here rather than self-skipping into a green pass.
+        # Enforced by `armature_testkit::skip_if_no_docker!`, which panics
+        # when this is set to "1" and no daemon is reachable. Every
+        # container-gated suite in the crates above routes through that macro;
+        # a hand-rolled `if !docker_available() { return; }` would bypass it.
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} --all-features --verbose ${{ matrix.extra }}
+      - name: Run doc tests
+        run: cargo test -p ${{ matrix.crate }} --all-features --doc
+      # Separate step so a minimal-feature failure is attributable rather than
+      # buried in the --all-features run. Skipped for feature-less crates,
+      # where it would be a byte-for-byte re-run of the step above. Does not
+      # thread `matrix.extra` through: today only `armature-testkit` sets it,
+      # and `--include-ignored` would be a no-op there under
+      # `--no-default-features` (see that row's comment) — if a future row
+      # needs an extra flag applied to this step too, give it its own matrix
+      # key rather than reusing `extra`.
+      - name: Run tests (minimal features)
+        if: matrix.minimal != ''
+        env:
+          ARMATURE_REQUIRE_DOCKER: "1"
+        run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
+
+  # ============================================================================
+  # TEST (armature-payments single-provider feature combinations)
+  #
+  # `armature-payments` gates `hmac`/`sha2`/`hex`/`base64` per provider, and
+  # those shapes are compiled nowhere else: `--all-features` and the default
+  # feature set both enable all three providers, so a provider-specific
+  # `use` left outside its `#[cfg]` only breaks for a downstream consumer
+  # building a single provider. Clippy with `-D warnings` is what turns that
+  # into a CI failure rather than a warning nobody reads.
+  # ============================================================================
+
+  test-payments-providers:
+    name: Test armature-payments (${{ matrix.provider }} only)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [stripe, paypal, braintree]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (single provider, warnings are errors)
+        run: |
+          cargo clippy -p armature-payments --all-targets \
+            --no-default-features --features ${{ matrix.provider }} \
+            -- -D warnings \
+            -A clippy::collapsible_if \
+            -A clippy::result_large_err \
+            -A dead_code \
+            -A clippy::useless_vec \
+            -A clippy::unwrap_or_default
+      - name: Run tests (single provider)
+        run: |
+          cargo test -p armature-payments --verbose \
+            --no-default-features --features ${{ matrix.provider }}
+
   doc-tests:
     name: Documentation Tests
     runs-on: ubuntu-latest
@@ -152,6 +357,18 @@ jobs:
   examples:
     name: Build Examples
     runs-on: ubuntu-latest
+    # Redis-backed so the distributed-locks example can actually be *run*
+    # below, not just built — see the "Run distributed_locks_example" step.
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - name: Install SAML system dependencies
@@ -162,11 +379,100 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build all examples
         run: |
+          fail=0
           for example in examples/*.rs; do
             name=$(basename "$example" .rs)
             echo "Building example: $name"
-            cargo build --example "$name" --features full-with-saml || echo "Failed to build $name"
+            if ! cargo build --example "$name" --features full-with-saml; then
+              echo "::error::Failed to build example: $name"
+              fail=1
+            fi
           done
+          exit $fail
+      # `cargo build --example` above only proves the example compiles; the
+      # mutual-exclusion assertions in distributed_locks_example.rs only fire
+      # when it is actually executed against a live Redis, so run it here
+      # with the `redis` service container above.
+      - name: Run distributed_locks_example (mutual-exclusion assertions)
+        run: cargo run --example distributed_locks_example --features full-with-saml
+
+  # ============================================================================
+  # TEMPLATE BUILDS
+  #
+  # templates/{api-full,api-minimal,microservice,graphql-api} are excluded
+  # from the workspace (`exclude = ["templates/*", ...]` in the root
+  # Cargo.toml) and are otherwise never compiled anywhere in CI — they could
+  # silently rot indefinitely. Each template depends on `armature-framework`/
+  # `armature-core` via crates.io version requirements (deliberately not path
+  # deps, since they must stand alone for real users), so a plain `cargo
+  # check` in the checked-out repo would resolve against whatever is
+  # currently published on crates.io rather than the code actually under
+  # test in this PR. To check templates against the in-repo source, append a
+  # CI-only `[patch.crates-io]` block to a throwaway copy of each template's
+  # Cargo.toml before running `cargo check` — the committed template files
+  # themselves are never modified.
+  # ============================================================================
+
+  template-builds:
+    name: Template Build (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [api-full, api-minimal, microservice, graphql-api]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Patch template to build against in-repo armature/armature-core (CI-only)
+        working-directory: templates/${{ matrix.template }}
+        run: |
+          cat >> Cargo.toml <<'EOF'
+
+          [patch.crates-io]
+          armature-framework = { path = "../.." }
+          armature-core = { path = "../../armature-core" }
+          EOF
+      - name: cargo check --all-features
+        working-directory: templates/${{ matrix.template }}
+        run: cargo check --all-features
+
+  # ============================================================================
+  # KUBERNETES / HELM MANIFEST VALIDATION
+  #
+  # Nothing else in this workflow syntactically validates templates/k8s/* or
+  # templates/helm/armature/*, so a malformed manifest, Kustomize base, or
+  # Chart.yaml field can ship with zero detection.
+  #
+  # `kubectl kustomize` fully renders the Kustomize base (catches malformed
+  # YAML, bad patches, missing resources) with no cluster required. We do
+  # NOT also run `kubectl apply --dry-run=client`: despite the name,
+  # client-side dry-run still builds a RESTMapper via the discovery client,
+  # which requires a reachable API server even with `--validate=false` —
+  # confirmed on a real runner (fails with "connect: connection refused" to
+  # localhost:8080, not a manifest problem). `kubectl kustomize`'s render
+  # already proves the manifests are structurally valid; a genuine
+  # server-side check would need a real (e.g. kind/k3d) cluster, which is a
+  # bigger addition than this pass warrants.
+  # ============================================================================
+
+  k8s-manifest-validation:
+    name: K8s/Helm Manifest Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+      - name: Validate raw k8s manifests (kustomize render)
+        run: kubectl kustomize templates/k8s
+      - name: Lint Helm chart
+        run: helm lint templates/helm/armature
 
   coverage:
     name: Code Coverage
@@ -211,7 +517,7 @@ jobs:
   # ============================================================================
 
   msrv:
-    name: MSRV Check (1.95)
+    name: MSRV Check (1.94.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -219,7 +525,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.95
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: |

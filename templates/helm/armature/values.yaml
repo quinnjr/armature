@@ -5,6 +5,12 @@
 # Application name
 name: armature-api
 
+# NOTE: The Deployment-related defaults below (replicaCount, podAnnotations,
+# podSecurityContext, securityContext, resources, the probes, and
+# terminationGracePeriodSeconds) are intentionally kept in sync with the
+# equivalent hardcoded values in templates/k8s/deployment.yaml. If you change
+# one, check the other.
+
 # Number of replicas
 replicaCount: 3
 

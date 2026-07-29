@@ -1,6 +1,6 @@
 [package]
 name = "armature-webhooks"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,17 +13,17 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Core dependencies
-armature-core = { path = "../armature-core", version = "0.2.1" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
 async-trait = "0.1"
 thiserror = "2.0"
 tracing = "0.1"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 
 # HTTP client for outgoing webhooks
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -38,12 +38,12 @@ hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Unique identifiers
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 # URL parsing
 url = "2.5"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 wiremock = "0.6"
 

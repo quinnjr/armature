@@ -1,6 +1,6 @@
 [package]
 name = "armature-admin"
-version = "0.1.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,25 +12,25 @@ keywords = ["admin", "dashboard", "crud", "ui", "generator"]
 categories = ["web-programming", "gui"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
-armature-log = { path = "../armature-log", version = "0.1.0" }
-armature-proc-macro = { path = "../armature-proc-macro", version = "0.1.0" }
-tokio = { version = "1.35", features = ["rt-multi-thread", "sync"] }
+armature-core = { path = "../armature-core", version = "0.5.0" }
+armature-log = { path = "../armature-log", version = "0.2.0" }
+armature-proc-macro = { path = "../armature-proc-macro", version = "0.2.0" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 thiserror = "2.0"
-uuid = { version = "1.8", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-dashmap = "6.0"
+dashmap = "6.2"
 parking_lot = "0.12"
-bytes = "1.5"
+bytes = "1.12"
 
 # HTML templating
-askama = { version = "0.12", features = ["with-axum"] }
+askama = { version = "0.16" }
 
 # For form handling
-validator = { version = "0.19", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 [features]
 default = []
