@@ -33,7 +33,9 @@ mod generators;
 mod templates;
 mod watcher;
 
-use commands::{build, config, dev, generate, info, mock, new, openapi, repl, routes, run};
+use commands::{
+    build, config, dev, external, generate, info, mock, new, openapi, repl, routes, run,
+};
 use error::{CliError, CliResult};
 
 /// Armature CLI - Modern Rust Web Framework Tools
@@ -166,6 +168,14 @@ enum Commands {
 
     /// Run a Rhai application script
     Run(RunArgs),
+
+    /// Fallback for any subcommand not recognized above: looked up as
+    /// `armature-<name>` on $PATH and run directly (mirrors cargo's own
+    /// extension mechanism). Not shown in --help since the actual set of
+    /// available extensions depends on what's installed; see `armature
+    /// plugin list` to discover what's currently on $PATH.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 // =============================================================================
@@ -2244,8 +2254,23 @@ async fn main() {
             print_mini_banner();
             match command {
                 PluginCommands::List => {
-                    info("Installed plugins:");
-                    println!("  {} No plugins installed", "○".dimmed());
+                    info("Discovered armature-* extensions on $PATH:");
+                    let discovered = external::discover_external_commands();
+                    if discovered.is_empty() {
+                        println!(
+                            "  {} No armature-* extension binaries found on $PATH",
+                            "○".dimmed()
+                        );
+                    } else {
+                        for (name, path) in &discovered {
+                            println!(
+                                "  {} {} {}",
+                                "●".green(),
+                                name.cyan(),
+                                format!("({})", path.display()).dimmed()
+                            );
+                        }
+                    }
                 }
                 PluginCommands::Install { name } => {
                     info(&format!("Installing plugin: {}", name.cyan()));
@@ -2355,6 +2380,20 @@ async fn main() {
 
         Commands::Run(args) => {
             run::run(&args.script, args.port, args.host.as_deref(), args.watch).await
+        }
+
+        Commands::External(args) => {
+            // clap's external_subcommand always gives us a non-empty Vec —
+            // the unrecognized subcommand name is args[0], its own
+            // arguments (if any) follow.
+            let Some((name, rest)) = args.split_first() else {
+                eprintln!("\n  {} no command given\n", "Error:".red().bold());
+                std::process::exit(1);
+            };
+            match external::run_external_command(name, rest) {
+                Ok(exit_code) => std::process::exit(exit_code),
+                Err(e) => Err(e),
+            }
         }
     };
 

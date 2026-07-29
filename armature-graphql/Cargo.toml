@@ -23,11 +23,25 @@ async-trait = "0.1"
 thiserror = "2.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 futures = { version = "0.3", optional = true }
+clap = { version = "4.6", features = ["derive"], optional = true }
+syn = { version = "2.0", features = ["full", "extra-traits"], optional = true }
+proc-macro2 = { version = "1.0", optional = true }
 
 [features]
 default = []
 # Apollo Federation v2 support for microservices
 federation = ["reqwest", "futures"]
+# `armature-graphql-sdl` binary: statically analyzes async-graphql resolver
+# source (#[Object]/#[derive(SimpleObject)]/etc.) and renders SDL text
+# without running the server. Discoverable by armature-cli's
+# external-subcommand mechanism (`armature graphql-sdl ...`) once installed
+# on $PATH.
+sdl-export = ["dep:syn", "dep:proc-macro2", "dep:clap"]
+
+[[bin]]
+name = "armature-graphql-sdl"
+path = "src/bin/armature_graphql_sdl.rs"
+required-features = ["sdl-export"]
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -6,6 +6,8 @@ pub mod federation;
 pub mod resolver;
 pub mod schema_builder;
 pub mod schema_docs;
+#[cfg(feature = "sdl-export")]
+pub mod sdl_static;
 
 pub use async_graphql;
 pub use async_graphql::{
