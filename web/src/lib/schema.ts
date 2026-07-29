@@ -26,12 +26,12 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   author: {
     '@type': 'Person',
     name: 'Joseph R. Quinn',
-    email: 'pegasusheavyindustries@gmail.com',
+    email: 'quinn.josephr@proton.me',
     url: 'https://github.com/quinnjr',
   },
   publisher: {
     '@type': 'Organization',
-    name: 'Pegasus Heavy Industries',
+    name: 'Joseph Quinn',
     url: 'https://github.com/quinnjr',
   },
   codeRepository: 'https://github.com/quinnjr/armature',
@@ -87,7 +87,7 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
 export const ORGANIZATION_SCHEMA = JSON.stringify({
   '@context': 'https://schema.org',
   '@type': 'Organization',
-  name: 'Pegasus Heavy Industries',
+  name: 'Joseph Quinn',
   url: 'https://github.com/quinnjr',
   logo: 'https://quinnjr.github.io/armature/assets/armature-logo.svg',
   sameAs: ['https://github.com/quinnjr'],

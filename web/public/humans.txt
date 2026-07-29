@@ -1,6 +1,6 @@
 /* TEAM */
 Creator: Joseph R. Quinn
-Contact: pegasusheavyindustries@gmail.com
+Contact: quinn.josephr@proton.me
 GitHub: https://github.com/quinnjr
 Location: United States
 

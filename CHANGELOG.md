@@ -988,6 +988,6 @@ See [docs/migration.md](docs/migration.md) for detailed upgrade instructions bet
 
 ---
 
-[Unreleased]: https://github.com/PegasusHeavyIndustries/armature/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/PegasusHeavyIndustries/armature/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/PegasusHeavyIndustries/armature/releases/tag/v0.1.0
+[Unreleased]: https://github.com/quinnjr/armature/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/quinnjr/armature/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/quinnjr/armature/releases/tag/v0.1.0

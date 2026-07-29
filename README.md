@@ -585,7 +585,7 @@ MIT
 
 ## Documentation
 
-🌐 **Live Documentation Website**: [https://pegasusheavy.github.io/armature/](https://pegasusheavy.github.io/armature/)
+🌐 **Live Documentation Website**: [https://quinnjr.github.io/armature/](https://quinnjr.github.io/armature/)
 
 Comprehensive documentation is available in the [`docs/`](docs/) directory:
 
