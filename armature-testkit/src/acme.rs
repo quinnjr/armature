@@ -66,7 +66,23 @@ impl PebbleCa {
             .status()
             .expect("run docker cp for pebble minica");
         assert!(status.success(), "docker cp of pebble.minica.pem failed");
-        let pem = std::fs::read(&dest).expect("read pebble minica pem");
+
+        // `docker cp` can return before the destination file is visible to a
+        // subsequent read on a loaded/overlay host filesystem (observed as
+        // intermittent CI failures) -- retry briefly rather than assume the
+        // first read always sees it.
+        let mut attempt = 0;
+        let pem = loop {
+            match std::fs::read(&dest) {
+                Ok(bytes) if !bytes.is_empty() => break bytes,
+                Ok(_) | Err(_) if attempt < 20 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Ok(bytes) => break bytes,
+                Err(e) => panic!("read pebble minica pem after {attempt} retries: {e}"),
+            }
+        };
         let _ = std::fs::remove_file(&dest);
         pem
     }
