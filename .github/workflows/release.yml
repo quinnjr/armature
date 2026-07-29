@@ -100,99 +100,27 @@ jobs:
     name: Publish to crates.io
     needs: release
     runs-on: ubuntu-latest
+    # Required by both scripts/publish.sh and the final bare 'cargo publish' step below —
+    # both read this env var natively, neither takes an explicit --token flag.
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Publish crates in dependency order
-      - name: Publish armature-core
-        run: cargo publish -p armature-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
+      # Publishes all workspace member crates in dependency-topological order
+      # (see scripts/publish.sh for the ordering logic and rate-limit handling).
+      - name: Publish workspace crates
+        run: ./scripts/publish.sh --yes
 
-      - name: Wait for crates.io
-        run: sleep 30
-
-      - name: Publish armature-macro
-        run: cargo publish -p armature-macro --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-config
-        run: cargo publish -p armature-config --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-jwt
-        run: cargo publish -p armature-jwt --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-auth
-        run: cargo publish -p armature-auth --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-graphql
-        run: cargo publish -p armature-graphql --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-angular
-        run: cargo publish -p armature-angular --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-react
-        run: cargo publish -p armature-react --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-vue
-        run: cargo publish -p armature-vue --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-svelte
-        run: cargo publish -p armature-svelte --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-validation
-        run: cargo publish -p armature-validation --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-testing
-        run: cargo publish -p armature-testing --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-openapi
-        run: cargo publish -p armature-openapi --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-cache
-        run: cargo publish -p armature-cache --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-cron
-        run: cargo publish -p armature-cron --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-queue
-        run: cargo publish -p armature-queue --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-opentelemetry
-        run: cargo publish -p armature-opentelemetry --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-security
-        run: cargo publish -p armature-security --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-handlebars
-        run: cargo publish -p armature-handlebars --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Publish armature-ratelimit
-        run: cargo publish -p armature-ratelimit --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
-
-      - name: Wait for dependencies
+      - name: Wait for crates.io indexing
         run: sleep 60
 
-      - name: Publish armature (main crate)
-        run: cargo publish -p armature --token ${{ secrets.CARGO_REGISTRY_TOKEN }} || true
-        continue-on-error: true
+      # The workspace root is a mixed manifest: package name is "armature-framework"
+      # (the crates.io package), while [lib] name = "armature" is only the library's
+      # import name. It depends on the workspace member crates published above, so
+      # it must be published last.
+      - name: Publish armature-framework (root crate)
+        run: cargo publish -p armature-framework
 

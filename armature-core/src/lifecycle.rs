@@ -35,6 +35,14 @@
 //!     }
 //! }
 //! ```
+//!
+//! ## Internal (`__`-prefixed) implementation details — no semver guarantee
+//!
+//! Items prefixed with `__` in this module (and anything they expand to,
+//! e.g. via [`__armature_register_lifecycle_hooks`]) are internal
+//! implementation details of the `#[module(...)]` / `provider_registration!`
+//! macros. They carry **no semver stability guarantee** and may change or be
+//! removed in any 0.x release without notice. Do not call them directly.
 
 use async_trait::async_trait;
 use std::any::TypeId;
@@ -202,6 +210,64 @@ impl LifecycleManager {
     ) {
         let mut hooks = self.before_shutdown_hooks.write().await;
         hooks.push((name, hook));
+    }
+
+    /// Synchronous, best-effort variant of [`Self::register_on_init`].
+    ///
+    /// Provider registration (see [`crate::container::Container::attach_lifecycle`]
+    /// and [`crate::module::provider_registration`]) runs synchronously during
+    /// [`crate::Application::create`], so it cannot `.await` the methods
+    /// above. Registration happens during single-threaded application
+    /// startup, before this manager is shared with any other task, so the
+    /// lock is never contended in practice; `try_write` is used instead of
+    /// blocking so a pathological caller can never deadlock startup. On the
+    /// vanishingly unlikely event it can't acquire the lock, the hook is
+    /// skipped rather than blocking, and a `tracing::warn!` is emitted so the
+    /// dropped registration leaves a diagnostic trail.
+    pub fn register_on_init_sync(&self, name: String, hook: Arc<dyn OnModuleInit>) {
+        match self.init_hooks.try_write() {
+            Ok(mut hooks) => hooks.push((name, hook)),
+            Err(_) => tracing::warn!(
+                hook = %name,
+                "Failed to register OnModuleInit hook: lock contended, hook was NOT registered"
+            ),
+        }
+    }
+
+    /// Synchronous, best-effort variant of [`Self::register_on_destroy`]. See
+    /// [`Self::register_on_init_sync`] for why this exists.
+    pub fn register_on_destroy_sync(&self, name: String, hook: Arc<dyn OnModuleDestroy>) {
+        match self.destroy_hooks.try_write() {
+            Ok(mut hooks) => hooks.push((name, hook)),
+            Err(_) => tracing::warn!(
+                hook = %name,
+                "Failed to register OnModuleDestroy hook: lock contended, hook was NOT registered"
+            ),
+        }
+    }
+
+    /// Synchronous, best-effort variant of [`Self::register_on_bootstrap`].
+    /// See [`Self::register_on_init_sync`] for why this exists.
+    pub fn register_on_bootstrap_sync(&self, name: String, hook: Arc<dyn OnApplicationBootstrap>) {
+        match self.bootstrap_hooks.try_write() {
+            Ok(mut hooks) => hooks.push((name, hook)),
+            Err(_) => tracing::warn!(
+                hook = %name,
+                "Failed to register OnApplicationBootstrap hook: lock contended, hook was NOT registered"
+            ),
+        }
+    }
+
+    /// Synchronous, best-effort variant of [`Self::register_on_shutdown`].
+    /// See [`Self::register_on_init_sync`] for why this exists.
+    pub fn register_on_shutdown_sync(&self, name: String, hook: Arc<dyn OnApplicationShutdown>) {
+        match self.shutdown_hooks.try_write() {
+            Ok(mut hooks) => hooks.push((name, hook)),
+            Err(_) => tracing::warn!(
+                hook = %name,
+                "Failed to register OnApplicationShutdown hook: lock contended, hook was NOT registered"
+            ),
+        }
     }
 
     /// Execute all OnModuleInit hooks
@@ -407,9 +473,142 @@ pub struct LifecycleHookCounts {
     pub before_shutdown: usize,
 }
 
+// ============================================================================
+// Automatic lifecycle hook discovery
+// ============================================================================
+//
+// Providers are registered into the DI container behind a plain
+// `fn(&Container)` pointer (`ProviderRegistration::register_fn` in
+// `traits.rs`), generated once per concrete provider type by
+// `armature_proc_macro`'s `#[module(...)]` codegen (and by the
+// [`crate::module::provider_registration`] macro, for hand-built modules).
+// That closure is the only place in the framework where a provider's
+// *concrete* type is still known: once it's registered, the instance is
+// erased into `Arc<dyn Any + Send + Sync>` and nothing can recover which
+// lifecycle traits (if any) it implements.
+//
+// [`__armature_register_lifecycle_hooks`] is invoked from inside that
+// closure (which is monomorphic per provider type, since the macro
+// substitutes the concrete type textually) to conditionally register the
+// instance against each lifecycle trait it implements, using "autoref-based
+// stable specialization": for each trait `X`, a `__ViaXSpecific` impl exists
+// only for `&__LifecycleProbe<T> where T: X`, while a `__ViaXFallback` impl
+// (no-op) exists unconditionally for `__LifecycleProbe<T>`. Calling
+// `(&&probe).method()` prefers the `&__LifecycleProbe<T>`-level impl (found
+// one deref step earlier in method resolution) when it exists, and falls
+// back to the no-op otherwise.
+//
+// Crucially, this only works when the call site is monomorphic (a concrete
+// `T`, not a generic type parameter still under a `where` bound): inside a
+// generic function, method resolution can only use the bounds declared on
+// that function, not whatever `T` is eventually monomorphized to, so the
+// specific impl would never be selected. Do not wrap this macro in a
+// generic helper function for that reason -- always invoke it directly from
+// a concrete, per-type call site (i.e. from within macro-generated code
+// where the provider type has already been substituted).
+
+// NOTE: everything below this point (`__LifecycleProbe`, the `__ViaX*`
+// traits, and `__armature_register_lifecycle_hooks!`) is `__`-prefixed and
+// carries NO semver stability guarantee -- see the "Internal implementation
+// details" section of the module-level docs at the top of this file (not
+// itself `#[doc(hidden)]`, so it renders normally in rustdoc/IDE tooltips
+// for the `lifecycle` module) for the full policy statement. Do not call
+// these directly.
+
+/// Wrapper used by the autoref-specialization trick below. Not part of the
+/// public API.
+#[doc(hidden)]
+pub struct __LifecycleProbe<T>(pub Arc<T>);
+
+// Generates one `__ViaXFallback`/`__ViaXSpecific` trait pair (see the
+// autoref-specialization explanation above) for a single lifecycle trait.
+// The four invocations below are structurally identical modulo the
+// substituted identifiers -- this macro exists purely to avoid hand-copying
+// that boilerplate four times; it produces the same code the hand-written
+// pairs used to.
+macro_rules! define_lifecycle_probe_via {
+    ($fallback:ident, $specific:ident, $bound:ident, $method:ident, $register_fn:ident) => {
+        #[doc(hidden)]
+        pub trait $fallback {
+            fn $method(&self, _manager: &LifecycleManager, _name: &str) {}
+        }
+        impl<T> $fallback for __LifecycleProbe<T> {}
+
+        #[doc(hidden)]
+        pub trait $specific {
+            fn $method(&self, manager: &LifecycleManager, name: &str);
+        }
+        impl<T: $bound + 'static> $specific for &__LifecycleProbe<T> {
+            fn $method(&self, manager: &LifecycleManager, name: &str) {
+                manager.$register_fn(name.to_string(), self.0.clone() as Arc<dyn $bound>);
+            }
+        }
+    };
+}
+
+define_lifecycle_probe_via!(
+    __ViaOnModuleInitFallback,
+    __ViaOnModuleInitSpecific,
+    OnModuleInit,
+    __maybe_register_on_init,
+    register_on_init_sync
+);
+
+define_lifecycle_probe_via!(
+    __ViaOnModuleDestroyFallback,
+    __ViaOnModuleDestroySpecific,
+    OnModuleDestroy,
+    __maybe_register_on_destroy,
+    register_on_destroy_sync
+);
+
+define_lifecycle_probe_via!(
+    __ViaOnApplicationBootstrapFallback,
+    __ViaOnApplicationBootstrapSpecific,
+    OnApplicationBootstrap,
+    __maybe_register_on_bootstrap,
+    register_on_bootstrap_sync
+);
+
+define_lifecycle_probe_via!(
+    __ViaOnApplicationShutdownFallback,
+    __ViaOnApplicationShutdownSpecific,
+    OnApplicationShutdown,
+    __maybe_register_on_shutdown,
+    register_on_shutdown_sync
+);
+
+/// Probe a provider instance (`Arc<T>`) for lifecycle hook trait
+/// implementations and register any it implements with `$manager`. See the
+/// module-level comment above for how this works and why it must be
+/// invoked from a monomorphic call site.
+///
+/// Not part of the public API; used by
+/// [`crate::module::provider_registration`] and by `armature_proc_macro`'s
+/// `#[module(...)]` codegen.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __armature_register_lifecycle_hooks {
+    ($manager:expr, $name:expr, $instance:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::lifecycle::{
+            __ViaOnApplicationBootstrapFallback as _, __ViaOnApplicationBootstrapSpecific as _,
+            __ViaOnApplicationShutdownFallback as _, __ViaOnApplicationShutdownSpecific as _,
+            __ViaOnModuleDestroyFallback as _, __ViaOnModuleDestroySpecific as _,
+            __ViaOnModuleInitFallback as _, __ViaOnModuleInitSpecific as _,
+        };
+        let __armature_probe = $crate::lifecycle::__LifecycleProbe($instance.clone());
+        (&&__armature_probe).__maybe_register_on_init($manager, $name);
+        (&&__armature_probe).__maybe_register_on_destroy($manager, $name);
+        (&&__armature_probe).__maybe_register_on_bootstrap($manager, $name);
+        (&&__armature_probe).__maybe_register_on_shutdown($manager, $name);
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[allow(dead_code)]
     struct TestService {
@@ -518,5 +717,137 @@ mod tests {
 
         let execution_order = order.read().await.clone();
         assert_eq!(execution_order, vec![1, 2, 3]);
+    }
+
+    // ---- sync registration variants (used by the provider registration
+    // path, which cannot `.await`) --------------------------------------
+
+    #[tokio::test]
+    async fn test_sync_register_methods_are_visible_to_async_call_hooks() {
+        struct SyncService {
+            init_called: Arc<AtomicBool>,
+            destroy_called: Arc<AtomicBool>,
+            bootstrap_called: Arc<AtomicBool>,
+            shutdown_called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl OnModuleInit for SyncService {
+            async fn on_module_init(&self) -> LifecycleResult {
+                self.init_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        #[async_trait]
+        impl OnModuleDestroy for SyncService {
+            async fn on_module_destroy(&self) -> LifecycleResult {
+                self.destroy_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        #[async_trait]
+        impl OnApplicationBootstrap for SyncService {
+            async fn on_application_bootstrap(&self) -> LifecycleResult {
+                self.bootstrap_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        #[async_trait]
+        impl OnApplicationShutdown for SyncService {
+            async fn on_application_shutdown(&self, _signal: Option<String>) -> LifecycleResult {
+                self.shutdown_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let init_called = Arc::new(AtomicBool::new(false));
+        let destroy_called = Arc::new(AtomicBool::new(false));
+        let bootstrap_called = Arc::new(AtomicBool::new(false));
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let service = Arc::new(SyncService {
+            init_called: init_called.clone(),
+            destroy_called: destroy_called.clone(),
+            bootstrap_called: bootstrap_called.clone(),
+            shutdown_called: shutdown_called.clone(),
+        });
+
+        let manager = LifecycleManager::new();
+        manager.register_on_init_sync("SyncService".to_string(), service.clone());
+        manager.register_on_destroy_sync("SyncService".to_string(), service.clone());
+        manager.register_on_bootstrap_sync("SyncService".to_string(), service.clone());
+        manager.register_on_shutdown_sync("SyncService".to_string(), service.clone());
+
+        let counts = manager.hook_counts().await;
+        assert_eq!(counts.init, 1);
+        assert_eq!(counts.destroy, 1);
+        assert_eq!(counts.bootstrap, 1);
+        assert_eq!(counts.shutdown, 1);
+
+        manager.call_module_init_hooks().await.unwrap();
+        manager.call_bootstrap_hooks().await.unwrap();
+        manager.call_shutdown_hooks(None).await.unwrap();
+        manager.call_module_destroy_hooks().await.unwrap();
+
+        assert!(init_called.load(Ordering::SeqCst));
+        assert!(destroy_called.load(Ordering::SeqCst));
+        assert!(bootstrap_called.load(Ordering::SeqCst));
+        assert!(shutdown_called.load(Ordering::SeqCst));
+    }
+
+    // ---- autoref-specialization probe (Finding 1) -----------------------
+
+    struct ProbeHasInitAndDestroy {
+        init: Arc<AtomicBool>,
+        destroy: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl OnModuleInit for ProbeHasInitAndDestroy {
+        async fn on_module_init(&self) -> LifecycleResult {
+            self.init.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl OnModuleDestroy for ProbeHasInitAndDestroy {
+        async fn on_module_destroy(&self) -> LifecycleResult {
+            self.destroy.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct ProbePlain;
+
+    #[tokio::test]
+    async fn test_lifecycle_probe_macro_registers_only_implemented_traits() {
+        let manager = LifecycleManager::new();
+
+        let init = Arc::new(AtomicBool::new(false));
+        let destroy = Arc::new(AtomicBool::new(false));
+        let full_instance = Arc::new(ProbeHasInitAndDestroy {
+            init: init.clone(),
+            destroy: destroy.clone(),
+        });
+        // This call site is monomorphic (concrete `ProbeHasInitAndDestroy`),
+        // exactly like a macro-generated `register_fn` closure body.
+        crate::__armature_register_lifecycle_hooks!(
+            &manager,
+            "ProbeHasInitAndDestroy",
+            full_instance
+        );
+
+        let plain_instance = Arc::new(ProbePlain);
+        crate::__armature_register_lifecycle_hooks!(&manager, "ProbePlain", plain_instance);
+
+        let counts = manager.hook_counts().await;
+        assert_eq!(
+            counts.init, 1,
+            "only the OnModuleInit-implementing provider should register an init hook"
+        );
+        assert_eq!(
+            counts.destroy, 1,
+            "only the OnModuleDestroy-implementing provider should register a destroy hook"
+        );
+        assert_eq!(counts.bootstrap, 0);
+        assert_eq!(counts.shutdown, 0);
     }
 }

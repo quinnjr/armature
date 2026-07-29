@@ -282,13 +282,12 @@ use armature_auth::OAuth2Provider;
 
 let (auth_url, csrf_token) = provider.authorization_url()?;
 
-// IMPORTANT: Armature is stateless - no server-side sessions
-// Option 1: Use PKCE (recommended for public clients)
-let (auth_url, pkce_verifier) = provider.authorization_url_with_pkce()?;
-// Return pkce_verifier to client securely (in redirect state param or response)
-
-// Option 2: Store CSRF in signed cookie (client-side)
-// Or embed in the redirect URL state parameter
+// IMPORTANT: Armature is stateless - no server-side sessions.
+// `csrf_token` (an oauth2::CsrfToken) must be preserved across the redirect
+// so it can be compared against the `state` parameter the provider echoes
+// back on callback. Since there's no server-side session to stash it in,
+// embed it in a signed/encrypted cookie or a signed value passed through
+// the flow (e.g. as part of the state parameter itself).
 
 // Redirect user to auth_url
 response.redirect(auth_url.as_str());
@@ -301,15 +300,20 @@ response.redirect(auth_url.as_str());
 let code = request.query("code")?;
 let state = request.query("state")?;
 
-// Verify CSRF token (stateless approach)
-// Option 1: With PKCE (no CSRF needed - cryptographically secure)
-let token = provider.exchange_code_pkce(code.to_string(), pkce_verifier).await?;
-
-// Option 2: Verify state parameter if not using PKCE
-// Extract state from redirect, compare with original (stored client-side or signed)
+// Verify the state parameter matches the csrf_token generated in Step 1
+// (read back from the signed cookie or wherever it was stored) before
+// trusting the callback.
+//
+// Plain `!=` is acceptable here: state values are single-use and
+// short-lived, so timing side-channels are a much lower risk than for
+// long-lived secrets like TOTP codes or API tokens (which should use a
+// constant-time comparison instead).
+if state != csrf_token.secret().as_str() {
+    return Err(Error::AuthenticationFailed);
+}
 
 // Exchange code for token
-// let token = provider.exchange_code(code.to_string()).await?;
+let token = provider.exchange_code(code.to_string()).await?;
 ```
 
 ### Step 3: Get User Info
@@ -363,8 +367,10 @@ impl AuthController {
             .authorization_url()
             .map_err(|e| Error::Internal(e.to_string()))?;
 
-        // Armature is stateless - use PKCE instead of CSRF tokens
-        // PKCE provides cryptographic protection without server-side state
+        // Armature is stateless - there's no server-side session to stash
+        // `csrf_token` in. Persist it (e.g. in a signed/encrypted cookie)
+        // so it can be compared against the `state` query parameter the
+        // provider sends back to the callback route below.
 
         // Redirect to Google
         Ok(Response::redirect(auth_url.as_str()))
@@ -372,9 +378,14 @@ impl AuthController {
 
     #[get("/google/callback")]
     async fn google_callback(&self, request: HttpRequest) -> Result<Response> {
-        // Extract authorization code
+        // Extract authorization code and state
         let code = request.query_param("code")
             .ok_or_else(|| Error::BadRequest("Missing code".into()))?;
+        let state = request.query_param("state")
+            .ok_or_else(|| Error::BadRequest("Missing state".into()))?;
+
+        // Verify `state` against the csrf_token persisted during login
+        // before proceeding (omitted here for brevity).
 
         // Exchange code for token
         let token = self.google_provider
@@ -410,21 +421,34 @@ impl AuthController {
 
 ### 1. CSRF Protection
 
-Use PKCE for stateless CSRF protection:
+`authorization_url()` returns a `CsrfToken` alongside the authorization URL. Persist
+it and verify it against the `state` parameter the provider echoes back on callback:
 
 ```rust
-// Generate with PKCE (recommended - stateless and secure)
-let (auth_url, pkce_verifier) = provider.authorization_url_with_pkce()?;
+// Generate the authorization URL and its CSRF token
+let (auth_url, csrf_token) = provider.authorization_url()?;
 
-// On callback, exchange with PKCE verifier
-let token = provider.exchange_code_pkce(code, pkce_verifier).await?;
+// Persist csrf_token.secret() somewhere that survives the redirect
+// (a signed/encrypted cookie, since Armature keeps no server-side session)
+// before sending the user to auth_url.
 
-// PKCE provides cryptographic protection without server-side state
-// The pkce_verifier can be passed through the OAuth flow securely
+// On callback, compare the `state` query parameter against the
+// persisted token before exchanging the code.
+//
+// Plain `!=` is acceptable here: state values are single-use and
+// short-lived, so timing side-channels are a much lower risk than for
+// long-lived secrets like TOTP codes or API tokens (which should use a
+// constant-time comparison instead).
+if state != csrf_token.secret().as_str() {
+    return Err(Error::AuthenticationFailed);
+}
+let token = provider.exchange_code(code).await?;
 ```
 
-**Note:** Armature is stateless. PKCE is preferred over traditional state parameters
-because it provides cryptographic security without requiring server-side session storage.
+**Note:** Armature is stateless, so there's no server-side session to hold the
+`CsrfToken` between the redirect and the callback. Store it client-side in a
+signed/encrypted cookie (or otherwise bind it to the redirect) so it can be
+compared against `state` when the callback arrives.
 
 ### 2. Secure Redirect URIs
 

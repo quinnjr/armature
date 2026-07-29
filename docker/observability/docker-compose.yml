@@ -33,8 +33,6 @@ services:
       - RUST_LOG=info,armature=debug
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
       - OTEL_SERVICE_NAME=armature-api
-      - METRICS_ENABLED=true
-      - METRICS_PORT=9100
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 10s
@@ -44,7 +42,7 @@ services:
       - observability
     labels:
       - "prometheus.scrape=true"
-      - "prometheus.port=9100"
+      - "prometheus.port=3000"
       - "prometheus.path=/metrics"
 
   # ============================================

@@ -12,7 +12,7 @@ keywords = ["crdt", "collaboration", "real-time", "ot", "sync"]
 categories = ["data-structures", "web-programming"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.3.0" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
 armature-log = { path = "../armature-log", version = "0.2.0" }
 armature-websocket = { path = "../armature-websocket", version = "0.2.1", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }

@@ -15,9 +15,14 @@ Deploy Armature applications to Azure Container Apps and Azure Functions.
 
 ### Quick Start
 
+> **Binary name:** The Dockerfile builds with `--bin ${BIN_NAME}` and
+> defaults `BIN_NAME` to `app`. If your crate's `[[bin]]`/package name is
+> not literally `app`, pass it as a build arg, e.g.:
+> `docker build --build-arg BIN_NAME=<your-crate-name> -t myapp .`
+
 ```bash
-# Build
-docker build -t armature-app -f Dockerfile .
+# Build (pass --build-arg BIN_NAME=<your-crate-name> if it isn't "app")
+docker build --build-arg BIN_NAME=<your-crate-name> -t armature-app -f Dockerfile .
 
 # Tag for ACR
 docker tag armature-app myregistry.azurecr.io/armature-app:latest
@@ -67,9 +72,13 @@ az containerapp create \
 
 ### Quick Start
 
+> **Binary name:** `Dockerfile.functions` also builds with `--bin
+> ${BIN_NAME}` (default `app`). Pass `--build-arg BIN_NAME=<your-crate-name>`
+> if your crate's binary isn't literally named `app`.
+
 ```bash
-# Build
-docker build -t armature-functions -f Dockerfile.functions .
+# Build (pass --build-arg BIN_NAME=<your-crate-name> if it isn't "app")
+docker build --build-arg BIN_NAME=<your-crate-name> -t armature-functions -f Dockerfile.functions .
 
 # Push
 docker push myregistry.azurecr.io/armature-functions:latest

@@ -87,14 +87,30 @@ Invalidates all cache entries with any of the specified tags.
 
 ```rust
 // Get all keys with a specific tag
-pub async fn get_keys_by_tag(&self, tag: &str) -> Vec<String>
+pub async fn get_keys_by_tag(&self, tag: &str) -> CacheResult<Vec<String>>
 
 // Get all tags for a specific key
-pub async fn get_tags_for_key(&self, key: &str) -> Vec<String>
+pub async fn get_tags_for_key(&self, key: &str) -> CacheResult<Vec<String>>
 
 // List all registered tags
-pub async fn list_tags(&self) -> Vec<String>
+pub async fn list_tags(&self) -> CacheResult<Vec<String>>
 ```
+
+### Cross-Instance Behavior
+
+The tag index (tag → member keys, and its reverse, key → tags) is persisted
+in the backing `CacheStore` itself under reserved keys, not kept in a local,
+per-process map. That means it is visible to every instance sharing the same
+backing store — e.g. every app process pointed at the same Redis — so a key
+tagged by one instance can be looked up and invalidated by another.
+
+Only backends that override `CacheStore::set_add`/`set_remove`/`set_members`
+with a native set type update the index atomically; `RedisCache` does this via
+`SADD`/`SREM`/`SMEMBERS`. Other backends fall back to a non-atomic
+read-modify-write, so concurrent tagging of the *same* tag from different
+instances can race and lose an update. For distributed deployments where that
+matters, wrap a `RedisCache` (or another backend that overrides the set
+primitives).
 
 ### Use Cases
 

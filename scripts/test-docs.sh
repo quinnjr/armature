@@ -19,25 +19,24 @@ TOTAL=0
 PASSED=0
 FAILED=0
 
-# List of all workspace members
-MEMBERS=(
-    "armature-core"
-    "armature-macro"
-    "armature-config"
-    "armature-graphql"
-    "armature-jwt"
-    "armature-auth"
-    "armature-testing"
-    "armature-validation"
-    "armature-openapi"
-    "armature-cache"
-    "armature-cron"
-    "armature-queue"
-    "armature-opentelemetry"
-    "armature-security"
-    "armature-acme"
-    "armature-ratelimit"
-)
+# Get script directory and project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# List of all workspace members, extracted dynamically from the workspace
+# Cargo.toml (see scripts/publish.sh's get_workspace_members for the same
+# pattern).
+# This pattern is duplicated in scripts/check-doc-coverage.sh and
+# scripts/publish.sh's get_workspace_members() — a future pass should
+# extract this into scripts/lib.sh and have all three source it.
+mapfile -t MEMBERS < <(grep -E '^\s+"armature-' "$PROJECT_ROOT/Cargo.toml" | sed 's/.*"\(armature-[^"]*\)".*/\1/' | sort -u)
+
+if [ "${#MEMBERS[@]}" -eq 0 ]; then
+    echo "❌ No workspace members discovered from Cargo.toml — aborting" >&2
+    exit 1
+fi
+
+cd "$PROJECT_ROOT"
 
 # Function to test a single member
 test_member() {

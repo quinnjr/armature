@@ -93,7 +93,7 @@ The \`#[get(\"/path\")]\` macro should validate:
 - Conflicting routes detection
 
 ### Implementation Plan
-1. Add route parsing logic to \`armature-macro\`
+1. Add route parsing logic to \`armature-proc-macro\`
 2. Emit \`compile_error!()\` for invalid patterns
 3. Generate static route metadata at compile time
 4. Remove runtime validation from hot paths

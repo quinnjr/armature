@@ -46,10 +46,10 @@ The `armature-opentelemetry` module provides comprehensive observability for you
 - Custom business metrics
 
 ✅ **Multiple Exporters**
-- OTLP (OpenTelemetry Protocol)
-- Jaeger
+- OTLP (OpenTelemetry Protocol) — works with any OTLP-compatible backend, including Jaeger (v1.35+) and Prometheus (via a Collector)
 - Zipkin
-- Prometheus
+
+Note: dedicated `jaeger` and `prometheus` exporters were discontinued upstream and are not available as `armature-opentelemetry` features. Use OTLP instead — see [Exporters](#exporters).
 
 ✅ **Flexible Configuration**
 - Environment-based config
@@ -67,8 +67,8 @@ Add to your `Cargo.toml`:
 [dependencies]
 armature-framework = { version = "0.1", features = ["opentelemetry"] }
 
-# Choose exporters
-armature-opentelemetry = { version = "0.1", features = ["otlp", "prometheus"] }
+# Choose exporters (available features: "otlp" [default], "zipkin", "full")
+armature-opentelemetry = { version = "0.1", features = ["otlp", "zipkin"] }
 ```
 
 ### Basic Setup
@@ -412,23 +412,26 @@ Backends that support OTLP:
 
 ### Jaeger
 
-Direct export to Jaeger:
+The dedicated Jaeger exporter was discontinued upstream and is not available as an
+`armature-opentelemetry` feature. (`TracingExporter::Jaeger` still exists as a config
+enum variant for backward-compatible deserialization, but initializing tracing with it
+always returns a config error telling you to use OTLP instead.)
 
-```toml
-[dependencies]
-armature-opentelemetry = { version = "0.1", features = ["jaeger"] }
-```
+Jaeger has native OTLP ingestion (v1.35+), so export via OTLP instead:
 
 ```rust
 let config = TelemetryConfig {
     tracing: TracingConfig {
-        exporter: TracingExporter::Jaeger,
-        jaeger_endpoint: Some("localhost:6831".to_string()),
+        exporter: TracingExporter::Otlp,
+        otlp_endpoint: Some("localhost:4317".to_string()),
         ..Default::default()
     },
     ..TelemetryConfig::new("my-service")
 };
 ```
+
+See [Running with Docker](#running-with-docker) for a Jaeger all-in-one container with
+its OTLP receiver enabled.
 
 ### Zipkin
 
@@ -452,26 +455,24 @@ let config = TelemetryConfig {
 
 ### Prometheus
 
-Expose metrics for Prometheus scraping:
+The dedicated Prometheus exporter was discontinued upstream and is not available as an
+`armature-opentelemetry` feature. (`MetricsExporter::Prometheus` still exists as a
+config enum variant for backward-compatible deserialization, but initializing metrics
+with it always returns a config error telling you to use OTLP instead.)
 
-```toml
-[dependencies]
-armature-opentelemetry = { version = "0.1", features = ["prometheus"] }
-```
+Export via OTLP to a Prometheus remote-write endpoint, or to an OpenTelemetry Collector
+configured with a `prometheus`/`prometheusremotewrite` exporter, instead:
 
 ```rust
 let telemetry = TelemetryBuilder::new("my-service")
+    .with_otlp_endpoint("http://collector:4317")
     .with_metrics()
     .build()
     .await?;
-
-// Add metrics endpoint
-#[get("/metrics")]
-async fn metrics() -> Result<String, Error> {
-    // Prometheus exporter provides the metrics
-    Ok("metrics data".to_string())
-}
 ```
+
+Configure the Collector to expose a `/metrics` scrape endpoint (or remote-write to your
+Prometheus server) — `armature-opentelemetry` no longer serves that endpoint itself.
 
 ## Middleware
 
@@ -698,7 +699,7 @@ spec:
 **Key Features:**
 - ✅ Automatic HTTP tracing with middleware
 - ✅ Built-in metrics collection
-- ✅ Multiple exporter support (OTLP, Jaeger, Zipkin, Prometheus)
+- ✅ OTLP and Zipkin exporters (OTLP works with any OTLP-compatible backend, including Jaeger and Prometheus)
 - ✅ Distributed tracing with context propagation
 - ✅ Flexible configuration and builder API
 - ✅ Production-ready with sampling strategies

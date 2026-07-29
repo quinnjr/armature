@@ -35,7 +35,12 @@ pub struct JwtConfig {
     /// Validate expiration
     pub validate_exp: bool,
 
-    /// Validate not before
+    /// Validate not before.
+    ///
+    /// **On by default** in both [`JwtConfig::new`] and [`JwtConfig::with_rsa`] — a token
+    /// carrying a future `nbf` claim is rejected unless this is explicitly turned off via
+    /// [`JwtConfig::with_nbf_validation`]`(false)`, for tokens that don't need not-before
+    /// enforcement.
     pub validate_nbf: bool,
 
     /// Leeway for time validation (seconds)
@@ -55,7 +60,7 @@ impl JwtConfig {
             issuer: None,
             audience: None,
             validate_exp: true,
-            validate_nbf: false,
+            validate_nbf: true,
             leeway: 0,
         }
     }
@@ -72,7 +77,7 @@ impl JwtConfig {
             issuer: None,
             audience: None,
             validate_exp: true,
-            validate_nbf: false,
+            validate_nbf: true,
             leeway: 0,
         }
     }
@@ -110,6 +115,16 @@ impl JwtConfig {
     /// Set leeway
     pub fn with_leeway(mut self, leeway: u64) -> Self {
         self.leeway = leeway;
+        self
+    }
+
+    /// Enable or disable `nbf` (not-before) validation.
+    ///
+    /// `validate_nbf` is `true` by default (see its doc comment), so a token with a future
+    /// `nbf` claim is rejected unless this is called with `false` to opt out, for tokens that
+    /// don't need not-before enforcement.
+    pub fn with_nbf_validation(mut self, enabled: bool) -> Self {
+        self.validate_nbf = enabled;
         self
     }
 
@@ -381,5 +396,71 @@ mod tests {
         let config = JwtConfig::new("secret".to_string()).with_expiration(one_year);
 
         assert_eq!(config.expires_in, one_year);
+    }
+
+    #[test]
+    fn test_nbf_validation_on_by_default() {
+        let config = JwtConfig::new("secret".to_string());
+        assert!(config.validate_nbf);
+
+        let validation = config.validation();
+        assert!(validation.validate_nbf);
+    }
+
+    #[test]
+    fn test_with_nbf_validation_builder() {
+        let config = JwtConfig::new("secret".to_string()).with_nbf_validation(false);
+        assert!(!config.validate_nbf);
+
+        let validation = config.validation();
+        assert!(!validation.validate_nbf);
+    }
+
+    /// A token with a future `nbf` is rejected when `validate_nbf` is left at its default (on)
+    /// — this is the current, secure-by-default posture.
+    #[test]
+    fn future_nbf_token_rejected_by_default() {
+        let config = JwtConfig::new("nbf-test-secret".to_string());
+        assert!(config.validate_nbf);
+
+        let service = crate::service::JwtService::new(config).unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user-1",
+            "nbf": now + 3600,
+            "exp": now + 7200,
+        });
+
+        let token = service.sign(&claims).unwrap();
+        let result: crate::Result<serde_json::Value> = service.verify(&token);
+        assert!(
+            result.is_err(),
+            "future nbf should be rejected when validate_nbf is on (default): {result:?}"
+        );
+    }
+
+    /// The same future-`nbf` token is accepted once `validate_nbf` is explicitly disabled via
+    /// [`JwtConfig::with_nbf_validation`]`(false)`.
+    #[test]
+    fn future_nbf_token_accepted_when_validation_explicitly_disabled() {
+        let config = JwtConfig::new("nbf-test-secret".to_string()).with_nbf_validation(false);
+        assert!(!config.validate_nbf);
+
+        let service = crate::service::JwtService::new(config).unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": "user-1",
+            "nbf": now + 3600,
+            "exp": now + 7200,
+        });
+
+        let token = service.sign(&claims).unwrap();
+        let result: crate::Result<serde_json::Value> = service.verify(&token);
+        assert!(
+            result.is_ok(),
+            "future nbf should be accepted when validate_nbf is explicitly disabled"
+        );
     }
 }

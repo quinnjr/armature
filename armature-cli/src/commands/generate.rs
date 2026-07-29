@@ -6,7 +6,7 @@ use heck::ToSnakeCase;
 use crate::error::{CliError, CliResult};
 use crate::generators::{NameCases, ensure_dir, get_src_dir, update_mod_file, write_file};
 use crate::templates::{
-    ComponentData, ControllerData, DtoData, EntityData, ModuleData, TemplateRegistry,
+    ComponentData, ControllerData, DtoData, EntityData, ModelData, ModuleData, TemplateRegistry,
 };
 
 /// A single user-specified field parsed from a `--fields` spec.
@@ -32,17 +32,53 @@ fn rust_type_for(spec: &str) -> &'static str {
     }
 }
 
+/// Single source-of-truth table mapping a Rust type (as produced by
+/// [`rust_type_for`]) to its Diesel type name and plain SQL column type.
+///
+/// Keeping both mappings in one table prevents the two from silently
+/// diverging (e.g. missing arms like the `serde_json::Value` -> `JSONB` case).
+const TYPE_MAPPINGS: &[(&str, &str, &str)] = &[
+    // (rust_type, diesel_type, sql_type)
+    ("String", "Text", "VARCHAR"),
+    ("i32", "Integer", "INTEGER"),
+    ("i64", "BigInt", "BIGINT"),
+    ("u32", "BigInt", "BIGINT"),
+    ("u64", "BigInt", "BIGINT"),
+    ("f64", "Double", "DOUBLE PRECISION"),
+    ("f32", "Double", "DOUBLE PRECISION"),
+    ("bool", "Bool", "BOOLEAN"),
+    ("serde_json::Value", "Text", "JSONB"),
+];
+
+/// Default Diesel type for a Rust type with no explicit mapping.
+const DEFAULT_DIESEL_TYPE: &str = "Text";
+/// Default SQL type for a Rust type with no explicit mapping.
+const DEFAULT_SQL_TYPE: &str = "TEXT";
+
 /// Map a Rust type to a Diesel SQL column type.
 fn diesel_type_for(rust_type: &str) -> &'static str {
-    match rust_type {
-        "String" => "Text",
-        "i32" => "Integer",
-        "i64" | "u32" | "u64" => "BigInt",
-        "f64" | "f32" => "Double",
-        "bool" => "Bool",
-        _ => "Text",
-    }
+    TYPE_MAPPINGS
+        .iter()
+        .find(|(rt, _, _)| *rt == rust_type)
+        .map(|(_, diesel, _)| *diesel)
+        .unwrap_or(DEFAULT_DIESEL_TYPE)
 }
+
+/// Map a Rust type to a plain SQL column type (used for generated migrations).
+fn sql_type_for(rust_type: &str) -> &'static str {
+    TYPE_MAPPINGS
+        .iter()
+        .find(|(rt, _, _)| *rt == rust_type)
+        .map(|(_, _, sql)| *sql)
+        .unwrap_or(DEFAULT_SQL_TYPE)
+}
+
+/// Field names already declared by the base model struct / migration SQL
+/// (see `MODEL_TEMPLATE` and `generate_migration` in `templates.rs`).
+///
+/// A user-supplied `--fields` entry that collides with one of these produces
+/// a duplicate struct field / SQL column, so it must be rejected up front.
+const RESERVED_FIELD_NAMES: &[&str] = &["id", "name", "created_at", "updated_at"];
 
 /// Parse a `--fields` spec like `name:string,email:string` into field definitions.
 ///
@@ -65,6 +101,23 @@ fn parse_fields(spec: Option<&str>) -> Vec<FieldDef> {
             })
         })
         .collect()
+}
+
+/// Reject `--fields` entries that collide with the reserved column/field
+/// names already hardcoded into the base model template and migration SQL
+/// (`id`, `name`, `created_at`, `updated_at`). Without this check, a field
+/// like `--fields name:string` produces a struct/table with a duplicate
+/// field and fails to compile/run.
+fn check_reserved_field_names(fields: &[FieldDef]) -> CliResult<()> {
+    for field in fields {
+        if RESERVED_FIELD_NAMES.contains(&field.snake.as_str()) {
+            return Err(CliError::InvalidArgument(format!(
+                "field name '{}' collides with a column already provided by the base model template; choose a different name",
+                field.snake
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Generate a controller.
@@ -360,6 +413,106 @@ pub async fn dto(name: &str, fields: Option<&str>) -> CliResult<()> {
 
     println!("\n{} Generated {}Dto", "✓".green().bold(), names.pascal);
     Ok(())
+}
+
+/// Generate a plain data model (see [`ModelData`]), optionally injecting
+/// `--fields` and, when `migration` is set, a paired up/down SQL migration.
+pub async fn model(name: &str, fields: Option<&str>, migration: bool) -> CliResult<()> {
+    let names = NameCases::from(name);
+    let src_dir = get_src_dir()?;
+    let models_dir = src_dir.join("models");
+    ensure_dir(&models_dir)?;
+
+    let templates = TemplateRegistry::new();
+
+    let parsed = parse_fields(fields);
+    check_reserved_field_names(&parsed)?;
+    let model_fields = parsed
+        .iter()
+        .map(|f| format!("    pub {}: {},\n", f.snake, f.rust_type))
+        .collect::<String>();
+
+    let data = ModelData {
+        name_pascal: names.pascal.clone(),
+        name_snake: names.snake.clone(),
+        name_kebab: names.kebab.clone(),
+        model_fields,
+    };
+
+    let content = templates
+        .render("model", &data)
+        .map_err(CliError::Template)?;
+
+    let file_path = models_dir.join(format!("{}.rs", names.snake));
+    write_file(&file_path, &content, false)?;
+
+    println!("  {} {}", "CREATE".green().bold(), file_path.display());
+
+    update_mod_file(&models_dir, &names.snake)?;
+    println!(
+        "  {} {}",
+        "UPDATE".yellow().bold(),
+        models_dir.join("mod.rs").display()
+    );
+
+    if migration {
+        let (up_file, down_file) = generate_migration(&names, &parsed)?;
+        println!("  {} {}", "CREATE".green().bold(), up_file.display());
+        println!("  {} {}", "CREATE".green().bold(), down_file.display());
+    }
+
+    println!("\n{} Generated {}Model", "✓".green().bold(), names.pascal);
+    Ok(())
+}
+
+/// Generate a Diesel-style up/down SQL migration for a model.
+///
+/// Mirrors the directory layout `diesel_migrations::embed_migrations!` expects
+/// (see `docs/diesel-guide.md`): a `migrations/<timestamp>_create_<table>/`
+/// directory at the project root containing `up.sql` and `down.sql`.
+/// Returns the paths of the two files written.
+fn generate_migration(
+    names: &NameCases,
+    fields: &[FieldDef],
+) -> CliResult<(std::path::PathBuf, std::path::PathBuf)> {
+    let src_dir = get_src_dir()?;
+    let project_root = src_dir.parent().unwrap_or(&src_dir).to_path_buf();
+    let table = format!("{}s", names.snake);
+
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d-%H%M%S");
+    let migration_dir = project_root
+        .join("migrations")
+        .join(format!("{}_create_{}", timestamp, table));
+    ensure_dir(&migration_dir)?;
+
+    let columns = fields
+        .iter()
+        .map(|f| format!("    {} {} NOT NULL,\n", f.snake, sql_type_for(f.rust_type)))
+        .collect::<String>();
+
+    let up_sql = format!(
+        "-- Create {table} table\nCREATE TABLE {table} (\n    id BIGSERIAL PRIMARY KEY,\n    name VARCHAR NOT NULL,\n{columns}    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n",
+        table = table,
+        columns = columns,
+    );
+    let down_sql = format!(
+        "-- Drop {table} table\nDROP TABLE IF EXISTS {table};\n",
+        table = table
+    );
+
+    let up_file = migration_dir.join("up.sql");
+    let down_file = migration_dir.join("down.sql");
+    // `migration_dir` is timestamp-named and freshly created by this call above,
+    // so on a partial write it's always safe to remove wholesale rather than
+    // leaving an orphaned up.sql with no down.sql behind.
+    if let Err(e) =
+        write_file(&up_file, &up_sql, false).and_then(|_| write_file(&down_file, &down_sql, false))
+    {
+        let _ = std::fs::remove_dir_all(&migration_dir); // best-effort cleanup of partial write
+        return Err(e);
+    }
+
+    Ok((up_file, down_file))
 }
 
 /// Generate a WebSocket handler.
@@ -966,4 +1119,35 @@ async fn generate_component(component_type: &str, name: &str, skip_tests: bool) 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_reserved_field_names_rejects_collisions_with_base_template() {
+        // `MODEL_TEMPLATE` (templates.rs) hardcodes `id`, `name`, `created_at`,
+        // and `updated_at`; user-supplied fields with these names must be
+        // rejected instead of silently producing a struct/table with a
+        // duplicate field.
+        for reserved in RESERVED_FIELD_NAMES {
+            let fields = parse_fields(Some(&format!("{reserved}:string")));
+            let result = check_reserved_field_names(&fields);
+            assert!(
+                result.is_err(),
+                "expected field name '{reserved}' to be rejected as reserved, got: {result:?}"
+            );
+            assert!(
+                matches!(result, Err(CliError::InvalidArgument(_))),
+                "expected a CliError::InvalidArgument for reserved field '{reserved}', got: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_reserved_field_names_allows_non_colliding_names() {
+        let fields = parse_fields(Some("email:string,age:i32,active:bool"));
+        assert!(check_reserved_field_names(&fields).is_ok());
+    }
 }

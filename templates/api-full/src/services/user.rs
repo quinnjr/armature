@@ -1,11 +1,9 @@
 //! User service
 
 use crate::models::{User, UserRole};
-use armature::Provider;
 use chrono::Utc;
-use std::any::Any;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use uuid::Uuid;
 
 pub struct UserService {
@@ -14,26 +12,8 @@ pub struct UserService {
 
 impl UserService {
     pub fn new() -> Self {
-        let mut users = HashMap::new();
-
-        // Create a default admin user
-        let admin_id = Uuid::new_v4();
-        users.insert(
-            admin_id,
-            User {
-                id: admin_id,
-                email: "admin@example.com".to_string(),
-                // password: admin123 (hashed with default secret)
-                password_hash: "5d7c7c3e0f0b6a0b".to_string(),
-                name: "Admin User".to_string(),
-                role: UserRole::Admin,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            },
-        );
-
         Self {
-            users: RwLock::new(users),
+            users: RwLock::new(HashMap::new()),
         }
     }
 
@@ -55,6 +35,18 @@ impl UserService {
     }
 
     pub fn create(&self, email: String, password_hash: String, name: String) -> User {
+        self.create_with_role(email, password_hash, name, UserRole::User)
+    }
+
+    /// Create a user with an explicit role. Used by `create` (always
+    /// `UserRole::User`) and by `main` to seed the default admin account.
+    pub fn create_with_role(
+        &self,
+        email: String,
+        password_hash: String,
+        name: String,
+        role: UserRole,
+    ) -> User {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
@@ -63,7 +55,7 @@ impl UserService {
             email,
             password_hash,
             name,
-            role: UserRole::User,
+            role,
             created_at: now,
             updated_at: now,
         };
@@ -105,5 +97,22 @@ impl Default for UserService {
     }
 }
 
-// Provider is automatically implemented via blanket impl
+static USER_SERVICE: OnceLock<UserService> = OnceLock::new();
+
+/// Install the process-wide [`UserService`].
+///
+/// Must be called exactly once from `main`, before the server starts
+/// accepting requests.
+pub fn init_user_service() {
+    if USER_SERVICE.set(UserService::new()).is_err() {
+        panic!("UserService already initialized");
+    }
+}
+
+/// Access the process-wide [`UserService`].
+pub fn get_user_service() -> &'static UserService {
+    USER_SERVICE
+        .get()
+        .expect("UserService not initialized — call init_user_service() in main()")
+}
 

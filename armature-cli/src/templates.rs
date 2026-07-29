@@ -61,6 +61,8 @@ impl TemplateRegistry {
             .expect("Failed to register repository test template");
         hbs.register_template_string("dto", DTO_TEMPLATE)
             .expect("Failed to register DTO template");
+        hbs.register_template_string("model", MODEL_TEMPLATE)
+            .expect("Failed to register model template");
         hbs.register_template_string("websocket", WEBSOCKET_TEMPLATE)
             .expect("Failed to register WebSocket template");
         hbs.register_template_string("websocket_test", WEBSOCKET_TEST_TEMPLATE)
@@ -113,6 +115,10 @@ impl TemplateRegistry {
             .expect("Failed to register health controller template");
         hbs.register_template_string("dockerfile", DOCKERFILE_TEMPLATE)
             .expect("Failed to register Dockerfile template");
+        hbs.register_template_string("dockerfile_lambda", LAMBDA_DOCKERFILE_TEMPLATE)
+            .expect("Failed to register Lambda Dockerfile template");
+        hbs.register_template_string("dockerfile_cloudrun", CLOUDRUN_DOCKERFILE_TEMPLATE)
+            .expect("Failed to register Cloud Run Dockerfile template");
         hbs.register_template_string("docker_compose", DOCKER_COMPOSE_TEMPLATE)
             .expect("Failed to register docker-compose template");
         hbs.register_template_string("github_actions", GITHUB_ACTIONS_TEMPLATE)
@@ -158,6 +164,7 @@ use armature::prelude::*;
 {{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
+#[routes]
 impl {{name_pascal}}Controller {
     /// Get all {{name_snake}}s.
     #[get("/")]
@@ -208,6 +215,7 @@ pub struct Update{{name_pascal}}Request {
 {{{guard_attr}}}#[derive(Default)]
 pub struct {{name_pascal}}Controller;
 
+#[routes]
 impl {{name_pascal}}Controller {
     /// List all {{name_snake}}s.
     ///
@@ -851,6 +859,11 @@ description = "{{description}}"
 
 [dependencies]
 {{{armature_dep}}}
+# Required by Armature's attribute macros (#[module], #[controller], #[get],
+# etc.), which expand to `armature_core::...` paths. Those paths aren't
+# re-exported through the `armature` facade crate, so `armature-core` must
+# also be a direct dependency for the generated code to resolve.
+armature-core = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -1150,6 +1163,29 @@ impl<T> Paginated<T> {
             total_pages,
         }
     }
+}
+"#;
+
+// =============================================================================
+// MODEL TEMPLATES
+// =============================================================================
+
+const MODEL_TEMPLATE: &str = r#"//! {{name_pascal}} model.
+
+use serde::{Deserialize, Serialize};
+
+/// {{name_pascal}} domain model.
+///
+/// A plain data struct: unlike `entity` (see `armature generate entity`),
+/// it carries no ORM derives or table mapping, and unlike `dto` it is not
+/// split into request/response variants. Use it for in-memory data or as
+/// the type your repository/service layer works with internally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct {{name_pascal}} {
+    pub id: i64,
+    pub name: String,
+{{{model_fields}}}    pub created_at: String,
+    pub updated_at: String,
 }
 "#;
 
@@ -3048,6 +3084,7 @@ impl HealthController {
     }
 }
 
+#[routes]
 impl HealthController {
     /// Basic health check (liveness probe).
     ///
@@ -3186,6 +3223,39 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Run the application
 CMD ["/app/{{name_kebab}}"]
 "#;
+
+/// The real Lambda container-runtime Dockerfile (Lambda Runtime Interface
+/// Client base image, `cargo-lambda` build), hand-crafted and verified via a
+/// real `docker build` in `templates/lambda/Dockerfile`.
+///
+/// This is a byte-for-byte copy kept at `assets/dockerfiles/lambda/Dockerfile`
+/// *inside this crate* (see `sync_with_canonical_template` below) rather than
+/// an `include_str!` reaching up to the workspace-root `templates/` directory:
+/// `templates/` lives outside the `armature-cli` package root, so `cargo
+/// package`/`cargo publish` silently drops files referenced from there —
+/// `include_str!("../../templates/...")` builds fine in this workspace but
+/// fails to compile from the published crate ("No such file or directory").
+/// Embedded verbatim: it has no per-project fields to substitute, since
+/// `cargo-lambda` locates the built binary itself via the
+/// `target/lambda/*/bootstrap` glob regardless of crate name.
+const LAMBDA_DOCKERFILE_TEMPLATE: &str = include_str!("../assets/dockerfiles/lambda/Dockerfile");
+
+/// The real Cloud Run distroless Dockerfile, hand-crafted and verified via a
+/// real `docker build` in `templates/cloudrun/Dockerfile`.
+///
+/// A byte-for-byte copy kept inside this crate — see
+/// [`LAMBDA_DOCKERFILE_TEMPLATE`] for why. The caller (`commands/new.rs`)
+/// rewrites the `ARG BIN_NAME=app` default to the generated project's actual
+/// crate name so `docker build` with no extra flags produces a working image.
+const CLOUDRUN_DOCKERFILE_TEMPLATE: &str =
+    include_str!("../assets/dockerfiles/cloudrun/Dockerfile");
+
+// Note: `templates/azure-container/Dockerfile` has no counterpart here.
+// Unlike `lambda`/`cloudrun`, `armature new` has no azure-container template
+// or `--template azure-container` case — `templates/azure-container/` is a
+// standalone reference example (deployable via its own README, never
+// generated by the CLI), so there's no `dockerfile_azure_container` template
+// string to embed and nothing for the drift-detection tests below to guard.
 
 const DOCKER_COMPOSE_TEMPLATE: &str = r#"version: '3.8'
 
@@ -4035,7 +4105,14 @@ impl ProjectData {
             curly_close: "}".to_string(),
             // Kept in sync with the `armature` facade crate's current minor
             // version and with `repl_init_script()` in `commands/repl.rs`.
-            armature_dep: "armature = \"0.2\"".to_string(),
+            //
+            // NOTE: the crate name `armature` on crates.io is squatted by an
+            // unrelated actor-framework crate; this project's crate is
+            // published as `armature-framework`, so `package = "armature-framework"`
+            // is required to rename it back to `armature` for `use armature::...`
+            // to resolve.
+            armature_dep: "armature = { version = \"0.2\", package = \"armature-framework\" }"
+                .to_string(),
             extra_deps: String::new(),
         }
     }
@@ -4082,6 +4159,16 @@ pub struct DtoData {
     pub create_fields: String,
     /// Full body of the update-request struct (all `Option<T>`).
     pub update_fields: String,
+}
+
+/// Template data for model generation, with optional user-specified fields.
+#[derive(Serialize)]
+pub struct ModelData {
+    pub name_pascal: String,
+    pub name_snake: String,
+    pub name_kebab: String,
+    /// Extra fields for the model struct (`    pub x: T,\n` lines).
+    pub model_fields: String,
 }
 
 /// Template data for Rhai script generation.
@@ -4241,5 +4328,170 @@ mod job_and_guard_template_api_tests {
                 "{name} template must declare the real `Guard::can_activate` signature, got:\n{content}"
             );
         }
+    }
+}
+
+// =============================================================================
+// LAMBDA / CLOUD RUN DOCKERFILE EMBEDDING REGRESSION TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod dockerfile_embedding_tests {
+    //! Regression coverage for a review finding: `armature new --template
+    //! lambda --docker` / `--template cloudrun --docker` used to emit the
+    //! generic `DOCKERFILE_TEMPLATE` (a plain `debian:bookworm-slim` image)
+    //! regardless of which template was chosen, rather than the real,
+    //! deployment-correct Lambda Runtime Interface Client / Cloud Run
+    //! distroless images hand-crafted and `docker build`-verified in
+    //! `templates/lambda/Dockerfile` / `templates/cloudrun/Dockerfile`.
+    //!
+    //! `include_str!` can't reach those files directly, though: `templates/`
+    //! lives outside the `armature-cli` package root, so `cargo
+    //! package`/`cargo publish` silently drops anything referenced from
+    //! there — it builds fine in this workspace checkout but fails to
+    //! compile from the published crate. So `LAMBDA_DOCKERFILE_TEMPLATE` /
+    //! `CLOUDRUN_DOCKERFILE_TEMPLATE` instead embed byte-for-byte copies kept
+    //! *inside* this crate, at `assets/dockerfiles/{lambda,cloudrun}/Dockerfile`.
+    //! These tests catch the two ways that can go stale: the in-crate copies
+    //! drifting from the canonical `templates/` originals, and the generator
+    //! (`commands/new.rs`) silently falling back to the generic template.
+    //!
+    //! `templates/azure-container/Dockerfile` is intentionally *not* covered
+    //! here: it's a standalone reference example, not something `armature
+    //! new` ever generates (no azure-container template exists in this
+    //! crate), so there's nothing for a drift-detection test to guard.
+    use super::*;
+    use std::path::Path;
+
+    /// Read a file relative to the workspace root (the parent of this
+    /// crate's `CARGO_MANIFEST_DIR`). Only meaningful when run inside this
+    /// git checkout (i.e. `cargo test`, not a build from a published
+    /// tarball) — exactly the environment these drift-detection tests need.
+    fn read_workspace_file(relative: &str) -> Option<String> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = Path::new(manifest_dir).join("..").join(relative);
+        std::fs::read_to_string(&path).ok()
+    }
+
+    /// Whether we're running inside a real git checkout of the workspace
+    /// (as opposed to a build from a published crate tarball, where the
+    /// sibling `templates/` directory doesn't exist). Used to distinguish
+    /// "legitimately can't compare, skip" from "should have been able to
+    /// compare but the canonical file is missing — fail loudly".
+    fn in_git_checkout() -> bool {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        Path::new(manifest_dir).join("..").join(".git").exists()
+    }
+
+    #[test]
+    fn lambda_dockerfile_copy_matches_canonical_template() {
+        let Some(canonical) = read_workspace_file("templates/lambda/Dockerfile") else {
+            // Not running inside the workspace checkout (e.g. building from
+            // a published crate tarball, where `templates/` doesn't exist).
+            // Nothing to compare against; skip rather than false-fail.
+            assert!(
+                !in_git_checkout(),
+                "templates/lambda/Dockerfile is missing even though this is a git \
+                 checkout — the drift-detection test cannot silently skip here"
+            );
+            eprintln!(
+                "skipping lambda_dockerfile_copy_matches_canonical_template: not in a \
+                 git checkout, templates/lambda/Dockerfile is unavailable"
+            );
+            return;
+        };
+        assert_eq!(
+            LAMBDA_DOCKERFILE_TEMPLATE, canonical,
+            "armature-cli/assets/dockerfiles/lambda/Dockerfile has drifted from \
+             templates/lambda/Dockerfile — re-sync the in-crate copy"
+        );
+    }
+
+    #[test]
+    fn cloudrun_dockerfile_copy_matches_canonical_template() {
+        let Some(canonical) = read_workspace_file("templates/cloudrun/Dockerfile") else {
+            assert!(
+                !in_git_checkout(),
+                "templates/cloudrun/Dockerfile is missing even though this is a git \
+                 checkout — the drift-detection test cannot silently skip here"
+            );
+            eprintln!(
+                "skipping cloudrun_dockerfile_copy_matches_canonical_template: not in a \
+                 git checkout, templates/cloudrun/Dockerfile is unavailable"
+            );
+            return;
+        };
+        assert_eq!(
+            CLOUDRUN_DOCKERFILE_TEMPLATE, canonical,
+            "armature-cli/assets/dockerfiles/cloudrun/Dockerfile has drifted from \
+             templates/cloudrun/Dockerfile — re-sync the in-crate copy"
+        );
+    }
+
+    #[test]
+    fn dockerfile_lambda_template_is_registered_and_distinct_from_generic() {
+        let registry = TemplateRegistry::new();
+        let lambda = registry
+            .render(
+                "dockerfile_lambda",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert!(
+            lambda.contains("public.ecr.aws/lambda/provided") && lambda.contains("cargo-lambda"),
+            "dockerfile_lambda must render the real Lambda Runtime Interface Client \
+             image, got:\n{lambda}"
+        );
+        let generic = registry
+            .render(
+                "dockerfile",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            lambda, generic,
+            "dockerfile_lambda must not be the same content as the generic dockerfile template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_cloudrun_template_is_registered_and_distinct_from_generic() {
+        let registry = TemplateRegistry::new();
+        let cloudrun = registry
+            .render(
+                "dockerfile_cloudrun",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert!(
+            cloudrun.contains("distroless") && cloudrun.contains("ARG BIN_NAME"),
+            "dockerfile_cloudrun must render the real distroless Cloud Run image, got:\n{cloudrun}"
+        );
+        let generic = registry
+            .render(
+                "dockerfile",
+                &DevOpsData::new(
+                    "FooBar".to_string(),
+                    "foo_bar".to_string(),
+                    "foo-bar".to_string(),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            cloudrun, generic,
+            "dockerfile_cloudrun must not be the same content as the generic dockerfile template"
+        );
     }
 }

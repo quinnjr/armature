@@ -1,6 +1,6 @@
 [package]
 name = "armature-admin"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ keywords = ["admin", "dashboard", "crud", "ui", "generator"]
 categories = ["web-programming", "gui"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.3.0" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
 armature-log = { path = "../armature-log", version = "0.2.0" }
 armature-proc-macro = { path = "../armature-proc-macro", version = "0.2.0" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync"] }

@@ -1,27 +1,53 @@
 # Armature Worker Service Dockerfile
 # Background job processing service
 
-# Build stage
-FROM rust:1.83-alpine AS builder
+# The chef/planner boilerplate below (Stages 1-2) is intentionally duplicated
+# across all 4 Armature Dockerfiles rather than extracted into a shared base
+# image, since this repo builds each with plain `docker build` (no buildx
+# bake infra). Keep RUST_VERSION / CARGO_CHEF_VERSION in sync across:
+#   docker/full-stack/Dockerfile
+#   docker/microservices/Dockerfile.service
+#   docker/microservices/Dockerfile.worker
+#   docker/observability/Dockerfile.api
+ARG RUST_VERSION=1.94.1
+# Pinned to a specific cargo-chef release (not "latest") for reproducible
+# builds. Update periodically: https://github.com/LukeMathWalker/cargo-chef/releases
+ARG CARGO_CHEF_VERSION=0.1.68
+
+# ==================================================
+# Stage 1: Chef - base image with cargo-chef installed
+# ==================================================
+FROM lukemathwalker/cargo-chef:${CARGO_CHEF_VERSION}-rust-${RUST_VERSION}-alpine AS chef
+WORKDIR /app
+
+# ==================================================
+# Stage 2: Planner - compute the dependency-only recipe
+# ==================================================
+FROM chef AS planner
+
+# The whole workspace (all Cargo.toml manifests + sources) is required for
+# `cargo chef prepare` to resolve the dependency graph, but this stage only
+# ever produces recipe.json, which is all that gets copied forward.
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ==================================================
+# Stage 3: Build
+# ==================================================
+FROM chef AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
 
-COPY Cargo.toml Cargo.lock ./
-COPY armature-core/Cargo.toml armature-core/
-COPY armature-proc-macro/Cargo.toml armature-proc-macro/
-COPY armature-log/Cargo.toml armature-log/
-COPY armature-queue/Cargo.toml armature-queue/
-
-# Stub files for dependency caching
-RUN mkdir -p armature-core/src armature-proc-macro/src armature-log/src armature-queue/src && \
-    echo "fn main() {}" > armature-core/src/lib.rs && \
-    echo "fn main() {}" > armature-proc-macro/src/lib.rs && \
-    echo "fn main() {}" > armature-log/src/lib.rs && \
-    echo "fn main() {}" > armature-queue/src/lib.rs
-
-RUN cargo build --release 2>/dev/null || true
+# Build dependencies only. This layer is cache-keyed on recipe.json (which is
+# itself derived only from Cargo.toml/Cargo.lock), so it is skipped entirely
+# on rebuilds that only change application source.
+COPY --from=planner /app/recipe.json recipe.json
+# Scoped to the single example this image actually builds (cqrs_example)
+# instead of --examples, so the cached dependency layer isn't inflated by
+# every other example in the workspace.
+RUN cargo chef cook --release --example cqrs_example --recipe-path recipe.json
 
 COPY . .
 
@@ -49,4 +75,3 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
     CMD ps aux | grep worker || exit 1
 
 ENTRYPOINT ["/app/worker"]
-

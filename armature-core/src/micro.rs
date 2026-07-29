@@ -48,7 +48,7 @@
 
 use crate::handler::{BoxedHandler, IntoHandler};
 use crate::route_cache::OptimizedRouter;
-use crate::{Error, HttpMethod, HttpRequest, HttpResponse, Router};
+use crate::{DEFAULT_MAX_BODY_SIZE, Error, HttpMethod, HttpRequest, HttpResponse, Router};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -119,6 +119,7 @@ pub struct App {
     middleware: Vec<Arc<dyn Middleware>>,
     state: AppState,
     default_service: Option<BoxedHandler>,
+    max_body_size: usize,
 }
 
 /// Internal application state storage
@@ -150,6 +151,7 @@ impl App {
             middleware: Vec::new(),
             state: AppState::default(),
             default_service: None,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
         }
     }
 
@@ -224,6 +226,17 @@ impl App {
         self
     }
 
+    /// Set the maximum request body size in bytes.
+    ///
+    /// Requests with larger bodies are rejected with `413 Payload Too Large`
+    /// before the body is buffered in memory. Defaults to
+    /// [`DEFAULT_MAX_BODY_SIZE`] (10 MB), matching
+    /// [`crate::Application::with_max_body_size`].
+    pub fn with_max_body_size(mut self, bytes: usize) -> Self {
+        self.max_body_size = bytes;
+        self
+    }
+
     /// Build and run the application
     ///
     /// This starts the HTTP server and blocks until shutdown.
@@ -237,6 +250,7 @@ impl App {
             middleware: self.middleware,
             state: self.state,
             default_service: self.default_service,
+            max_body_size: self.max_body_size,
         });
 
         run_server(app, addr).await
@@ -249,6 +263,7 @@ impl App {
             middleware: self.middleware,
             state: self.state,
             default_service: self.default_service,
+            max_body_size: self.max_body_size,
         }
     }
 }
@@ -268,6 +283,7 @@ pub struct BuiltApp {
     middleware: Vec<Arc<dyn Middleware>>,
     state: AppState,
     default_service: Option<BoxedHandler>,
+    max_body_size: usize,
 }
 
 impl BuiltApp {
@@ -1125,15 +1141,163 @@ fn error_response_parts(e: &Error) -> (u16, String) {
     (status, body)
 }
 
-/// Run the HTTP server
-async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::Result<()> {
+/// Build the `413 Payload Too Large` response with a JSON body matching the
+/// canonical `{"error", "status"}` shape used by [`error_response_parts`] and
+/// by `Application`'s own body-limit rejection (see `application.rs`).
+///
+/// Note: the body-size-limit pattern used here and in
+/// [`handle_micro_request`] (the `Content-Length` fast-path, the
+/// `Limited`-stream cap, and this `413` response shape) mirrors the
+/// equivalent logic in `Application::handle_request`
+/// (`armature-core/src/application.rs`) — a separate implementation, not a
+/// shared helper. If this logic changes, check whether that implementation
+/// needs the same fix.
+fn payload_too_large_response() -> HttpResponse {
+    let body = serde_json::json!({
+        "error": "Payload Too Large",
+        "status": 413,
+    });
+    HttpResponse::new(413)
+        .with_json(&body)
+        .unwrap_or_else(|_| HttpResponse::new(413))
+}
+
+/// Convert an [`HttpResponse`] into a hyper response with a fully-buffered
+/// `Full` body.
+fn to_hyper_response(resp: HttpResponse) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    let mut builder = hyper::Response::builder().status(resp.status);
+
+    for (name, value) in &resp.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    for cookie in &resp.cookies {
+        builder = builder.header("Set-Cookie", cookie.as_str());
+    }
+
+    builder
+        .body(http_body_util::Full::new(resp.into_body_bytes()))
+        .unwrap()
+}
+
+/// Convert a single hyper request into our [`HttpRequest`], dispatch it
+/// through `app`, and convert the result back into a hyper response.
+///
+/// Enforces `app.max_body_size` *before* the body is buffered in memory,
+/// mirroring `application.rs`'s `handle_request`: a `Content-Length`
+/// fast-path rejects declared-oversized requests with `413` before any body
+/// bytes are read, and a streaming [`http_body_util::Limited`] wrapper
+/// enforces the same cap while collecting chunked or undeclared bodies.
+/// Body-read errors that are *not* a size-limit violation (malformed chunked
+/// framing, a connection reset mid-body, ...) are rejected with `400 Bad
+/// Request` rather than silently substituted with an empty body — this now
+/// genuinely matches `handle_request`'s handling of the same class of error,
+/// rather than merely claiming to. One difference remains: this function's
+/// error type is `Infallible` (required by the hyper `Service` it backs), so
+/// a genuine `hyper::Error` is folded into the same `400` response here
+/// instead of being propagated to fail the connection the way
+/// `handle_request` does. Split out from [`run_server`]/[`serve`] so the
+/// body-limit behavior is directly unit-testable without a real socket.
+async fn handle_micro_request(
+    req: hyper::Request<hyper::body::Incoming>,
+    app: Arc<BuiltApp>,
+) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
+    use http_body_util::{BodyExt, Limited};
+
+    // Convert hyper request to our HttpRequest
+    let method = req.method().to_string();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.to_string())
+        .unwrap_or_else(|| "/".to_string());
+
+    let mut http_req = HttpRequest::new(method.clone(), path.clone());
+
+    // Copy headers
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            http_req.headers.insert(name.to_string(), v.to_string());
+        }
+    }
+
+    // Fast-path rejection: if the client declares a Content-Length larger
+    // than the configured limit, reject with 413 before buffering any body
+    // bytes. The streaming `Limited` wrapper below still enforces the limit
+    // for chunked or undeclared bodies.
+    if let Some(declared_len) = http_req
+        .headers
+        .get("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+        && declared_len > app.max_body_size
+    {
+        tracing::warn!(
+            method = %method,
+            path = %path,
+            limit = app.max_body_size,
+            declared_len,
+            "Request Content-Length exceeds configured limit"
+        );
+        return Ok(to_hyper_response(payload_too_large_response()));
+    }
+
+    // Read body, enforcing the configured size limit *before* it is fully
+    // buffered in memory — a client sending an arbitrarily large body would
+    // otherwise be buffered into a `Vec<u8>` with no cap at all.
+    let limited = Limited::new(req.into_body(), app.max_body_size);
+    let body_bytes = match limited.collect().await {
+        Ok(collected) => collected.to_bytes().to_vec(),
+        Err(err) if err.is::<http_body_util::LengthLimitError>() => {
+            tracing::warn!(
+                method = %method,
+                path = %path,
+                limit = app.max_body_size,
+                "Request body exceeds configured limit"
+            );
+            return Ok(to_hyper_response(payload_too_large_response()));
+        }
+        // Any other body-read error (e.g. malformed chunked framing or a
+        // dropped connection mid-body) is a genuine failure to receive the
+        // request as sent. Substituting an empty body here would let the
+        // request proceed to the handler as if the client had sent nothing,
+        // potentially producing a success response for a body that never
+        // actually arrived intact. Reject with 400 instead, matching
+        // `application.rs::handle_request`'s handling of non-length-limit
+        // body-read errors.
+        Err(err) => {
+            tracing::warn!(method = %method, path = %path, error = %err, "Failed to read request body");
+            return Ok(to_hyper_response(HttpResponse::new(400)));
+        }
+    };
+    http_req.body = body_bytes;
+
+    // Handle request
+    let response = app.handle(http_req).await;
+
+    // Convert to hyper response
+    match response {
+        Ok(resp) => Ok(to_hyper_response(resp)),
+        Err(e) => {
+            let (status, body) = error_response_parts(&e);
+
+            Ok(hyper::Response::builder()
+                .status(status)
+                .header("Content-Type", "application/json")
+                .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+                .unwrap())
+        }
+    }
+}
+
+/// Accept loop over an already-bound listener.
+///
+/// Split out from [`run_server`] so tests can bind an ephemeral port
+/// (`127.0.0.1:0`), read back the OS-assigned address via
+/// `TcpListener::local_addr`, and drive the server directly — without the
+/// bind/drop/rebind race a port-0-then-reconnect test would otherwise have.
+async fn serve(listener: tokio::net::TcpListener, app: Arc<BuiltApp>) -> std::io::Result<()> {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use tokio::net::TcpListener;
-
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("Micro-framework server listening on http://{}", addr);
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -1142,66 +1306,7 @@ async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::
 
         tokio::spawn(async move {
             let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let app = app.clone();
-                async move {
-                    // Convert hyper request to our HttpRequest
-                    let method = req.method().to_string();
-                    let path = req
-                        .uri()
-                        .path_and_query()
-                        .map(|pq| pq.to_string())
-                        .unwrap_or_else(|| "/".to_string());
-
-                    let mut http_req = HttpRequest::new(method, path);
-
-                    // Copy headers
-                    for (name, value) in req.headers() {
-                        if let Ok(v) = value.to_str() {
-                            http_req.headers.insert(name.to_string(), v.to_string());
-                        }
-                    }
-
-                    // Read body
-                    use http_body_util::BodyExt;
-                    let body_bytes = req
-                        .collect()
-                        .await
-                        .map(|b| b.to_bytes().to_vec())
-                        .unwrap_or_default();
-                    http_req.body = body_bytes;
-
-                    // Handle request
-                    let response = app.handle(http_req).await;
-
-                    // Convert to hyper response
-                    match response {
-                        Ok(resp) => {
-                            let mut builder = hyper::Response::builder().status(resp.status);
-
-                            for (name, value) in &resp.headers {
-                                builder = builder.header(name.as_str(), value.as_str());
-                            }
-                            for cookie in &resp.cookies {
-                                builder = builder.header("Set-Cookie", cookie.as_str());
-                            }
-
-                            Ok::<_, std::convert::Infallible>(
-                                builder
-                                    .body(http_body_util::Full::new(resp.into_body_bytes()))
-                                    .unwrap(),
-                            )
-                        }
-                        Err(e) => {
-                            let (status, body) = error_response_parts(&e);
-
-                            Ok(hyper::Response::builder()
-                                .status(status)
-                                .header("Content-Type", "application/json")
-                                .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-                                .unwrap())
-                        }
-                    }
-                }
+                handle_micro_request(req, app.clone())
             });
 
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
@@ -1209,6 +1314,16 @@ async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::
             }
         });
     }
+}
+
+/// Run the HTTP server
+async fn run_server(app: Arc<BuiltApp>, addr: std::net::SocketAddr) -> std::io::Result<()> {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(addr).await?;
+    tracing::info!("Micro-framework server listening on http://{}", addr);
+
+    serve(listener, app).await
 }
 
 #[cfg(test)]
@@ -1608,4 +1723,204 @@ mod tests {
     // mocking `gzip_encode` itself, which is out of scope for this file's
     // existing test patterns. See the fix report for the reasoning behind
     // why the join-failure path should not lose data in practice either.
+
+    // ---- Unbounded body buffering regression (micro-framework listener) ---
+    //
+    // `run_server`/`serve` used to read the entire request body with
+    // `req.collect().await` and no cap at all — unlike `Application`'s main
+    // server, which enforces `with_max_body_size`/`DEFAULT_MAX_BODY_SIZE` via
+    // a `Content-Length` fast-path plus a streaming `http_body_util::Limited`
+    // wrapper *before* buffering. These tests drive the real hyper/tokio
+    // wiring (`serve`) end-to-end over a loopback socket to prove the
+    // micro-framework listener now enforces the same cap and returns `413`
+    // before the oversized body is fully buffered.
+
+    async fn body_len_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
+        Ok(HttpResponse::ok().with_body(req.body.len().to_string().into_bytes()))
+    }
+
+    /// Bind an ephemeral loopback port, drive [`serve`] for `app` on a
+    /// background task, and return the resolved address. Binding first (port
+    /// `0`) and handing the *already-bound* listener to `serve` avoids the
+    /// bind/drop/reconnect race a "bind port 0, drop, rebind same port" test
+    /// helper would otherwise have.
+    async fn spawn_test_server(app: BuiltApp) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("resolve local_addr");
+        let app = Arc::new(app);
+        tokio::spawn(async move {
+            let _ = serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// Open a fresh connection to `addr`, write `request` in full, and
+    /// return whatever bytes come back before the connection closes or a 5s
+    /// safety timeout elapses. Relies on the request always sending
+    /// `Connection: close`, which the server mirrors onto its response and
+    /// honors by closing the connection once it has replied.
+    async fn send_raw_request(addr: std::net::SocketAddr, request: &[u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to test server");
+        stream.write_all(request).await.expect("write request");
+
+        // Deliberately do *not* half-close our write half here: every
+        // request below sends `Connection: close`, which hyper mirrors onto
+        // the response and honors by closing the connection from its end
+        // once the response is written — that's what unblocks
+        // `read_to_end` below. Pre-emptively shutting down our own write
+        // half raced the server's read/parse loop on a loopback socket
+        // (observed as an intermittent spurious "connection closed before
+        // message completed" even for a well-formed, fully-sent request)
+        // and is unnecessary: the fast-path test's server response never
+        // depends on the client finishing (or even starting) its body, so
+        // it doesn't need an EOF signal from us to answer either.
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut buf),
+        )
+        .await;
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// A request declaring a `Content-Length` far above the configured limit
+    /// must be rejected with `413` from the header fast-path alone — the
+    /// client here never sends the promised body at all (it writes only
+    /// headers and then just waits for a reply), so a response can only
+    /// arrive if the server decided *before* trying to read/buffer the body.
+    /// The old implementation had no such check and unconditionally called
+    /// `req.collect().await`, which would hang waiting for body bytes that
+    /// never arrive — this test would time out (and fail) against it instead
+    /// of promptly observing a `413`.
+    #[tokio::test]
+    async fn test_serve_rejects_oversized_content_length_before_buffering_body() {
+        let app = App::new()
+            .with_max_body_size(1024)
+            .route("/", post(body_len_handler))
+            .build();
+        let addr = spawn_test_server(app).await;
+
+        let request = b"POST / HTTP/1.1\r\n\
+            Host: test\r\n\
+            Content-Length: 10485760\r\n\
+            Connection: close\r\n\
+            \r\n";
+        let response = send_raw_request(addr, request).await;
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.contains("413"),
+            "expected 413 status line, got: {status_line:?} (full response: {response:?})"
+        );
+        assert!(
+            response.contains("Payload Too Large"),
+            "expected canonical 413 body, got: {response:?}"
+        );
+    }
+
+    /// The streaming path must also enforce the limit for requests that
+    /// don't declare `Content-Length` up front (chunked transfer encoding):
+    /// a single chunk larger than the configured limit must be rejected with
+    /// `413` via the `http_body_util::Limited` wrapper, even though the
+    /// client faithfully sends the full oversized chunk.
+    #[tokio::test]
+    async fn test_serve_rejects_oversized_chunked_body_via_limited_stream() {
+        let app = App::new()
+            .with_max_body_size(10)
+            .route("/", post(body_len_handler))
+            .build();
+        let addr = spawn_test_server(app).await;
+
+        // Chunk size 0x14 = 20 bytes, above the 10-byte limit; chunk data is
+        // exactly 20 ASCII digits.
+        let request = b"POST / HTTP/1.1\r\n\
+            Host: test\r\n\
+            Transfer-Encoding: chunked\r\n\
+            Connection: close\r\n\
+            \r\n\
+            14\r\n\
+            01234567890123456789\r\n\
+            0\r\n\
+            \r\n";
+        let response = send_raw_request(addr, request).await;
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.contains("413"),
+            "expected 413 status line, got: {status_line:?} (full response: {response:?})"
+        );
+    }
+
+    /// Regression for the body-read-error fallback: a body-read failure that
+    /// is *not* a size-limit violation (here, genuinely malformed chunked
+    /// framing — an invalid, non-hex chunk-size line) must be rejected with
+    /// `400 Bad Request`, not silently treated as an empty body that lets
+    /// the request proceed to the handler as if nothing were wrong. The
+    /// well within-limit `max_body_size` here rules out the `413` path
+    /// entirely, isolating the catch-all body-read-error arm.
+    #[tokio::test]
+    async fn test_serve_rejects_malformed_chunked_body_with_400() {
+        let app = App::new()
+            .with_max_body_size(1024)
+            .route("/", post(body_len_handler))
+            .build();
+        let addr = spawn_test_server(app).await;
+
+        // "ZZ" is not a valid hex chunk-size line, so the chunked decoder
+        // must reject this as malformed framing distinct from a size-limit
+        // violation.
+        let request = b"POST / HTTP/1.1\r\n\
+            Host: test\r\n\
+            Transfer-Encoding: chunked\r\n\
+            Connection: close\r\n\
+            \r\n\
+            ZZ\r\n\
+            data\r\n\
+            0\r\n\
+            \r\n";
+        let response = send_raw_request(addr, request).await;
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.contains("400"),
+            "expected 400 status line, got: {status_line:?} (full response: {response:?})"
+        );
+    }
+
+    /// Sanity/non-regression check for the `serve`/`handle_micro_request`
+    /// refactor: a body within the configured limit must still be routed and
+    /// echoed normally end-to-end over the real listener.
+    #[tokio::test]
+    async fn test_serve_accepts_body_within_limit() {
+        let app = App::new()
+            .with_max_body_size(1024)
+            .route("/", post(body_len_handler))
+            .build();
+        let addr = spawn_test_server(app).await;
+
+        let body = b"hello world";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        let response = send_raw_request(addr, request.as_bytes()).await;
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.contains("200"),
+            "expected 200 status line, got: {status_line:?} (full response: {response:?})"
+        );
+        assert!(
+            response.ends_with(&body.len().to_string()),
+            "expected echoed body length {}, got: {response:?}",
+            body.len()
+        );
+    }
 }

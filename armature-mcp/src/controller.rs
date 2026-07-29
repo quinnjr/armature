@@ -71,8 +71,25 @@ impl McpController {
             .with_body(response_json.into_bytes()))
     }
 
+    /// Authenticate a GET request against the configured [`McpAuthConfig`],
+    /// using `jsonrpc_method` to decide whether the `allow_list_unauthenticated`
+    /// / `allow_init_unauthenticated` escape hatches apply (mirroring the
+    /// semantics `dispatch_method` applies to the equivalent JSON-RPC call).
+    /// Maps an authentication failure to `Error::Unauthorized` (HTTP 401),
+    /// matching how the rest of the framework reports auth failures.
+    async fn authenticate_get(&self, req: &HttpRequest, jsonrpc_method: &str) -> Result<(), Error> {
+        let headers: std::collections::HashMap<String, String> = req.headers.clone().into();
+        self.service
+            .authenticate(&headers, jsonrpc_method)
+            .await
+            .map_err(|e| Error::Unauthorized(e.to_string()))?;
+        Ok(())
+    }
+
     /// Handle GET /mcp - Returns server info and capabilities
-    pub async fn handle_info(&self) -> Result<HttpResponse, Error> {
+    pub async fn handle_info(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+        self.authenticate_get(&req, "mcp/info").await?;
+
         let config = self.service.config();
         let tools = self.service.list_tools();
         let resources = self.service.list_resources();
@@ -102,7 +119,9 @@ impl McpController {
     }
 
     /// Handle GET /mcp/tools - List all available tools
-    pub async fn handle_list_tools(&self) -> Result<HttpResponse, Error> {
+    pub async fn handle_list_tools(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+        self.authenticate_get(&req, "tools/list").await?;
+
         let tools = self.service.list_tools();
 
         let response = serde_json::json!({
@@ -119,7 +138,9 @@ impl McpController {
     }
 
     /// Handle GET /mcp/resources - List all available resources
-    pub async fn handle_list_resources(&self) -> Result<HttpResponse, Error> {
+    pub async fn handle_list_resources(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+        self.authenticate_get(&req, "resources/list").await?;
+
         let resources = self.service.list_resources();
 
         let response = serde_json::json!({
@@ -195,23 +216,23 @@ impl McpRouterExt for armature_core::routing::Router {
 
         // GET /mcp - Server info
         let ctrl = controller.clone();
-        self.get("/mcp", move |_req: HttpRequest| {
+        self.get("/mcp", move |req: HttpRequest| {
             let ctrl = ctrl.clone();
-            async move { ctrl.handle_info().await }
+            async move { ctrl.handle_info(req).await }
         });
 
         // GET /mcp/tools - List tools
         let ctrl = controller.clone();
-        self.get("/mcp/tools", move |_req: HttpRequest| {
+        self.get("/mcp/tools", move |req: HttpRequest| {
             let ctrl = ctrl.clone();
-            async move { ctrl.handle_list_tools().await }
+            async move { ctrl.handle_list_tools(req).await }
         });
 
         // GET /mcp/resources - List resources
         let ctrl = controller;
-        self.get("/mcp/resources", move |_req: HttpRequest| {
+        self.get("/mcp/resources", move |req: HttpRequest| {
             let ctrl = ctrl.clone();
-            async move { ctrl.handle_list_resources().await }
+            async move { ctrl.handle_list_resources(req).await }
         });
 
         self
@@ -263,12 +284,26 @@ mod tests {
         serde_json::from_slice(&resp.body).expect("response body should be valid JSON")
     }
 
+    fn get_request(path: &str) -> HttpRequest {
+        HttpRequest::new("GET".to_string(), path.to_string())
+    }
+
+    fn get_request_with_auth(path: &str, header_value: &str) -> HttpRequest {
+        let mut req = get_request(path);
+        req.headers
+            .insert("Authorization".to_string(), header_value.to_string());
+        req
+    }
+
     #[tokio::test]
     async fn handle_list_tools_includes_dynamically_registered_provider() {
         let service = McpService::new().with_tool_provider(Arc::new(DynToolProvider));
         let controller = controller_wrapping(service);
 
-        let resp = controller.handle_list_tools().await.unwrap();
+        let resp = controller
+            .handle_list_tools(get_request("/mcp/tools"))
+            .await
+            .unwrap();
         let json = body_json(&resp);
         let tools = json
             .get("tools")
@@ -290,7 +325,7 @@ mod tests {
         let service = McpService::new().with_tool_provider(Arc::new(DynToolProvider));
         let controller = controller_wrapping(service);
 
-        let resp = controller.handle_info().await.unwrap();
+        let resp = controller.handle_info(get_request("/mcp")).await.unwrap();
         let json = body_json(&resp);
 
         assert_eq!(
@@ -298,5 +333,92 @@ mod tests {
             Some(1),
             "GET /mcp info under-counted the merged tools"
         );
+    }
+
+    /// Regression test for a CRITICAL auth-bypass finding: `GET /mcp/tools`
+    /// and `GET /mcp/resources` previously never called `authenticate()` at
+    /// all, so they served tool/resource data to unauthenticated clients no
+    /// matter what `McpAuthConfig` was configured. Against the pre-fix code
+    /// (handlers took no `HttpRequest` and never consulted auth), this test
+    /// would have failed because `handle_list_tools`/`handle_list_resources`
+    /// unconditionally returned `Ok(HttpResponse::ok())` with tool/resource
+    /// data — never `Err(Error::Unauthorized(_))` — regardless of headers.
+    #[tokio::test]
+    async fn get_endpoints_reject_requests_without_valid_auth() {
+        use crate::auth::{ApiTokenAuth, McpAuthConfig};
+
+        let config = McpConfig::default().with_auth(McpAuthConfig::api_token(
+            ApiTokenAuth::new().with_tokens(vec!["secret-token"]),
+        ));
+        let service = McpService::with_config(config).with_tool_provider(Arc::new(DynToolProvider));
+        let controller = controller_wrapping(service);
+
+        // No Authorization header at all.
+        let err = controller
+            .handle_list_tools(get_request("/mcp/tools"))
+            .await
+            .expect_err("GET /mcp/tools must reject unauthenticated requests");
+        assert_eq!(err.status_code(), 401);
+
+        // Invalid token.
+        let bad_req = get_request_with_auth("/mcp/tools", "Bearer wrong-token");
+        let err = controller
+            .handle_list_tools(bad_req)
+            .await
+            .expect_err("GET /mcp/tools must reject invalid tokens");
+        assert_eq!(err.status_code(), 401);
+
+        // Same for GET /mcp/resources.
+        let err = controller
+            .handle_list_resources(get_request("/mcp/resources"))
+            .await
+            .expect_err("GET /mcp/resources must reject unauthenticated requests");
+        assert_eq!(err.status_code(), 401);
+
+        // Same for GET /mcp (info).
+        let err = controller
+            .handle_info(get_request("/mcp"))
+            .await
+            .expect_err("GET /mcp must reject unauthenticated requests");
+        assert_eq!(err.status_code(), 401);
+    }
+
+    #[tokio::test]
+    async fn get_endpoints_accept_requests_with_valid_auth() {
+        use crate::auth::{ApiTokenAuth, McpAuthConfig};
+
+        let config = McpConfig::default().with_auth(McpAuthConfig::api_token(
+            ApiTokenAuth::new().with_tokens(vec!["secret-token"]),
+        ));
+        let service = McpService::with_config(config).with_tool_provider(Arc::new(DynToolProvider));
+        let controller = controller_wrapping(service);
+
+        let good_req = |path: &str| get_request_with_auth(path, "Bearer secret-token");
+
+        let resp = controller
+            .handle_list_tools(good_req("/mcp/tools"))
+            .await
+            .expect("valid token should be accepted for GET /mcp/tools");
+        let json = body_json(&resp);
+        let tools = json
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .expect("`tools` array");
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("dyn_tool")),
+            "authenticated GET /mcp/tools should still return the expected tool list"
+        );
+
+        controller
+            .handle_list_resources(good_req("/mcp/resources"))
+            .await
+            .expect("valid token should be accepted for GET /mcp/resources");
+
+        controller
+            .handle_info(good_req("/mcp"))
+            .await
+            .expect("valid token should be accepted for GET /mcp");
     }
 }

@@ -1,0 +1,124 @@
+# =============================================================================
+# Armature - Kubernetes Deployment
+# =============================================================================
+# NOTE: This file's defaults are intentionally kept in sync with
+# templates/helm/armature/values.yaml's Deployment-related defaults
+# (replicas, probes, resources, securityContext). If you change one, check
+# the other.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: armature-api
+  namespace: armature
+  labels:
+    app.kubernetes.io/name: armature-api
+    app.kubernetes.io/managed-by: armature-cli
+spec:
+  # Starting replica count; the HorizontalPodAutoscaler (hpa.yaml) takes over
+  # scaling after the first apply. Matches hpa.yaml's minReplicas.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: armature-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+      labels:
+        app.kubernetes.io/name: armature-api
+    spec:
+      serviceAccountName: armature-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: armature-api
+          image: ghcr.io/armature-rs/armature-api:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3000"
+            - name: RUST_LOG
+              value: "info"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: armature-api-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: armature-api-secrets
+                  key: redis-url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: armature-api-secrets
+                  key: jwt-secret
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: armature-api-config
+      terminationGracePeriodSeconds: 30

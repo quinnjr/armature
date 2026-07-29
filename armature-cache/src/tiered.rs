@@ -188,6 +188,19 @@ where
     }
 
     /// Clear both L1 and L2
+    ///
+    /// `L2::clear()` is whatever the L2 backend's `CacheStore::clear()` does.
+    /// For `RedisCache` with a `key_prefix` configured, that is now scoped:
+    /// it `SCAN`s for and `UNLINK`s only the keys under that prefix, not the
+    /// whole database. **Remaining risk:** an L2 `RedisCache` with *no*
+    /// `key_prefix` configured has no distinct slice of the keyspace to
+    /// scope to and still falls back to unscoped `FLUSHDB`, wiping the
+    /// *entire* Redis database/instance — so a `TieredCache` wrapping an
+    /// unprefixed `RedisCache` that shares a Redis instance with other
+    /// services/tenants should not call `clear()`. A `MemcachedCache` L2 has
+    /// no prefix-scoped clear at all (the memcached protocol has no key
+    /// enumeration primitive), so its `clear()` always wipes the whole
+    /// memcached instance regardless of `key_prefix`.
     pub async fn clear(&self) -> CacheResult<()> {
         if self.config.enable_l1 {
             self.l1.clear().await?;

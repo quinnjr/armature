@@ -162,16 +162,16 @@ impl<P: CacheProvider> TenantCache<P> {
     ///   `O(keyspace)`), and other operations against the same tenant's keys
     ///   that race with a `clear_tenant` call are not isolated from it —
     ///   keys written concurrently mid-scan may or may not be included.
-    /// - Correctness depends on the tenant's cache-key prefix
-    ///   (`"tenant:{id}:"`, see [`Tenant::cache_key`]) being collision-free.
-    ///   Because prefix matching is a plain `starts_with` check, a tenant
-    ///   whose `id` is itself a prefix of another tenant's `id` (e.g.
-    ///   `"acme"` vs. `"acme-2"`) would NOT collide here since the literal
-    ///   `:` separators are part of the prefix — but a `CacheProvider`
-    ///   implementation that stores unrelated keys sharing the same
-    ///   `tenant:{id}:` string (or that ignores the trailing separator) can
-    ///   still over-match and delete keys that do not belong to this
-    ///   tenant.
+    /// - Correctness depends on the tenant's cache-key prefix (see
+    ///   [`Tenant::cache_key`]) being collision-free, which it is by
+    ///   construction: the `id` segment is length-prefixed
+    ///   (`"tenant:{id.len()}:{id}:"`), so no `id` — regardless of its
+    ///   content, including embedded `':'` — can produce a prefix that is
+    ///   itself a prefix of, or equal to, another tenant's prefix. A
+    ///   `CacheProvider` implementation that stores unrelated keys sharing
+    ///   the same `tenant:{n}:{id}:` string verbatim (or that ignores the
+    ///   trailing separator) could still over-match, but that would require
+    ///   the provider itself to violate `starts_with` semantics.
     pub async fn clear_tenant(&self, tenant: &Tenant) -> Result<(), CacheError> {
         let prefix = tenant.cache_key("");
         let keys = self.provider.keys_with_prefix(&prefix).await?;
@@ -386,7 +386,7 @@ mod tests {
             .part("profile")
             .build_for_tenant(&tenant);
 
-        assert_eq!(key, "tenant:tenant-123:users:1:profile");
+        assert_eq!(key, "tenant:10:tenant-123:users:1:profile");
     }
 
     #[tokio::test]

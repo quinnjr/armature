@@ -38,7 +38,7 @@
 
 use crate::{
     Message, MessageBroker, MessageHandler, MessagingError, ProcessingResult, PublishOptions,
-    SubscribeOptions, Subscription,
+    SubscribeOptions, Subscription, dispatch,
 };
 use async_trait::async_trait;
 use mq_bridge::CanonicalMessage;
@@ -49,8 +49,8 @@ use mq_bridge::{Handled, HandlerError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
-use tracing::warn;
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 
 /// Configuration for mq-bridge endpoints
 #[derive(Debug, Clone)]
@@ -519,18 +519,30 @@ pub struct MqBridgeSubscription {
     topic: String,
     active: AtomicBool,
     cancel_token: tokio::sync::watch::Sender<bool>,
+    /// In-flight per-message handler tasks, drained (with a bounded timeout)
+    /// on `unsubscribe` instead of being abandoned.
+    tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 impl MqBridgeSubscription {
-    fn new(topic: String) -> (Self, tokio::sync::watch::Receiver<bool>) {
+    fn new(
+        topic: String,
+    ) -> (
+        Self,
+        tokio::sync::watch::Receiver<bool>,
+        Arc<Mutex<JoinSet<()>>>,
+    ) {
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tasks = Arc::new(Mutex::new(JoinSet::new()));
         (
             Self {
                 topic,
                 active: AtomicBool::new(true),
                 cancel_token: tx,
+                tasks: tasks.clone(),
             },
             rx,
+            tasks,
         )
     }
 }
@@ -540,6 +552,8 @@ impl Subscription for MqBridgeSubscription {
     async fn unsubscribe(&self) -> Result<(), MessagingError> {
         self.active.store(false, Ordering::SeqCst);
         let _ = self.cancel_token.send(true);
+        dispatch::drain_with_timeout(&self.tasks, dispatch::DEFAULT_DRAIN_TIMEOUT, "mq-bridge")
+            .await;
         Ok(())
     }
 
@@ -578,6 +592,30 @@ impl Handler for HandlerAdapter {
                 "Handler error: {}",
                 e
             ))),
+        }
+    }
+}
+
+/// Run the adapted handler for a single received mq-bridge message and
+/// ack/nack it via `commit` based on the result. Broken out of
+/// `subscribe_with_options`'s spawned consumer task so it can be spawned as
+/// an independent per-message task under the concurrency semaphore (mirrors
+/// `aws.rs`'s `handle_sqs_message` and `rabbitmq.rs`'s `handle_delivery`).
+async fn handle_received_message(
+    adapter: Arc<HandlerAdapter>,
+    msg: CanonicalMessage,
+    commit: mq_bridge::traits::CommitFunc,
+) {
+    match adapter.handle(msg).await {
+        Ok(Handled::Ack) => {
+            let _ = commit(MessageDisposition::Ack).await;
+        }
+        Ok(Handled::Publish(response)) => {
+            let _ = commit(MessageDisposition::Reply(response)).await;
+        }
+        Err(_) => {
+            // Negative acknowledgement - message will be redelivered
+            let _ = commit(MessageDisposition::Nack).await;
         }
     }
 }
@@ -633,16 +671,12 @@ impl MessageBroker for MqBridgeBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        if let Some(concurrency) = options.concurrency
-            && concurrency > 1
-        {
-            warn!(
-                concurrency,
-                "SubscribeOptions::concurrency is not implemented for the mq-bridge backend; messages are dispatched sequentially"
-            );
-        }
+        // Bounds how many per-message handler invocations may run
+        // concurrently (see the spawned consumer task below). Defaults to 1,
+        // which reproduces the previous strictly-sequential dispatch.
+        let concurrency = dispatch::concurrency_or_default(options.concurrency);
 
-        let (subscription, mut cancel_rx) = MqBridgeSubscription::new(topic.to_string());
+        let (subscription, mut cancel_rx, tasks) = MqBridgeSubscription::new(topic.to_string());
 
         // Route by the topic argument, not the broker's default
         // `config.topic` - otherwise every subscription would consume from
@@ -653,6 +687,19 @@ impl MessageBroker for MqBridgeBroker {
             handler,
             topic: topic.to_string(),
         });
+
+        // Bounds how many `adapter.handle` invocations may run concurrently.
+        // A permit is acquired before spawning each message's task (tracked
+        // in `tasks` so `unsubscribe` can drain outstanding handlers on
+        // shutdown - see `dispatch::spawn_bounded`) and released when that
+        // task finishes, so at most `concurrency` handlers are ever in
+        // flight at once (concurrency == 1 reproduces the previous
+        // strictly-sequential dispatch). `Received::commit` is a `'static +
+        // Send + FnOnce` closure fully decoupled from the `consumer` it came
+        // from, so committing out of dispatch order from a spawned task is
+        // safe and does not block `consumer.receive()` from being called
+        // again for the next message.
+        let semaphore = Arc::new(Semaphore::new(concurrency));
 
         // Spawn consumer task
         tokio::spawn(async move {
@@ -667,21 +714,13 @@ impl MessageBroker for MqBridgeBroker {
                         match result {
                             Ok(received) => {
                                 let msg = received.message;
-                                match adapter.handle(msg).await {
-                                    Ok(Handled::Ack) => {
-                                        let _ = (received.commit)(MessageDisposition::Ack).await;
-                                    }
-                                    Ok(Handled::Publish(response)) => {
-                                        let _ = (received.commit)(MessageDisposition::Reply(
-                                            response,
-                                        ))
-                                        .await;
-                                    }
-                                    Err(_) => {
-                                        // Negative acknowledgement - message will be redelivered
-                                        let _ = (received.commit)(MessageDisposition::Nack).await;
-                                    }
-                                }
+                                let commit = received.commit;
+                                let adapter = adapter.clone();
+
+                                dispatch::spawn_bounded(&semaphore, &tasks, async move {
+                                    handle_received_message(adapter, msg, commit).await;
+                                })
+                                .await;
                             }
                             Err(mq_bridge::errors::ConsumerError::EndOfStream) => {
                                 // Channel closed
@@ -929,5 +968,92 @@ mod tests {
             let msgs = channel.drain_messages();
             assert_eq!(msgs.len(), 2);
         }
+    }
+
+    /// Regression test for the finding that the bounded-concurrency dispatch
+    /// added across the aws/nats/rabbitmq/mq_bridge backends had zero test
+    /// coverage. Uses the in-memory broker (no external dependency) with
+    /// `concurrency: Some(2)` and 4 messages whose handlers complete in a
+    /// scrambled order (via staggered `tokio::time::sleep`s), and asserts:
+    /// (i) an in-flight counter's high-water mark never exceeds 2, proving
+    /// the semaphore actually bounds concurrent handlers, and (ii) every
+    /// message is still handled (acked) exactly once regardless of
+    /// completion order.
+    #[tokio::test]
+    async fn concurrency_bounds_in_flight_handlers_and_acks_every_message_regardless_of_order() {
+        use crate::FnHandler;
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+        use tokio::sync::Mutex as AsyncMutex;
+
+        let broker = MqBridgeBroker::memory("concurrency-test").await.unwrap();
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let high_water_mark = Arc::new(AtomicUsize::new(0));
+        let acked = Arc::new(AsyncMutex::new(Vec::new()));
+
+        let in_flight_clone = in_flight.clone();
+        let high_water_mark_clone = high_water_mark.clone();
+        let acked_clone = acked.clone();
+
+        let handler = Arc::new(FnHandler(move |msg: Message| {
+            let in_flight = in_flight_clone.clone();
+            let high_water_mark = high_water_mark_clone.clone();
+            let acked = acked_clone.clone();
+            async move {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                high_water_mark.fetch_max(current, Ordering::SeqCst);
+
+                // Stagger completion so handler-completion order is
+                // scrambled relative to dispatch order: message 0's handler
+                // is the slowest.
+                let idx: usize = msg.payload_str().unwrap().parse().unwrap();
+                let delay_ms = [80u64, 10, 40, 20][idx];
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                acked.lock().await.push(idx);
+
+                Ok::<_, MessagingError>(ProcessingResult::Success)
+            }
+        }));
+
+        let sub = broker
+            .subscribe_with_options(
+                "concurrency-test",
+                handler,
+                SubscribeOptions::default().with_concurrency(2),
+            )
+            .await
+            .unwrap();
+
+        for i in 0..4usize {
+            broker
+                .publish(Message::new("concurrency-test", i.to_string().into_bytes()))
+                .await
+                .unwrap();
+        }
+
+        // Give the consumer loop time to receive, dispatch, and complete all
+        // 4 handlers (longest single delay is 80ms; with concurrency 2 the
+        // whole batch completes well within this margin).
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        let observed_high_water_mark = high_water_mark.load(Ordering::SeqCst);
+        assert!(
+            observed_high_water_mark <= 2,
+            "at most `concurrency` (2) handlers should ever be in flight at once, saw {}",
+            observed_high_water_mark
+        );
+
+        let mut acked = acked.lock().await.clone();
+        acked.sort_unstable();
+        assert_eq!(
+            acked,
+            vec![0, 1, 2, 3],
+            "every message must be handled (acked) exactly once regardless of completion order"
+        );
+
+        sub.unsubscribe().await.unwrap();
     }
 }

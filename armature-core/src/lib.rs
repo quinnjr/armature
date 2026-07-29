@@ -140,6 +140,7 @@ pub mod connection_tuning;
 pub mod container;
 pub mod content_negotiation;
 pub mod cow_state;
+pub mod crypto;
 pub mod epoll_tuning;
 pub mod error;
 pub mod error_correlation;

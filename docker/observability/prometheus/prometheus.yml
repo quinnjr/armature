@@ -24,7 +24,7 @@ scrape_configs:
   # Armature API metrics
   - job_name: "armature-api"
     static_configs:
-      - targets: ["api:9100"]
+      - targets: ["api:3000"]
     metrics_path: /metrics
     scrape_interval: 5s
 

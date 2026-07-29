@@ -567,19 +567,13 @@ impl TenantManager {
         }
 
         // Generate ID
+        //
+        // `Tenant::cache_key` length-prefixes the `id` segment
+        // (`"tenant:{id.len()}:{id}:{key}"`), so `TenantCache::clear_tenant`'s
+        // `starts_with` prefix match can never over-match across tenants
+        // regardless of what characters `id` contains — no ':' restriction
+        // needed here.
         let id = uuid::Uuid::new_v4().to_string();
-
-        // `Tenant::cache_key`/`TenantCache::clear_tenant` match keys with a
-        // plain `starts_with("tenant:{id}:")` prefix test (see cache.rs), so
-        // a tenant `id` containing ':' could over-match and delete/read keys
-        // belonging to another tenant. Server-generated IDs are UUIDv4
-        // strings (hex digits and '-' only), so this can never fire in
-        // practice; the assert documents and guards the invariant in case
-        // the ID generation strategy ever changes.
-        debug_assert!(
-            !id.contains(':'),
-            "generated tenant id must not contain ':' (breaks cache key prefix matching)"
-        );
 
         // Create core tenant
         let mut tenant = Tenant::new(&id, &request.slug);

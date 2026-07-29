@@ -16,6 +16,7 @@
 #   --from CRATE    Publish starting from the specified crate
 #   --skip CRATE    Skip the specified crate (can be used multiple times)
 #   --no-verify     Skip cargo publish verification step
+#   --yes, -y       Skip the interactive confirmation prompt (for CI/non-interactive use)
 #   --delay SECS    Delay between publishes (default: 30)
 #   --burst N       Publish N crates then pause longer (default: 5)
 #   --burst-delay S Delay after burst (default: 120)
@@ -50,6 +51,7 @@ SINGLE_CRATE=""
 FROM_CRATE=""
 NO_VERIFY=false
 FORCE=false
+ASSUME_YES=false
 SKIP_CRATES=()
 CRATES_IO_API="https://crates.io/api/v1/crates"
 
@@ -211,6 +213,7 @@ OPTIONS:
     --skip CRATE    Skip the specified crate (can be repeated)
     --no-verify     Skip cargo publish verification step
     --force         Publish even if version already exists on crates.io
+    --yes, -y       Skip the interactive confirmation prompt (for CI/non-interactive use)
     --help          Show this help message
 
 RATE LIMITING OPTIONS:
@@ -260,6 +263,9 @@ EXAMPLES:
     # Skip problematic crates
     ./scripts/publish.sh --skip armature-cli --skip armature-ferron
 
+    # Non-interactive (e.g. CI): skip the "Continue? [y/N]" prompt
+    ./scripts/publish.sh --yes
+
 DEPENDENCY ORDER:
     The script automatically determines the correct publish order by
     analyzing inter-workspace dependencies. Crates with no workspace
@@ -297,6 +303,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force)
             FORCE=true
+            shift
+            ;;
+        --yes|-y)
+            ASSUME_YES=true
             shift
             ;;
         --delay)
@@ -831,7 +841,7 @@ publish_all() {
     fi
 
     # Confirm before publishing
-    if [[ -z "$SINGLE_CRATE" ]]; then
+    if [[ -z "$SINGLE_CRATE" && "$ASSUME_YES" != "true" ]]; then
         echo -e "${YELLOW}This will publish $to_publish crates to crates.io.${NC}"
         echo -n "Continue? [y/N] "
         read -r confirm
@@ -938,6 +948,10 @@ publish_all() {
     echo "  ⏱  Total time:          $(format_time $elapsed)"
     echo "  ⏳ Wait time:           $(format_time $TOTAL_WAIT_TIME)"
     echo ""
+
+    if [[ $failed -gt 0 ]]; then
+        return 1
+    fi
 }
 
 # =============================================================================

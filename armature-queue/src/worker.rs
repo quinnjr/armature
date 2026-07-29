@@ -3,14 +3,14 @@
 use crate::error::{QueueError, QueueResult};
 use crate::job::{Job, JobId};
 use crate::queue::Queue;
-use armature_log::{debug, info, warn};
+use armature_log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 /// Job handler function type.
 pub type JobHandler =
@@ -43,13 +43,39 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Outcome of a graceful (or partially force-aborted) worker shutdown, as
+/// returned by [`Worker::stop_with_timeout`].
+///
+/// The three counts always sum to the total number of worker tasks that were
+/// spawned by [`Worker::start`] and reaped by this shutdown call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StopOutcome {
+    /// Number of worker tasks that returned normally on their own within the
+    /// grace period.
+    pub gracefully_completed: usize,
+    /// Number of worker tasks that panicked while a job handler was running,
+    /// observed as a `JoinError` while draining during the grace period. Each
+    /// occurrence is also logged at `error` level unconditionally (regardless
+    /// of `WorkerConfig::log_execution`), since the job that task was
+    /// processing is left orphaned "Processing" with no other signal.
+    pub panicked: usize,
+    /// Number of worker tasks still running when the grace period elapsed
+    /// and were therefore forcibly aborted as a last resort.
+    pub force_aborted: usize,
+}
+
 /// Worker for processing jobs from a queue.
 pub struct Worker {
     queue: Queue,
     handlers: Arc<RwLock<HashMap<String, JobHandler>>>,
     config: WorkerConfig,
     running: Arc<RwLock<bool>>,
-    handles: Vec<JoinHandle<()>>,
+    // A `JoinSet` (rather than `Vec<JoinHandle<_>>`) is required for graceful
+    // shutdown: `stop()` needs to `abort_all()` the *actual* spawned tasks as
+    // a last resort after a grace period, not just stop awaiting them. Wrapping
+    // each `JoinHandle` in a second spawned task and aborting that wrapper
+    // would leave the original worker task running detached.
+    handles: JoinSet<()>,
 }
 
 impl Worker {
@@ -70,7 +96,7 @@ impl Worker {
             handlers: Arc::new(RwLock::new(HashMap::new())),
             config,
             running: Arc::new(RwLock::new(false)),
-            handles: Vec::new(),
+            handles: JoinSet::new(),
         }
     }
 
@@ -143,7 +169,7 @@ impl Worker {
             let job_timeout = self.config.job_timeout;
             let log = self.config.log_execution;
 
-            let handle = tokio::spawn(async move {
+            self.handles.spawn(async move {
                 while *running.read().await {
                     match queue.dequeue().await {
                         Ok(Some(job)) => {
@@ -231,8 +257,6 @@ impl Worker {
                     println!("[WORKER-{}] Stopped", i);
                 }
             });
-
-            self.handles.push(handle);
         }
 
         Ok(())
@@ -420,8 +444,76 @@ impl Worker {
         self.handlers.write().await.insert(job_type.into(), wrapped);
     }
 
-    /// Stop the worker.
+    /// Stop the worker gracefully.
+    ///
+    /// This is [`stop_with_timeout`] using `self.config.job_timeout` as the
+    /// grace period. That bound is not arbitrary: each worker task wraps its
+    /// current job's handler invocation in `tokio::time::timeout(job_timeout,
+    /// ...)` (see the loop spawned by [`start`]), so `job_timeout` is already
+    /// the worst-case time a task can be stuck inside a handler before it
+    /// self-times-out the job and loops back to observe the stop flag. Waiting
+    /// that long guarantees every task gets the chance to either finish its
+    /// current job or hit its own internal timeout -- and therefore call
+    /// `queue.complete()`/`queue.fail()` -- before shutdown falls back to
+    /// aborting anything still outstanding.
+    ///
+    /// This wrapper discards the [`StopOutcome`] that [`stop_with_timeout`]
+    /// returns, for backward-compatible callers that only care whether
+    /// shutdown was initiated successfully. Call [`stop_with_timeout`]
+    /// directly if you need to know whether any tasks panicked or had to be
+    /// force-aborted.
+    ///
+    /// [`stop_with_timeout`]: Self::stop_with_timeout
+    /// [`start`]: Self::start
     pub async fn stop(&mut self) -> QueueResult<()> {
+        self.stop_with_timeout(self.config.job_timeout).await?;
+        Ok(())
+    }
+
+    /// Stop the worker, waiting up to `timeout` for in-flight jobs to finish
+    /// gracefully before forcibly aborting any worker tasks still running.
+    ///
+    /// Setting `running` to `false` only *signals* the spawned tasks to stop --
+    /// each task only observes the flag at the top of its `while
+    /// *running.read().await` loop (see [`start`]), so a task currently inside
+    /// `handler(job.clone()).await` keeps running until that call returns (or
+    /// times out) and it loops back around. This method waits for that to
+    /// happen naturally, up to `timeout`, so the handler gets a chance to reach
+    /// `queue.complete()`/`queue.fail()` instead of being cancelled mid-flight
+    /// and leaving the job orphaned "Processing" in Redis forever. Only once
+    /// `timeout` elapses are any still-running tasks forcibly aborted as a
+    /// last resort -- at that point whatever job they were mid-handler on is
+    /// still orphaned, exactly as the previous unconditional-abort behavior
+    /// left it.
+    ///
+    /// Returns a [`StopOutcome`] reporting how many worker tasks finished
+    /// gracefully, how many panicked mid-handler during the drain (logged at
+    /// `error` level unconditionally when it happens), and how many had to be
+    /// force-aborted after the grace period elapsed (logged at `warn` level
+    /// unconditionally when it happens). A panicked worker task is *not*
+    /// treated the same as a normal completion: a `JoinError` from
+    /// `join_next()` means the task's handler crashed, not that it returned
+    /// `Ok(())`, and the in-flight job it was processing is left orphaned
+    /// "Processing" with no other signal unless this is observed.
+    ///
+    /// [`start`]: Self::start
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use armature_queue::*;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(mut worker: Worker) -> QueueResult<()> {
+    /// // Give in-flight jobs up to 10 seconds to finish before force-killing them.
+    /// let outcome = worker.stop_with_timeout(Duration::from_secs(10)).await?;
+    /// if outcome.panicked > 0 || outcome.force_aborted > 0 {
+    ///     eprintln!("shutdown was not fully graceful: {:?}", outcome);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_with_timeout(&mut self, timeout: Duration) -> QueueResult<StopOutcome> {
         let mut running = self.running.write().await;
         if !*running {
             return Err(QueueError::WorkerNotRunning);
@@ -430,19 +522,78 @@ impl Worker {
         drop(running);
 
         if self.config.log_execution {
-            println!("[WORKER] Stopping...");
+            println!("[WORKER] Stopping (grace period: {:?})...", timeout);
         }
 
-        // Abort all worker tasks
-        for handle in self.handles.drain(..) {
-            handle.abort();
+        // Wait for tasks to return on their own, up to `timeout` total (not
+        // per-task): each completed task is drained from the `JoinSet` as it
+        // finishes, and we keep waiting -- against a single shared deadline --
+        // for the rest.
+        let mut gracefully_completed = 0usize;
+        let mut panicked = 0usize;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, self.handles.join_next()).await {
+                // A task finished normally on its own; keep waiting for the rest.
+                Ok(Some(Ok(()))) => {
+                    gracefully_completed += 1;
+                    continue;
+                }
+                // A task PANICKED mid-handler during the drain. This must not
+                // be treated the same as a normal completion: the job it was
+                // processing is left orphaned "Processing" in Redis with no
+                // other signal, so this is always logged -- unconditionally,
+                // not gated by `log_execution` -- a panicked handler is not a
+                // routine event worth suppressing.
+                Ok(Some(Err(join_err))) => {
+                    panicked += 1;
+                    error!(
+                        "[WORKER] worker task panicked during graceful shutdown drain: {}",
+                        join_err
+                    );
+                    continue;
+                }
+                // All tasks finished on their own within the grace period.
+                Ok(None) => break,
+                // Grace period elapsed with tasks still outstanding.
+                Err(_) => break,
+            }
         }
+
+        // Last resort: force-abort anything still running once the grace
+        // period has elapsed. `abort_all` + draining is a no-op for tasks that
+        // already finished above.
+        let force_aborted = self.handles.len();
+        if force_aborted > 0 {
+            warn!(
+                "[WORKER] force-aborting {} in-flight worker task(s) after {:?} grace period elapsed",
+                force_aborted, timeout
+            );
+        }
+        self.handles.abort_all();
+        while self.handles.join_next().await.is_some() {}
 
         if self.config.log_execution {
-            println!("[WORKER] Stopped");
+            if force_aborted > 0 {
+                println!(
+                    "[WORKER] Stopped ({}s grace period elapsed; {} task(s) force-aborted)",
+                    timeout.as_secs_f64(),
+                    force_aborted
+                );
+            } else {
+                println!("[WORKER] Stopped (all tasks exited gracefully)");
+            }
         }
 
-        Ok(())
+        Ok(StopOutcome {
+            gracefully_completed,
+            panicked,
+            force_aborted,
+        })
     }
 
     /// Check if the worker is running.

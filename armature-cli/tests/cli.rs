@@ -188,7 +188,31 @@ fn new_cloudrun_produces_tree() {
         root.join("service.yaml").exists() || root.join("cloudbuild.yaml").exists(),
         "cloudrun template must emit a Cloud Run deploy descriptor"
     );
+
+    // The embedded Dockerfile's `ARG BIN_NAME=app` placeholder must actually
+    // be substituted with the project's kebab-case binary name end-to-end —
+    // not just that the file exists (see commands/new.rs's `ARG BIN_NAME`
+    // patch in `create_project_structure`).
+    let dockerfile_contents = fs::read_to_string(root.join("Dockerfile")).unwrap();
+    assert!(
+        dockerfile_contents.contains("ARG BIN_NAME=acme"),
+        "Dockerfile must have 'ARG BIN_NAME=app' substituted with the \
+         project's kebab-case name, got:\n{dockerfile_contents}"
+    );
+    assert!(
+        !dockerfile_contents.contains("ARG BIN_NAME=app"),
+        "Dockerfile must not still contain the unsubstituted 'ARG BIN_NAME=app' \
+         placeholder, got:\n{dockerfile_contents}"
+    );
 }
+
+// Note: there is no `new_azure_container_produces_tree` test alongside the
+// two above. `templates/azure-container/Dockerfile` is a standalone
+// reference example, not an `armature new --template ...` target — there's
+// no "azure-container" entry in `KNOWN_TEMPLATES` (see `commands/new.rs`),
+// so there's no CLI-generated Dockerfile for a test like this to exercise.
+// See the matching note in `armature-cli/src/templates.rs` next to
+// `CLOUDRUN_DOCKERFILE_TEMPLATE`.
 
 #[test]
 fn clap_rejects_unknown_template_before_new_runs() {
@@ -262,6 +286,124 @@ fn generate_dto_injects_fields() {
     assert!(
         dto.contains("pub email: String"),
         "DTO must contain the requested email field, got:\n{dto}"
+    );
+}
+
+#[test]
+fn generate_model_writes_struct_with_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_project(tmp.path());
+
+    armature_in(tmp.path())
+        .args([
+            "generate",
+            "model",
+            "user",
+            "--fields",
+            "email:string,age:i32,active:bool",
+        ])
+        .assert()
+        .success();
+
+    let model_file = tmp.path().join("src/models/user.rs");
+    assert!(
+        model_file.exists(),
+        "expected src/models/user.rs to be written"
+    );
+
+    let model = fs::read_to_string(&model_file).unwrap();
+    assert!(
+        model.contains("pub struct User"),
+        "model must define a User struct, got:\n{model}"
+    );
+    assert!(
+        model.contains("pub email: String"),
+        "model must contain the requested email field, got:\n{model}"
+    );
+    assert!(
+        model.contains("pub age: i32"),
+        "model must contain the requested age field, got:\n{model}"
+    );
+    assert!(
+        model.contains("pub active: bool"),
+        "model must contain the requested active field, got:\n{model}"
+    );
+
+    // src/models/mod.rs must be created/updated to declare the new module.
+    let mod_file = fs::read_to_string(tmp.path().join("src/models/mod.rs")).unwrap();
+    assert!(
+        mod_file.contains("pub mod user;"),
+        "models/mod.rs must declare the new module, got:\n{mod_file}"
+    );
+
+    // No migration was requested, so no migrations directory should exist.
+    assert!(
+        !tmp.path().join("migrations").exists(),
+        "migrations directory should not be created without --migration"
+    );
+}
+
+#[test]
+fn generate_model_with_migration_writes_up_and_down_sql() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_project(tmp.path());
+
+    armature_in(tmp.path())
+        .args([
+            "generate",
+            "model",
+            "post",
+            "--fields",
+            "title:string,published:bool",
+            "--migration",
+        ])
+        .assert()
+        .success();
+
+    assert_exists(tmp.path(), "src/models/post.rs");
+
+    let migrations_dir = tmp.path().join("migrations");
+    assert!(
+        migrations_dir.exists(),
+        "expected a migrations directory to be created"
+    );
+
+    let entries: Vec<_> = fs::read_dir(&migrations_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one migration directory, got: {:?}",
+        entries
+    );
+
+    let migration_dir = &entries[0];
+    let dir_name = migration_dir.file_name().unwrap().to_string_lossy();
+    assert!(
+        dir_name.ends_with("_create_posts"),
+        "migration directory should be named '<timestamp>_create_posts', got: {dir_name}"
+    );
+
+    let up_sql = fs::read_to_string(migration_dir.join("up.sql")).unwrap();
+    assert!(
+        up_sql.contains("CREATE TABLE posts"),
+        "up.sql must create the posts table, got:\n{up_sql}"
+    );
+    assert!(
+        up_sql.contains("title VARCHAR NOT NULL"),
+        "up.sql must contain the title column, got:\n{up_sql}"
+    );
+    assert!(
+        up_sql.contains("published BOOLEAN NOT NULL"),
+        "up.sql must contain the published column, got:\n{up_sql}"
+    );
+
+    let down_sql = fs::read_to_string(migration_dir.join("down.sql")).unwrap();
+    assert!(
+        down_sql.contains("DROP TABLE IF EXISTS posts"),
+        "down.sql must drop the posts table, got:\n{down_sql}"
     );
 }
 

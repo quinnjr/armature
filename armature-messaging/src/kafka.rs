@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::stream::FuturesOrdered;
 use rdkafka::Message as KafkaMessage;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::{Header, Headers, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::{Offset, TopicPartitionList};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -203,17 +205,10 @@ impl MessageBroker for KafkaBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        // `concurrency` is not yet implemented for any backend: messages are
-        // dispatched to the handler sequentially. Warn so a caller who set it
-        // is not silently misled into thinking they got parallel dispatch.
-        if let Some(concurrency) = options.concurrency
-            && concurrency > 1
-        {
-            warn!(
-                concurrency,
-                "SubscribeOptions::concurrency is not implemented for Kafka; messages are dispatched sequentially"
-            );
-        }
+        // Bounds how many per-message handler invocations may run
+        // concurrently (see `consume_messages`). Defaults to 1, which
+        // reproduces the previous strictly-sequential dispatch.
+        let concurrency = options.concurrency.unwrap_or(1).max(1);
 
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &self.config.base.url);
@@ -326,7 +321,15 @@ impl MessageBroker for KafkaBroker {
         let topic_owned = topic.to_string();
         let ack_mode = options.ack_mode;
         tokio::spawn(async move {
-            consume_messages(consumer, handler, &topic_owned, ack_mode, active).await;
+            consume_messages(
+                consumer,
+                handler,
+                &topic_owned,
+                ack_mode,
+                active,
+                concurrency,
+            )
+            .await;
         });
 
         info!(topic = topic, group_id = %group_id, "Subscribed to Kafka topic");
@@ -364,12 +367,23 @@ fn derive_enable_auto_commit(ack_mode: AckMode, config: &KafkaConfig) -> bool {
     }
 }
 
+/// The outcome of dispatching one message to the handler, carrying enough
+/// owned data (topic/partition/offset) to commit its offset without holding
+/// on to the borrowed `rdkafka` message.
+struct KafkaDispatchOutcome {
+    topic: String,
+    partition: i32,
+    offset: i64,
+    result: Result<ProcessingResult, MessagingError>,
+}
+
 async fn consume_messages(
     consumer: Arc<StreamConsumer>,
     handler: Arc<dyn MessageHandler>,
     topic: &str,
     ack_mode: AckMode,
     active: Arc<AtomicBool>,
+    concurrency: usize,
 ) {
     use futures_util::StreamExt;
 
@@ -392,61 +406,155 @@ async fn consume_messages(
     // messages (handlers must be idempotent), but it never skips one.
     let mut commit_halted = false;
 
-    while active.load(Ordering::SeqCst) {
-        match stream.next().await {
-            Some(Ok(borrowed_message)) => {
-                let message = kafka_message_to_message(&borrowed_message, topic);
+    // Bounds how many handler invocations run concurrently. Handler futures
+    // are pushed onto `in_flight` (capped at `concurrency` entries at a
+    // time) and polled together, but `FuturesOrdered` always *yields* them
+    // in push order regardless of which finishes first. That is essential
+    // here: per rdkafka's own docs, `Consumer::commit`/`commit_message`
+    // commit a per-partition *watermark* and must "only [be used] if you are
+    // processing messages in order," so the `commit_halted` bookkeeping
+    // below is applied strictly in dispatch order even though the handler
+    // futures themselves run concurrently underneath.
+    let mut in_flight: FuturesOrdered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = KafkaDispatchOutcome> + Send>>,
+    > = FuturesOrdered::new();
+    let mut stream_ended = false;
 
-                match handler.handle(message).await {
-                    Ok(ProcessingResult::Success) => {
-                        // Commit the offset explicitly in manual ack mode, since
-                        // `enable.auto.commit` is disabled for that mode and
-                        // rdkafka will never advance the consumer group's offset
-                        // on its own, causing redelivery on restart. Skip once a
-                        // prior message has failed (see `commit_halted` above).
-                        if ack_mode == AckMode::Manual
-                            && !commit_halted
-                            && let Err(e) =
-                                consumer.commit_message(&borrowed_message, CommitMode::Async)
-                        {
-                            error!(error = %e, "Failed to commit Kafka offset");
-                        }
+    loop {
+        if in_flight.is_empty() && (stream_ended || !active.load(Ordering::SeqCst)) {
+            // Flip `active` false right as the loop is genuinely about to
+            // exit for good (not on a transient/recoverable path - a stream
+            // error just logs and keeps looping above), so `is_active()`
+            // stops reporting `true` once the background task has actually
+            // died. Matches RabbitMQ's consume loop, which does the same on
+            // its own stream-ended/fatal-error exits.
+            active.store(false, Ordering::SeqCst);
+            break;
+        }
+
+        let can_poll_stream =
+            !stream_ended && active.load(Ordering::SeqCst) && in_flight.len() < concurrency;
+
+        tokio::select! {
+            item = stream.next(), if can_poll_stream => {
+                match item {
+                    Some(Ok(borrowed_message)) => {
+                        let message = kafka_message_to_message(&borrowed_message, topic);
+                        let msg_topic = borrowed_message.topic().to_string();
+                        let partition = borrowed_message.partition();
+                        let offset = borrowed_message.offset();
+                        let handler = handler.clone();
+
+                        in_flight.push_back(Box::pin(async move {
+                            let result = handler.handle(message).await;
+                            KafkaDispatchOutcome {
+                                topic: msg_topic,
+                                partition,
+                                offset,
+                                result,
+                            }
+                        }));
                     }
-                    Ok(ProcessingResult::Retry) => {
-                        if ack_mode == AckMode::Manual {
-                            commit_halted = true;
-                            warn!(
-                                "Kafka message not acknowledged (retry requested); halting further offset commits so it and later messages are redelivered on restart"
-                            );
-                        } else {
-                            warn!("Kafka does not support message retry - message will be lost");
-                        }
+                    Some(Err(e)) => {
+                        error!(error = %e, "Kafka consumer error");
                     }
-                    Ok(ProcessingResult::DeadLetter | ProcessingResult::Reject) => {
-                        if ack_mode == AckMode::Manual {
-                            commit_halted = true;
-                            debug!(
-                                "Message rejected; halting further Kafka offset commits to avoid skipping it"
-                            );
-                        } else {
-                            debug!("Message rejected");
-                        }
-                    }
-                    Err(e) => {
-                        if ack_mode == AckMode::Manual {
-                            commit_halted = true;
-                        }
-                        error!(error = %e, "Message handler error");
+                    None => {
+                        debug!("Consumer stream ended");
+                        stream_ended = true;
                     }
                 }
             }
-            Some(Err(e)) => {
-                error!(error = %e, "Kafka consumer error");
+            outcome = in_flight.next(), if !in_flight.is_empty() => {
+                if let Some(outcome) = outcome {
+                    apply_kafka_outcome(consumer.as_ref(), ack_mode, &mut commit_halted, outcome).await;
+                }
             }
-            None => {
-                debug!("Consumer stream ended");
-                break;
+        }
+    }
+}
+
+/// Abstraction over "commit an offset," used so [`apply_kafka_outcome`]'s
+/// dispatch-order guarantee can be unit-tested against a fake committer that
+/// records the sequence of offsets it was asked to commit, instead of
+/// requiring a live Kafka broker (`rdkafka::consumer::Consumer::commit`
+/// talks to the broker). `StreamConsumer` implements this by delegating to
+/// that real method; production code paths are unaffected.
+trait KafkaCommit {
+    fn commit(&self, tpl: &TopicPartitionList, mode: CommitMode)
+    -> rdkafka::error::KafkaResult<()>;
+}
+
+impl KafkaCommit for StreamConsumer {
+    fn commit(
+        &self,
+        tpl: &TopicPartitionList,
+        mode: CommitMode,
+    ) -> rdkafka::error::KafkaResult<()> {
+        Consumer::commit(self, tpl, mode)
+    }
+}
+
+/// Apply one message's handler outcome: ack/commit on success, or set
+/// `commit_halted` on failure so later offsets stop being committed (see the
+/// at-least-once safety comment in `consume_messages`). Called strictly in
+/// original dispatch order, even when handlers ran concurrently.
+async fn apply_kafka_outcome<C: KafkaCommit>(
+    consumer: &C,
+    ack_mode: AckMode,
+    commit_halted: &mut bool,
+    outcome: KafkaDispatchOutcome,
+) {
+    match outcome.result {
+        Ok(ProcessingResult::Success) => {
+            // Commit the offset explicitly in manual ack mode, since
+            // `enable.auto.commit` is disabled for that mode and rdkafka
+            // will never advance the consumer group's offset on its own,
+            // causing redelivery on restart. Skip once a prior message has
+            // failed (see `commit_halted` above).
+            if ack_mode == AckMode::Manual && !*commit_halted {
+                let mut tpl = TopicPartitionList::new();
+                let add_result = tpl.add_partition_offset(
+                    &outcome.topic,
+                    outcome.partition,
+                    Offset::Offset(outcome.offset + 1),
+                );
+                match add_result {
+                    Ok(()) => {
+                        if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                            error!(error = %e, "Failed to commit Kafka offset");
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to build Kafka commit offset");
+                    }
+                }
             }
+        }
+        Ok(ProcessingResult::Retry) => {
+            if ack_mode == AckMode::Manual {
+                *commit_halted = true;
+                warn!(
+                    "Kafka message not acknowledged (retry requested); halting further offset commits so it and later messages are redelivered on restart"
+                );
+            } else {
+                warn!("Kafka does not support message retry - message will be lost");
+            }
+        }
+        Ok(ProcessingResult::DeadLetter | ProcessingResult::Reject) => {
+            if ack_mode == AckMode::Manual {
+                *commit_halted = true;
+                debug!(
+                    "Message rejected; halting further Kafka offset commits to avoid skipping it"
+                );
+            } else {
+                debug!("Message rejected");
+            }
+        }
+        Err(e) => {
+            if ack_mode == AckMode::Manual {
+                *commit_halted = true;
+            }
+            error!(error = %e, "Message handler error");
         }
     }
 }
@@ -537,6 +645,133 @@ impl Subscription for KafkaSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+    use std::sync::Mutex as StdMutex;
+
+    /// Records the sequence of offsets it is asked to commit, so tests can
+    /// assert commit ordering without a live Kafka broker.
+    #[derive(Default)]
+    struct FakeCommitter {
+        committed: StdMutex<Vec<i64>>,
+    }
+
+    impl KafkaCommit for FakeCommitter {
+        fn commit(
+            &self,
+            tpl: &TopicPartitionList,
+            _mode: CommitMode,
+        ) -> rdkafka::error::KafkaResult<()> {
+            for elem in tpl.elements() {
+                if let Offset::Offset(offset) = elem.offset() {
+                    self.committed.lock().unwrap().push(offset);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Regression test for the finding that Kafka's `concurrency > 1` path
+    /// (handlers dispatched concurrently via `FuturesOrdered`) had zero test
+    /// coverage of the ordering guarantee offset-commit correctness depends
+    /// on. This hand-builds a `FuturesOrdered` exactly like
+    /// `consume_messages` does, with handler completion order intentionally
+    /// scrambled (message 0's handler is the slowest, so it finishes last
+    /// even though it was dispatched first), and asserts both that
+    /// `FuturesOrdered::next()` still yields outcomes in original dispatch
+    /// order and that `apply_kafka_outcome` commits offsets in that same
+    /// order.
+    #[tokio::test]
+    async fn concurrent_handlers_commit_offsets_in_original_dispatch_order() {
+        let delays_ms = [300u64, 10, 100, 50];
+        let mut in_flight: FuturesOrdered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = KafkaDispatchOutcome> + Send>>,
+        > = FuturesOrdered::new();
+
+        for (i, delay) in delays_ms.into_iter().enumerate() {
+            let offset = i as i64;
+            in_flight.push_back(Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                KafkaDispatchOutcome {
+                    topic: "test-topic".to_string(),
+                    partition: 0,
+                    offset,
+                    result: Ok(ProcessingResult::Success),
+                }
+            }));
+        }
+
+        let committer = FakeCommitter::default();
+        let mut commit_halted = false;
+        let mut observed_order = Vec::new();
+
+        while let Some(outcome) = in_flight.next().await {
+            observed_order.push(outcome.offset);
+            apply_kafka_outcome(&committer, AckMode::Manual, &mut commit_halted, outcome).await;
+        }
+
+        assert_eq!(
+            observed_order,
+            vec![0, 1, 2, 3],
+            "FuturesOrdered must yield outcomes in original dispatch order even when \
+             handler completion order is scrambled"
+        );
+        assert_eq!(
+            *committer.committed.lock().unwrap(),
+            vec![1, 2, 3, 4],
+            "commits must be applied strictly in dispatch order (offset+1 per outcome)"
+        );
+    }
+
+    /// Companion to the above: an early message that fails (here, requests
+    /// retry) must halt commits for *later* messages even when those later
+    /// messages' handlers finish first. If completion order (rather than
+    /// dispatch order) controlled commit application, message 1's offset
+    /// would be committed before message 0's failure was observed, silently
+    /// skipping message 0 on redelivery - exactly the data-loss hazard
+    /// `commit_halted` exists to prevent.
+    #[tokio::test]
+    async fn early_failure_halts_commits_for_later_successful_messages_despite_finishing_first() {
+        // Message 0 fails but is slow (finishes second); message 1 succeeds
+        // but is fast (finishes first).
+        let specs: Vec<(u64, Result<ProcessingResult, MessagingError>)> = vec![
+            (200, Ok(ProcessingResult::Retry)),
+            (10, Ok(ProcessingResult::Success)),
+        ];
+
+        let mut in_flight: FuturesOrdered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = KafkaDispatchOutcome> + Send>>,
+        > = FuturesOrdered::new();
+
+        for (i, (delay, result)) in specs.into_iter().enumerate() {
+            let offset = i as i64;
+            in_flight.push_back(Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                KafkaDispatchOutcome {
+                    topic: "test-topic".to_string(),
+                    partition: 0,
+                    offset,
+                    result,
+                }
+            }));
+        }
+
+        let committer = FakeCommitter::default();
+        let mut commit_halted = false;
+
+        while let Some(outcome) = in_flight.next().await {
+            apply_kafka_outcome(&committer, AckMode::Manual, &mut commit_halted, outcome).await;
+        }
+
+        assert!(
+            commit_halted,
+            "the failed message must halt further commits"
+        );
+        assert!(
+            committer.committed.lock().unwrap().is_empty(),
+            "no offsets should be committed once an earlier-dispatched message failed, \
+             even though the later message's handler finished first"
+        );
+    }
 
     #[test]
     fn manual_ack_mode_always_disables_auto_commit() {

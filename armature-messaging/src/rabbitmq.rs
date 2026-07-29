@@ -10,12 +10,14 @@ use lapin::{
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, options::*,
     types::FieldTable, uri::AMQPUri,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::{
     AckMode, Message, MessageBroker, MessageHandler, MessagingConfig, MessagingError,
     ProcessingResult, PublishOptions, SubscribeOptions, Subscription, config::RabbitMqConfig,
+    dispatch,
 };
 
 /// RabbitMQ message broker
@@ -285,16 +287,10 @@ impl MessageBroker for RabbitMqBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        // `concurrency` is not yet implemented: messages are dispatched to the
-        // handler sequentially. Warn rather than silently ignore a non-1 value.
-        if let Some(concurrency) = options.concurrency
-            && concurrency > 1
-        {
-            warn!(
-                concurrency,
-                "SubscribeOptions::concurrency is not implemented for RabbitMQ; messages are dispatched sequentially"
-            );
-        }
+        // Bounds how many per-message handler invocations may run
+        // concurrently (see `consume_messages`). Defaults to 1, which
+        // reproduces the previous strictly-sequential dispatch.
+        let concurrency = dispatch::concurrency_or_default(options.concurrency);
 
         // Draw a pre-warmed channel from the pool if one is available;
         // otherwise fall back to creating a fresh one on demand.
@@ -342,12 +338,14 @@ impl MessageBroker for RabbitMqBroker {
             .await?;
 
         let active = Arc::new(AtomicBool::new(true));
+        let tasks = Arc::new(Mutex::new(JoinSet::new()));
         let subscription_id = uuid::Uuid::new_v4().to_string();
         let subscription = RabbitMqSubscription {
             topic: topic.to_string(),
             consumer_tag: consumer_tag.clone(),
             channel: channel.clone(),
             active: active.clone(),
+            tasks: tasks.clone(),
             id: subscription_id.clone(),
             channels: self.channels.clone(),
         };
@@ -362,8 +360,21 @@ impl MessageBroker for RabbitMqBroker {
         // Spawn consumer task
         let topic_owned = topic.to_string();
         let ack_mode = options.ack_mode;
+        let consume_config = ConsumeConfig {
+            channel,
+            ack_mode,
+            concurrency,
+        };
         tokio::spawn(async move {
-            consume_messages(consumer, handler, channel, &topic_owned, ack_mode, active).await;
+            consume_messages(
+                consumer,
+                handler,
+                &topic_owned,
+                active,
+                tasks,
+                consume_config,
+            )
+            .await;
         });
 
         info!(queue = topic, consumer_tag = %consumer_tag, "Subscribed to queue");
@@ -396,83 +407,134 @@ impl MessageBroker for RabbitMqBroker {
     }
 }
 
+/// Bundles `consume_messages`' connection/policy parameters (as opposed to
+/// the per-call `handler`/`topic`/`active`/`tasks` parameters) into one value
+/// so the function stays under clippy's argument-count limit.
+struct ConsumeConfig {
+    channel: Channel,
+    ack_mode: AckMode,
+    concurrency: usize,
+}
+
 async fn consume_messages(
     mut consumer: Consumer,
     handler: Arc<dyn MessageHandler>,
-    channel: Channel,
     topic: &str,
-    ack_mode: AckMode,
     active: Arc<AtomicBool>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
+    consume_config: ConsumeConfig,
 ) {
+    let ConsumeConfig {
+        channel,
+        ack_mode,
+        concurrency,
+    } = consume_config;
+
+    // Bounds how many per-message handler invocations may run concurrently.
+    // A permit is acquired before spawning each message's task (tracked in
+    // `tasks` so `unsubscribe` can drain outstanding handlers on shutdown -
+    // see `dispatch::spawn_bounded`) and released when that task finishes, so
+    // at most `concurrency` handlers are ever in flight at once. `concurrency
+    // == 1` reproduces the previous strictly-sequential dispatch. Acking is
+    // per-delivery-tag, so unlike Kafka's watermark offset commits,
+    // acks/nacks/rejects completing out of dispatch order is safe.
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+
     while active.load(Ordering::SeqCst) {
         match consumer.next().await {
             Some(Ok(delivery)) => {
                 let message = delivery_to_message(&delivery, topic);
                 let delivery_tag = delivery.delivery_tag;
+                let handler = handler.clone();
+                let channel = channel.clone();
 
-                match handler.handle(message).await {
-                    Ok(result) => {
-                        if ack_mode == AckMode::Auto || ack_mode == AckMode::Manual {
-                            match result {
-                                ProcessingResult::Success => {
-                                    if let Err(e) = channel
-                                        .basic_ack(delivery_tag, BasicAckOptions::default())
-                                        .await
-                                    {
-                                        error!(error = %e, "Failed to ack message");
-                                    }
-                                }
-                                ProcessingResult::Retry => {
-                                    if let Err(e) = channel
-                                        .basic_nack(
-                                            delivery_tag,
-                                            BasicNackOptions {
-                                                requeue: true,
-                                                ..Default::default()
-                                            },
-                                        )
-                                        .await
-                                    {
-                                        error!(error = %e, "Failed to nack message for retry");
-                                    }
-                                }
-                                ProcessingResult::DeadLetter | ProcessingResult::Reject => {
-                                    if let Err(e) = channel
-                                        .basic_reject(
-                                            delivery_tag,
-                                            BasicRejectOptions { requeue: false },
-                                        )
-                                        .await
-                                    {
-                                        error!(error = %e, "Failed to reject message");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Message handler error");
-                        if ack_mode != AckMode::None {
-                            let _ = channel
-                                .basic_nack(
-                                    delivery_tag,
-                                    BasicNackOptions {
-                                        requeue: true,
-                                        ..Default::default()
-                                    },
-                                )
-                                .await;
-                        }
-                    }
-                }
+                dispatch::spawn_bounded(&semaphore, &tasks, async move {
+                    handle_delivery(&handler, &channel, message, delivery_tag, ack_mode).await;
+                })
+                .await;
             }
             Some(Err(e)) => {
-                error!(error = %e, "Consumer error");
+                if e.can_be_recovered() {
+                    // Transient/recoverable error (per lapin's own
+                    // `Error::can_be_recovered`, e.g. a channel-state hiccup
+                    // that doesn't tear down the connection): log and keep
+                    // consuming, mirroring Kafka's posture of not ending the
+                    // loop for non-fatal stream errors.
+                    warn!(error = %e, "Recoverable RabbitMQ consumer error, continuing to consume");
+                    continue;
+                }
+                error!(error = %e, "Fatal RabbitMQ consumer error, stopping consumption");
+                active.store(false, Ordering::SeqCst);
                 break;
             }
             None => {
                 debug!("Consumer stream ended");
+                active.store(false, Ordering::SeqCst);
                 break;
+            }
+        }
+    }
+}
+
+/// Run the handler for a single delivery and ack/nack/reject it based on the
+/// result. Broken out of `consume_messages` so it can be spawned as an
+/// independent per-message task under the concurrency semaphore.
+async fn handle_delivery(
+    handler: &Arc<dyn MessageHandler>,
+    channel: &Channel,
+    message: Message,
+    delivery_tag: u64,
+    ack_mode: AckMode,
+) {
+    match handler.handle(message).await {
+        Ok(result) => {
+            if ack_mode == AckMode::Auto || ack_mode == AckMode::Manual {
+                match result {
+                    ProcessingResult::Success => {
+                        if let Err(e) = channel
+                            .basic_ack(delivery_tag, BasicAckOptions::default())
+                            .await
+                        {
+                            error!(error = %e, "Failed to ack message");
+                        }
+                    }
+                    ProcessingResult::Retry => {
+                        if let Err(e) = channel
+                            .basic_nack(
+                                delivery_tag,
+                                BasicNackOptions {
+                                    requeue: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                        {
+                            error!(error = %e, "Failed to nack message for retry");
+                        }
+                    }
+                    ProcessingResult::DeadLetter | ProcessingResult::Reject => {
+                        if let Err(e) = channel
+                            .basic_reject(delivery_tag, BasicRejectOptions { requeue: false })
+                            .await
+                        {
+                            error!(error = %e, "Failed to reject message");
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Message handler error");
+            if ack_mode != AckMode::None {
+                let _ = channel
+                    .basic_nack(
+                        delivery_tag,
+                        BasicNackOptions {
+                            requeue: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
             }
         }
     }
@@ -522,6 +584,9 @@ pub struct RabbitMqSubscription {
     consumer_tag: String,
     channel: Channel,
     active: Arc<AtomicBool>,
+    /// In-flight per-message handler tasks, drained (with a bounded timeout)
+    /// on `unsubscribe` instead of being abandoned.
+    tasks: Arc<Mutex<JoinSet<()>>>,
     /// Id under which this subscription's channel is tracked in
     /// `RabbitMqBroker::channels`.
     id: String,
@@ -540,6 +605,12 @@ impl Subscription for RabbitMqSubscription {
                 BasicCancelOptions::default(),
             )
             .await?;
+
+        // Drain in-flight handler tasks *before* closing the channel below -
+        // `handle_delivery` still needs a live channel to ack/nack/reject
+        // through while it finishes.
+        dispatch::drain_with_timeout(&self.tasks, dispatch::DEFAULT_DRAIN_TIMEOUT, "rabbitmq")
+            .await;
 
         // Drop the tracked channel from the registry and close it so neither
         // the map nor the broker's open-channel count grows unbounded.

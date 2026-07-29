@@ -17,10 +17,10 @@ on:
       benchmark:
         description: 'Benchmark to profile'
         required: false
-        default: 'framework_comparison'
+        default: 'internal_overhead_benchmarks'
         type: choice
         options:
-          - framework_comparison
+          - internal_overhead_benchmarks
           - core_benchmarks
           - json_benchmarks
           - simd_parser_benchmarks
@@ -81,7 +81,7 @@ jobs:
       - name: Build release binaries
         run: |
           cargo build --release --features full
-          cargo build --release --bench framework_comparison --features full
+          cargo build --release --bench internal_overhead_benchmarks --features full
           cargo build --release --bench core_benchmarks --features full 2>/dev/null || true
           cargo build --release --bench json_benchmarks --features full 2>/dev/null || true
 
@@ -91,19 +91,19 @@ jobs:
           echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || true
 
-      - name: Generate framework_comparison flamegraph
-        if: ${{ github.event.inputs.benchmark == 'framework_comparison' || github.event.inputs.benchmark == 'all' || github.event_name != 'workflow_dispatch' }}
+      - name: Generate internal_overhead_benchmarks flamegraph
+        if: ${{ github.event.inputs.benchmark == 'internal_overhead_benchmarks' || github.event.inputs.benchmark == 'all' || github.event_name != 'workflow_dispatch' }}
         run: |
           mkdir -p flamegraphs
-          
+
           # Try to use perf-based flamegraph first
           timeout ${{ github.event.inputs.duration || '30' }}s \
-            cargo flamegraph --bench framework_comparison --features full \
-            -o flamegraphs/framework_comparison.svg \
+            cargo flamegraph --bench internal_overhead_benchmarks --features full \
+            -o flamegraphs/internal_overhead_benchmarks.svg \
             -- --bench "routing" 2>&1 || {
               # Fallback: use dtrace/sampling if perf not available
               echo "Perf unavailable, trying alternative profiling..."
-              cargo bench --bench framework_comparison --features full -- --profile-time 10 2>&1 | tee flamegraphs/framework_comparison.txt || true
+              cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 10 2>&1 | tee flamegraphs/internal_overhead_benchmarks.txt || true
             }
 
       - name: Generate core_benchmarks flamegraph
@@ -244,13 +244,13 @@ jobs:
         run: |
           cargo build --release --features full
           # Create a simple test to profile
-          cargo bench --bench framework_comparison --features full -- --profile-time 5 2>&1 > /tmp/pr-profile.txt || true
+          cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 5 2>&1 > /tmp/pr-profile.txt || true
 
       - name: Profile base branch
         working-directory: base
         run: |
           cargo build --release --features full || true
-          cargo bench --bench framework_comparison --features full -- --profile-time 5 2>&1 > /tmp/base-profile.txt || true
+          cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 5 2>&1 > /tmp/base-profile.txt || true
 
       - name: Generate diff summary
         run: |

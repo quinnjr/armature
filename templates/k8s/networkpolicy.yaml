@@ -4,15 +4,15 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Values.name | default "armature-api" }}
-  namespace: {{ .Values.namespace | default "armature" }}
+  name: armature-api
+  namespace: armature
   labels:
-    app.kubernetes.io/name: {{ .Values.name | default "armature-api" }}
+    app.kubernetes.io/name: armature-api
     app.kubernetes.io/managed-by: armature-cli
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Values.name | default "armature-api" }}
+      app.kubernetes.io/name: armature-api
   policyTypes:
     - Ingress
     - Egress

@@ -49,14 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ✅ Cached 2 users and 1 post with tags");
 
     // Query by tags
-    let user_keys = tagged_cache.get_keys_by_tag("users").await;
+    let user_keys = tagged_cache.get_keys_by_tag("users").await?;
     println!("   📊 Keys with 'users' tag: {} entries", user_keys.len());
     for key in &user_keys {
         println!("      - {}", key);
     }
     println!();
 
-    let admin_keys = tagged_cache.get_keys_by_tag("admins").await;
+    let admin_keys = tagged_cache.get_keys_by_tag("admins").await?;
     println!("   📊 Keys with 'admins' tag: {} entries", admin_keys.len());
     for key in &admin_keys {
         println!("      - {}", key);

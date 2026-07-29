@@ -326,9 +326,21 @@ fn split_segments(path: &str) -> impl Iterator<Item = &str> {
 fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, String>> {
     // First pass: validate the segment count and static segments, and count
     // how many parameters the pattern declares. No allocation happens here.
+    //
+    // A `*name` segment is a catch-all: it consumes every remaining path
+    // segment (zero or more) and, matching `CompiledRoute::matches`, ends
+    // pattern validation right there (any pattern segments after a
+    // catch-all are unreachable, same as the compiled matcher).
     let mut seen = 0usize;
     let mut param_count = 0usize;
+    let mut catch_all_at: Option<usize> = None;
     for (i, pattern_part) in split_segments(pattern).enumerate() {
+        if pattern_part.starts_with('*') {
+            catch_all_at = Some(i);
+            param_count += 1;
+            break;
+        }
+
         // Pattern has more segments than the request path
         let path_part = path_parts.get(i)?;
         if pattern_part.starts_with(':') {
@@ -340,8 +352,19 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, Stri
         seen = i + 1;
     }
 
-    // Pattern must consume every request-path segment
-    if seen != path_parts.len() {
+    if let Some(idx) = catch_all_at {
+        // Everything before the catch-all must already be present in the
+        // request path; the catch-all itself may consume zero segments. The
+        // per-segment loop above already validated this: for every `i < idx`
+        // it early-returns `None` via `path_parts.get(i)?` if that index is
+        // missing, so by the time we reach here `path_parts.len() >= idx`
+        // always holds. Documented as an invariant rather than re-checked.
+        debug_assert!(
+            path_parts.len() >= idx,
+            "catch-all index validated during first pass"
+        );
+    } else if seen != path_parts.len() {
+        // Pattern must consume every request-path segment
         return None;
     }
 
@@ -349,7 +372,13 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, Stri
     let mut params = HashMap::with_capacity(param_count);
     if param_count > 0 {
         for (i, pattern_part) in split_segments(pattern).enumerate() {
-            if let Some(param_name) = pattern_part.strip_prefix(':') {
+            if let Some(name) = pattern_part.strip_prefix('*') {
+                // Catch-all: join all remaining path segments, matching
+                // `CompiledRoute::extract_params`'s joining convention.
+                let name = if name.is_empty() { "*" } else { name };
+                params.insert(name.to_string(), path_parts[i..].join("/"));
+                break;
+            } else if let Some(param_name) = pattern_part.strip_prefix(':') {
                 params.insert(param_name.to_string(), path_parts[i].to_string());
             }
         }
@@ -515,6 +544,76 @@ mod tests {
         let params = parse_query_string(query);
         assert!(params.contains_key("debug"));
         assert_eq!(params.get("debug"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn test_match_path_catch_all() {
+        // Mirrors route_cache.rs's `test_compiled_route_catch_all`, but
+        // exercises the linear `Router`'s own matcher directly.
+        let pattern = "/files/*path";
+
+        assert!(match_path_str(pattern, "/files/docs").is_some());
+
+        let result = match_path_str(pattern, "/files/docs/readme.md");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+
+        // An exact prefix match (no trailing segments) should still match,
+        // with the catch-all param extracted as an empty string.
+        let result = match_path_str(pattern, "/files");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().get("path"), Some(&String::new()));
+
+        // A path that doesn't even reach the static prefix must not match.
+        assert!(match_path_str(pattern, "/other").is_none());
+    }
+
+    #[test]
+    fn test_match_path_catch_all_with_preceding_param() {
+        // A catch-all preceded by a named `:param` segment must extract both
+        // the param and the catch-all correctly.
+        let pattern = "/users/:id/files/*path";
+        let result = match_path_str(pattern, "/users/42/files/a/b");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("id"), Some(&"42".to_string()));
+        assert_eq!(params.get("path"), Some(&"a/b".to_string()));
+
+        // A bare, unnamed catch-all (`*` with no name) stores its captured
+        // value under the literal key `"*"` (see the `name.is_empty()`
+        // fallback in `match_path`).
+        let pattern = "/files/*";
+        let result = match_path_str(pattern, "/files/a/b/c");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("*"), Some(&"a/b/c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_router_route_catch_all() {
+        // Mirrors route_cache.rs's `test_from_router_catch_all`, but calls
+        // `Router::route` directly instead of going through
+        // `OptimizedRouter`, to make sure the linear router's own catch-all
+        // handling (not just the compiled fast path) works end to end.
+        async fn echo_path(req: HttpRequest) -> Result<HttpResponse, Error> {
+            let p = req.path_params.get("path").cloned().unwrap_or_default();
+            Ok(HttpResponse::ok().with_body(p.into_bytes()))
+        }
+
+        let mut router = Router::new();
+        router.get("/files/*path", echo_path);
+
+        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let response = router.route(req).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.into_body_bytes().as_ref(), b"docs/readme.md");
+
+        // `match_route` (used for lookup without dispatch) must agree.
+        let (_, params) = router
+            .match_route("GET", "/files/docs/readme.md")
+            .expect("catch-all route should match via match_route");
+        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
     }
 
     #[test]

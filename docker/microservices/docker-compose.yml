@@ -14,6 +14,20 @@
 #   docker compose up -d
 #   Gateway: http://localhost:8000
 #   Kong Admin: http://localhost:8001
+#
+# NOTE — demo simplification:
+#   User/Product/Order/Notification "services" below are illustrative only.
+#   docker/microservices/Dockerfile.service does not currently branch on the
+#   SERVICE_NAME build arg — it always builds and runs examples/rest_api.rs.
+#   So all four containers currently run byte-identical code; the distinct
+#   service blocks exist to demonstrate the deployment topology (Kong
+#   routing, per-service scaling/resource limits, service discovery via DNS
+#   names, dependency wiring) rather than genuinely different service
+#   implementations. SERVICE_NAME is kept (it's still useful for container
+#   naming/labels) but env vars that examples/rest_api.rs never reads
+#   (ELASTICSEARCH_URL, SMTP_HOST/PORT, RABBITMQ_URL) have been removed
+#   rather than left in as unused config. Wiring real per-service binaries
+#   is a follow-up.
 
 version: "3.8"
 
@@ -60,6 +74,7 @@ services:
   # User Service
   # ============================================
   user-service:
+    # See the NOTE at the top of this file re: SERVICE_NAME/unused env vars.
     build:
       context: ../..
       dockerfile: docker/microservices/Dockerfile.service
@@ -88,6 +103,7 @@ services:
   # Product Service
   # ============================================
   product-service:
+    # See the NOTE at the top of this file re: SERVICE_NAME/unused env vars.
     build:
       context: ../..
       dockerfile: docker/microservices/Dockerfile.service
@@ -99,7 +115,6 @@ services:
       SERVICE_NAME: product-service
       PORT: 3000
       DATABASE_URL: postgres://armature:armature@postgres:5432/products
-      ELASTICSEARCH_URL: http://elasticsearch:9200
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,6 +131,7 @@ services:
   # Order Service
   # ============================================
   order-service:
+    # See the NOTE at the top of this file re: SERVICE_NAME/unused env vars.
     build:
       context: ../..
       dockerfile: docker/microservices/Dockerfile.service
@@ -127,7 +143,6 @@ services:
       SERVICE_NAME: order-service
       PORT: 3000
       DATABASE_URL: postgres://armature:armature@postgres:5432/orders
-      RABBITMQ_URL: amqp://armature:armature@rabbitmq:5672
       USER_SERVICE_URL: http://user-service:3000
       PRODUCT_SERVICE_URL: http://product-service:3000
     depends_on:
@@ -146,6 +161,7 @@ services:
   # Notification Service
   # ============================================
   notification-service:
+    # See the NOTE at the top of this file re: SERVICE_NAME/unused env vars.
     build:
       context: ../..
       dockerfile: docker/microservices/Dockerfile.service
@@ -156,9 +172,6 @@ services:
       <<: *armature-env
       SERVICE_NAME: notification-service
       PORT: 3000
-      RABBITMQ_URL: amqp://armature:armature@rabbitmq:5672
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
     depends_on:
       rabbitmq:
         condition: service_healthy

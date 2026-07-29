@@ -626,6 +626,36 @@ mod server {
         Ok(())
     }
 
+    /// Convert a resolved HTTP/3 request into an Armature [`HttpRequest`],
+    /// copying method, path, headers, and — critically — percent-decoded
+    /// query parameters (mirrors `application.rs::handle_request`'s hyper
+    /// conversion, which extracts `req.uri().query()` and decodes it via
+    /// [`crate::simd_parser::parse_query_string_decoded`] before routing).
+    ///
+    /// Split out from [`handle_request_resolver`] so the conversion is
+    /// unit-testable without a live QUIC connection.
+    pub(super) fn build_armature_request(request: &http::Request<()>) -> HttpRequest {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let mut armature_req = HttpRequest::new(method, path);
+
+        // Parse and percent-decode the query string, if present. Without
+        // this, `?a=b` on a QUIC request was silently dropped: the request
+        // never reached the router with `query_params` populated.
+        if let Some(query) = request.uri().query() {
+            armature_req.query_params = crate::simd_parser::parse_query_string_decoded(query);
+        }
+
+        // Copy headers
+        for (name, value) in request.headers() {
+            if let Ok(v) = value.to_str() {
+                armature_req.headers.insert(name.to_string(), v.to_string());
+            }
+        }
+
+        armature_req
+    }
+
     /// Handle a request using the RequestResolver API (h3 0.0.8+)
     async fn handle_request_resolver(
         resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
@@ -641,17 +671,9 @@ mod server {
 
         stats.request_processed();
 
-        // Convert to Armature request
-        let method = request.method().to_string();
-        let path = request.uri().path().to_string();
-        let mut armature_req = HttpRequest::new(method.clone(), path.clone());
-
-        // Copy headers
-        for (name, value) in request.headers() {
-            if let Ok(v) = value.to_str() {
-                armature_req.headers.insert(name.to_string(), v.to_string());
-            }
-        }
+        // Convert to Armature request, including percent-decoded query
+        // parameters (see `build_armature_request`).
+        let mut armature_req = build_armature_request(&request);
 
         // Read body if present (using Buf trait), enforcing the configured size limit
         let mut body: Vec<u8> = Vec::new();
@@ -914,6 +936,92 @@ mod tests {
         assert!(
             widened_transport.contains(&widened.initial_connection_receive_window.to_string()),
             "connection receive window must appear in the applied transport config"
+        );
+    }
+
+    /// Regression: query strings must be parsed and percent-decoded on the
+    /// HTTP/3 path, just like the hyper-based `application.rs::handle_request`.
+    /// Before the fix, `handle_request_resolver` built the Armature request
+    /// from `request.uri().path()` only and never touched `.query()`, so
+    /// `?a=b` was silently dropped on every `listen_h3` / `listen_dual_stack`
+    /// QUIC request.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_decodes_query_params() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?a=b&name=hello%20world")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.method, "GET");
+        assert_eq!(armature_req.path, "/search");
+        assert_eq!(
+            armature_req.query_params.get("a").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            armature_req.query_params.get("name").map(String::as_str),
+            Some("hello world")
+        );
+    }
+
+    /// Requests without a query string must not populate `query_params`.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_without_query_string() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/no-query")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert!(armature_req.query_params.is_empty());
+    }
+
+    /// A URI ending in a bare `?` has a query string that is present but
+    /// empty (`request.uri().query()` returns `Some("")`), distinct from no
+    /// query string at all. `build_armature_request` must not panic and
+    /// must produce an empty `query_params` map in this case.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_with_empty_query_string() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?")
+            .body(())
+            .unwrap();
+
+        assert_eq!(request.uri().query(), Some(""));
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.path, "/search");
+        assert!(armature_req.query_params.is_empty());
+    }
+
+    /// Duplicate query keys: `parse_query_string_decoded` stores params in
+    /// a `HashMap`, processing segments left-to-right and inserting each
+    /// parsed pair in turn, so the last occurrence of a repeated key wins.
+    #[cfg(feature = "http3")]
+    #[test]
+    fn test_build_armature_request_with_duplicate_query_keys() {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/search?a=1&a=2")
+            .body(())
+            .unwrap();
+
+        let armature_req = super::server::build_armature_request(&request);
+
+        assert_eq!(armature_req.query_params.len(), 1);
+        assert_eq!(
+            armature_req.query_params.get("a").map(String::as_str),
+            Some("2")
         );
     }
 }
