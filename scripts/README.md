@@ -175,7 +175,7 @@ git push --tags
 gh release create v0.2.0 --notes "Release notes here"
 
 # Or manually on GitHub
-# Go to: https://github.com/pegasusheavy/armature/releases/new
+# Go to: https://github.com/quinnjr/armature/releases/new
 ```
 
 ### 5. Publish to crates.io

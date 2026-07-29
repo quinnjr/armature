@@ -5,7 +5,7 @@
 
 set -e
 
-REPO="pegasusheavy/armature"
+REPO="quinnjr/armature"
 
 echo "Creating GitHub issues for high-priority TODOs..."
 echo "Repository: $REPO"
