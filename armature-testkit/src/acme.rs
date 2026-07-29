@@ -55,7 +55,20 @@ impl PebbleCa {
     /// The image is distroless, so the file is extracted with `docker cp`
     /// rather than an in-container shell.
     pub fn management_ca_pem(&self) -> Vec<u8> {
-        let dest = std::env::temp_dir().join(format!("pebble-minica-{}.pem", std::process::id()));
+        // `std::process::id()` alone is not a unique destination: Rust's
+        // test harness runs every test in one process across multiple
+        // threads, so two tests calling this concurrently raced on the
+        // same path -- one test's cleanup `remove_file` deleted the file
+        // out from under the other's read, surfacing as an intermittent
+        // "No such file or directory" failure. Add a per-call counter to
+        // guarantee a distinct path for every invocation, concurrent or
+        // not.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let call_id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dest = std::env::temp_dir().join(format!(
+            "pebble-minica-{}-{call_id}.pem",
+            std::process::id()
+        ));
         let status = std::process::Command::new("docker")
             .arg("cp")
             .arg(format!(
