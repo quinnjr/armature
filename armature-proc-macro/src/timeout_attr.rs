@@ -1,6 +1,26 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Expr, ItemFn, Lit, Token, parse::Parse, parse::ParseStream, parse_macro_input};
+use syn::{
+    Expr, FnArg, ItemFn, Lit, Pat, Token, parse::Parse, parse::ParseStream, parse_macro_input,
+};
+
+/// Find the identifier of the handler's first non-receiver parameter — the
+/// request binding — so generated code refers to it by its real name instead
+/// of assuming `req`.
+fn request_ident(input: &ItemFn) -> syn::Ident {
+    input
+        .sig
+        .inputs
+        .iter()
+        .find_map(|arg| match arg {
+            FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .unwrap_or_else(|| syn::Ident::new("req", proc_macro2::Span::call_site()))
+}
 
 /// Arguments for the timeout attribute
 /// Parses: #[timeout(5)] or #[timeout(seconds = 5)] or #[timeout(ms = 5000)]
@@ -88,8 +108,8 @@ impl Parse for TimeoutArgs {
 /// # How It Works
 ///
 /// The macro generates a wrapper function that:
-/// 1. Creates a `TimeoutMiddleware` with the specified duration
-/// 2. Wraps the original handler function
+/// 1. Defines an inner function containing the original handler body
+/// 2. Awaits the inner function's call wrapped in `tokio::time::timeout(...)` with the specified duration
 /// 3. Returns a timeout error if the handler doesn't complete in time
 pub fn timeout_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as TimeoutArgs);
@@ -114,6 +134,7 @@ pub fn timeout_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Create the inner handler name
     let inner_fn_name = syn::Ident::new(&format!("__{}_inner", func_name), func_name.span());
+    let req_ident = request_ident(&input);
 
     let expanded = quote! {
         #(#func_attrs)*
@@ -127,7 +148,7 @@ pub fn timeout_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             // Apply timeout
             let __timeout_duration = Duration::from_millis(#duration_ms);
 
-            match tokio::time::timeout(__timeout_duration, #inner_fn_name(req)).await {
+            match tokio::time::timeout(__timeout_duration, #inner_fn_name(#req_ident)).await {
                 Ok(result) => result,
                 Err(_) => Err(armature_core::Error::RequestTimeout(format!(
                     "Request exceeded timeout of {} ms",

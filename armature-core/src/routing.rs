@@ -9,6 +9,7 @@ use crate::handler::{BoxedHandler, IntoHandler};
 use crate::logging::{debug, trace};
 use crate::route_constraint::RouteConstraints;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -191,6 +192,21 @@ impl Router {
         self
     }
 
+    /// Add a QUERY route with an optimized handler.
+    ///
+    /// QUERY is a safe, idempotent method that carries the query in the
+    /// request body (draft-ietf-httpbis-safe-method-w-body). Use it for
+    /// queries too large or structured for a URL query string.
+    #[inline]
+    pub fn query<H, Args>(&mut self, path: impl Into<String>, handler: H) -> &mut Self
+    where
+        H: IntoHandler<Args>,
+    {
+        self.routes
+            .push(Route::new(HttpMethod::QUERY, path, handler));
+        self
+    }
+
     /// Match a route without executing the handler.
     /// Returns the handler and path parameters if a route matches.
     /// Useful for route lookup benchmarking and inspection.
@@ -203,12 +219,15 @@ impl Router {
         // Strip query string if present
         let path = path.split('?').next().unwrap_or(path);
 
+        // Split the request path once, up front, rather than per candidate route.
+        let path_parts: SmallVec<[&str; 8]> = split_segments(path).collect();
+
         for route in &self.routes {
             if route.method.as_str() != method {
                 continue;
             }
 
-            if let Some(params) = match_path(&route.path, path) {
+            if let Some(params) = match_path(&route.path, &path_parts) {
                 return Some((route.handler.clone(), params));
             }
         }
@@ -237,31 +256,47 @@ impl Router {
             request.query_params = parse_query_string(query);
         }
 
-        // Find matching route - this is the route matching hot path
-        for route in &self.routes {
-            if route.method.as_str() != request.method {
-                continue;
-            }
+        // Find matching route - this is the route matching hot path. The request
+        // path is split once, up front, rather than per candidate route. The
+        // `path_parts` borrow of `request.path` is confined to this block (which
+        // drops the `SmallVec`) so `request` can be moved into the handler below;
+        // we only carry out the matched index + params.
+        let matched: Option<(usize, HashMap<String, String>)> = {
+            let path_parts: SmallVec<[&str; 8]> = split_segments(path).collect();
 
-            if let Some(params) = match_path(&route.path, path) {
-                debug!(
-                    "Route matched: {} {} -> {}",
-                    request.method, path, route.path
-                );
-
-                // Validate route constraints if present
-                if let Some(constraints) = &route.constraints {
-                    trace!("Validating route constraints");
-                    constraints.validate(&params)?;
+            let mut found = None;
+            for (idx, route) in self.routes.iter().enumerate() {
+                if route.method.as_str() != request.method {
+                    continue;
                 }
 
-                request.path_params = params;
-
-                // Handler dispatch - the BoxedHandler.call() is optimized
-                // to allow the compiler to inline the actual handler body
-                trace!("Dispatching handler");
-                return route.handler.call(request).await;
+                if let Some(params) = match_path(&route.path, &path_parts) {
+                    debug!(
+                        "Route matched: {} {} -> {}",
+                        request.method, path, route.path
+                    );
+                    found = Some((idx, params));
+                    break;
+                }
             }
+            found
+        };
+
+        if let Some((idx, params)) = matched {
+            let route = &self.routes[idx];
+
+            // Validate route constraints if present
+            if let Some(constraints) = &route.constraints {
+                trace!("Validating route constraints");
+                constraints.validate(&params)?;
+            }
+
+            request.path_params = params;
+
+            // Handler dispatch - the BoxedHandler.call() is optimized
+            // to allow the compiler to inline the actual handler body
+            trace!("Dispatching handler");
+            return route.handler.call(request).await;
         }
 
         debug!("No route found for {} {}", request.method, path);
@@ -275,25 +310,77 @@ impl Default for Router {
     }
 }
 
-/// Match a route path pattern against a request path
-/// Returns Some(params) if matched, None otherwise
-fn match_path(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
-    let pattern_parts: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-    let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+/// Split a path into non-empty segments without allocating a `Vec`.
+#[inline]
+fn split_segments(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/').filter(|s| !s.is_empty())
+}
 
-    if pattern_parts.len() != path_parts.len() {
+/// Match a route path pattern against a request path that has already been
+/// split into non-empty segments.
+///
+/// The pattern is compared segment-by-segment using a `split('/')` iterator,
+/// so no `Vec` is allocated per candidate route. The `HashMap` of parameters is
+/// only allocated once a route actually matches (and only sized for the number
+/// of parameters the pattern declares).
+fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, String>> {
+    // First pass: validate the segment count and static segments, and count
+    // how many parameters the pattern declares. No allocation happens here.
+    //
+    // A `*name` segment is a catch-all: it consumes every remaining path
+    // segment (zero or more) and, matching `CompiledRoute::matches`, ends
+    // pattern validation right there (any pattern segments after a
+    // catch-all are unreachable, same as the compiled matcher).
+    let mut seen = 0usize;
+    let mut param_count = 0usize;
+    let mut catch_all_at: Option<usize> = None;
+    for (i, pattern_part) in split_segments(pattern).enumerate() {
+        if pattern_part.starts_with('*') {
+            catch_all_at = Some(i);
+            param_count += 1;
+            break;
+        }
+
+        // Pattern has more segments than the request path
+        let path_part = path_parts.get(i)?;
+        if pattern_part.starts_with(':') {
+            param_count += 1;
+        } else if pattern_part != *path_part {
+            // Static segment doesn't match
+            return None;
+        }
+        seen = i + 1;
+    }
+
+    if let Some(idx) = catch_all_at {
+        // Everything before the catch-all must already be present in the
+        // request path; the catch-all itself may consume zero segments. The
+        // per-segment loop above already validated this: for every `i < idx`
+        // it early-returns `None` via `path_parts.get(i)?` if that index is
+        // missing, so by the time we reach here `path_parts.len() >= idx`
+        // always holds. Documented as an invariant rather than re-checked.
+        debug_assert!(
+            path_parts.len() >= idx,
+            "catch-all index validated during first pass"
+        );
+    } else if seen != path_parts.len() {
+        // Pattern must consume every request-path segment
         return None;
     }
 
-    let mut params = HashMap::new();
-
-    for (pattern_part, path_part) in pattern_parts.iter().zip(path_parts.iter()) {
-        if let Some(param_name) = pattern_part.strip_prefix(':') {
-            // This is a parameter
-            params.insert(param_name.to_string(), path_part.to_string());
-        } else if pattern_part != path_part {
-            // Static part doesn't match
-            return None;
+    // Second pass: the route matched, so allocate the params map now.
+    let mut params = HashMap::with_capacity(param_count);
+    if param_count > 0 {
+        for (i, pattern_part) in split_segments(pattern).enumerate() {
+            if let Some(name) = pattern_part.strip_prefix('*') {
+                // Catch-all: join all remaining path segments, matching
+                // `CompiledRoute::extract_params`'s joining convention.
+                let name = if name.is_empty() { "*" } else { name };
+                params.insert(name.to_string(), path_parts[i..].join("/"));
+                break;
+            } else if let Some(param_name) = pattern_part.strip_prefix(':') {
+                params.insert(param_name.to_string(), path_parts[i].to_string());
+            }
         }
     }
 
@@ -303,10 +390,12 @@ fn match_path(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
 /// Parse a query string into a map of parameters
 ///
 /// Uses SIMD-optimized byte searching via memchr for faster parsing.
+/// Values are percent-decoded (and `+` decoded as space) so handlers
+/// receive the actual parameter values, not their encoded form.
 #[inline]
 fn parse_query_string(query: &str) -> HashMap<String, String> {
-    // Use the SIMD-optimized parser
-    crate::simd_parser::parse_query_string_fast(query)
+    // Use the SIMD-optimized decoding parser
+    crate::simd_parser::parse_query_string_decoded(query)
 }
 
 #[cfg(test)]
@@ -318,11 +407,18 @@ mod tests {
         Ok(HttpResponse::ok())
     }
 
+    // Test helper: split a raw path and run match_path, mirroring how the
+    // router pre-splits the request path before the route loop.
+    fn match_path_str(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
+        let parts: Vec<&str> = super::split_segments(path).collect();
+        match_path(pattern, &parts)
+    }
+
     #[test]
     fn test_match_path_static() {
         let pattern = "/users";
         let path = "/users";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 0);
     }
@@ -331,7 +427,7 @@ mod tests {
     fn test_match_path_with_param() {
         let pattern = "/users/:id";
         let path = "/users/123";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
         let params = result.unwrap();
         assert_eq!(params.get("id"), Some(&"123".to_string()));
@@ -341,7 +437,7 @@ mod tests {
     fn test_match_path_no_match() {
         let pattern = "/users/:id";
         let path = "/posts/123";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_none());
     }
 
@@ -354,10 +450,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_query_string_decodes_values() {
+        let query = "name=john%20doe&x=a%26b";
+        let params = parse_query_string(query);
+        assert_eq!(params.get("name"), Some(&"john doe".to_string()));
+        assert_eq!(params.get("x"), Some(&"a&b".to_string()));
+    }
+
+    #[test]
+    fn test_query_method_round_trip() {
+        assert_eq!(HttpMethod::from_str("QUERY"), Some(HttpMethod::QUERY));
+        assert_eq!(HttpMethod::from_str("query"), Some(HttpMethod::QUERY));
+        assert_eq!(HttpMethod::QUERY.as_str(), "QUERY");
+    }
+
+    #[tokio::test]
+    async fn test_query_route_dispatch() {
+        async fn echo_body(req: HttpRequest) -> Result<HttpResponse, Error> {
+            Ok(HttpResponse::ok().with_body(req.body.clone()))
+        }
+
+        let mut router = Router::new();
+        router.query("/search", echo_body);
+
+        let mut request = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        request.body = b"name=john".to_vec();
+        let response = router.route(request).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.into_body_bytes().as_ref(), b"name=john");
+
+        // A GET to the same path must not hit the QUERY handler
+        let request = HttpRequest::new("GET".to_string(), "/search".to_string());
+        assert!(router.route(request).await.is_err());
+    }
+
+    #[test]
     fn test_match_path_multiple_params() {
         let pattern = "/users/:user_id/posts/:post_id";
         let path = "/users/123/posts/456";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
         let params = result.unwrap();
         assert_eq!(params.get("user_id"), Some(&"123".to_string()));
@@ -368,7 +499,7 @@ mod tests {
     fn test_match_path_trailing_slash() {
         let pattern = "/users";
         let path = "/users/";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         // Should handle trailing slash gracefully
         assert!(result.is_some() || result.is_none());
     }
@@ -377,7 +508,7 @@ mod tests {
     fn test_match_path_nested() {
         let pattern = "/api/v1/users/:id";
         let path = "/api/v1/users/123";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
         let params = result.unwrap();
         assert_eq!(params.get("id"), Some(&"123".to_string()));
@@ -387,7 +518,7 @@ mod tests {
     fn test_match_path_empty() {
         let pattern = "/";
         let path = "/";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
     }
 
@@ -416,10 +547,80 @@ mod tests {
     }
 
     #[test]
+    fn test_match_path_catch_all() {
+        // Mirrors route_cache.rs's `test_compiled_route_catch_all`, but
+        // exercises the linear `Router`'s own matcher directly.
+        let pattern = "/files/*path";
+
+        assert!(match_path_str(pattern, "/files/docs").is_some());
+
+        let result = match_path_str(pattern, "/files/docs/readme.md");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+
+        // An exact prefix match (no trailing segments) should still match,
+        // with the catch-all param extracted as an empty string.
+        let result = match_path_str(pattern, "/files");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().get("path"), Some(&String::new()));
+
+        // A path that doesn't even reach the static prefix must not match.
+        assert!(match_path_str(pattern, "/other").is_none());
+    }
+
+    #[test]
+    fn test_match_path_catch_all_with_preceding_param() {
+        // A catch-all preceded by a named `:param` segment must extract both
+        // the param and the catch-all correctly.
+        let pattern = "/users/:id/files/*path";
+        let result = match_path_str(pattern, "/users/42/files/a/b");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("id"), Some(&"42".to_string()));
+        assert_eq!(params.get("path"), Some(&"a/b".to_string()));
+
+        // A bare, unnamed catch-all (`*` with no name) stores its captured
+        // value under the literal key `"*"` (see the `name.is_empty()`
+        // fallback in `match_path`).
+        let pattern = "/files/*";
+        let result = match_path_str(pattern, "/files/a/b/c");
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.get("*"), Some(&"a/b/c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_router_route_catch_all() {
+        // Mirrors route_cache.rs's `test_from_router_catch_all`, but calls
+        // `Router::route` directly instead of going through
+        // `OptimizedRouter`, to make sure the linear router's own catch-all
+        // handling (not just the compiled fast path) works end to end.
+        async fn echo_path(req: HttpRequest) -> Result<HttpResponse, Error> {
+            let p = req.path_params.get("path").cloned().unwrap_or_default();
+            Ok(HttpResponse::ok().with_body(p.into_bytes()))
+        }
+
+        let mut router = Router::new();
+        router.get("/files/*path", echo_path);
+
+        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let response = router.route(req).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.into_body_bytes().as_ref(), b"docs/readme.md");
+
+        // `match_route` (used for lookup without dispatch) must agree.
+        let (_, params) = router
+            .match_route("GET", "/files/docs/readme.md")
+            .expect("catch-all route should match via match_route");
+        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+    }
+
+    #[test]
     fn test_match_path_param_with_special_chars() {
         let pattern = "/users/:id";
         let path = "/users/abc-123";
-        let result = match_path(pattern, path);
+        let result = match_path_str(pattern, path);
         assert!(result.is_some());
         let params = result.unwrap();
         assert_eq!(params.get("id"), Some(&"abc-123".to_string()));

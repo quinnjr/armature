@@ -32,6 +32,18 @@ pub enum GcpError {
     #[error("GCP service error: {0}")]
     Service(String),
 
+    /// Requested resource was not found (HTTP 404).
+    #[error("GCP resource not found: {0}")]
+    NotFound(String),
+
+    /// Request was rate limited (HTTP 429); it may succeed if retried after backoff.
+    #[error("GCP request rate limited: {0}")]
+    RateLimited(String),
+
+    /// Server-side error (HTTP 5xx); the request may succeed if retried.
+    #[error("GCP server error: {0}")]
+    ServerError(String),
+
     /// Network error.
     #[error("Network error: {0}")]
     Network(String),

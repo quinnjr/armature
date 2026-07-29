@@ -114,13 +114,26 @@ fn collect_services(module: &ScriptModule) -> Vec<ScriptService> {
     out
 }
 
-/// Recursively collect all controllers from a module tree (depth-first).
+/// Recursively collect all controllers from a module tree (depth-first),
+/// prepending each module's own `guards([...])` to the guard list of every
+/// controller it directly contains. This makes module-scoped guards run
+/// ahead of controller-scoped guards (see `make_handler`'s guard loop,
+/// which runs `ctrl.guards` in order), rather than being collected nowhere
+/// and silently enforcing nothing.
 fn collect_controllers(module: &ScriptModule) -> Vec<ScriptController> {
     let mut out = Vec::new();
     for imp in &module.imports {
         out.extend(collect_controllers(imp));
     }
-    out.extend(module.controllers.iter().cloned());
+    for ctrl in &module.controllers {
+        let mut ctrl = ctrl.clone();
+        if !module.guards.is_empty() {
+            let mut guards = module.guards.clone();
+            guards.extend(ctrl.guards);
+            ctrl.guards = guards;
+        }
+        out.push(ctrl);
+    }
     out
 }
 
@@ -310,6 +323,7 @@ fn parse_method(method: &str) -> Result<HttpMethod> {
         "PATCH" => Ok(HttpMethod::PATCH),
         "OPTIONS" => Ok(HttpMethod::OPTIONS),
         "HEAD" => Ok(HttpMethod::HEAD),
+        "QUERY" => Ok(HttpMethod::QUERY),
         _ => Err(AppError::Builder {
             message: format!("Unknown HTTP method: {}", method),
         }),

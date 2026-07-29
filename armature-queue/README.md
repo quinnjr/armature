@@ -21,14 +21,14 @@ armature-queue = "0.1"
 ## Quick Start
 
 ```rust
-use armature_queue::{Queue, Job, Worker};
+use armature_queue::{Queue, Worker, WorkerConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create queue
+    // Create a queue.
     let queue = Queue::new("redis://localhost:6379", "default").await?;
 
-    // Enqueue a job
+    // Enqueue a job.
     queue.enqueue(
         "send_email",
         serde_json::json!({
@@ -37,14 +37,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     ).await?;
 
-    // Process jobs
-    let worker = Worker::new(queue)
-        .register("send_email", |job| async move {
+    // Build a worker with a custom concurrency via `WorkerConfig`
+    // (`Worker::new(queue)` uses the defaults).
+    let config = WorkerConfig { concurrency: 4, ..Default::default() };
+    let mut worker = Worker::with_config(queue, config);
+
+    // Registration is async and completes before it returns, so the handler
+    // is guaranteed to be present once `start()` begins dequeuing.
+    worker
+        .register_handler("send_email", |job| async move {
             println!("Sending email: {:?}", job.data);
             Ok(())
         })
-        .concurrency(4);
+        .await;
 
+    // `start()` spawns the worker tasks and returns immediately.
     worker.start().await?;
     Ok(())
 }
@@ -53,14 +60,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Scheduling
 
 ```rust
-// Delayed execution
+use chrono::{Duration, Utc};
+
+// Delayed execution: run 5 minutes from now.
 queue.enqueue_in(
-    Duration::from_secs(300),
+    Duration::minutes(5),
     "reminder",
     serde_json::json!({"message": "Don't forget!"})
 ).await?;
 
-// Scheduled time
+// Scheduled time: run at a specific instant.
 queue.enqueue_at(
     Utc::now() + Duration::hours(1),
     "report",

@@ -44,7 +44,7 @@ pub struct MinLength(pub usize);
 
 impl MinLength {
     pub fn validate(&self, value: &str, field: &str) -> Result<(), ValidationError> {
-        if value.len() < self.0 {
+        if value.chars().count() < self.0 {
             Err(ValidationError::new(
                 field,
                 format!("{} must be at least {} characters", field, self.0),
@@ -62,7 +62,7 @@ pub struct MaxLength(pub usize);
 
 impl MaxLength {
     pub fn validate(&self, value: &str, field: &str) -> Result<(), ValidationError> {
-        if value.len() > self.0 {
+        if value.chars().count() > self.0 {
             Err(ValidationError::new(
                 field,
                 format!("{} must be at most {} characters", field, self.0),
@@ -456,6 +456,27 @@ mod tests {
         assert!(IsUuid::validate("123e4567-e89b-12d3-a456-426614174000", "id").is_ok());
         // Without hyphens should fail
         assert!(IsUuid::validate("123e4567e89b12d3a456426614174000", "id").is_err());
+    }
+
+    #[test]
+    fn test_max_length_counts_characters_not_bytes() {
+        // Three emoji = 3 characters but 12 bytes. Under a 5-char cap it must pass.
+        let three_emoji = "😀😀😀";
+        assert_eq!(three_emoji.chars().count(), 3);
+        assert_eq!(three_emoji.len(), 12);
+        assert!(MaxLength(5).validate(three_emoji, "field").is_ok());
+        // A 2-char cap must still reject the 3 characters.
+        assert!(MaxLength(2).validate(three_emoji, "field").is_err());
+    }
+
+    #[test]
+    fn test_min_length_counts_characters_not_bytes() {
+        // "café" is 4 characters but 5 bytes. MinLength(4) must accept it.
+        let cafe = "café";
+        assert_eq!(cafe.chars().count(), 4);
+        assert_eq!(cafe.len(), 5);
+        assert!(MinLength(4).validate(cafe, "field").is_ok());
+        assert!(MinLength(5).validate(cafe, "field").is_err());
     }
 
     #[test]

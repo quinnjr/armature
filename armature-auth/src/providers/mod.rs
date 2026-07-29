@@ -1,5 +1,26 @@
 // OAuth2 provider implementations
 
+use std::sync::OnceLock;
+
+/// Shared `reqwest::Client` for the stateless (unit-struct) providers.
+///
+/// Building a `reqwest::Client` allocates a connection pool and loads the TLS
+/// root store, so constructing one per request is wasteful. These providers
+/// expose only static async methods and hold no state, so they share a single
+/// lazily-initialized client and clone the cheap `Arc`-backed handle per call.
+pub(crate) fn shared_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
+}
+
 pub mod auth0;
 pub mod aws_cognito;
 pub mod discord;

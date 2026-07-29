@@ -31,6 +31,13 @@ use super::RateLimitAlgorithm;
 use dashmap::DashMap;
 use std::time::Instant;
 
+/// Default hard cap on the number of distinct keys retained. Keys are derived
+/// from untrusted request data, so without a bound a client rotating its key on
+/// every request would grow the map without limit (a network-reachable OOM).
+/// When the cap is reached, inserting a new key evicts the least-recently-active
+/// one. Chosen generously so legitimate workloads never hit it.
+const DEFAULT_MAX_KEYS: usize = 100_000;
+
 /// Token bucket rate limiter state
 #[derive(Debug, Clone)]
 struct BucketState {
@@ -48,6 +55,8 @@ pub struct TokenBucket {
     refill_rate: f64,
     /// State per key
     buckets: DashMap<String, BucketState>,
+    /// Hard cap on retained keys; evict the oldest when a new key would exceed it.
+    max_keys: usize,
 }
 
 impl TokenBucket {
@@ -69,6 +78,25 @@ impl TokenBucket {
             capacity,
             refill_rate,
             buckets: DashMap::new(),
+            max_keys: DEFAULT_MAX_KEYS,
+        }
+    }
+
+    /// Override the hard cap on retained keys (default [`DEFAULT_MAX_KEYS`]).
+    pub fn with_max_keys(mut self, max_keys: usize) -> Self {
+        self.max_keys = max_keys.max(1);
+        self
+    }
+
+    /// Evict the single least-recently-refilled entry to make room for a new key.
+    fn evict_oldest(&self) {
+        if let Some(oldest) = self
+            .buckets
+            .iter()
+            .min_by_key(|e| e.value().last_refill)
+            .map(|e| e.key().clone())
+        {
+            self.buckets.remove(&oldest);
         }
     }
 
@@ -84,6 +112,12 @@ impl TokenBucket {
 
     /// Try to consume a token
     pub fn try_acquire(&self, key: &str) -> (bool, u64) {
+        // Bound memory: if this is a new key that would push us over the cap,
+        // evict the oldest entry first.
+        if !self.buckets.contains_key(key) && self.buckets.len() >= self.max_keys {
+            self.evict_oldest();
+        }
+
         let mut entry = self
             .buckets
             .entry(key.to_string())
@@ -212,6 +246,21 @@ mod tests {
 
         // Should be full again
         assert_eq!(bucket.remaining("test"), 5);
+    }
+
+    #[test]
+    fn test_max_keys_bounds_map() {
+        // Regression: the standalone DashMap was unbounded. With a hard cap,
+        // a flood of distinct keys must not grow it past the cap.
+        let bucket = TokenBucket::new(10, 1.0).with_max_keys(100);
+        for i in 0..10_000 {
+            bucket.check(&format!("client-{i}"));
+        }
+        assert!(
+            bucket.buckets.len() <= 100,
+            "map must stay within max_keys, got {}",
+            bucket.buckets.len()
+        );
     }
 
     #[test]

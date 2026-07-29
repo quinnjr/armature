@@ -11,10 +11,54 @@
 //! to protect your Armature applications with various security headers.
 
 use armature::prelude::*;
+use armature_proc_macro::middleware;
 use armature_security::{
     SecurityMiddleware, content_security_policy::CspConfig, frame_guard::FrameGuard,
     hsts::HstsConfig, referrer_policy::ReferrerPolicy,
 };
+
+// ========== Security Configurations ==========
+//
+// These are wired onto the controllers below via `#[middleware(...)]`, which
+// wraps *every* route on the annotated controller in a real middleware
+// chain. That is what actually puts these headers on the wire -- building a
+// `SecurityMiddleware` value alone does nothing unless it is attached like
+// this (or run through a `MiddlewareChain`/`#[use_middleware(...)]`).
+
+/// Recommended-defaults security middleware, applied to the home page
+/// (`HomeController`, mounted at `/`).
+fn default_security() -> SecurityMiddleware {
+    SecurityMiddleware::default()
+}
+
+/// Custom security configuration, applied to the API routes
+/// (`ApiController`, mounted at `/api`). Its Frame Guard and Referrer
+/// Policy settings match what `GET /api/custom` reports back to the caller.
+fn custom_security() -> SecurityMiddleware {
+    SecurityMiddleware::new()
+        .with_csp(
+            CspConfig::new()
+                .default_src(vec!["'self'".to_string()])
+                .script_src(vec![
+                    "'self'".to_string(),
+                    "https://cdn.example.com".to_string(),
+                ])
+                .style_src(vec!["'self'".to_string(), "'unsafe-inline'".to_string()])
+                .img_src(vec![
+                    "'self'".to_string(),
+                    "data:".to_string(),
+                    "https:".to_string(),
+                ]),
+        )
+        .with_hsts(
+            HstsConfig::new(31536000) // 1 year
+                .include_subdomains(true)
+                .preload(true),
+        )
+        .with_frame_guard(FrameGuard::SameOrigin)
+        .with_referrer_policy(ReferrerPolicy::StrictOriginWhenCrossOrigin)
+        .hide_powered_by(true)
+}
 
 // ========== Services ==========
 
@@ -36,8 +80,7 @@ impl SecurityService {
                 "Referrer-Policy",
                 "X-DNS-Prefetch-Control",
                 "X-Download-Options",
-                "X-Permitted-Cross-Domain-Policies",
-                "Expect-CT"
+                "X-Permitted-Cross-Domain-Policies"
             ]
         })
     }
@@ -46,6 +89,7 @@ impl SecurityService {
 // ========== Controllers ==========
 
 #[controller("/")]
+#[middleware(default_security())]
 #[derive(Default, Clone)]
 struct HomeController;
 
@@ -97,7 +141,6 @@ impl HomeController {
         <div class="header">X-DNS-Prefetch-Control</div>
         <div class="header">X-Download-Options</div>
         <div class="header">X-Permitted-Cross-Domain-Policies</div>
-        <div class="header">Expect-CT</div>
     </div>
 
     <h2>What This Protects Against</h2>
@@ -119,6 +162,7 @@ impl HomeController {
 }
 
 #[controller("/api")]
+#[middleware(custom_security())]
 #[derive(Default, Clone)]
 struct ApiController;
 
@@ -156,50 +200,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🛡️  Security Middleware Example");
     println!("================================\n");
 
-    // Configure security middleware with recommended defaults
-    let _security = SecurityMiddleware::default();
-
-    println!("✅ Security middleware configured with:");
+    // `default_security()` is wired onto `HomeController` via
+    // `#[middleware(default_security())]` above, so `GET /` genuinely emits
+    // these headers on every response -- open your browser's dev tools (or
+    // `curl -i`) against it and they will be there, not just described here.
+    println!("✅ HomeController (GET /) is wrapped in SecurityMiddleware::default(), which sends:");
     println!("   - Content Security Policy (CSP)");
     println!("   - HTTP Strict Transport Security (HSTS)");
     println!("   - Frame Guard (X-Frame-Options: DENY)");
-    println!("   - XSS Protection");
-    println!("   - Content Type Options");
+    println!("   - XSS Protection header (X-XSS-Protection: 0, disabled per modern guidance)");
+    println!("   - Content Type Options (nosniff)");
     println!("   - DNS Prefetch Control");
     println!("   - Referrer Policy");
     println!("   - Download Options");
     println!("   - Cross-Domain Policies");
-    println!("   - Expect-CT");
-    println!("   - X-Powered-By header removed");
+    println!("   - X-Powered-By header removed (if present)");
 
-    // Example: Custom CSP configuration (demonstrating API usage)
-    let _custom_security = SecurityMiddleware::new()
-        .with_csp(
-            CspConfig::new()
-                .default_src(vec!["'self'".to_string()])
-                .script_src(vec![
-                    "'self'".to_string(),
-                    "https://cdn.example.com".to_string(),
-                ])
-                .style_src(vec!["'self'".to_string(), "'unsafe-inline'".to_string()])
-                .img_src(vec![
-                    "'self'".to_string(),
-                    "data:".to_string(),
-                    "https:".to_string(),
-                ]),
-        )
-        .with_hsts(
-            HstsConfig::new(31536000) // 1 year
-                .include_subdomains(true)
-                .preload(true),
-        )
-        .with_frame_guard(FrameGuard::SameOrigin)
-        .with_referrer_policy(ReferrerPolicy::StrictOriginWhenCrossOrigin)
-        .hide_powered_by(true);
+    // `custom_security()` is wired onto `ApiController` via
+    // `#[middleware(custom_security())]` above, so every `/api/*` route
+    // emits *these* header values instead -- notably SAMEORIGIN framing and
+    // a strict-origin-when-cross-origin referrer policy, matching what
+    // `GET /api/custom` reports back in its JSON body.
+    println!("\n✅ ApiController (/api/*) is wrapped in a custom SecurityMiddleware:");
+    println!("   - Content Security Policy scoped to 'self' + https://cdn.example.com");
+    println!("   - HSTS for 1 year, including subdomains, preload");
+    println!("   - Frame Guard: X-Frame-Options: SAMEORIGIN");
+    println!("   - Referrer-Policy: strict-origin-when-cross-origin");
+    println!("   - X-Powered-By header removed (if present)");
 
     println!("\n🌐 Server starting on http://localhost:3000");
     println!("📖 Visit http://localhost:3000 to see security headers in action");
-    println!("🔍 Check your browser's Network tab to inspect headers");
+    println!("🔍 Check your browser's Network tab (or `curl -i`) to inspect headers");
     println!("\nEndpoints:");
     println!("  GET /         - Home page");
     println!("  GET /api/data - JSON API with security info");

@@ -24,18 +24,44 @@ fi
 echo "📦 Building with profiling enabled..."
 cargo build --example profiling_server --release 2>&1 | grep -v "warning:"
 
-# Start the server in background
+# Start the server in background, capturing its own stdout/stderr to a temp
+# file. The server binds to an OS-assigned ephemeral port (127.0.0.1:0) and
+# prints the port it actually got (e.g. "Server: http://localhost:PORT") only
+# to its own stdout, so that's where we have to read it from.
 echo ""
 echo "🚀 Starting profiling server..."
-cargo run --example profiling_server --release 2>&1 | grep -v "warning:" &
+SERVER_LOG="$(mktemp -t armature-profile-server.XXXXXX.log)"
+cleanup() {
+    if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill -INT "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    rm -f "$SERVER_LOG"
+}
+trap cleanup EXIT
+
+cargo run --example profiling_server --release > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
-# Wait for server to start
-sleep 2
+# Wait for the server to print its bound port. Poll instead of a fixed sleep
+# since build/startup time varies, and bail out early (with the captured log)
+# if the server process dies before it gets there.
+PORT=""
+for _ in $(seq 1 30); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "❌ Server process exited before it started listening. Log:"
+        grep -v "warning:" "$SERVER_LOG" || true
+        exit 1
+    fi
+    PORT=$(grep -o "localhost:[0-9]*" "$SERVER_LOG" 2>/dev/null | tail -1 | cut -d: -f2)
+    if [ -n "$PORT" ]; then
+        break
+    fi
+    sleep 0.5
+done
 
-# Find the port from the server output
-PORT=$(grep -o "localhost:[0-9]*" /home/joseph/.cursor/projects/home-joseph-PegasusHeavyIndustries-armature/terminals/*.txt 2>/dev/null | tail -1 | cut -d: -f2)
 if [ -z "$PORT" ]; then
+    echo "⚠️  Could not detect the server's port from its output after 15s; falling back to 3000"
     PORT=3000
 fi
 
@@ -83,6 +109,7 @@ if [ -f "flamegraph-profile.svg" ]; then
     echo "Wider bars = more CPU time spent in that function."
 else
     echo "⚠️  Flamegraph not generated. The server may have exited unexpectedly."
+    exit 1
 fi
 
 echo ""

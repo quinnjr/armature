@@ -9,7 +9,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use armature_azure::{AzureServices, AzureConfig};
 //!
 //! #[tokio::main]
@@ -18,14 +18,13 @@
 //!     let config = AzureConfig::builder()
 //!         .storage_account("mystorageaccount")
 //!         .enable_blob()
-//!         .enable_cosmos()
 //!         .build();
 //!
-//!     // Load services
+//!     // Load services (credentials resolve via the developer-tools chain).
 //!     let services = AzureServices::new(config).await?;
 //!
-//!     // Use Blob Storage
-//!     let blob = services.blob_client()?;
+//!     // Obtain the raw Azure SDK Blob Service client.
+//!     let _blob = services.blob_service()?;
 //!
 //!     Ok(())
 //! }
@@ -55,10 +54,14 @@
 
 mod config;
 mod error;
+#[cfg(feature = "servicebus")]
+mod servicebus;
 mod services;
 
 pub use config::{AzureConfig, AzureConfigBuilder, CredentialsSource};
 pub use error::{AzureError, Result};
+#[cfg(feature = "servicebus")]
+pub use servicebus::{ServiceBusClient, ServiceBusServiceConfig};
 pub use services::AzureServices;
 
 // Re-export Azure SDK types
@@ -69,10 +72,10 @@ pub use azure_core;
 pub use azure_identity;
 
 #[cfg(feature = "blob")]
-pub use azure_storage_blobs;
+pub use azure_storage_blob;
 
 #[cfg(feature = "queue")]
-pub use azure_storage_queues;
+pub use azure_storage_queue;
 
 #[cfg(feature = "cosmos")]
 pub use azure_data_cosmos;
@@ -81,4 +84,4 @@ pub use azure_data_cosmos;
 pub use azure_messaging_servicebus;
 
 #[cfg(feature = "keyvault")]
-pub use azure_security_keyvault;
+pub use azure_security_keyvault_secrets;

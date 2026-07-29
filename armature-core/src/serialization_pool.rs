@@ -138,8 +138,11 @@ pub fn serialize_json_with_size<T: Serialize>(
             let len = buffer.len();
             SERIALIZATION_STATS.record_bytes(len);
 
-            // Convert to Bytes (zero-copy if buffer not reallocated)
-            Ok(buffer.freeze())
+            // Copy the serialized bytes out and let the guard drop, returning
+            // the buffer to the pool. Freezing would consume the pooled buffer
+            // (a pool miss on every call) and pin its full capacity in the
+            // returned `Bytes`.
+            Ok(Bytes::copy_from_slice(&buffer[..]))
         }
         Err(e) => {
             SERIALIZATION_STATS.record_error();
@@ -158,7 +161,7 @@ pub fn serialize_json_simd<T: Serialize>(value: &T) -> Result<Bytes, Serializati
 #[cfg(feature = "simd-json")]
 pub fn serialize_json_simd_with_size<T: Serialize>(
     value: &T,
-    size: SerializationSize,
+    _size: SerializationSize,
 ) -> Result<Bytes, SerializationError> {
     SERIALIZATION_STATS.record_serialization();
 
@@ -680,6 +683,34 @@ mod tests {
 
         let bytes = serialize_json_with_size(&user, SerializationSize::Tiny).unwrap();
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_json_recycles_pooled_buffer() {
+        // Regression: serialize_json_with_size used to freeze() the pooled
+        // buffer, so it never returned to the pool and every call was a miss.
+        // Run on a dedicated thread to get a fresh thread-local pool.
+        std::thread::spawn(|| {
+            let stats = crate::buffer_pool::pool_stats();
+            let user = TestUser {
+                name: "Pool".to_string(),
+                age: 1,
+            };
+
+            // First call misses the empty pool but must return its buffer.
+            let first = serialize_json_with_size(&user, SerializationSize::Medium).unwrap();
+            let hits_before = stats.hits();
+
+            // Second call must reuse the returned buffer (a pool hit).
+            let second = serialize_json_with_size(&user, SerializationSize::Medium).unwrap();
+            assert!(
+                stats.hits() > hits_before,
+                "second serialization should hit the pool"
+            );
+            assert_eq!(first, second);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

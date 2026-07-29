@@ -15,7 +15,11 @@ use syn::Error;
 /// Result of route validation
 #[allow(dead_code)]
 pub struct ValidatedRoute {
-    /// The normalized path (converted to matchit syntax internally)
+    /// The validated path, preserved verbatim.
+    ///
+    /// Both `:param` and `{param}` forms are accepted and passed through
+    /// unchanged; the path is *not* rewritten. The framework's router matches
+    /// the `:param` form directly, so no conversion is performed here.
     pub path: String,
     /// Extracted parameter names for validation
     pub params: Vec<String>,

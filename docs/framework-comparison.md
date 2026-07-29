@@ -155,7 +155,7 @@ async fn main() {
 cargo install oha
 
 # Clone Armature
-git clone https://github.com/pegasusheavy/armature
+git clone https://github.com/quinnjr/armature
 cd armature
 
 # Build servers

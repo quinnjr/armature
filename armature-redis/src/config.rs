@@ -13,10 +13,10 @@ pub struct RedisConfig {
     /// Minimum idle connections.
     pub min_idle: Option<u32>,
     /// Connection timeout.
-    #[serde(with = "humantime_serde", default = "default_connection_timeout")]
+    #[serde(with = "duration_secs_serde", default = "default_connection_timeout")]
     pub connection_timeout: Duration,
     /// Command timeout.
-    #[serde(with = "humantime_serde", default = "default_command_timeout")]
+    #[serde(with = "duration_secs_serde", default = "default_command_timeout")]
     pub command_timeout: Duration,
     /// Database number (0-15).
     pub database: Option<u8>,
@@ -124,32 +124,74 @@ impl RedisConfig {
     pub fn connection_url(&self) -> String {
         let mut url = self.url.clone();
 
-        // Add auth if provided
+        // Upgrade to TLS scheme if configured, regardless of how the config
+        // was constructed (builder's `tls()` already rewrites the scheme at
+        // set-time, but a directly-constructed or deserialized config with
+        // `tls: true` and a plain `redis://` URL must still be upgraded here).
+        if self.tls && url.starts_with("redis://") {
+            url = url.replacen("redis://", "rediss://", 1);
+        }
+
+        // Add auth if provided. Username/password are percent-encoded before
+        // splicing into the URL: an un-encoded password containing `@`, `/`,
+        // `?`, `#`, or whitespace would otherwise corrupt the URL (e.g. be
+        // parsed as a path/query separator or a second userinfo boundary).
         if let Some(password) = &self.password {
+            let encoded_password = urlencoding::encode(password);
             if let Some(username) = &self.username {
                 // Redis 6+ ACL format: redis://username:password@host
+                let encoded_username = urlencoding::encode(username);
                 url = url.replacen(
                     "redis://",
-                    &format!("redis://{}:{}@", username, password),
+                    &format!("redis://{}:{}@", encoded_username, encoded_password),
                     1,
                 );
                 url = url.replacen(
                     "rediss://",
-                    &format!("rediss://{}:{}@", username, password),
+                    &format!("rediss://{}:{}@", encoded_username, encoded_password),
                     1,
                 );
             } else {
                 // Legacy format: redis://:password@host
-                url = url.replacen("redis://", &format!("redis://:{}@", password), 1);
-                url = url.replacen("rediss://", &format!("rediss://:{}@", password), 1);
+                url = url.replacen("redis://", &format!("redis://:{}@", encoded_password), 1);
+                url = url.replacen("rediss://", &format!("rediss://:{}@", encoded_password), 1);
             }
         }
 
-        // Add database if provided
-        if let Some(db) = self.database
-            && (!url.contains('/') || url.ends_with(':'))
-        {
-            url = format!("{}/{}", url.trim_end_matches('/'), db);
+        // Add database if provided, but only when the URL doesn't already
+        // carry a db path segment after the `scheme://[auth@]host[:port]`
+        // prefix. A bare `redis://host:port` always contains `/` (from the
+        // scheme separator), so checking `url.contains('/')` against the
+        // *whole* URL never appends the database; we must only look past the
+        // scheme separator for an actual path segment. The scan must also
+        // skip past any userinfo (`user:pass@`) segment — a `/` inside
+        // percent-encoded (or, before encoding was added, raw) credentials
+        // would otherwise be mistaken for a path separator and wrongly
+        // suppress the database append.
+        //
+        // The scan (and any db-segment insertion) is further restricted to
+        // the *path* region only — up to the first `?` or `#` — so a query
+        // string (e.g. `?protocol=resp3`) with no path segment doesn't get
+        // mistaken for one, and so the db segment is inserted before the
+        // query/fragment rather than appended after it (which would corrupt
+        // the URL, e.g. `redis://h:6379?protocol=resp3` -> `.../3` tacked on
+        // after the query instead of `redis://h:6379/3?protocol=resp3`).
+        if let Some(db) = self.database {
+            let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
+            let after_auth = url[scheme_end..]
+                .find('@')
+                .map(|i| scheme_end + i + 1)
+                .unwrap_or(scheme_end);
+            let query_or_fragment_start = url[after_auth..]
+                .find(['?', '#'])
+                .map(|i| after_auth + i)
+                .unwrap_or(url.len());
+            let has_db_segment = url[after_auth..query_or_fragment_start].contains('/');
+            if !has_db_segment {
+                let path = &url[..query_or_fragment_start];
+                let rest = &url[query_or_fragment_start..];
+                url = format!("{}/{}{}", path.trim_end_matches('/'), db, rest);
+            }
         }
 
         url
@@ -252,7 +294,142 @@ impl RedisConfigBuilder {
     }
 }
 
-mod humantime_serde {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_url_appends_database_when_no_db_segment_present() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/3");
+    }
+
+    #[test]
+    fn connection_url_keeps_existing_db_segment() {
+        let config = RedisConfig {
+            url: "redis://h:6379/1".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/1");
+    }
+
+    #[test]
+    fn connection_url_without_database_is_unchanged() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: None,
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379");
+    }
+
+    #[test]
+    fn connection_url_with_auth_and_database() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            database: Some(2),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://user:pass@h:6379/2");
+    }
+
+    #[test]
+    fn connection_url_upgrades_to_tls_scheme_when_tls_true_directly_constructed() {
+        // Constructed directly (not via the builder's `tls()` setter, which
+        // rewrites the scheme eagerly) — `connection_url` must still upgrade
+        // the scheme when `tls` is true.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            tls: true,
+            ..Default::default()
+        };
+        assert!(config.connection_url().starts_with("rediss://"));
+    }
+
+    #[test]
+    fn connection_url_tls_upgrade_still_appends_database() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            tls: true,
+            database: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "rediss://h:6379/5");
+    }
+
+    #[test]
+    fn connection_url_percent_encodes_password_with_special_chars() {
+        // A raw `@` or `/` in the password must not be spliced verbatim —
+        // that would corrupt the URL (e.g. introduce a bogus userinfo
+        // boundary or path segment). It must come through percent-encoded.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            password: Some("p@ss/word".to_string()),
+            ..Default::default()
+        };
+        let url = config.connection_url();
+        assert_eq!(url, "redis://:p%40ss%2Fword@h:6379");
+        assert!(!url.contains("p@ss/word"));
+    }
+
+    #[test]
+    fn connection_url_percent_encodes_username_and_password() {
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            username: Some("us/er".to_string()),
+            password: Some("pa:ss@word".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.connection_url(),
+            "redis://us%2Fer:pa%3Ass%40word@h:6379"
+        );
+    }
+
+    #[test]
+    fn connection_url_inserts_database_before_query_string() {
+        // Regression test: a URL with a query string but no path segment
+        // must get the db segment inserted *before* the `?`, not appended
+        // after it (which would corrupt the URL).
+        let config = RedisConfig {
+            url: "redis://h:6379?protocol=resp3".to_string(),
+            database: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://h:6379/3?protocol=resp3");
+    }
+
+    #[test]
+    fn connection_url_password_with_slash_still_appends_database() {
+        // Before the fix, `has_db_segment` scanned the whole
+        // `scheme://user:pass@host` string, so a `/` inside the raw
+        // (pre-encoding) password would be mistaken for a path separator and
+        // wrongly suppress the database append. Even now that passwords are
+        // percent-encoded (so a literal `/` can no longer reach the URL via
+        // password), this guards the userinfo-skip logic itself: the scan
+        // must start after the `@` boundary, not from the scheme end.
+        let config = RedisConfig {
+            url: "redis://h:6379".to_string(),
+            password: Some("p/ss".to_string()),
+            database: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(config.connection_url(), "redis://:p%2Fss@h:6379/4");
+    }
+}
+
+/// (De)serializes a `Duration` as an integer number of seconds. Despite the
+/// name similarity to the `humantime_serde` crate, this does NOT use
+/// human-readable duration strings (e.g. `"5s"`) — it is a plain integer
+/// seconds codec.
+mod duration_secs_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 

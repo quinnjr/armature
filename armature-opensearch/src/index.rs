@@ -1,6 +1,6 @@
 //! Index management for OpenSearch.
 
-use crate::error::{OpenSearchError, Result};
+use crate::error::{OpenSearchError, Result, error_reason, json_or_error};
 use armature_log::{debug, info};
 use opensearch::OpenSearch;
 use serde::{Deserialize, Serialize};
@@ -44,23 +44,10 @@ impl IndexManager {
                 return Err(OpenSearchError::IndexExists(name.to_string()));
             }
 
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
+            return Err(OpenSearchError::Internal(error_reason(&body)));
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -76,21 +63,11 @@ impl IndexManager {
             .send()
             .await?;
 
-        let status = response.status_code();
-
-        if status == opensearch::http::StatusCode::NOT_FOUND {
+        if response.status_code() == opensearch::http::StatusCode::NOT_FOUND {
             return Err(OpenSearchError::IndexNotFound(name.to_string()));
         }
 
-        if !status.is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -141,15 +118,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -166,15 +135,7 @@ impl IndexManager {
             .send()
             .await?;
 
-        if !response.status_code().is_success() {
-            let body: Value = response.json().await?;
-            return Err(OpenSearchError::Internal(
-                body["error"]["reason"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            ));
-        }
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -183,11 +144,14 @@ impl IndexManager {
     pub async fn open(&self, name: &str) -> Result<()> {
         info!("Opening index: {}", name);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .open(opensearch::indices::IndicesOpenParts::Index(&[name]))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -196,11 +160,14 @@ impl IndexManager {
     pub async fn close(&self, name: &str) -> Result<()> {
         info!("Closing index: {}", name);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .close(opensearch::indices::IndicesCloseParts::Index(&[name]))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -209,11 +176,14 @@ impl IndexManager {
     pub async fn refresh(&self, name: &str) -> Result<()> {
         debug!("Refreshing index: {}", name);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .refresh(opensearch::indices::IndicesRefreshParts::Index(&[name]))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -222,11 +192,14 @@ impl IndexManager {
     pub async fn flush(&self, name: &str) -> Result<()> {
         debug!("Flushing index: {}", name);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .flush(opensearch::indices::IndicesFlushParts::Index(&[name]))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }
@@ -235,7 +208,8 @@ impl IndexManager {
     pub async fn create_alias(&self, index: &str, alias: &str) -> Result<()> {
         info!("Creating alias {} for index {}", alias, index);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .put_alias(opensearch::indices::IndicesPutAliasParts::IndexName(
                 &[index],
@@ -244,6 +218,8 @@ impl IndexManager {
             .send()
             .await?;
 
+        json_or_error(response).await?;
+
         Ok(())
     }
 
@@ -251,7 +227,8 @@ impl IndexManager {
     pub async fn delete_alias(&self, index: &str, alias: &str) -> Result<()> {
         info!("Deleting alias {} from index {}", alias, index);
 
-        self.client
+        let response = self
+            .client
             .indices()
             .delete_alias(opensearch::indices::IndicesDeleteAliasParts::IndexName(
                 &[index],
@@ -259,6 +236,8 @@ impl IndexManager {
             ))
             .send()
             .await?;
+
+        json_or_error(response).await?;
 
         Ok(())
     }

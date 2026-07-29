@@ -96,6 +96,25 @@ impl<E: std::fmt::Display> std::fmt::Display for BulkheadError<E> {
 
 impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for BulkheadError<E> {}
 
+/// RAII guard that decrements a counter when dropped, keeping counts
+/// accurate even if the caller's future is cancelled mid-await.
+struct CountGuard<'a> {
+    counter: &'a AtomicU32,
+}
+
+impl<'a> CountGuard<'a> {
+    fn increment(counter: &'a AtomicU32) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for CountGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Bulkhead for limiting concurrent access.
 pub struct Bulkhead {
     config: BulkheadConfig,
@@ -169,24 +188,20 @@ impl Bulkhead {
             return Err(BulkheadError::Full);
         }
 
-        self.waiting_count.fetch_add(1, Ordering::SeqCst);
+        // Guard decrements on drop, so a cancelled caller cannot leak the count
+        let waiting_guard = CountGuard::increment(&self.waiting_count);
 
         // Try to acquire permit with timeout
         let permit =
             match tokio::time::timeout(self.config.max_wait, self.semaphore.acquire()).await {
-                Ok(Ok(permit)) => {
-                    self.waiting_count.fetch_sub(1, Ordering::SeqCst);
-                    permit
-                }
+                Ok(Ok(permit)) => permit,
                 Ok(Err(_)) => {
                     // Semaphore closed (shouldn't happen)
-                    self.waiting_count.fetch_sub(1, Ordering::SeqCst);
                     self.total_rejections.fetch_add(1, Ordering::Relaxed);
                     return Err(BulkheadError::Full);
                 }
                 Err(_) => {
                     // Timeout
-                    self.waiting_count.fetch_sub(1, Ordering::SeqCst);
                     self.total_timeouts.fetch_add(1, Ordering::Relaxed);
                     warn!(
                         name = %self.config.name,
@@ -196,14 +211,15 @@ impl Bulkhead {
                     return Err(BulkheadError::Timeout);
                 }
             };
+        drop(waiting_guard);
 
-        self.active_count.fetch_add(1, Ordering::SeqCst);
+        let active_guard = CountGuard::increment(&self.active_count);
 
         // Execute the operation
         let result = f().await;
 
         // Release permit
-        self.active_count.fetch_sub(1, Ordering::SeqCst);
+        drop(active_guard);
         drop(permit);
 
         result.map_err(BulkheadError::Execution)
@@ -225,11 +241,11 @@ impl Bulkhead {
             }
         };
 
-        self.active_count.fetch_add(1, Ordering::SeqCst);
+        let active_guard = CountGuard::increment(&self.active_count);
 
         let result = f().await;
 
-        self.active_count.fetch_sub(1, Ordering::SeqCst);
+        drop(active_guard);
         drop(permit);
 
         result.map_err(BulkheadError::Execution)
@@ -307,5 +323,49 @@ mod tests {
         let result: Result<i32, BulkheadError<&str>> = bulkhead.try_call(|| async { Ok(42) }).await;
 
         assert!(matches!(result, Err(BulkheadError::Full)));
+    }
+
+    #[tokio::test]
+    async fn test_bulkhead_waiting_count_reset_on_cancellation() {
+        let bulkhead = Bulkhead::new(BulkheadConfig {
+            name: "test".to_string(),
+            max_concurrent: 1,
+            max_wait: Duration::from_secs(5),
+            queue_size: Some(1),
+        });
+
+        // Hold the only permit so the next caller has to wait
+        let permit = bulkhead.semaphore.acquire().await.unwrap();
+
+        // Cancel a call while it waits for a permit by dropping its future
+        let cancelled: Result<Result<i32, BulkheadError<&str>>, _> =
+            tokio::time::timeout(Duration::from_millis(20), bulkhead.call(|| async { Ok(1) }))
+                .await;
+        assert!(cancelled.is_err());
+        assert_eq!(bulkhead.waiting_count(), 0);
+
+        drop(permit);
+
+        // Queue must not be permanently poisoned: this call should succeed
+        let result: Result<i32, BulkheadError<&str>> = bulkhead.call(|| async { Ok(2) }).await;
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_bulkhead_active_count_reset_on_cancellation() {
+        let bulkhead = Bulkhead::new(BulkheadConfig::new("test", 1));
+
+        // Cancel a call while its operation is executing
+        let cancelled: Result<Result<i32, BulkheadError<&str>>, _> = tokio::time::timeout(
+            Duration::from_millis(20),
+            bulkhead.call(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(1)
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert_eq!(bulkhead.active_count(), 0);
+        assert_eq!(bulkhead.available_permits(), 1);
     }
 }

@@ -27,7 +27,7 @@ echo ""
 
 # 2. Run clippy with warnings as errors (only on changed files)
 echo "🔍 Running clippy linter..."
-if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+if ! cargo clippy --workspace --all-targets --features full-with-saml -- -D warnings; then
     echo ""
     echo "❌ Clippy check failed!"
     echo "   Fix the linting issues above before committing."

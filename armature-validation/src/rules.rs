@@ -88,16 +88,20 @@ impl ValidationBuilder {
         }
     }
 
-    /// Validate all fields in parallel using async tasks
+    /// Validate all fields concurrently using async tasks.
     ///
-    /// This method validates multiple fields concurrently, providing
-    /// significant performance improvements for forms with many fields.
+    /// Each field's validators run in a separate [`tokio`] task via a
+    /// [`JoinSet`](tokio::task::JoinSet), so independent fields are scheduled
+    /// concurrently rather than strictly in sequence.
     ///
     /// # Performance
     ///
-    /// - **Sequential:** O(n * avg_validation_time)
-    /// - **Parallel:** O(max(validation_times))
-    /// - **Speedup:** 2-4x for forms with 10+ fields
+    /// The built-in validators are synchronous and CPU-cheap, so for typical
+    /// forms the task-spawn overhead dominates and this offers no measurable
+    /// speedup over [`ValidationBuilder::validate`] — it is not benchmarked to
+    /// be faster. Reach for it only when your validators do genuinely
+    /// independent, latency-bound work (for example custom async checks wrapped
+    /// in blocking validators); otherwise prefer the synchronous method.
     ///
     /// # Examples
     ///
@@ -115,7 +119,6 @@ impl ValidationBuilder {
     /// data.insert("username".to_string(), "john_doe".to_string());
     /// data.insert("age".to_string(), "25".to_string());
     ///
-    /// // Validate all fields in parallel (2-4x faster)
     /// validator.validate_parallel(&data).await?;
     /// # Ok(())
     /// # }

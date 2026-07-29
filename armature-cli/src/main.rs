@@ -14,7 +14,6 @@
 //! - `armature config` - Validate configuration files
 //! - `armature doctor` - Check system requirements and dependencies
 //! - `armature upgrade` - Check for and install CLI updates
-//! - `armature db` - Database migrations and management
 //! - `armature deploy` - Deploy to cloud providers
 //! - `armature repl` - Interactive Rust REPL
 //! - `armature info` - Show project information
@@ -34,19 +33,21 @@ mod generators;
 mod templates;
 mod watcher;
 
-use commands::{build, config, dev, generate, info, mock, new, openapi, repl, routes, run};
+use commands::{
+    build, config, dev, external, generate, info, mock, new, openapi, repl, routes, run,
+};
 use error::{CliError, CliResult};
 
 /// Armature CLI - Modern Rust Web Framework Tools
 #[derive(Parser)]
 #[command(name = "armature")]
-#[command(author = "Pegasus Heavy Industries LLC")]
+#[command(author = "Joseph Quinn")]
 #[command(version)]
 #[command(about = "🔧 CLI tool for Armature framework - code generation and development server")]
 #[command(long_about = None)]
 #[command(propagate_version = true)]
 #[command(after_help = format!(
-    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature deploy --provider aws\n\n{}\n  {} https://github.com/pegasusheavy/armature",
+    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature deploy --provider aws\n\n{}\n  {} https://github.com/quinnjr/armature",
     "Examples:".bright_cyan().bold(),
     "$".dimmed(),
     "$".dimmed(),
@@ -114,12 +115,6 @@ enum Commands {
     #[command(alias = "up")]
     Upgrade(UpgradeArgs),
 
-    /// Database migrations and management
-    Db {
-        #[command(subcommand)]
-        command: DbCommands,
-    },
-
     /// Deploy to cloud providers
     Deploy(DeployArgs),
 
@@ -159,7 +154,6 @@ enum Commands {
     Add(AddArgs),
 
     /// Validate project setup and configuration
-    #[command(alias = "check")]
     Validate(ValidateArgs),
 
     /// OpenAPI tools (client generation, spec validation)
@@ -174,6 +168,14 @@ enum Commands {
 
     /// Run a Rhai application script
     Run(RunArgs),
+
+    /// Fallback for any subcommand not recognized above: looked up as
+    /// `armature-<name>` on $PATH and run directly (mirrors cargo's own
+    /// extension mechanism). Not shown in --help since the actual set of
+    /// available extensions depends on what's installed; see `armature
+    /// plugin list` to discover what's currently on $PATH.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 // =============================================================================
@@ -525,7 +527,7 @@ enum GeneratorType {
     },
 
     /// Generate a Prax ORM schema file
-    #[command(alias = "prax-schema")]
+    #[command(alias = "praxschema")]
     PraxSchema {
         /// Model name
         name: String,
@@ -737,60 +739,6 @@ enum ConfigCommands {
         /// Environment (development, production, test)
         #[arg(short, long, default_value = "development")]
         env: String,
-    },
-}
-
-// =============================================================================
-// DATABASE COMMANDS
-// =============================================================================
-
-#[derive(Subcommand)]
-enum DbCommands {
-    /// Create the database
-    Create,
-
-    /// Drop the database
-    Drop {
-        /// Skip confirmation prompt
-        #[arg(short, long)]
-        force: bool,
-    },
-
-    /// Run pending migrations
-    Migrate {
-        /// Number of migrations to run
-        #[arg(short, long)]
-        steps: Option<u32>,
-    },
-
-    /// Rollback migrations
-    Rollback {
-        /// Number of migrations to rollback
-        #[arg(short, long, default_value = "1")]
-        steps: u32,
-    },
-
-    /// Reset database (drop + create + migrate)
-    Reset {
-        /// Skip confirmation prompt
-        #[arg(short, long)]
-        force: bool,
-    },
-
-    /// Show migration status
-    Status,
-
-    /// Seed the database
-    Seed {
-        /// Specific seeder to run
-        seeder: Option<String>,
-    },
-
-    /// Generate a new migration
-    #[command(alias = "g")]
-    Generate {
-        /// Migration name
-        name: String,
     },
 }
 
@@ -1017,7 +965,7 @@ struct ValidateArgs {
 #[derive(Subcommand)]
 enum OpenapiCommands {
     /// Generate HTTP client from OpenAPI spec
-    #[command(alias = "client")]
+    #[command(alias = "gen-client")]
     Client(OpenapiClientArgs),
 
     /// Validate an OpenAPI spec
@@ -1054,6 +1002,10 @@ struct OpenapiClientArgs {
     /// Custom client class name
     #[arg(long)]
     name: Option<String>,
+
+    /// Default base URL baked into the generated client
+    #[arg(long)]
+    base_url: Option<String>,
 
     /// Include request logging
     #[arg(long)]
@@ -1357,8 +1309,40 @@ async fn run_interactive_wizard() -> CliResult<()> {
 
     println!();
 
+    // Map the wizard selections into project options.
+    let database = match db_idx {
+        0 => Some("postgres".to_string()),
+        1 => Some("mysql".to_string()),
+        2 => Some("sqlite".to_string()),
+        3 => Some("mongodb".to_string()),
+        _ => None,
+    };
+
+    // Feature keys, indexed to the `features` list presented above.
+    let feature_keys = [
+        "auth",
+        "ratelimit",
+        "cache",
+        "queue",
+        "realtime",
+        "storage",
+        "mail",
+        "opentelemetry",
+    ];
+    let selected: Vec<String> = selected_features
+        .iter()
+        .filter_map(|i| feature_keys.get(*i).map(|k| k.to_string()))
+        .collect();
+
+    let opts = new::NewProjectOptions {
+        database,
+        features: selected,
+        docker: include_docker,
+        ci: include_ci,
+    };
+
     // Create the project
-    new::run(&name, template, false, false).await?;
+    new::run(&name, template, false, false, &opts).await?;
 
     // Print next steps
     println!();
@@ -1434,9 +1418,11 @@ fn run_add_command(args: AddArgs) -> CliResult<()> {
     println!("  {} Changes to Cargo.toml:", "📝".cyan());
 
     if let Some(flag) = feature.feature_flag() {
-        // Enable feature on armature dependency
+        // Enable feature on armature dependency. `armature` on crates.io is
+        // squatted by an unrelated crate, so this project's crate is
+        // published as `armature-framework` and renamed back to `armature`.
         println!(
-            "    {} armature = {{ features = [\"{}\"] }}",
+            "    {} armature = {{ package = \"armature-framework\", features = [\"{}\"] }}",
             "+".green(),
             flag.green()
         );
@@ -1451,10 +1437,21 @@ fn run_add_command(args: AddArgs) -> CliResult<()> {
         return Ok(());
     }
 
-    // Add the dependency using cargo add
+    // Add the dependency using cargo add. `armature` on crates.io is squatted
+    // by an unrelated actor-framework crate; this project's crate is
+    // published as `armature-framework`, so it must be added with
+    // `--rename armature` to keep resolving as `armature` in source while
+    // depending on the real published package.
     let cargo_add_result = if let Some(flag) = feature.feature_flag() {
         std::process::Command::new("cargo")
-            .args(["add", "armature", "--features", flag])
+            .args([
+                "add",
+                "armature-framework",
+                "--rename",
+                "armature",
+                "--features",
+                flag,
+            ])
             .status()
     } else {
         std::process::Command::new("cargo")
@@ -1652,6 +1649,10 @@ async fn run_validate_command(args: ValidateArgs) -> CliResult<()> {
         if args.fix {
             println!("  {} Auto-fix is not yet implemented", "ℹ".dimmed());
         }
+        println!();
+        return Err(CliError::Validation(
+            "project validation failed".to_string(),
+        ));
     } else if has_warnings {
         println!(
             "  {} Validation passed with {}",
@@ -1669,6 +1670,23 @@ async fn run_validate_command(args: ValidateArgs) -> CliResult<()> {
 // =============================================================================
 // DOCTOR COMMAND
 // =============================================================================
+
+/// Result of a single `doctor` tool check.
+struct ToolCheck {
+    name: &'static str,
+    found: bool,
+    /// Whether the tool is required for Armature to function.
+    essential: bool,
+}
+
+/// Return the names of the missing essential tools.
+fn missing_essentials(checks: &[ToolCheck]) -> Vec<&'static str> {
+    checks
+        .iter()
+        .filter(|c| c.essential && !c.found)
+        .map(|c| c.name)
+        .collect()
+}
 
 async fn run_doctor() -> CliResult<()> {
     print_mini_banner();
@@ -1694,6 +1712,7 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    let rust_found = matches!(&rust_version, Ok(o) if o.status.success());
     match rust_version {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -1720,6 +1739,7 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let cargo_found = matches!(&cargo_version, Ok(o) if o.status.success());
     match cargo_version {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -1742,7 +1762,8 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    if generators::has_cargo_watch() {
+    let cargo_watch_found = generators::has_cargo_watch();
+    if cargo_watch_found {
         pb.finish_with_message(format!(
             "{} cargo-watch: {}",
             "✓".green(),
@@ -1769,6 +1790,7 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let docker_found = matches!(&docker_version, Ok(o) if o.status.success());
     match docker_version {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -1802,6 +1824,7 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let git_found = matches!(&git_version, Ok(o) if o.status.success());
     match git_version {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -1828,6 +1851,7 @@ async fn run_doctor() -> CliResult<()> {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let evcxr_found = matches!(&evcxr, Ok(o) if o.status.success());
     match evcxr {
         Ok(output) if output.status.success() => {
             pb.finish_with_message(format!(
@@ -1846,14 +1870,61 @@ async fn run_doctor() -> CliResult<()> {
         }
     }
 
-    println!();
-    println!(
-        "  {} All essential tools are installed!",
-        "✓".green().bold()
-    );
-    println!();
+    let checks = [
+        ToolCheck {
+            name: "rustc",
+            found: rust_found,
+            essential: true,
+        },
+        ToolCheck {
+            name: "cargo",
+            found: cargo_found,
+            essential: true,
+        },
+        ToolCheck {
+            name: "git",
+            found: git_found,
+            essential: true,
+        },
+        ToolCheck {
+            name: "cargo-watch",
+            found: cargo_watch_found,
+            essential: false,
+        },
+        ToolCheck {
+            name: "docker",
+            found: docker_found,
+            essential: false,
+        },
+        ToolCheck {
+            name: "evcxr_repl",
+            found: evcxr_found,
+            essential: false,
+        },
+    ];
 
-    Ok(())
+    let missing = missing_essentials(&checks);
+
+    println!();
+    if missing.is_empty() {
+        println!(
+            "  {} All essential tools are installed!",
+            "✓".green().bold()
+        );
+        println!();
+        Ok(())
+    } else {
+        println!(
+            "  {} Missing essential tools: {}",
+            "✗".red().bold(),
+            missing.join(", ").red()
+        );
+        println!();
+        Err(CliError::Tool(format!(
+            "missing essential tools: {}",
+            missing.join(", ")
+        )))
+    }
 }
 
 // =============================================================================
@@ -1894,11 +1965,29 @@ async fn main() {
                     Some(ProjectTemplate::Cloudrun) => "cloudrun",
                     None => "minimal",
                 };
+                let database = args.database.as_ref().map(|db| {
+                    match db {
+                        DatabaseType::Postgres => "postgres",
+                        DatabaseType::Mysql => "mysql",
+                        DatabaseType::Sqlite => "sqlite",
+                        DatabaseType::Mongodb => "mongodb",
+                        DatabaseType::Redis => "redis",
+                        DatabaseType::None => "none",
+                    }
+                    .to_string()
+                });
+                let opts = new::NewProjectOptions {
+                    database,
+                    features: Vec::new(),
+                    docker: args.docker,
+                    ci: args.ci,
+                };
                 new::run(
                     args.name.as_deref().unwrap_or("my-app"),
                     template,
                     args.skip_git,
                     args.skip_install,
+                    &opts,
                 )
                 .await
             }
@@ -1909,8 +1998,8 @@ async fn main() {
                 name,
                 crud,
                 skip_tests,
-                auth: _,
-            } => generate::controller(&name, crud, skip_tests).await,
+                auth,
+            } => generate::controller(&name, crud, skip_tests, auth).await,
 
             GeneratorType::Module {
                 name,
@@ -1925,8 +2014,18 @@ async fn main() {
             GeneratorType::Guard {
                 name,
                 skip_tests,
-                guard_type: _,
-            } => generate::guard(&name, skip_tests).await,
+                guard_type,
+            } => {
+                let gt = match guard_type {
+                    GuardType::Custom => "custom",
+                    GuardType::Auth => "auth",
+                    GuardType::Role => "role",
+                    GuardType::Permission => "permission",
+                    GuardType::ApiKey => "apikey",
+                    GuardType::RateLimit => "ratelimit",
+                };
+                generate::guard(&name, skip_tests, gt).await
+            }
 
             GeneratorType::Service { name, skip_tests } => {
                 generate::service(&name, skip_tests).await
@@ -1936,29 +2035,33 @@ async fn main() {
 
             GeneratorType::Model {
                 name,
-                fields: _,
-                migration: _,
-            } => {
-                info(&format!("Generating model: {}", name.cyan()));
-                warn("Model generation is coming soon!");
-                Ok(())
-            }
+                fields,
+                migration,
+            } => generate::model(&name, fields.as_deref(), migration).await,
 
-            GeneratorType::Job { name, job_type: _ } => generate::job(&name, false).await,
+            GeneratorType::Job { name, job_type } => {
+                let jt = match job_type {
+                    JobType::Async => "async",
+                    JobType::Scheduled => "scheduled",
+                    JobType::Recurring => "recurring",
+                };
+                generate::job(&name, false, jt).await
+            }
 
             GeneratorType::Event { name } => generate::event_handler(&name, false).await,
 
-            GeneratorType::Dto { name, fields: _ } => generate::dto(&name).await,
+            GeneratorType::Dto { name, fields } => generate::dto(&name, fields.as_deref()).await,
 
-            GeneratorType::Scaffold { name, fields: _ } => {
+            GeneratorType::Scaffold { name, fields } => {
                 // Generate all layers: entity, repository, dto, service, controller
                 info(&format!("Generating full scaffold for: {}", name.cyan()));
+                let fields = fields.as_deref();
                 async {
-                    generate::entity(&name).await?;
+                    generate::entity_with_orm(&name, generate::OrmType::Generic, fields).await?;
                     generate::repository(&name, false).await?;
-                    generate::dto(&name).await?;
+                    generate::dto(&name, fields).await?;
                     generate::service(&name, false).await?;
-                    generate::controller(&name, true, false).await
+                    generate::controller(&name, true, false, false).await
                 }
                 .await
             }
@@ -1988,7 +2091,7 @@ async fn main() {
             GeneratorType::Config { name } => generate::config(&name).await,
 
             GeneratorType::Entity { name, orm } => match orm.parse::<generate::OrmType>() {
-                Ok(orm_type) => generate::entity_with_orm(&name, orm_type).await,
+                Ok(orm_type) => generate::entity_with_orm(&name, orm_type, None).await,
                 Err(e) => Err(crate::error::CliError::InvalidArgument(e)),
             },
 
@@ -2031,12 +2134,24 @@ async fn main() {
         Commands::Build(args) => build::run(args.release, &args.cargo_args).await,
 
         Commands::Routes(args) => {
-            print_mini_banner();
-            if let Some(method) = args.method.as_deref() {
-                routes::execute_with_filter(None, Some(method))
-            } else {
-                routes::execute(None)
+            let format = match args.format {
+                OutputFormat::Table => routes::RouteFormat::Table,
+                OutputFormat::Json => routes::RouteFormat::Json,
+                OutputFormat::Yaml => routes::RouteFormat::Yaml,
+                OutputFormat::Markdown => routes::RouteFormat::Markdown,
+            };
+            // Only the human table gets the decorative banner; machine formats
+            // (json/yaml/markdown) must emit clean, parseable output.
+            if matches!(args.format, OutputFormat::Table) {
+                print_mini_banner();
             }
+            routes::run(
+                None,
+                args.method.as_deref(),
+                args.path.as_deref(),
+                format,
+                args.middleware,
+            )
         }
 
         Commands::Config(args) => match args.command {
@@ -2086,45 +2201,6 @@ async fn main() {
             Ok(())
         }
 
-        Commands::Db { command } => {
-            print_mini_banner();
-            match command {
-                DbCommands::Create => {
-                    info("Creating database...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Drop { force: _ } => {
-                    info("Dropping database...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Migrate { steps: _ } => {
-                    info("Running migrations...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Rollback { steps: _ } => {
-                    info("Rolling back migrations...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Reset { force: _ } => {
-                    info("Resetting database...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Status => {
-                    info("Migration status:");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Seed { seeder: _ } => {
-                    info("Seeding database...");
-                    warn("Database commands are coming soon!");
-                }
-                DbCommands::Generate { name } => {
-                    info(&format!("Generating migration: {}", name.cyan()));
-                    warn("Database commands are coming soon!");
-                }
-            }
-            Ok(())
-        }
-
         Commands::Deploy(args) => {
             print_mini_banner();
             let provider = args.provider.map(|p| match p {
@@ -2167,7 +2243,7 @@ async fn main() {
 
         Commands::Docs => {
             info("Opening documentation...");
-            let url = "https://github.com/pegasusheavy/armature";
+            let url = "https://github.com/quinnjr/armature";
             if webbrowser::open(url).is_err() {
                 println!("  {} {}", "→".cyan(), url);
             }
@@ -2178,8 +2254,23 @@ async fn main() {
             print_mini_banner();
             match command {
                 PluginCommands::List => {
-                    info("Installed plugins:");
-                    println!("  {} No plugins installed", "○".dimmed());
+                    info("Discovered armature-* extensions on $PATH:");
+                    let discovered = external::discover_external_commands();
+                    if discovered.is_empty() {
+                        println!(
+                            "  {} No armature-* extension binaries found on $PATH",
+                            "○".dimmed()
+                        );
+                    } else {
+                        for (name, path) in &discovered {
+                            println!(
+                                "  {} {} {}",
+                                "●".green(),
+                                name.cyan(),
+                                format!("({})", path.display()).dimmed()
+                            );
+                        }
+                    }
                 }
                 PluginCommands::Install { name } => {
                     info(&format!("Installing plugin: {}", name.cyan()));
@@ -2252,8 +2343,7 @@ async fn main() {
                         ClientLanguageArg::Both => openapi::ClientLanguage::Both,
                     };
                     let options = openapi::ClientOptions {
-                        base_url: None,
-                        async_client: true,
+                        base_url: args.base_url,
                         with_logging: args.with_logging,
                         with_retry: args.with_retry,
                         client_name: args.name,
@@ -2291,10 +2381,81 @@ async fn main() {
         Commands::Run(args) => {
             run::run(&args.script, args.port, args.host.as_deref(), args.watch).await
         }
+
+        Commands::External(args) => {
+            // clap's external_subcommand always gives us a non-empty Vec —
+            // the unrecognized subcommand name is args[0], its own
+            // arguments (if any) follow.
+            let Some((name, rest)) = args.split_first() else {
+                eprintln!("\n  {} no command given\n", "Error:".red().bold());
+                std::process::exit(1);
+            };
+            match external::run_external_command(name, rest) {
+                Ok(exit_code) => std::process::exit(exit_code),
+                Err(e) => Err(e),
+            }
+        }
     };
 
     if let Err(e) = result {
         eprintln!("\n  {} {}\n", "Error:".red().bold(), e);
         std::process::exit(1);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_reports_missing_essentials() {
+        let checks = [
+            ToolCheck {
+                name: "rustc",
+                found: false,
+                essential: true,
+            },
+            ToolCheck {
+                name: "cargo",
+                found: true,
+                essential: true,
+            },
+            ToolCheck {
+                name: "docker",
+                found: false,
+                essential: false,
+            },
+        ];
+        // Missing an essential tool is reported; a missing optional tool is not.
+        assert_eq!(missing_essentials(&checks), vec!["rustc"]);
+    }
+
+    #[test]
+    fn doctor_all_clear_when_essentials_present() {
+        let checks = [
+            ToolCheck {
+                name: "rustc",
+                found: true,
+                essential: true,
+            },
+            ToolCheck {
+                name: "cargo",
+                found: true,
+                essential: true,
+            },
+            ToolCheck {
+                name: "cargo-watch",
+                found: false,
+                essential: false,
+            },
+        ];
+        assert!(missing_essentials(&checks).is_empty());
+    }
+
+    #[test]
+    fn cli_command_tree_has_no_duplicate_aliases() {
+        // clap's debug asserts run during command construction; a duplicate
+        // alias anywhere panics here (and would break every invocation).
+        Cli::command().debug_assert();
+    }
 }

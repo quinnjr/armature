@@ -162,11 +162,6 @@ impl GcpConfigBuilder {
         self.enable("pubsub")
     }
 
-    /// Enable Firestore.
-    pub fn enable_firestore(self) -> Self {
-        self.enable("firestore")
-    }
-
     /// Enable Spanner.
     pub fn enable_spanner(self) -> Self {
         self.enable("spanner")
@@ -194,10 +189,7 @@ impl GcpConfigBuilder {
 
     /// Enable all data services.
     pub fn enable_data(self) -> Self {
-        self.enable_storage()
-            .enable_firestore()
-            .enable_spanner()
-            .enable_bigquery()
+        self.enable_storage().enable_spanner().enable_bigquery()
     }
 
     /// Add service-specific configuration.

@@ -70,4 +70,31 @@ ignore = [
     # Used by: reqwest, armature-core, armature-acme
     # Note: Core functionality, will monitor for alternatives
     "RUSTSEC-2025-0134",
+
+    #
+    # === 2026 advisories (transitive; no takeable fix without upstream bumps) ===
+    #
+
+    # RUSTSEC-2026-0049 / -0098 / -0099 / -0104: rustls-webpki - name-constraint /
+    # wildcard-name verification issues. Pulled transitively through the rustls
+    # 0.23 stack (reqwest / tokio-rustls). A fresh resolve still selects the
+    # affected line because intermediate crates cap the version; will pick up the
+    # >=0.103.13 fix when the rustls ecosystem deps release compatible bumps.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # RUSTSEC-2026-0187: lopdf - stack overflow via deeply nested PDF objects.
+    # Transitive via armature-files PDF support; fix is lopdf >=0.42.0, held back
+    # by the intermediate dependency. PDF parsing is an opt-in feature.
+    "RUSTSEC-2026-0187",
+
+    # RUSTSEC-2026-0194 / -0195: quick-xml - quadratic attribute-check /
+    # unbounded namespace-declaration DoS. Reaches us only through `samael`
+    # (behind the opt-in `saml` feature); samael pins quick-xml below the
+    # >=0.41.0 fix. SAML XML is bounded by upstream request-body limits. Will
+    # drop this ignore once samael releases against quick-xml >=0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

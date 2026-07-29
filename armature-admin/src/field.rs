@@ -262,31 +262,6 @@ impl FieldType {
             Self::ManyToMany => WidgetType::MultiSelect,
         }
     }
-
-    /// Get SQL type representation
-    pub fn sql_type(&self) -> &'static str {
-        match self {
-            Self::Integer => "INTEGER",
-            Self::BigInteger => "BIGINT",
-            Self::Float => "REAL",
-            Self::Decimal => "DECIMAL",
-            Self::String => "VARCHAR",
-            Self::Text => "TEXT",
-            Self::Boolean => "BOOLEAN",
-            Self::Date => "DATE",
-            Self::Time => "TIME",
-            Self::DateTime => "TIMESTAMP",
-            Self::Uuid => "UUID",
-            Self::Json => "JSON",
-            Self::Binary => "BLOB",
-            Self::Email => "VARCHAR",
-            Self::Url => "VARCHAR",
-            Self::IpAddress => "VARCHAR",
-            Self::Enum => "VARCHAR",
-            Self::ForeignKey => "INTEGER",
-            Self::ManyToMany => "INTEGER",
-        }
-    }
 }
 
 /// Widget types for form rendering

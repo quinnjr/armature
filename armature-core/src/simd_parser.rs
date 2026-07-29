@@ -29,6 +29,7 @@
 
 use memchr::memchr;
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 // Common header names for interning - using static strings avoids allocation
@@ -85,10 +86,25 @@ static COMMON_HEADERS: &[(&str, &str)] = &[
 /// ```
 #[inline]
 pub fn intern_header_name(name: &str) -> Cow<'static, str> {
-    let lower = name.to_ascii_lowercase();
+    // Binary search through the (lowercase, sorted) common-header table without
+    // allocating a lowercased copy of `name`. Each key is already lowercase, so
+    // we compare it against `name` case-insensitively byte-by-byte.
+    let needle = name.as_bytes();
+    let found = COMMON_HEADERS.binary_search_by(|(key, _)| {
+        let key = key.as_bytes();
+        let common = key.len().min(needle.len());
+        for i in 0..common {
+            // Key bytes are already lowercase; lowercase the needle byte to
+            // compare case-insensitively.
+            match key[i].cmp(&needle[i].to_ascii_lowercase()) {
+                Ordering::Equal => {}
+                non_eq => return non_eq,
+            }
+        }
+        key.len().cmp(&needle.len())
+    });
 
-    // Binary search through common headers
-    if let Ok(idx) = COMMON_HEADERS.binary_search_by(|(k, _)| k.cmp(&lower.as_str())) {
+    if let Ok(idx) = found {
         Cow::Borrowed(COMMON_HEADERS[idx].1)
     } else {
         Cow::Owned(name.to_string())
@@ -211,7 +227,10 @@ pub fn url_decode(input: &str) -> String {
         return input.to_string();
     }
 
-    let mut result = String::with_capacity(input.len());
+    // Decode into raw bytes first: percent-escapes are bytes of a UTF-8
+    // sequence, so pushing them as individual chars would mangle multibyte
+    // characters (e.g. "%E2%82%AC" must decode to "€", not mojibake).
+    let mut result = Vec::with_capacity(input.len());
     let mut i = 0;
 
     while i < bytes.len() {
@@ -219,25 +238,25 @@ pub fn url_decode(input: &str) -> String {
             b'%' if i + 2 < bytes.len() => {
                 // Try to decode hex
                 if let (Some(h1), Some(h2)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                    result.push((h1 << 4 | h2) as char);
+                    result.push(h1 << 4 | h2);
                     i += 3;
                 } else {
-                    result.push('%');
+                    result.push(b'%');
                     i += 1;
                 }
             }
             b'+' => {
-                result.push(' ');
+                result.push(b' ');
                 i += 1;
             }
             c => {
-                result.push(c as char);
+                result.push(c);
                 i += 1;
             }
         }
     }
 
-    result
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 /// Convert a hex digit character to its value.
@@ -251,7 +270,10 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-/// Split a path into segments using SIMD-optimized search.
+/// Split a path into segments.
+///
+/// This is a plain scalar `str::split('/')` (no SIMD); it is listed here
+/// alongside the SIMD helpers only because it is part of the fast path API.
 ///
 /// Returns an iterator over path segments, skipping empty segments.
 ///
@@ -351,7 +373,7 @@ pub fn parse_request_line(buf: &[u8]) -> Result<(&str, &str, u8), httparse::Erro
 
 /// Check if a byte sequence contains only valid header name characters.
 ///
-/// Uses SIMD to check multiple bytes at once.
+/// Scalar validation (`iter().all(..)`); it does not use SIMD.
 #[inline]
 pub fn is_valid_header_name(name: &[u8]) -> bool {
     // Valid header name characters: a-z, A-Z, 0-9, -, _
@@ -361,8 +383,8 @@ pub fn is_valid_header_name(name: &[u8]) -> bool {
 
 /// Fast path parameter extraction.
 ///
-/// Given a route pattern and actual path, extract parameters using
-/// SIMD-optimized string operations.
+/// Given a route pattern and actual path, extract parameters using scalar
+/// string operations (segment split and comparison; no SIMD).
 ///
 /// # Example
 ///
@@ -403,9 +425,26 @@ mod tests {
         assert_eq!(intern_header_name("CONTENT-TYPE"), "Content-Type");
         assert_eq!(intern_header_name("authorization"), "Authorization");
 
-        // Unknown headers
+        // Mixed-case matches for every entry regardless of input casing
+        assert_eq!(intern_header_name("AcCePt"), "Accept");
+        assert_eq!(intern_header_name("X-FORWARDED-FOR"), "X-Forwarded-For");
+        assert_eq!(intern_header_name("te"), "TE");
+        assert_eq!(intern_header_name("TE"), "TE");
+
+        // Unknown headers are returned unchanged (original casing preserved)
         let custom = intern_header_name("X-Custom-Header");
         assert_eq!(custom.as_ref(), "X-Custom-Header");
+        assert!(matches!(custom, Cow::Owned(_)));
+
+        // A name that shares a prefix with a known header but is longer/shorter
+        assert_eq!(intern_header_name("content-typ").as_ref(), "content-typ");
+        assert_eq!(
+            intern_header_name("content-type-extra").as_ref(),
+            "content-type-extra"
+        );
+
+        // Known matches return a borrowed static string (no allocation)
+        assert!(matches!(intern_header_name("host"), Cow::Borrowed(_)));
     }
 
     #[test]
@@ -452,6 +491,19 @@ mod tests {
         assert_eq!(url_decode("normal"), "normal");
         assert_eq!(url_decode("%2F"), "/");
         assert_eq!(url_decode("%3A%2F%2F"), "://");
+    }
+
+    #[test]
+    fn test_url_decode_multibyte_utf8() {
+        // Percent-escapes are bytes of a UTF-8 sequence and must be decoded
+        // as a whole, not byte-by-byte as Latin-1 chars.
+        assert_eq!(url_decode("%E2%82%AC"), "\u{20AC}"); // €
+        assert_eq!(url_decode("caf%C3%A9"), "caf\u{e9}"); // café
+        assert_eq!(url_decode("%F0%9F%A6%80"), "\u{1F980}"); // 🦀
+
+        let params = parse_query_string_decoded("price=%E2%82%AC10&name=caf%C3%A9");
+        assert_eq!(params.get("price"), Some(&"\u{20AC}10".to_string()));
+        assert_eq!(params.get("name"), Some(&"caf\u{e9}".to_string()));
     }
 
     #[test]

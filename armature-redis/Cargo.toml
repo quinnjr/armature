@@ -1,6 +1,6 @@
 [package]
 name = "armature-redis"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,14 +13,14 @@ categories = ["database", "asynchronous", "caching"]
 
 [dependencies]
 # Redis client - aligned with other armature crates (redis 1.0, bb8-redis 0.26)
-redis = { version = "1.0", features = ["tokio-comp", "connection-manager", "cluster-async"] }
+redis = { version = "1.3", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 
 # Connection pooling
 bb8 = "0.9"
 bb8-redis = "0.26"
 
 # Async runtime
-tokio = { version = "1.35", features = ["sync", "time"] }
+tokio = { version = "1.52", features = ["sync", "time"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -35,18 +35,16 @@ thiserror = "2.0"
 tracing = "0.1"
 parking_lot = "0.12"
 url = "2.5"
+urlencoding = "2.1"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
+armature-testkit = { path = "../armature-testkit", features = ["containers"] }
 
 [features]
 default = []
-# Cluster support
-cluster = []
 # TLS support
-tls = ["redis/tls-rustls"]
-# Sentinel support
-sentinel = []
+tls = ["redis/tokio-rustls-comp"]
 # All features
-full = ["cluster", "tls", "sentinel"]
+full = ["tls"]
 

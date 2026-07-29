@@ -116,9 +116,10 @@ impl ConfigServiceBuilder {
 
     /// Build the configuration service
     pub fn build(self) -> Result<ConfigService> {
-        // Load .env file first if specified
+        // Load .env file first if specified. Surface the error so a caller who
+        // pointed at a concrete `.env` path is told when it cannot be loaded.
         if self.load_dotenv {
-            let _ = self.manager.load_dotenv(self.dotenv_path.as_deref());
+            self.manager.load_dotenv(self.dotenv_path.as_deref())?;
         }
 
         // Load environment variables
@@ -138,5 +139,31 @@ impl ConfigServiceBuilder {
 impl Default for ConfigServiceBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_surfaces_missing_dotenv_path() {
+        // Pointing at a concrete `.env` path that does not exist must fail the
+        // build rather than silently succeeding.
+        let missing = "/nonexistent/definitely/not/here/.env";
+        let result = ConfigService::builder()
+            .load_dotenv(Some(missing.to_string()))
+            .build();
+
+        assert!(
+            result.is_err(),
+            "build() should surface a missing concrete dotenv path as an error"
+        );
+    }
+
+    #[test]
+    fn test_build_without_dotenv_succeeds() {
+        let result = ConfigService::builder().build();
+        assert!(result.is_ok());
     }
 }

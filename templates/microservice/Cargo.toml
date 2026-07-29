@@ -2,11 +2,22 @@
 name = "microservice"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94.1"
+
+# Mark this as a standalone project (not part of workspace)
+[workspace]
 
 [dependencies]
-# Armature with queue feature
-armature = { path = "../../", features = ["queue", "cache"] }
+# Armature with queue feature.
+#
+# NOTE: the crates.io name "armature" is squatted by an unrelated, unmaintained
+# package, so the real crate -- published as "armature-framework" but exposing
+# its library as `armature` (see this repo's root `[lib] name = "armature"`)
+# -- must be pulled in under an explicit `package` rename.
+armature = { package = "armature-framework", version = "0.2", features = ["queue"] }
+# armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
+armature-core = "0.5"
+async-trait = "0.1"
 
 # Runtime
 tokio = { version = "1.35", features = ["full", "signal"] }

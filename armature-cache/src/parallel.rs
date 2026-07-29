@@ -76,10 +76,10 @@ impl ParallelCacheOps {
         store: &S,
         keys: &[&str],
     ) -> CacheResult<Vec<Option<String>>> {
-        let futures = keys.iter().map(|key| store.get_json(key));
-        let results: Vec<CacheResult<Option<String>>> = join_all(futures).await;
-
-        results.into_iter().collect()
+        // Delegate to the store's native batch primitive. Backends like Redis
+        // collapse this into a single `MGET` round-trip; others fall back to the
+        // concurrent per-key loop. Order matches `keys` in both cases.
+        store.mget(keys).await
     }
 
     /// Get multiple typed values in parallel.
@@ -160,12 +160,9 @@ impl ParallelCacheOps {
         items: &[(&str, String)],
         ttl: Option<Duration>,
     ) -> CacheResult<()> {
-        let futures = items
-            .iter()
-            .map(|(key, value)| store.set_json(key, value.clone(), ttl));
-
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the store's native batch primitive (e.g. Redis `MSET` /
+        // pipelined `SET ... EX`), falling back to the per-key loop otherwise.
+        store.mset(items, ttl).await
     }
 
     /// Set multiple typed values in parallel.
@@ -235,9 +232,9 @@ impl ParallelCacheOps {
     /// # }
     /// ```
     pub async fn delete_many<S: CacheStore>(store: &S, keys: &[&str]) -> CacheResult<()> {
-        let futures = keys.iter().map(|key| store.delete(key));
-        try_join_all(futures).await?;
-        Ok(())
+        // Delegate to the store's native batch primitive (e.g. Redis variadic
+        // `DEL`), falling back to the concurrent per-key loop otherwise.
+        store.mdel(keys).await
     }
 
     /// Check if multiple keys exist in parallel.

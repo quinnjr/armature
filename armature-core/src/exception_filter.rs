@@ -49,11 +49,26 @@
 //!
 //! ## Registering Global Filters
 //!
-//! ```ignore
-//! let app = Application::create(AppModule)
-//!     .await?
-//!     .use_global_filter(MyExceptionFilter)
-//!     .use_global_filter(ValidationExceptionFilter::new());
+//! ```
+//! use armature_core::{Application, Module};
+//! use armature_core::exception_filter::AllExceptionsFilter;
+//! use std::any::TypeId;
+//!
+//! #[derive(Default)]
+//! struct AppModule;
+//! impl Module for AppModule {
+//!     fn providers(&self) -> Vec<armature_core::ProviderRegistration> { vec![] }
+//!     fn controllers(&self) -> Vec<armature_core::ControllerRegistration> { vec![] }
+//!     fn imports(&self) -> Vec<Box<dyn Module>> { vec![] }
+//!     fn exports(&self) -> Vec<TypeId> { vec![] }
+//! }
+//!
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
+//! let app = Application::create::<AppModule>()
+//!     .await
+//!     .use_global_filter(AllExceptionsFilter::new());
+//! # let _ = app;
+//! # });
 //! ```
 
 use crate::error_transform::{ErrorContext, ErrorResponse, ErrorTransformer, ResponseFormat};

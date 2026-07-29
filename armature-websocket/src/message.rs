@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Message type enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MessageType {
     /// Text message
     Text,

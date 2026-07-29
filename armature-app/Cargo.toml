@@ -12,11 +12,11 @@ keywords = ["rhai", "scripting", "web", "framework", "application"]
 categories = ["web-programming", "development-tools"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.2.1" }
-armature-rhai = { path = "../armature-rhai", version = "0.1.0" }
+armature-core = { path = "../armature-core", version = "0.5.0" }
+armature-rhai = { path = "../armature-rhai", version = "0.2.0" }
 
-rhai = { version = "1.19", features = ["sync", "serde", "metadata"] }
-tokio = { version = "1.35", features = ["sync", "fs", "time", "rt-multi-thread", "macros", "signal"] }
+rhai = { version = "1.25", features = ["sync", "serde", "metadata"] }
+tokio = { version = "1.52", features = ["sync", "fs", "time", "rt-multi-thread", "macros", "signal"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,5 +24,5 @@ thiserror = "2.0"
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
-tempfile = "3.10"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal", "test-util"] }
+tempfile = "3.27"

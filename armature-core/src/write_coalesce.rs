@@ -595,7 +595,7 @@ impl ConnectionWriteBuffer {
     #[inline]
     pub fn write(&mut self, data: &[u8]) {
         if let WriteResult::Bypass(bytes) = self.coalescer.write(data) {
-            self.pending_large.push(bytes);
+            self.push_large(bytes);
         }
     }
 
@@ -603,8 +603,21 @@ impl ConnectionWriteBuffer {
     #[inline]
     pub fn write_bytes(&mut self, data: Bytes) {
         if let WriteResult::Bypass(bytes) = self.coalescer.write_bytes(data) {
-            self.pending_large.push(bytes);
+            self.push_large(bytes);
         }
+    }
+
+    /// Queue a large (bypass) write, preserving FIFO ordering.
+    ///
+    /// Any bytes currently coalesced were written before this large chunk,
+    /// so they are flushed into the pending queue first.
+    #[inline]
+    fn push_large(&mut self, bytes: Bytes) {
+        if !self.coalescer.is_empty() {
+            let coalesced = self.coalescer.take();
+            self.pending_large.push(coalesced);
+        }
+        self.pending_large.push(bytes);
     }
 
     /// Check if ready to flush.
@@ -615,15 +628,14 @@ impl ConnectionWriteBuffer {
 
     /// Get all data ready for writing.
     pub fn take_all(&mut self) -> Vec<Bytes> {
-        let mut result = Vec::with_capacity(1 + self.pending_large.len());
+        // Large writes were queued before anything currently coalesced
+        // (the coalescer is flushed into `pending_large` on every bypass),
+        // so pending large writes come first to preserve FIFO ordering.
+        let mut result = std::mem::take(&mut self.pending_large);
 
-        // Coalesced data first
         if !self.coalescer.is_empty() {
             result.push(self.coalescer.take());
         }
-
-        // Then large writes
-        result.append(&mut self.pending_large);
 
         self.flushes += 1;
         result
@@ -633,12 +645,13 @@ impl ConnectionWriteBuffer {
     pub fn as_io_slices(&self) -> Vec<IoSlice<'_>> {
         let mut slices = Vec::with_capacity(1 + self.pending_large.len());
 
-        if !self.coalescer.is_empty() {
-            slices.push(IoSlice::new(self.coalescer.peek()));
-        }
-
+        // Pending large writes precede anything currently coalesced.
         for large in &self.pending_large {
             slices.push(IoSlice::new(large));
+        }
+
+        if !self.coalescer.is_empty() {
+            slices.push(IoSlice::new(self.coalescer.peek()));
         }
 
         slices
@@ -946,6 +959,42 @@ mod tests {
         // Should have coalesced + pending large
         let slices = buffer.as_io_slices();
         assert_eq!(slices.len(), 2);
+    }
+
+    #[test]
+    fn test_connection_write_buffer_interleaved_ordering() {
+        let config = CoalesceConfig {
+            bypass_threshold: 64,
+            ..Default::default()
+        };
+        let mut buffer = ConnectionWriteBuffer::new(1, config);
+
+        let large = vec![b'X'; 128];
+
+        // small header, large body, small trailer
+        buffer.write(b"header");
+        buffer.write(&large);
+        buffer.write(b"trailer");
+
+        // IoSlices must preserve write order
+        let flattened: Vec<u8> = buffer
+            .as_io_slices()
+            .iter()
+            .flat_map(|s| s.iter().copied())
+            .collect();
+
+        let mut expected = b"header".to_vec();
+        expected.extend_from_slice(&large);
+        expected.extend_from_slice(b"trailer");
+        assert_eq!(flattened, expected);
+
+        // take_all must preserve write order too
+        let taken: Vec<u8> = buffer
+            .take_all()
+            .iter()
+            .flat_map(|b| b.iter().copied())
+            .collect();
+        assert_eq!(taken, expected);
     }
 
     #[test]

@@ -20,7 +20,7 @@ fi
 
 # 1. Run quick compile check
 echo "🔨 Running cargo check..."
-if ! cargo check --workspace --all-features; then
+if ! cargo check --workspace --features full-with-saml; then
     echo ""
     echo "❌ Cargo check failed!"
     echo "   Fix compilation errors before pushing."
@@ -32,7 +32,7 @@ echo ""
 
 # 2. Run tests
 echo "🧪 Running tests..."
-if ! cargo test --workspace --all-features; then
+if ! cargo test --workspace --features full-with-saml; then
     echo ""
     echo "❌ Tests failed!"
     echo "   Fix failing tests before pushing."
@@ -44,7 +44,7 @@ echo ""
 
 # 3. Run doc tests
 echo "📚 Running doc tests..."
-if ! cargo test --doc --all-features; then
+if ! cargo test --doc --features full-with-saml; then
     echo ""
     echo "❌ Doc tests failed!"
     echo "   Fix failing doc tests before pushing."
@@ -78,7 +78,7 @@ fi
 
 # 5. Build documentation (quick check)
 echo "📖 Checking documentation builds..."
-if ! cargo doc --workspace --all-features --no-deps --quiet; then
+if ! cargo doc --workspace --features full-with-saml --no-deps --quiet; then
     echo ""
     echo "❌ Documentation build failed!"
     echo "   Fix doc errors before pushing."

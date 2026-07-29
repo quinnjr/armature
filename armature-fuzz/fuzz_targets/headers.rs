@@ -1,130 +1,86 @@
 //! Fuzz target for HTTP header parsing.
 //!
-//! Tests header parsing, validation, and common header value parsing
-//! with arbitrary input.
+//! `armature_core::simd_parser::{parse_headers, is_valid_header_name}` have
+//! no confirmed production caller: a workspace-wide grep for
+//! `parse_headers`/`is_valid_header_name` turns up nothing outside this
+//! fuzz target, benches, and `simd_parser.rs` itself. Real HTTP/1 request
+//! parsing goes through `hyper` (an `armature-core` dependency), not this
+//! module. These functions are, however, `pub fn`s in the `pub mod
+//! simd_parser`, and the module's own doc comment frames it as a general
+//! parsing-utility module ("complements Hyper's built-in parsing") with
+//! usage examples aimed at external callers - i.e. they are part of
+//! `armature_core`'s public API surface even though nothing inside the
+//! crate currently calls them. This target fuzzes them as public library
+//! utilities (valuable for catching panics/UB in code reachable by external
+//! consumers, and in case they become hot-path functions later), not as
+//! "the" live request-handling path.
 
 #![no_main]
+
+#[path = "common.rs"]
+mod common;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use std::collections::HashMap;
+use armature_core::simd_parser::{is_valid_header_name, parse_headers};
 
-/// Arbitrary headers for fuzzing.
+/// Arbitrary input for header parsing.
 #[derive(Debug, Arbitrary)]
 struct FuzzHeaders {
-    /// Raw header lines
-    raw_lines: Vec<String>,
-    /// Key-value pairs
-    pairs: Vec<(String, String)>,
+    /// Raw HTTP request buffer (request line + headers) fed directly into
+    /// the SIMD-optimized header parser (`simd_parser::parse_headers`).
+    buf: Vec<u8>,
+    /// Candidate header names to validate directly.
+    names: Vec<Vec<u8>>,
+    /// Fuzzer-controlled method for the synthesized request line in Test 5.
+    method: String,
+    /// Fuzzer-controlled HTTP/1.x minor version digit for Test 5.
+    version_digit: u8,
 }
 
 fuzz_target!(|data: FuzzHeaders| {
-    // Test 1: Parse raw header lines (name: value format)
-    let mut headers: HashMap<String, String> = HashMap::new();
-    for line in &data.raw_lines {
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_lowercase();
-            let value = value.trim().to_string();
-            if !name.is_empty() {
-                headers.insert(name, value);
-            }
+    // Test 1: Parse arbitrary bytes as HTTP headers using
+    // `simd_parser::parse_headers` (public API, no confirmed internal
+    // caller - see module doc above). Should never panic regardless of how
+    // malformed the input is.
+    if let Ok(headers) = parse_headers(&data.buf) {
+        for (name, value) in &headers {
+            // Exercise the header-name validator on names the parser
+            // actually produced.
+            let _ = is_valid_header_name(name.as_bytes());
+            let _ = value.len();
         }
     }
 
-    // Test 2: Build headers from pairs
-    let mut headers2: HashMap<String, String> = HashMap::new();
-    for (key, value) in &data.pairs {
-        let key_lower = key.to_lowercase();
-        if !key_lower.is_empty() && key_lower.len() < 1000 {
-            headers2.insert(key_lower, value.clone());
-        }
+    // Test 2: Validate arbitrary byte sequences as header names directly.
+    for name in &data.names {
+        let _ = is_valid_header_name(name);
     }
 
-    // Test 3: Parse common header values
-
-    // Content-Type parsing
-    if let Some(ct) = headers.get("content-type") {
-        // Extract mime type and parameters
-        let parts: Vec<&str> = ct.split(';').collect();
-        if let Some(mime) = parts.first() {
-            let _ = mime.trim();
-        }
-        // Look for charset
-        for part in parts.iter().skip(1) {
-            if let Some((key, value)) = part.split_once('=') {
-                if key.trim().to_lowercase() == "charset" {
-                    let _ = value.trim();
-                }
-            }
-        }
+    // Test 3: Validate newline-delimited chunks of the raw buffer, mirroring
+    // how a caller might validate individual header lines.
+    for line in data.buf.split(|&b| b == b'\n') {
+        let _ = is_valid_header_name(line);
     }
 
-    // Accept header parsing
-    if let Some(accept) = headers.get("accept") {
-        // Parse media types with quality values
-        for media_type in accept.split(',') {
-            let parts: Vec<&str> = media_type.split(';').collect();
-            if let Some(mime) = parts.first() {
-                let _ = mime.trim();
-            }
-            // Look for q= quality value
-            for part in parts.iter().skip(1) {
-                if let Some((key, value)) = part.split_once('=') {
-                    if key.trim().to_lowercase() == "q" {
-                        let _ = value.trim().parse::<f32>();
-                    }
-                }
-            }
-        }
-    }
+    // Test 4: Re-parse the raw buffer with a synthesized, well-formed
+    // request line prepended, to reach deeper into the header-parsing path
+    // for inputs that are pure header garbage.
+    let mut synthesized = common::synth_request_line("GET", "/", 1);
+    synthesized.extend_from_slice(&data.buf);
+    let _ = parse_headers(&synthesized);
 
-    // Content-Length parsing
-    if let Some(cl) = headers.get("content-length") {
-        let _ = cl.trim().parse::<u64>();
-    }
-
-    // Authorization parsing
-    if let Some(auth) = headers.get("authorization") {
-        let parts: Vec<&str> = auth.splitn(2, ' ').collect();
-        if parts.len() == 2 {
-            let scheme = parts[0];
-            let credentials = parts[1];
-            let _ = scheme.to_lowercase();
-            let _ = credentials.len();
-        }
-    }
-
-    // Cookie parsing
-    if let Some(cookie) = headers.get("cookie") {
-        for pair in cookie.split(';') {
-            if let Some((name, value)) = pair.split_once('=') {
-                let _ = name.trim();
-                let _ = value.trim();
-            }
-        }
-    }
-
-    // Cache-Control parsing
-    if let Some(cc) = headers.get("cache-control") {
-        for directive in cc.split(',') {
-            let directive = directive.trim();
-            if let Some((key, value)) = directive.split_once('=') {
-                let _ = key.trim();
-                let _ = value.trim().parse::<u64>();
-            } else {
-                let _ = directive;
-            }
-        }
-    }
-
-    // Test 4: Header validation (check for invalid characters)
-    for (key, value) in &headers {
-        // Check for control characters
-        let has_invalid_key = key.chars().any(|c| c.is_control() || c == ':');
-        let has_invalid_value = value.chars().any(|c| c == '\n' || c == '\r');
-        let _ = has_invalid_key;
-        let _ = has_invalid_value;
-    }
+    // Test 5: Same idea as Test 4, but the method and HTTP minor version in
+    // the request line are also fuzzer-controlled (target path is kept
+    // fixed and simple so the line stays structurally parseable), so
+    // request-line fuzzing and header fuzzing aren't fully decoupled.
+    let method = if data.method.is_empty() || data.method.len() > 16 {
+        "GET"
+    } else {
+        data.method.as_str()
+    };
+    let mut fuzzed_line = common::synth_request_line(method, "/", data.version_digit);
+    fuzzed_line.extend_from_slice(&data.buf);
+    let _ = parse_headers(&fuzzed_line);
 });
-

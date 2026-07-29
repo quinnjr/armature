@@ -50,7 +50,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-log/            # Structured logging
 ├── armature-auth/           # JWT, OAuth2, SAML, RBAC, guards
 ├── armature-jwt/            # JWT token management (HS256/RS256/ES256)
-├── armature-security/       # CORS, CSP, HSTS, CSRF
+├── armature-security/       # CORS, CSP, HSTS
 ├── armature-config/         # Type-safe config (env, .env, JSON, TOML)
 ├── armature-cache/          # Redis/Memcached/in-memory caching
 ├── armature-redis/          # Centralized Redis client
@@ -60,7 +60,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-cqrs/           # Command/Query Responsibility Segregation
 ├── armature-graphql/        # GraphQL server (schema-first and code-first)
 ├── armature-openapi/        # OpenAPI/Swagger generation
-├── armature-opentelemetry/  # Distributed tracing (Jaeger, Zipkin, Prometheus)
+├── armature-opentelemetry/  # Distributed tracing (OTLP, Zipkin), metrics
 ├── armature-websocket/      # WebSocket with rooms and broadcasting
 ├── armature-messaging/      # RabbitMQ, Kafka, NATS
 ├── armature-aws/            # AWS SDK (S3, DynamoDB, SQS, SNS, Lambda, etc.)
@@ -107,7 +107,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-macros-utils/   # Macro utilities
 ├── docs/                    # 70+ guides
 ├── examples/                # 60+ working examples
-├── benches/                 # Benchmarks (micro, comparison, profiling)
+├── benches/                 # Benchmarks (micro, internal-overhead, cross-framework comparison via comparison_servers/)
 ├── tests/                   # Integration tests
 └── templates/               # Project scaffolding templates (excluded from workspace)
 ```
@@ -116,19 +116,24 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 
 The framework follows NestJS/Angular conventions adapted to Rust:
 
-- **Decorators** are proc macros: `#[controller]`, `#[get]`, `#[post]`, `#[injectable]`, `#[module]`
+- **Decorators** are proc macros: `#[controller]`, `#[get]`, `#[post]`, `#[put]`, `#[delete]`, `#[patch]`, `#[options]`, `#[head]`, `#[query]`, `#[injectable]`, `#[module]`
+- **HTTP methods**: `HttpMethod` includes `QUERY` (IETF safe-method-with-body). It is `#[non_exhaustive]` — always include a `_` arm when matching it.
 - **Dependency injection** is field-based — add a service type as a struct field and it's auto-injected
 - **Modules** group providers (services) and controllers with `#[module(...)]`
 - **Application bootstrap** via `Application::create::<AppModule>().await`
-- **Guards** implement the `Guard` trait for authorization
+- **Guards** implement the `Guard` trait for authorization. They **fail closed**: a `RoleGuard`/`PermissionGuard` requires a verified `UserContext`/`RequestRoles` extension attached by an authentication layer (use `armature_auth::JwtAuthMiddleware`, which verifies the JWT and populates them). A module's guards are scoped to that module's controllers' routes, not applied globally.
 - **Middleware** implements the `Middleware` trait for request/response pipeline
 - **Lifecycle hooks**: `OnModuleInit`, `OnModuleDestroy`, `OnApplicationBootstrap`, `OnApplicationShutdown`
+- **Routing**: the linear `Router` is the registration target; it is compiled once into an O(1) `OptimizedRouter` for the serve path. Preserve exact routing semantics (param extraction, catch-all, constraints, unknown-method → 404) when touching either.
 
 ## Key Conventions
 
-- **Rust 2024 edition**, MSRV 1.89
+- **Rust 2024 edition**, MSRV 1.94.1
 - **Async-first**: Built on Tokio + Hyper. All handlers are `async`
 - **Feature flags**: The crate uses feature flags extensively. `full` enables everything except SAML. `full-with-saml` enables everything
+- **`tokio` features**: crates declare the minimal per-crate feature subset they use (e.g. `["rt", "macros", "sync", "time"]`, plus `net`/`io-util`/`fs` as needed) — do **not** use `features = ["full"]`
+- **TLS is rustls-only**: do not pull `native-tls`/OpenSSL. Add `default-features = false` to `reqwest`/`tokio-tungstenite` deps and select the rustls feature
+- `HttpRequest.headers` is a `HeaderMap` (SmallVec-backed, case-insensitive); it is a drop-in for the old `HashMap<String,String>` access patterns
 - Core types: `HttpRequest`, `HttpResponse`, `Router`, `Container`, `Application`, `Error`
 - Error type has 30+ variants with status codes, help text, and client/server classification
 - Response builder is fluent: `HttpResponse::ok().json(&data)?`
@@ -147,7 +152,7 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 
 - Target: Actix-competitive performance (currently 242k req/sec plaintext)
 - JSON serialization is a known optimization area
-- Benchmark suite in `benches/` covers micro, comparison, and profiling scenarios
+- Benchmark suite in `benches/` covers micro and internal-overhead scenarios (plus real cross-framework HTTP comparison via `benches/comparison_servers/` + the `http-benchmark` runner). Profiling (flamegraphs, DHAT/pprof) is not in `benches/` — it lives in `examples/profiling_server.rs`, `examples/memory_profile_server.rs`, and `scripts/memory-profile.sh`
 - Do not regress performance without justification — run `cargo bench` before and after changes
 
 ## When Making Changes

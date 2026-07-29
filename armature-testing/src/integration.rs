@@ -161,6 +161,61 @@ impl IntegrationTestBuilder {
         self.after_each.push(Box::new(move || Box::pin(f())));
         self
     }
+
+    /// Run `body` with the collected hooks around it: every `before_each`
+    /// hook is awaited (in registration order), then `body`, then every
+    /// `after_each` hook (in registration order). `after_each` hooks run
+    /// whenever `body` returns normally; if `body` panics, the panic
+    /// unwinds through this function and `after_each` hooks do *not* run
+    /// (matching `TestFixture::run_test`'s non-catching behavior).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use armature_testing::integration::IntegrationTestBuilder;
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    ///
+    /// # tokio_test::block_on(async {
+    /// let order = Arc::new(AtomicUsize::new(0));
+    /// let before_slot = order.clone();
+    /// let after_slot = order.clone();
+    ///
+    /// let builder = IntegrationTestBuilder::new("example")
+    ///     .before_each(move || {
+    ///         let before_slot = before_slot.clone();
+    ///         async move { before_slot.store(1, Ordering::SeqCst); }
+    ///     })
+    ///     .after_each(move || {
+    ///         let after_slot = after_slot.clone();
+    ///         async move { after_slot.store(3, Ordering::SeqCst); }
+    ///     });
+    ///
+    /// let seen_during_body = builder
+    ///     .run_test(|| async { order.load(Ordering::SeqCst) })
+    ///     .await;
+    ///
+    /// assert_eq!(seen_during_body, 1); // before_each already ran
+    /// assert_eq!(order.load(Ordering::SeqCst), 3); // after_each ran too
+    /// # });
+    /// ```
+    pub async fn run_test<F, Fut, T>(&self, body: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        for hook in &self.before_each {
+            hook().await;
+        }
+
+        let result = body().await;
+
+        for hook in &self.after_each {
+            hook().await;
+        }
+
+        result
+    }
 }
 
 /// Database seeder
@@ -241,5 +296,68 @@ mod tests {
             .add_fixture("posts");
 
         assert_eq!(seeder.fixtures().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_test_invokes_hooks_in_order_around_body() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+        let before_log = log.clone();
+        let before_log_2 = log.clone();
+        let after_log = log.clone();
+        let after_log_2 = log.clone();
+
+        let builder = IntegrationTestBuilder::new("ordering")
+            .before_each(move || {
+                let log = before_log.clone();
+                async move { log.lock().unwrap().push("before_1") }
+            })
+            .before_each(move || {
+                let log = before_log_2.clone();
+                async move { log.lock().unwrap().push("before_2") }
+            })
+            .after_each(move || {
+                let log = after_log.clone();
+                async move { log.lock().unwrap().push("after_1") }
+            })
+            .after_each(move || {
+                let log = after_log_2.clone();
+                async move { log.lock().unwrap().push("after_2") }
+            });
+
+        let body_log = log.clone();
+        builder
+            .run_test(|| async move {
+                body_log.lock().unwrap().push("body");
+            })
+            .await;
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["before_1", "before_2", "body", "after_1", "after_2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_test_returns_the_body_result() {
+        let builder = IntegrationTestBuilder::new("passthrough");
+        let value = builder.run_test(|| async { 42 }).await;
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn run_test_runs_after_each_even_when_no_before_each_hooks_registered() {
+        let ran_after = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran_after.clone();
+
+        let builder = IntegrationTestBuilder::new("no-before").after_each(move || {
+            let flag = flag.clone();
+            async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        builder.run_test(|| async {}).await;
+        assert!(ran_after.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

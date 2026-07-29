@@ -1,14 +1,20 @@
-//! Database Benchmarks
+//! Database-Pattern Benchmarks (Mock Pool — No Real Database I/O)
 //!
-//! Benchmarks for database operations following TechEmpower patterns:
+//! Benchmarks the *shape* of database access patterns following TechEmpower
+//! conventions, but against a `MockPool`/`AsyncMockPool` that reads from an
+//! in-memory `Vec<World>` — there is no real database driver, connection, or
+//! I/O involved anywhere in this file. `AsyncMockPool` approximates network
+//! latency with `tokio::time::sleep`, so its numbers reflect Rust
+//! in-memory-collection access plus Tokio timer/scheduling overhead, not
+//! actual database round-trip cost (e.g. Postgres/sqlx over a real socket).
+//! Use these to compare the *overhead of the access pattern itself*
+//! (single query vs. N queries vs. fortunes vs. updates), not to estimate
+//! real-world database latency or throughput.
 //!
 //! - **Single Query**: Fetch one row by ID
 //! - **Multiple Queries**: Fetch N rows with N individual queries
 //! - **Fortunes**: Fetch all rows, add one, sort, render HTML
 //! - **Updates**: Fetch N rows, modify, update individually
-//!
-//! These benchmarks simulate real-world database access patterns
-//! and help identify performance bottlenecks in database layers.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -130,7 +136,10 @@ impl Default for MockPool {
 // Async Mock Pool (simulates network latency)
 // ============================================================================
 
-/// Async database pool that simulates network latency
+/// Mock async pool that approximates network latency with `tokio::time::sleep`.
+/// Still backed by the in-memory `MockPool` — no real database connection,
+/// driver, or I/O is involved; this only measures async scheduling overhead
+/// layered on top of the in-memory access.
 pub struct AsyncMockPool {
     inner: MockPool,
     latency_us: u64,

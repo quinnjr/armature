@@ -3,16 +3,45 @@
 //! This module provides high-performance static file serving with:
 //! - Configurable cache strategies
 //! - ETag support for conditional requests
-//! - Compression support (gzip, brotli)
+//! - Compression support (gzip, brotli, zstd)
 //! - Content-Type detection
 //! - Security (path traversal prevention)
 //! - File type-based cache policies
 
 use crate::{Error, HttpRequest, HttpResponse};
+use bytes::Bytes;
+use lru::LruCache;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+/// Default number of `(path, mtime, encoding)` entries retained in the
+/// in-memory content cache.
+pub const DEFAULT_CONTENT_CACHE_CAPACITY: usize = 128;
+
+/// Default maximum file size (bytes) that will be read fully into memory and
+/// cached. Larger files are streamed fresh on every request and never cached
+/// to keep memory bounded.
+pub const DEFAULT_MAX_SERVE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Cache key: file path, its modification time, and the negotiated encoding.
+///
+/// Keying on `mtime` means a modified file naturally misses the cache (the old
+/// entry is never looked up again and is evicted by LRU pressure).
+type ContentCacheKey = (PathBuf, SystemTime, Option<CompressionAlgorithm>);
+
+/// A cached, ready-to-serve file body plus its ETag.
+#[derive(Clone)]
+struct CachedContent {
+    /// Already-compressed (or raw) bytes, shared cheaply via `Bytes`.
+    body: Bytes,
+    /// ETag computed for this `(path, mtime, encoding)` triple.
+    etag: Option<String>,
+}
 
 /// Cache strategy for static assets
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,12 +82,16 @@ impl CacheStrategy {
 
 /// Compression algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CompressionAlgorithm {
     /// Gzip compression
     Gzip,
 
     /// Brotli compression (higher compression ratio than gzip)
     Brotli,
+
+    /// Zstandard compression (fast, with a ratio competitive with Brotli)
+    Zstd,
 }
 
 impl CompressionAlgorithm {
@@ -67,6 +100,7 @@ impl CompressionAlgorithm {
         match self {
             CompressionAlgorithm::Gzip => "gzip",
             CompressionAlgorithm::Brotli => "br",
+            CompressionAlgorithm::Zstd => "zstd",
         }
     }
 
@@ -75,6 +109,7 @@ impl CompressionAlgorithm {
         match self {
             CompressionAlgorithm::Gzip => ".gz",
             CompressionAlgorithm::Brotli => ".br",
+            CompressionAlgorithm::Zstd => ".zst",
         }
     }
 }
@@ -113,6 +148,18 @@ impl CompressionLevel {
             CompressionLevel::Default => 6,
             CompressionLevel::Best => 11,
             CompressionLevel::Custom(level) => (*level).min(11),
+        }
+    }
+
+    /// Get zstd compression level (1-22; 20+ requires substantially more
+    /// memory and time, so `Best` stops at 19 rather than the theoretical
+    /// max of 22).
+    pub fn zstd_level(&self) -> i32 {
+        match self {
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Default => 3,
+            CompressionLevel::Best => 19,
+            CompressionLevel::Custom(level) => (*level).min(22) as i32,
         }
     }
 }
@@ -354,6 +401,14 @@ pub struct StaticAssetsConfig {
 
     /// Compression configuration
     pub compression: CompressionConfig,
+
+    /// Maximum number of `(path, mtime, encoding)` entries to keep in the
+    /// in-memory content cache. `0` disables the cache.
+    pub cache_capacity: usize,
+
+    /// Files larger than this (bytes) are read fresh on every request and are
+    /// never cached, keeping memory usage bounded for large assets.
+    pub max_serve_size: usize,
 }
 
 impl StaticAssetsConfig {
@@ -397,7 +452,23 @@ impl StaticAssetsConfig {
             fallback: None,
             index_files: vec!["index.html".to_string()],
             compression: CompressionConfig::new(),
+            cache_capacity: DEFAULT_CONTENT_CACHE_CAPACITY,
+            max_serve_size: DEFAULT_MAX_SERVE_SIZE,
         }
+    }
+
+    /// Set the in-memory content cache capacity (number of cached
+    /// `(path, mtime, encoding)` entries). Set to `0` to disable caching.
+    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.cache_capacity = capacity;
+        self
+    }
+
+    /// Set the maximum file size (bytes) that will be read fully into memory
+    /// and cached. Larger files are streamed fresh on every request.
+    pub fn with_max_serve_size(mut self, size: usize) -> Self {
+        self.max_serve_size = size;
+        self
     }
 
     /// Set default cache strategy
@@ -508,6 +579,10 @@ impl Default for StaticAssetsConfig {
 #[derive(Clone)]
 pub struct StaticAssetServer {
     config: StaticAssetsConfig,
+    /// Bounded in-memory cache of already-compressed (or raw) file bodies,
+    /// shared across clones. `None` when caching is disabled
+    /// (`cache_capacity == 0`).
+    cache: Option<Arc<Mutex<LruCache<ContentCacheKey, CachedContent>>>>,
 }
 
 impl StaticAssetServer {
@@ -520,7 +595,54 @@ impl StaticAssetServer {
             )));
         }
 
-        Ok(Self { config })
+        let cache = NonZeroUsize::new(config.cache_capacity)
+            .map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
+
+        Ok(Self { config, cache })
+    }
+
+    /// Look up a cached body for this `(path, mtime, encoding)` key.
+    fn cache_get(&self, key: &ContentCacheKey) -> Option<CachedContent> {
+        let cache = self.cache.as_ref()?;
+        cache.lock().get(key).cloned()
+    }
+
+    /// Store a body in the cache (no-op when caching is disabled).
+    fn cache_put(&self, key: ContentCacheKey, value: CachedContent) {
+        if let Some(cache) = self.cache.as_ref() {
+            cache.lock().put(key, value);
+        }
+    }
+
+    /// Read a file body, applying pre-compressed lookup / on-the-fly
+    /// compression exactly as configured. Returns the ready-to-serve bytes.
+    async fn load_body(
+        &self,
+        path: &Path,
+        compression: Option<CompressionAlgorithm>,
+    ) -> Result<Bytes, Error> {
+        let bytes = if let Some(algo) = compression {
+            if self.config.compression.serve_precompressed {
+                if let Some(content) = self.try_serve_precompressed(path, algo).await? {
+                    content
+                } else {
+                    let raw_content = tokio::fs::read(path)
+                        .await
+                        .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?;
+                    self.compress_content(&raw_content, algo)?
+                }
+            } else {
+                let raw_content = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?;
+                self.compress_content(&raw_content, algo)?
+            }
+        } else {
+            tokio::fs::read(path)
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?
+        };
+        Ok(Bytes::from(bytes))
     }
 
     /// Serve a static file
@@ -591,39 +713,38 @@ impl StaticAssetServer {
             return Ok(self.not_modified_response(etag.as_deref().unwrap_or("")));
         }
 
-        // Try to serve pre-compressed file first
-        let (content, used_compression) = if let Some(algo) = compression {
-            if self.config.compression.serve_precompressed {
-                if let Some(content) = self.try_serve_precompressed(path, algo).await? {
-                    (content, Some(algo))
-                } else {
-                    // Compress on-the-fly
-                    let raw_content = tokio::fs::read(path)
-                        .await
-                        .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?;
+        // Decide whether this response is cacheable. Files above
+        // `max_serve_size` are read fresh every time and never cached so a few
+        // huge assets cannot exhaust memory; caching also requires a known
+        // mtime for invalidation.
+        let used_compression = compression;
+        let cacheable = file_size <= self.config.max_serve_size && modified.is_some();
 
-                    let compressed = self.compress_content(&raw_content, algo)?;
-                    (compressed, Some(algo))
-                }
+        let content: Bytes = if cacheable {
+            let key: ContentCacheKey = (path.to_path_buf(), modified.unwrap(), compression);
+            if let Some(entry) = self.cache_get(&key) {
+                // Cache hit: skip the read + compression entirely. The ETag is
+                // derived from the same (path, mtime, encoding) key, so the
+                // cached one must match the freshly computed one.
+                debug_assert_eq!(entry.etag, etag);
+                entry.body
             } else {
-                // Compress on-the-fly only
-                let raw_content = tokio::fs::read(path)
-                    .await
-                    .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?;
-
-                let compressed = self.compress_content(&raw_content, algo)?;
-                (compressed, Some(algo))
+                let body = self.load_body(path, compression).await?;
+                self.cache_put(
+                    key,
+                    CachedContent {
+                        body: body.clone(),
+                        etag: etag.clone(),
+                    },
+                );
+                body
             }
         } else {
-            // No compression
-            let content = tokio::fs::read(path)
-                .await
-                .map_err(|e| Error::Internal(format!("Failed to read file: {}", e)))?;
-            (content, None)
+            self.load_body(path, compression).await?
         };
 
         // Build response
-        let mut response = HttpResponse::ok().with_body(content);
+        let mut response = HttpResponse::ok().with_bytes_body(content);
 
         // Content-Type
         let content_type = file_type.mime_type(path);
@@ -714,14 +835,20 @@ impl StaticAssetServer {
         // Check if client supports our compression algorithms
         let supports_brotli = encodings.contains(&"br");
         let supports_gzip = encodings.contains(&"gzip");
+        let supports_zstd = encodings.contains(&"zstd");
 
-        // Select based on preference and support
+        // Select based on preference and support. When Brotli is preferred
+        // and supported it wins outright; otherwise the priority is
+        // gzip > zstd > brotli, with zstd filling the gap for clients that
+        // advertise it without also advertising gzip or brotli.
         if self.config.compression.prefer_brotli && supports_brotli {
             Some(CompressionAlgorithm::Brotli)
         } else if supports_gzip {
             Some(CompressionAlgorithm::Gzip)
         } else if supports_brotli {
             Some(CompressionAlgorithm::Brotli)
+        } else if supports_zstd {
+            Some(CompressionAlgorithm::Zstd)
         } else {
             None
         }
@@ -779,6 +906,11 @@ impl StaticAssetServer {
                     .map_err(|e| Error::Internal(format!("Brotli compression failed: {}", e)))?;
 
                 Ok(output)
+            }
+            CompressionAlgorithm::Zstd => {
+                let level = self.config.compression.level.zstd_level();
+                zstd::encode_all(std::io::Cursor::new(content), level)
+                    .map_err(|e| Error::Internal(format!("Zstd compression failed: {}", e)))
             }
         }
     }
@@ -946,8 +1078,10 @@ mod tests {
     fn test_compression_algorithm() {
         assert_eq!(CompressionAlgorithm::Gzip.to_header_value(), "gzip");
         assert_eq!(CompressionAlgorithm::Brotli.to_header_value(), "br");
+        assert_eq!(CompressionAlgorithm::Zstd.to_header_value(), "zstd");
         assert_eq!(CompressionAlgorithm::Gzip.file_extension(), ".gz");
         assert_eq!(CompressionAlgorithm::Brotli.file_extension(), ".br");
+        assert_eq!(CompressionAlgorithm::Zstd.file_extension(), ".zst");
     }
 
     #[test]
@@ -957,6 +1091,12 @@ mod tests {
         assert_eq!(CompressionLevel::Best.brotli_level(), 11);
         assert_eq!(CompressionLevel::Custom(8).brotli_level(), 8);
         assert_eq!(CompressionLevel::Custom(20).brotli_level(), 11); // Capped at 11
+
+        assert_eq!(CompressionLevel::Fast.zstd_level(), 1);
+        assert_eq!(CompressionLevel::Default.zstd_level(), 3);
+        assert_eq!(CompressionLevel::Best.zstd_level(), 19);
+        assert_eq!(CompressionLevel::Custom(8).zstd_level(), 8);
+        assert_eq!(CompressionLevel::Custom(50).zstd_level(), 22); // Capped at 22
     }
 
     #[test]
@@ -1003,5 +1143,204 @@ mod tests {
         assert!(config.compression.enabled);
         assert_eq!(config.compression.level, CompressionLevel::Best);
         assert!(config.compression.prefer_brotli);
+    }
+
+    // --- Content cache / large-file guard tests --------------------------
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("armature_sa_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn write(&self, name: &str, contents: &[u8]) {
+            std::fs::write(self.path.join(name), contents).unwrap();
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn get_req(path: &str) -> HttpRequest {
+        HttpRequest::new("GET".to_string(), path.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_second_request_served_from_cache_with_stable_etag() {
+        let dir = TempDir::new();
+        dir.write("data.js", &vec![b'a'; 2048]);
+
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        // First request populates the cache.
+        let resp1 = server.serve(&get_req("/data.js")).await.unwrap();
+        assert_eq!(resp1.status, 200);
+        assert_eq!(resp1.body_ref().len(), 2048);
+        let etag1 = resp1.headers.get("ETag").cloned().expect("etag present");
+
+        // The (path, mtime, encoding=None) entry is now cached.
+        let cache = server.cache.as_ref().unwrap();
+        assert_eq!(cache.lock().len(), 1);
+
+        // Second request: identical body and a *stable* ETag, served from cache.
+        let resp2 = server.serve(&get_req("/data.js")).await.unwrap();
+        assert_eq!(resp2.status, 200);
+        assert_eq!(resp2.body_ref(), resp1.body_ref());
+        let etag2 = resp2.headers.get("ETag").cloned().expect("etag present");
+        assert_eq!(etag1, etag2, "ETag must be stable across requests");
+
+        // Cache size unchanged (no duplicate entry).
+        assert_eq!(cache.lock().len(), 1);
+
+        // Conditional request with matching ETag yields 304 Not Modified.
+        let mut cond = get_req("/data.js");
+        cond.headers
+            .insert("If-None-Match".to_string(), etag1.clone());
+        let resp304 = server.serve(&cond).await.unwrap();
+        assert_eq!(resp304.status, 304);
+        assert_eq!(resp304.headers.get("ETag"), Some(&etag1));
+    }
+
+    #[tokio::test]
+    async fn test_compressed_response_cached_by_encoding() {
+        let dir = TempDir::new();
+        dir.write("app.js", &vec![b'x'; 4096]);
+
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let mut req = get_req("/app.js");
+        req.headers
+            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+
+        let resp1 = server.serve(&req).await.unwrap();
+        assert_eq!(resp1.status, 200);
+        assert_eq!(
+            resp1.headers.get("Content-Encoding"),
+            Some(&"gzip".to_string())
+        );
+        let etag1 = resp1.headers.get("ETag").cloned().unwrap();
+
+        // Cached under the gzip encoding key.
+        let cache = server.cache.as_ref().unwrap();
+        assert_eq!(cache.lock().len(), 1);
+
+        let resp2 = server.serve(&req).await.unwrap();
+        assert_eq!(resp2.body_ref(), resp1.body_ref());
+        assert_eq!(resp2.headers.get("ETag"), Some(&etag1));
+        assert_eq!(cache.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_large_file_not_cached() {
+        let dir = TempDir::new();
+        dir.write("big.bin", &vec![0u8; 1024]);
+
+        // max_serve_size below the file size => never cached.
+        let config = StaticAssetsConfig::new(dir.path.clone()).with_max_serve_size(10);
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let resp = server.serve(&get_req("/big.bin")).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body_ref().len(), 1024);
+
+        // Nothing cached for oversized files.
+        let cache = server.cache.as_ref().unwrap();
+        assert_eq!(cache.lock().len(), 0);
+    }
+
+    #[test]
+    fn test_compress_content_round_trip_all_algorithms() {
+        let dir = TempDir::new();
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let data = b"Hello, World! This is a test string for compression.".repeat(20);
+
+        // Gzip round-trip.
+        let gz = server
+            .compress_content(&data, CompressionAlgorithm::Gzip)
+            .unwrap();
+        assert_ne!(gz, data);
+        let mut gz_decoder = flate2::read::GzDecoder::new(&gz[..]);
+        let mut gz_decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut gz_decoder, &mut gz_decompressed).unwrap();
+        assert_eq!(gz_decompressed, data);
+
+        // Brotli round-trip.
+        let br = server
+            .compress_content(&data, CompressionAlgorithm::Brotli)
+            .unwrap();
+        assert_ne!(br, data);
+        let mut br_decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut std::io::Cursor::new(&br), &mut br_decompressed).unwrap();
+        assert_eq!(br_decompressed, data);
+
+        // Zstd round-trip.
+        let zst = server
+            .compress_content(&data, CompressionAlgorithm::Zstd)
+            .unwrap();
+        assert_ne!(zst, data);
+        let zst_decompressed = zstd::decode_all(std::io::Cursor::new(&zst)).unwrap();
+        assert_eq!(zst_decompressed, data);
+    }
+
+    #[tokio::test]
+    async fn test_zstd_compressed_response_cached_by_encoding() {
+        let dir = TempDir::new();
+        dir.write("app.js", &vec![b'x'; 4096]);
+
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let mut req = get_req("/app.js");
+        req.headers
+            .insert("Accept-Encoding".to_string(), "zstd".to_string());
+
+        let resp1 = server.serve(&req).await.unwrap();
+        assert_eq!(resp1.status, 200);
+        assert_eq!(
+            resp1.headers.get("Content-Encoding"),
+            Some(&"zstd".to_string())
+        );
+
+        // The body actually decompresses back to the original content, not
+        // just a correctly-labeled but bogus encoding.
+        let decompressed = zstd::decode_all(std::io::Cursor::new(resp1.body_ref())).unwrap();
+        assert_eq!(decompressed, vec![b'x'; 4096]);
+
+        let etag1 = resp1.headers.get("ETag").cloned().unwrap();
+
+        // Cached under the zstd encoding key.
+        let cache = server.cache.as_ref().unwrap();
+        assert_eq!(cache.lock().len(), 1);
+
+        let resp2 = server.serve(&req).await.unwrap();
+        assert_eq!(resp2.body_ref(), resp1.body_ref());
+        assert_eq!(resp2.headers.get("ETag"), Some(&etag1));
+        assert_eq!(cache.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cache_capacity_zero_disables_cache() {
+        let dir = TempDir::new();
+        dir.write("data.txt", b"hello world");
+
+        let config = StaticAssetsConfig::new(dir.path.clone()).with_cache_capacity(0);
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let resp = server.serve(&get_req("/data.txt")).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body_ref(), b"hello world");
+        assert!(server.cache.is_none());
     }
 }

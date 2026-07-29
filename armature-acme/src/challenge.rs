@@ -53,7 +53,12 @@ pub struct Challenge {
     /// Challenge status
     pub status: ChallengeStatus,
 
-    /// Challenge token
+    /// Challenge token.
+    ///
+    /// Defaults to empty when absent: some newer challenge types advertised by
+    /// a CA (e.g. `dns-persist-01`) carry no token, and must not break parsing
+    /// of the surrounding authorization.
+    #[serde(default)]
     pub token: String,
 
     /// Validation record (for DNS challenges)

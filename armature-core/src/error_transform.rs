@@ -41,7 +41,45 @@
 use crate::{Error, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+/// Compiled PII/secret redaction patterns used by [`ErrorTransformer`].
+///
+/// These regexes are compiled exactly once at first use rather than on every
+/// error transformation. Each entry pairs a case-insensitive compiled pattern
+/// with its replacement string. Behaviour is identical to compiling the same
+/// patterns per-call; only the compilation cost is amortized.
+static SENSITIVE_PATTERNS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
+    let patterns: [(&str, &str); 9] = [
+        // Passwords
+        (r"password[=:]\s*\S+", "password=[FILTERED]"),
+        (r"pwd[=:]\s*\S+", "pwd=[FILTERED]"),
+        // API keys
+        (r"api[_-]?key[=:]\s*\S+", "api_key=[FILTERED]"),
+        (r"apikey[=:]\s*\S+", "apikey=[FILTERED]"),
+        // Tokens
+        (r"token[=:]\s*\S+", "token=[FILTERED]"),
+        (r"bearer\s+\S+", "Bearer [FILTERED]"),
+        // Secrets
+        (r"secret[=:]\s*\S+", "secret=[FILTERED]"),
+        // Credit cards (simple pattern)
+        (
+            r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b",
+            "[CARD FILTERED]",
+        ),
+        // SSN
+        (r"\b\d{3}[- ]?\d{2}[- ]?\d{4}\b", "[SSN FILTERED]"),
+    ];
+
+    patterns
+        .into_iter()
+        .filter_map(|(pattern, replacement)| {
+            regex::Regex::new(&format!("(?i){pattern}"))
+                .ok()
+                .map(|re| (re, replacement))
+        })
+        .collect()
+});
 
 // ============================================================================
 // Error Response Types
@@ -117,7 +155,7 @@ impl ErrorResponse {
             details: None,
             error_type: None,
             path: None,
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(httpdate::fmt_http_date(std::time::SystemTime::now())),
             request_id: None,
             metadata: HashMap::new(),
             validation_errors: Vec::new(),
@@ -233,11 +271,16 @@ impl ErrorResponse {
     <div class="error">
         <p class="status">Error {}</p>
         <h1>{}</h1>"#,
-            self.status, self.status, self.message
+            self.status,
+            self.status,
+            html_escape(&self.message)
         );
 
         if let Some(ref details) = self.details {
-            html.push_str(&format!(r#"<div class="details">{}</div>"#, details));
+            html.push_str(&format!(
+                r#"<div class="details">{}</div>"#,
+                html_escape(details)
+            ));
         }
 
         if !self.validation_errors.is_empty() {
@@ -245,7 +288,8 @@ impl ErrorResponse {
             for err in &self.validation_errors {
                 html.push_str(&format!(
                     "<li><strong>{}</strong>: {}</li>",
-                    err.field, err.message
+                    html_escape(&err.field),
+                    html_escape(&err.message)
                 ));
             }
             html.push_str("</ul></div>");
@@ -979,80 +1023,39 @@ impl ErrorTransformer {
 
     /// Apply error filters.
     fn apply_filters(&self, error: &Error) -> Error {
-        // Note: Since Error doesn't implement Clone, we'll work with references
-        // and only apply string-based filtering
-        if self.filter_sensitive {
-            // Return a filtered version if needed
+        let mut current = if self.filter_sensitive {
             self.filter_error_message(error)
         } else {
-            // Create a new error with same message
             self.clone_error(error)
+        };
+
+        // Apply user-registered filters in order
+        for filter in &self.filters {
+            current = filter(&current);
         }
+
+        current
     }
 
     /// Clone an error (simplified).
     fn clone_error(&self, error: &Error) -> Error {
-        // Map to the same error type
-        match error {
-            Error::BadRequest(msg) => Error::BadRequest(msg.clone()),
-            Error::Unauthorized(msg) => Error::Unauthorized(msg.clone()),
-            Error::Forbidden(msg) => Error::Forbidden(msg.clone()),
-            Error::NotFound(msg) => Error::NotFound(msg.clone()),
-            Error::Internal(msg) => Error::Internal(msg.clone()),
-            Error::Validation(msg) => Error::Validation(msg.clone()),
-            _ => Error::Internal(error.to_string()),
-        }
+        map_error_message(error, |msg| msg.to_string())
     }
 
     /// Filter sensitive information from error messages.
     fn filter_error_message(&self, error: &Error) -> Error {
-        let message = error.to_string();
-        let filtered = self.filter_sensitive_string(&message);
-
-        // Return same error type with filtered message
-        match error {
-            Error::BadRequest(_) => Error::BadRequest(filtered),
-            Error::Unauthorized(_) => Error::Unauthorized(filtered),
-            Error::Forbidden(_) => Error::Forbidden(filtered),
-            Error::NotFound(_) => Error::NotFound(filtered),
-            Error::Internal(_) => Error::Internal(filtered),
-            Error::Validation(_) => Error::Validation(filtered),
-            Error::Serialization(_) => Error::Serialization(filtered),
-            Error::Deserialization(_) => Error::Deserialization(filtered),
-            _ => Error::Internal(filtered),
-        }
+        map_error_message(error, |msg| self.filter_sensitive_string(msg))
     }
 
     /// Filter sensitive strings.
+    ///
+    /// Uses the module-level [`SENSITIVE_PATTERNS`] regexes, which are compiled
+    /// once on first use rather than on every call.
     fn filter_sensitive_string(&self, s: &str) -> String {
         let mut result = s.to_string();
 
-        // Filter common sensitive patterns
-        let patterns = [
-            // Passwords
-            (r"password[=:]\s*\S+", "password=[FILTERED]"),
-            (r"pwd[=:]\s*\S+", "pwd=[FILTERED]"),
-            // API keys
-            (r"api[_-]?key[=:]\s*\S+", "api_key=[FILTERED]"),
-            (r"apikey[=:]\s*\S+", "apikey=[FILTERED]"),
-            // Tokens
-            (r"token[=:]\s*\S+", "token=[FILTERED]"),
-            (r"bearer\s+\S+", "Bearer [FILTERED]"),
-            // Secrets
-            (r"secret[=:]\s*\S+", "secret=[FILTERED]"),
-            // Credit cards (simple pattern)
-            (
-                r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b",
-                "[CARD FILTERED]",
-            ),
-            // SSN
-            (r"\b\d{3}[- ]?\d{2}[- ]?\d{4}\b", "[SSN FILTERED]"),
-        ];
-
-        for (pattern, replacement) in patterns {
-            if let Ok(regex) = regex::Regex::new(&format!("(?i){}", pattern)) {
-                result = regex.replace_all(&result, replacement).to_string();
-            }
+        for (regex, replacement) in SENSITIVE_PATTERNS.iter() {
+            result = regex.replace_all(&result, *replacement).to_string();
         }
 
         result
@@ -1274,6 +1277,85 @@ impl Default for ErrorResponseBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Escape a string for safe interpolation into HTML text content.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Apply `f` to the error's message payload, rebuilding the same variant so
+/// the status code is preserved. `Io` carries no `String` payload and maps to
+/// `Internal`, which shares its 500 status.
+fn map_error_message(error: &Error, f: impl FnOnce(&str) -> String) -> Error {
+    macro_rules! map_variants {
+        ($($variant:ident),* $(,)?) => {
+            match error {
+                $(Error::$variant(msg) => Error::$variant(f(msg)),)*
+                other => Error::Internal(f(&other.to_string())),
+            }
+        };
+    }
+    map_variants!(
+        Http,
+        RouteNotFound,
+        MethodNotAllowed,
+        DependencyInjection,
+        ProviderNotFound,
+        Serialization,
+        Deserialization,
+        Validation,
+        Internal,
+        Forbidden,
+        BadRequest,
+        Unauthorized,
+        PaymentRequired,
+        NotFound,
+        NotAcceptable,
+        ProxyAuthenticationRequired,
+        RequestTimeout,
+        Conflict,
+        Gone,
+        LengthRequired,
+        PreconditionFailed,
+        PayloadTooLarge,
+        UriTooLong,
+        UnsupportedMediaType,
+        RangeNotSatisfiable,
+        ExpectationFailed,
+        ImATeapot,
+        MisdirectedRequest,
+        UnprocessableEntity,
+        Locked,
+        FailedDependency,
+        TooEarly,
+        UpgradeRequired,
+        PreconditionRequired,
+        TooManyRequests,
+        RequestHeaderFieldsTooLarge,
+        UnavailableForLegalReasons,
+        NotImplemented,
+        BadGateway,
+        ServiceUnavailable,
+        GatewayTimeout,
+        HttpVersionNotSupported,
+        VariantAlsoNegotiates,
+        InsufficientStorage,
+        LoopDetected,
+        NotExtended,
+        NetworkAuthenticationRequired,
+    )
 }
 
 // ============================================================================
@@ -1568,5 +1650,79 @@ mod tests {
     fn test_preset_api() {
         let transformer = ErrorTransformer::api();
         assert_eq!(transformer.format, ResponseFormat::ProblemDetails);
+    }
+
+    #[test]
+    fn test_transform_preserves_status_of_unlisted_variants() {
+        let transformer = ErrorTransformer::new();
+        let request = HttpRequest::new("GET".into(), "/test".into());
+
+        let response = transformer.transform(&Error::TooManyRequests("slow down".into()), &request);
+        assert_eq!(response.status, 429);
+
+        let response = transformer.transform(&Error::Conflict("dup".into()), &request);
+        assert_eq!(response.status, 409);
+
+        let response = transformer.transform(&Error::ServiceUnavailable("down".into()), &request);
+        assert_eq!(response.status, 503);
+    }
+
+    #[test]
+    fn test_user_registered_filters_are_applied() {
+        let transformer =
+            ErrorTransformer::new().with_filter(|_| Error::NotFound("filtered by user".into()));
+        let request = HttpRequest::new("GET".into(), "/test".into());
+
+        let response = transformer.transform(&Error::Internal("original".into()), &request);
+        assert_eq!(response.status, 404);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        assert!(body.contains("filtered by user"));
+    }
+
+    #[test]
+    fn test_to_html_escapes_message_and_details() {
+        let response = ErrorResponse::new(400)
+            .message("<script>alert(1)</script>")
+            .details("a & b <img>");
+        let html = response.to_html();
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("a &amp; b &lt;img&gt;"));
+    }
+
+    #[test]
+    fn test_filter_sensitive_string_redacts_pii_and_secrets() {
+        let transformer = ErrorTransformer::new().filter_sensitive_data(true);
+        let input = "card 4111 1111 1111 1111 ssn 123-45-6789 \
+                     email user@example.com token=abcdef123 password=hunter2 \
+                     Bearer sk_live_secret";
+        let filtered = transformer.filter_sensitive_string(input);
+
+        // Card and SSN are redacted.
+        assert!(filtered.contains("[CARD FILTERED]"));
+        assert!(!filtered.contains("4111 1111 1111 1111"));
+        assert!(filtered.contains("[SSN FILTERED]"));
+        assert!(!filtered.contains("123-45-6789"));
+
+        // Token / password / bearer secrets are redacted.
+        assert!(!filtered.contains("abcdef123"));
+        assert!(!filtered.contains("hunter2"));
+        assert!(!filtered.contains("sk_live_secret"));
+        assert!(filtered.contains("[FILTERED]"));
+
+        // Non-secret email address is preserved (not part of the redaction set).
+        assert!(filtered.contains("user@example.com"));
+    }
+
+    #[test]
+    fn test_filter_sensitive_string_stable_across_calls() {
+        // Exercises the once-compiled LazyLock regexes across repeated calls.
+        let transformer = ErrorTransformer::new().filter_sensitive_data(true);
+        let input = "password=secret123 token=deadbeef";
+        let first = transformer.filter_sensitive_string(input);
+        let second = transformer.filter_sensitive_string(input);
+        assert_eq!(first, second);
+        assert!(!first.contains("secret123"));
+        assert!(!first.contains("deadbeef"));
     }
 }

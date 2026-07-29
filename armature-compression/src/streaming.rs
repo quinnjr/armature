@@ -42,6 +42,7 @@ use brotli::CompressorWriter as BrotliEncoder;
 #[cfg(feature = "zstd")]
 use zstd::stream::write::Encoder as ZstdEncoder;
 
+#[cfg(any(feature = "gzip", feature = "brotli", feature = "zstd"))]
 use std::io::Write;
 
 /// Configuration for streaming compression.
@@ -149,6 +150,10 @@ pub struct StreamingCompressor {
     bytes_in: u64,
     bytes_out: u64,
     unflushed_bytes: usize,
+    /// Input staged but not yet handed to the encoder because it hasn't
+    /// reached `min_chunk_size`. Drained on the next threshold-crossing
+    /// chunk, or on `flush`/`finish`.
+    input_buffer: BytesMut,
     finished: bool,
 }
 
@@ -163,6 +168,7 @@ impl StreamingCompressor {
             bytes_in: 0,
             bytes_out: 0,
             unflushed_bytes: 0,
+            input_buffer: BytesMut::new(),
             finished: false,
         })
     }
@@ -250,6 +256,12 @@ impl StreamingCompressor {
     /// Compress a chunk of data.
     ///
     /// Returns compressed bytes. May return empty if data is being buffered.
+    ///
+    /// Sub-threshold input is staged in an internal buffer and only handed to
+    /// the encoder once at least `min_chunk_size` bytes have accumulated, so
+    /// tiny chunks aren't compressed prematurely. The pass-through (`None`)
+    /// algorithm is exempt — with no compression to defer, its output is
+    /// emitted immediately to preserve latency.
     pub fn compress_chunk(&mut self, data: &[u8]) -> Result<Bytes> {
         if self.finished {
             return Err(CompressionError::CompressionFailed(
@@ -262,27 +274,49 @@ impl StreamingCompressor {
         }
 
         self.bytes_in += data.len() as u64;
-        self.unflushed_bytes += data.len();
+
+        // Pass-through: nothing to compress, so `min_chunk_size` (a knob that
+        // gates *compression*) does not apply. Emit immediately.
+        if matches!(self.encoder, EncoderState::None) {
+            self.bytes_out += data.len() as u64;
+            return Ok(Bytes::copy_from_slice(data));
+        }
+
+        // Stage input until we have at least `min_chunk_size` bytes to compress.
+        self.input_buffer.extend_from_slice(data);
+        if self.input_buffer.len() < self.config.min_chunk_size {
+            return Ok(Bytes::new());
+        }
+
+        let buffered = std::mem::take(&mut self.input_buffer);
+        self.feed_encoder(&buffered)?;
+
+        // Flush if we've accumulated enough since the last flush.
+        if self.unflushed_bytes >= self.config.flush_interval {
+            self.flush_internal()
+        } else {
+            Ok(Bytes::new())
+        }
+    }
+
+    /// Write raw bytes into the active encoder, tracking unflushed volume.
+    ///
+    /// Does not itself flush; callers decide when to drain via `flush_internal`.
+    fn feed_encoder(&mut self, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
 
         match &mut self.encoder {
-            EncoderState::None => {
-                // Pass through
-                self.bytes_out += data.len() as u64;
-                Ok(Bytes::copy_from_slice(data))
-            }
+            // `None` never stages input, so it never reaches this path.
+            EncoderState::None => {}
 
             #[cfg(feature = "gzip")]
             EncoderState::Gzip(encoder) => {
                 encoder
                     .write_all(data)
                     .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
-
-                // Flush if we've accumulated enough
-                if self.unflushed_bytes >= self.config.flush_interval {
-                    self.flush_internal()
-                } else {
-                    Ok(Bytes::new())
-                }
+                self.unflushed_bytes += data.len();
             }
 
             #[cfg(feature = "brotli")]
@@ -290,12 +324,7 @@ impl StreamingCompressor {
                 encoder
                     .write_all(data)
                     .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
-
-                if self.unflushed_bytes >= self.config.flush_interval {
-                    self.flush_internal()
-                } else {
-                    Ok(Bytes::new())
-                }
+                self.unflushed_bytes += data.len();
             }
 
             #[cfg(feature = "zstd")]
@@ -303,18 +332,22 @@ impl StreamingCompressor {
                 encoder
                     .write_all(data)
                     .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
-
-                if self.unflushed_bytes >= self.config.flush_interval {
-                    self.flush_internal()
-                } else {
-                    Ok(Bytes::new())
-                }
+                self.unflushed_bytes += data.len();
             }
         }
+
+        Ok(())
     }
 
     /// Flush compressed data without finishing.
+    ///
+    /// Any input still staged below the `min_chunk_size` threshold is drained
+    /// into the encoder first so no buffered data is lost.
     pub fn flush(&mut self) -> Result<Bytes> {
+        if !self.input_buffer.is_empty() {
+            let buffered = std::mem::take(&mut self.input_buffer);
+            self.feed_encoder(&buffered)?;
+        }
         self.flush_internal()
     }
 
@@ -374,6 +407,13 @@ impl StreamingCompressor {
             return Ok(Bytes::new());
         }
         self.finished = true;
+
+        // Drain any input still staged below the `min_chunk_size` threshold so
+        // the tail of the stream isn't silently dropped.
+        if !self.input_buffer.is_empty() {
+            let buffered = std::mem::take(&mut self.input_buffer);
+            self.feed_encoder(&buffered)?;
+        }
 
         match self.encoder {
             EncoderState::None => Ok(Bytes::new()),
@@ -445,11 +485,17 @@ impl CompressionStats {
 
 /// Async streaming compressor wrapper.
 ///
-/// Wraps a StreamingCompressor for use with async streams.
+/// Wraps a [`StreamingCompressor`] so it slots into `async` stream pipelines
+/// (its `process`/`flush` methods can be `.await`ed at call sites).
+///
+/// Note: compression here is CPU-bound and fully synchronous — these methods
+/// perform no I/O and never actually suspend. They are `async` purely for
+/// ergonomic composition with async code, not because buffering happens off
+/// the task. Input buffering (the `min_chunk_size` threshold) is handled by
+/// the inner [`StreamingCompressor`], so this wrapper holds no state of its
+/// own beyond the inner compressor.
 pub struct AsyncStreamingCompressor {
     inner: StreamingCompressor,
-    #[allow(dead_code)] // Reserved for buffering partial data
-    pending: BytesMut,
 }
 
 impl AsyncStreamingCompressor {
@@ -457,7 +503,6 @@ impl AsyncStreamingCompressor {
     pub fn new(config: StreamingConfig) -> Result<Self> {
         Ok(Self {
             inner: StreamingCompressor::new(config)?,
-            pending: BytesMut::with_capacity(8192),
         })
     }
 
@@ -467,11 +512,16 @@ impl AsyncStreamingCompressor {
     }
 
     /// Process a chunk and return compressed data.
+    ///
+    /// Synchronous wrapper (see the type-level note): delegates directly to
+    /// [`StreamingCompressor::compress_chunk`].
     pub async fn process(&mut self, chunk: Bytes) -> Result<Bytes> {
         self.inner.compress_chunk(&chunk)
     }
 
     /// Flush any pending compressed data.
+    ///
+    /// Synchronous wrapper: delegates to [`StreamingCompressor::flush`].
     pub async fn flush(&mut self) -> Result<Bytes> {
         self.inner.flush()
     }
@@ -571,5 +621,114 @@ mod tests {
         let config = StreamingConfig::high_compression();
         assert_eq!(config.level, 9);
         assert!(config.flush_interval > 1024);
+    }
+
+    /// Regression: `min_chunk_size` must gate when input reaches the encoder.
+    /// A sub-threshold chunk is staged (not compressed) even when
+    /// `flush_interval` is tiny. Against the pre-fix code this fails because
+    /// the chunk was written to the encoder and flushed immediately.
+    #[test]
+    #[cfg(feature = "gzip")]
+    fn test_min_chunk_size_buffers_small_chunks() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let config = StreamingConfig::new()
+            .algorithm(CompressionAlgorithm::Gzip)
+            .flush_interval(1) // would force an immediate flush without staging
+            .min_chunk_size(1024);
+        let mut compressor = StreamingCompressor::new(config).unwrap();
+
+        // Sub-threshold chunk: must be staged, producing no output and
+        // reaching the encoder not at all.
+        let out = compressor.compress_chunk(b"small chunk").unwrap();
+        assert!(
+            out.is_empty(),
+            "sub-threshold chunk should be buffered, not compressed"
+        );
+        assert_eq!(
+            compressor.stats().bytes_out,
+            0,
+            "nothing should reach the encoder below min_chunk_size"
+        );
+
+        // Crossing the threshold drains the staged bytes and compresses them.
+        let big = vec![b'x'; 2048];
+        let out2 = compressor.compress_chunk(&big).unwrap();
+        assert!(
+            !out2.is_empty(),
+            "crossing min_chunk_size should emit compressed data"
+        );
+
+        // Full round-trip: staged + threshold-crossing data must all survive.
+        let mut all = BytesMut::new();
+        all.extend_from_slice(&out2);
+        all.extend_from_slice(&compressor.finish().unwrap());
+
+        let mut decoder = GzDecoder::new(&all[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+
+        let mut expected = b"small chunk".to_vec();
+        expected.extend_from_slice(&big);
+        assert_eq!(decompressed, expected);
+    }
+
+    /// A stream whose entire input stays below `min_chunk_size` must still be
+    /// emitted in full by `finish()` (the staged tail is not dropped).
+    #[test]
+    #[cfg(feature = "gzip")]
+    fn test_finish_drains_staged_input() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let config = StreamingConfig::new()
+            .algorithm(CompressionAlgorithm::Gzip)
+            .min_chunk_size(1_000_000); // nothing ever crosses the threshold
+        let mut compressor = StreamingCompressor::new(config).unwrap();
+
+        assert!(
+            compressor
+                .compress_chunk(b"tiny payload")
+                .unwrap()
+                .is_empty()
+        );
+        let final_bytes = compressor.finish().unwrap();
+        assert!(!final_bytes.is_empty());
+
+        let mut decoder = GzDecoder::new(&final_bytes[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, b"tiny payload");
+    }
+
+    /// The async wrapper is a thin (synchronous) shim over the inner
+    /// compressor: process/finish must round-trip correctly.
+    #[tokio::test]
+    #[cfg(feature = "gzip")]
+    async fn test_async_wrapper_round_trip() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let config = StreamingConfig::new()
+            .algorithm(CompressionAlgorithm::Gzip)
+            .min_chunk_size(4)
+            .flush_interval(4);
+        let mut compressor = AsyncStreamingCompressor::new(config).unwrap();
+
+        let mut all = BytesMut::new();
+        for _ in 0..8 {
+            let out = compressor
+                .process(Bytes::from_static(b"chunk-"))
+                .await
+                .unwrap();
+            all.extend_from_slice(&out);
+        }
+        all.extend_from_slice(&compressor.finish().unwrap());
+
+        let mut decoder = GzDecoder::new(&all[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, b"chunk-".repeat(8));
     }
 }

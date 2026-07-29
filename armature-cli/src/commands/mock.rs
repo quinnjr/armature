@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Arguments for the mock command
@@ -114,16 +114,10 @@ pub async fn run(args: MockArgs) -> CliResult<()> {
         HashMap::new()
     };
 
-    // Create shared state
-    let state = Arc::new(MockState {
-        spec,
-        custom_data,
-        delay_ms: args.delay_ms,
-        cors: args.cors,
-        seed: args.seed,
-        request_count: std::sync::atomic::AtomicU64::new(0),
-        start_time: Utc::now(),
-    });
+    let start_time = Utc::now();
+
+    // Create shared state (wrapped so a watcher can hot-swap it on spec changes).
+    let state = Arc::new(build_state(spec, custom_data.clone(), &args, start_time));
 
     // Print routes
     println!();
@@ -133,12 +127,18 @@ pub async fn run(args: MockArgs) -> CliResult<()> {
     // Build router with mock handlers
     let router = build_mock_router(Arc::clone(&state));
 
+    // Shared, swappable state.
+    let shared: Arc<RwLock<Arc<MockState>>> = Arc::new(RwLock::new(state));
+
     // Print startup info
     println!();
     success(&format!(
         "Mock server running at http://{}:{}",
         args.host, args.port
     ));
+    if args.watch {
+        info(&format!("Watching {} for changes", args.spec.cyan()));
+    }
     println!();
     println!(
         "  {} Press {} to stop",
@@ -146,6 +146,17 @@ pub async fn run(args: MockArgs) -> CliResult<()> {
         "Ctrl+C".bright_white()
     );
     println!();
+
+    // Spawn a lightweight polling watcher that reloads MockState on spec changes.
+    if args.watch {
+        let shared = Arc::clone(&shared);
+        let spec_path = args.spec.clone();
+        let custom_data = custom_data.clone();
+        let watch_args = args.clone();
+        tokio::spawn(async move {
+            watch_spec(shared, spec_path, custom_data, watch_args, start_time).await;
+        });
+    }
 
     // Start the server using armature-core
     let addr = format!("{}:{}", args.host, args.port);
@@ -159,13 +170,88 @@ pub async fn run(args: MockArgs) -> CliResult<()> {
     loop {
         let (stream, client_addr) = listener.accept().await.map_err(CliError::Io)?;
         let router = Arc::clone(&router);
-        let state = Arc::clone(&state);
+        // Read the current state snapshot (clone the inner Arc, release the lock).
+        let state = {
+            let guard = shared.read().expect("mock state lock poisoned");
+            Arc::clone(&guard)
+        };
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, router, state, client_addr).await {
                 eprintln!("  {} Connection error: {}", "✗".red(), e);
             }
         });
+    }
+}
+
+/// Build a `MockState` from a parsed spec and the server configuration.
+fn build_state(
+    spec: OpenAPI,
+    custom_data: HashMap<String, Value>,
+    args: &MockArgs,
+    start_time: DateTime<Utc>,
+) -> MockState {
+    MockState {
+        spec,
+        custom_data,
+        delay_ms: args.delay_ms,
+        cors: args.cors,
+        seed: args.seed,
+        request_count: std::sync::atomic::AtomicU64::new(0),
+        start_time,
+    }
+}
+
+/// Poll the spec file and hot-swap the shared `MockState` whenever it changes.
+///
+/// A lightweight polling watcher (checking the file's modified time every 500ms)
+/// is used rather than an OS notifier: it is dependency-free here and robust
+/// across editors that replace files on save.
+async fn watch_spec(
+    shared: Arc<RwLock<Arc<MockState>>>,
+    spec_path: String,
+    custom_data: HashMap<String, Value>,
+    args: MockArgs,
+    start_time: DateTime<Utc>,
+) {
+    let mut last_modified = fs::metadata(&spec_path).and_then(|m| m.modified()).ok();
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    loop {
+        ticker.tick().await;
+
+        let modified = match fs::metadata(&spec_path).and_then(|m| m.modified()) {
+            Ok(m) => m,
+            Err(_) => continue, // file temporarily missing (editor swap); retry next tick
+        };
+
+        if last_modified == Some(modified) {
+            continue;
+        }
+        last_modified = Some(modified);
+
+        match load_openapi_spec(&spec_path) {
+            Ok(spec) => {
+                let new_state = Arc::new(build_state(spec, custom_data.clone(), &args, start_time));
+                match shared.write() {
+                    Ok(mut guard) => {
+                        *guard = new_state;
+                        success(&format!("Reloaded spec: {}", spec_path.cyan()));
+                    }
+                    Err(_) => {
+                        eprintln!("  {} Mock state lock poisoned; skipping reload", "✗".red());
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {} Failed to reload spec ({}): {}",
+                    "✗".red(),
+                    spec_path,
+                    e
+                );
+            }
+        }
     }
 }
 

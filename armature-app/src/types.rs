@@ -3,9 +3,33 @@
 //! These types are registered with the Rhai engine and used in scripts
 //! to define services, controllers, guards, middleware, and modules.
 
-use rhai::{Dynamic, FnPtr};
+use rhai::{Dynamic, EvalAltResult, FnPtr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// Cast every element of `items` to `T`, or return a Rhai error naming the
+/// offending index and its actual type. Used by `ScriptModule`'s
+/// `providers([...])`/`controllers([...])`/`guards([...])`/`imports([...])`
+/// setters so a typo (e.g. passing a non-`ScriptService` into `providers`)
+/// surfaces to the script author instead of being silently dropped.
+fn cast_all<T: Clone + Send + Sync + 'static>(
+    setter_name: &str,
+    expected: &str,
+    items: Vec<Dynamic>,
+) -> Result<Vec<T>, Box<EvalAltResult>> {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let actual = d.type_name().to_string();
+            d.try_cast::<T>().ok_or_else(|| {
+                Box::<EvalAltResult>::from(format!(
+                    "{setter_name}([...]) element {i} has type `{actual}`, expected {expected}"
+                ))
+            })
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // ScriptService
@@ -205,32 +229,36 @@ impl ScriptModule {
         }
     }
 
-    pub fn set_providers(&mut self, providers: Vec<Dynamic>) {
-        self.providers = providers
-            .into_iter()
-            .filter_map(|d| d.try_cast::<ScriptService>())
-            .collect();
+    pub fn set_providers(&mut self, providers: Vec<Dynamic>) -> Result<(), Box<EvalAltResult>> {
+        self.providers = cast_all(
+            "providers",
+            "a ScriptService (from service(\"Name\"))",
+            providers,
+        )?;
+        Ok(())
     }
 
-    pub fn set_controllers(&mut self, controllers: Vec<Dynamic>) {
-        self.controllers = controllers
-            .into_iter()
-            .filter_map(|d| d.try_cast::<ScriptController>())
-            .collect();
+    pub fn set_controllers(&mut self, controllers: Vec<Dynamic>) -> Result<(), Box<EvalAltResult>> {
+        self.controllers = cast_all(
+            "controllers",
+            "a ScriptController (from controller(\"/path\"))",
+            controllers,
+        )?;
+        Ok(())
     }
 
-    pub fn set_guards(&mut self, guards: Vec<Dynamic>) {
-        self.guards = guards
-            .into_iter()
-            .filter_map(|d| d.try_cast::<ScriptGuard>())
-            .collect();
+    pub fn set_guards(&mut self, guards: Vec<Dynamic>) -> Result<(), Box<EvalAltResult>> {
+        self.guards = cast_all("guards", "a ScriptGuard (from guard(\"Name\"))", guards)?;
+        Ok(())
     }
 
-    pub fn set_imports(&mut self, imports: Vec<Dynamic>) {
-        self.imports = imports
-            .into_iter()
-            .filter_map(|d| d.try_cast::<ScriptModule>())
-            .collect();
+    pub fn set_imports(&mut self, imports: Vec<Dynamic>) -> Result<(), Box<EvalAltResult>> {
+        self.imports = cast_all(
+            "imports",
+            "a ScriptModule (from create_module(\"Name\"))",
+            imports,
+        )?;
+        Ok(())
     }
 
     pub fn on_module_init(&mut self, handler: FnPtr) {
@@ -293,8 +321,11 @@ impl ScriptApp {
 
 /// DI context passed to handler closures as the `ctx` argument.
 ///
-/// Provides `ctx.call("ServiceName", "methodName", ...args)` for invoking
-/// service methods from within route handlers.
+/// Provides `ctx.invoke("ServiceName", "methodName", ...args)` for invoking
+/// service methods from within route handlers. (Not `ctx.call(...)`: `call`
+/// is Rhai's own reserved keyword for function-pointer invocation and
+/// cannot be used as a custom method name — see `bindings.rs`'s
+/// `register_service_context_api` for the full explanation.)
 #[derive(Debug, Clone)]
 pub struct ServiceContext {
     pub services: Arc<BTreeMap<String, BTreeMap<String, FnPtr>>>,

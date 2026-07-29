@@ -10,24 +10,25 @@ pub enum CredentialsSource {
     /// Use Default Azure Credential (environment, managed identity, CLI, etc.).
     #[default]
     DefaultCredential,
-    /// Use environment variables.
+    /// Resolve via the developer-tools credential chain.
+    ///
+    /// Despite the name, this variant does **not** read `AZURE_CLIENT_ID` /
+    /// `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` from the environment:
+    /// `azure_identity` 1.0 removed the standalone `EnvironmentCredential`, so it
+    /// currently resolves **identically** to [`CredentialsSource::DefaultCredential`]
+    /// (Azure CLI / Azure Developer CLI) and shares its match arm. It is retained
+    /// as a distinct name for callers that configure it explicitly; use
+    /// [`CredentialsSource::ServicePrincipal`] to supply client-id/secret directly.
     Environment,
     /// Use managed identity.
     ManagedIdentity,
     /// Use Azure CLI credential.
     AzureCli,
-    /// Use connection string.
-    ConnectionString(String),
     /// Use service principal with client secret.
     ServicePrincipal {
         tenant_id: String,
         client_id: String,
         client_secret: String,
-    },
-    /// Use storage account key.
-    StorageAccountKey {
-        account_name: String,
-        account_key: String,
     },
 }
 
@@ -42,6 +43,10 @@ pub struct AzureConfig {
     pub cosmos_database: Option<String>,
     /// Service Bus namespace.
     pub servicebus_namespace: Option<String>,
+    /// Service Bus connection string (SAS). Carries the namespace + shared
+    /// access policy the SAS-based Service Bus SDK requires.
+    #[serde(default)]
+    pub servicebus_connection_string: Option<String>,
     /// Key Vault URL.
     pub keyvault_url: Option<String>,
     /// Credentials source.
@@ -64,6 +69,7 @@ impl Default for AzureConfig {
             cosmos_endpoint: None,
             cosmos_database: None,
             servicebus_namespace: None,
+            servicebus_connection_string: None,
             keyvault_url: None,
             credentials: CredentialsSource::DefaultCredential,
             enabled_services: HashSet::new(),
@@ -92,16 +98,20 @@ impl AzureConfig {
             builder = builder.storage_account(account);
         }
 
-        if let Ok(conn_str) = std::env::var("AZURE_STORAGE_CONNECTION_STRING") {
-            builder = builder.connection_string(conn_str);
-        }
-
         if let Ok(endpoint) = std::env::var("AZURE_COSMOS_ENDPOINT") {
             builder = builder.cosmos_endpoint(endpoint);
         }
 
+        if let Ok(database) = std::env::var("AZURE_COSMOS_DATABASE") {
+            builder = builder.cosmos_database(database);
+        }
+
         if let Ok(namespace) = std::env::var("AZURE_SERVICEBUS_NAMESPACE") {
             builder = builder.servicebus_namespace(namespace);
+        }
+
+        if let Ok(conn_str) = std::env::var("AZURE_SERVICEBUS_CONNECTION_STRING") {
+            builder = builder.servicebus_connection_string(conn_str);
         }
 
         if let Ok(url) = std::env::var("AZURE_KEYVAULT_URL") {
@@ -165,6 +175,12 @@ impl AzureConfigBuilder {
         self
     }
 
+    /// Set the Service Bus connection string (SAS).
+    pub fn servicebus_connection_string(mut self, conn_str: impl Into<String>) -> Self {
+        self.config.servicebus_connection_string = Some(conn_str.into());
+        self
+    }
+
     /// Set the Key Vault URL.
     pub fn keyvault_url(mut self, url: impl Into<String>) -> Self {
         self.config.keyvault_url = Some(url.into());
@@ -174,12 +190,6 @@ impl AzureConfigBuilder {
     /// Set the credentials source.
     pub fn credentials(mut self, credentials: CredentialsSource) -> Self {
         self.config.credentials = credentials;
-        self
-    }
-
-    /// Use connection string.
-    pub fn connection_string(mut self, conn_str: impl Into<String>) -> Self {
-        self.config.credentials = CredentialsSource::ConnectionString(conn_str.into());
         self
     }
 
@@ -194,19 +204,6 @@ impl AzureConfigBuilder {
             tenant_id: tenant_id.into(),
             client_id: client_id.into(),
             client_secret: client_secret.into(),
-        };
-        self
-    }
-
-    /// Use storage account key.
-    pub fn account_key(
-        mut self,
-        account_name: impl Into<String>,
-        account_key: impl Into<String>,
-    ) -> Self {
-        self.config.credentials = CredentialsSource::StorageAccountKey {
-            account_name: account_name.into(),
-            account_key: account_key.into(),
         };
         self
     }

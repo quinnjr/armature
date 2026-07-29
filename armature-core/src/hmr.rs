@@ -3,21 +3,40 @@
 //! Provides file watching and hot reload capabilities for development mode.
 //! Supports automatic reloading of JavaScript, TypeScript, CSS, and other web assets.
 //!
-//! ## Features
+//! ## How it works
 //!
-//! - File system watching
-//! - WebSocket-based change notification
-//! - Automatic browser refresh
-//! - Module replacement without full page reload
-//! - Support for static assets and templates
+//! 1. [`HmrManager::start_watching`] spawns a background task that watches the
+//!    configured paths with the `notify` crate. Relevant file-system events are
+//!    debounced and published as [`HmrEvent`]s on an internal
+//!    `tokio::sync::broadcast` channel.
+//! 2. [`HmrManager::start_websocket_server`] binds a real WebSocket server
+//!    (`tokio_tungstenite`) on `127.0.0.1:{websocket_port}`. Each accepted
+//!    connection subscribes to the broadcast channel and forwards every
+//!    [`HmrEvent`] to the browser as a JSON message
+//!    (`{"type": "css-update" | "js-update" | "full-reload", "path": "..."}`).
+//!    The per-connection task ends as soon as the client disconnects or a send
+//!    fails, so connections never accumulate.
+//! 3. [`inject_hmr_script`] injects a small client script into served HTML that
+//!    connects to the WebSocket server and reloads CSS in place or triggers a
+//!    full page refresh based on the received message type.
+//!
+//! The accept loop is aborted when [`HmrManager::stop`] is called or the
+//! manager is dropped, and events can also be published manually with
+//! [`HmrManager::publish`].
 
-use crate::{Error, HttpRequest, HttpResponse};
+use crate::Error;
+use futures_util::{SinkExt, StreamExt};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// HMR file change event
 #[derive(Debug, Clone)]
@@ -146,15 +165,9 @@ impl HmrConfig {
 pub struct HmrManager {
     config: HmrConfig,
     event_tx: broadcast::Sender<HmrEvent>,
-    clients: Arc<RwLock<Vec<ClientConnection>>>,
+    client_count: Arc<AtomicUsize>,
     last_events: Arc<RwLock<HashMap<PathBuf, std::time::SystemTime>>>,
-}
-
-/// WebSocket client connection
-#[allow(dead_code)]
-struct ClientConnection {
-    id: String,
-    connected_at: std::time::SystemTime,
+    server_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl HmrManager {
@@ -165,8 +178,9 @@ impl HmrManager {
         Self {
             config,
             event_tx,
-            clients: Arc::new(RwLock::new(Vec::new())),
+            client_count: Arc::new(AtomicUsize::new(0)),
             last_events: Arc::new(RwLock::new(HashMap::new())),
+            server_handle: std::sync::Mutex::new(None),
         }
     }
 
@@ -374,25 +388,179 @@ impl HmrManager {
         )
     }
 
-    /// Handle WebSocket upgrade request
-    pub async fn handle_websocket(&self, _req: &HttpRequest) -> Result<HttpResponse, Error> {
-        // This would be implemented with a WebSocket library
-        // For now, return a placeholder
-        Ok(HttpResponse::ok().with_body(b"WebSocket upgrade".to_vec()))
-    }
+    /// Start the HMR WebSocket notification server.
+    ///
+    /// Binds a `TcpListener` on `127.0.0.1:{websocket_port}` (use port `0` for
+    /// an ephemeral port) and spawns an accept loop. Each accepted connection
+    /// is upgraded with `tokio_tungstenite::accept_async` and forwards every
+    /// broadcast [`HmrEvent`] to the client as a JSON reload message until the
+    /// client disconnects or a send fails.
+    ///
+    /// Returns the actual bound port. The accept loop runs until [`stop`] is
+    /// called or the manager is dropped.
+    ///
+    /// [`stop`]: HmrManager::stop
+    pub async fn start_websocket_server(&self) -> Result<u16, Error> {
+        let listener = TcpListener::bind(("127.0.0.1", self.config.websocket_port))
+            .await
+            .map_err(|e| Error::Internal(format!("HMR WebSocket bind failed: {}", e)))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| Error::Internal(format!("HMR WebSocket local_addr failed: {}", e)))?
+            .port();
 
-    /// Register a new client connection
-    pub async fn register_client(&self, client_id: String) {
-        let mut clients = self.clients.write().await;
-        clients.push(ClientConnection {
-            id: client_id,
-            connected_at: std::time::SystemTime::now(),
+        if self.config.verbose {
+            println!("🔥 HMR WebSocket server listening on ws://127.0.0.1:{port}");
+        }
+
+        let event_tx = self.event_tx.clone();
+        let client_count = self.client_count.clone();
+        let verbose = self.config.verbose;
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (stream, _addr) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("❌ HMR WebSocket accept error: {}", e);
+                        }
+                        continue;
+                    }
+                };
+
+                // Subscribe before the handshake so no event published during
+                // the handshake window is missed.
+                let rx = event_tx.subscribe();
+                let client_count = client_count.clone();
+
+                tokio::spawn(async move {
+                    // Bound the handshake so a client that opens TCP but never
+                    // completes the WebSocket upgrade (slow-loris) cannot park
+                    // this task forever. On timeout or handshake error we drop
+                    // the connection and return without ever touching the
+                    // client count.
+                    let handshake = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio_tungstenite::accept_async(stream),
+                    )
+                    .await;
+
+                    match handshake {
+                        Ok(Ok(ws)) => {
+                            client_count.fetch_add(1, Ordering::SeqCst);
+                            Self::forward_events(ws, rx, verbose).await;
+                            client_count.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Ok(Err(e)) => {
+                            if verbose {
+                                eprintln!("❌ HMR WebSocket handshake failed: {}", e);
+                            }
+                        }
+                        Err(_elapsed) => {
+                            if verbose {
+                                eprintln!(
+                                    "❌ HMR WebSocket handshake timed out; dropping connection"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
         });
+
+        let mut slot = self
+            .server_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(old) = slot.replace(handle) {
+            old.abort();
+        }
+
+        Ok(port)
     }
 
-    /// Get number of connected clients
-    pub async fn client_count(&self) -> usize {
-        self.clients.read().await.len()
+    /// Forward broadcast HMR events to a single WebSocket client until the
+    /// client disconnects, a send fails, or the event channel closes.
+    async fn forward_events(
+        mut ws: WebSocketStream<TcpStream>,
+        mut rx: broadcast::Receiver<HmrEvent>,
+        verbose: bool,
+    ) {
+        loop {
+            tokio::select! {
+                event = rx.recv() => match event {
+                    Ok(event) => {
+                        let message = Self::reload_message(&event);
+                        if ws.send(WsMessage::text(message)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        if verbose {
+                            eprintln!("⚠️  HMR client lagged, skipped {} events", skipped);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                incoming = ws.next() => match incoming {
+                    Some(Ok(msg)) if msg.is_close() => break,
+                    Some(Ok(_)) => {} // Ignore client messages (pings are auto-handled)
+                    Some(Err(_)) | None => break,
+                },
+            }
+        }
+
+        let _ = ws.close(None).await;
+    }
+
+    /// Build the JSON reload message the embedded client script expects.
+    fn reload_message(event: &HmrEvent) -> String {
+        let msg_type = match event.extension.as_deref() {
+            Some("css") | Some("scss") | Some("less") => "css-update",
+            Some("js") | Some("ts") | Some("jsx") | Some("tsx") => "js-update",
+            _ => "full-reload",
+        };
+
+        serde_json::json!({
+            "type": msg_type,
+            "path": event.path.to_string_lossy(),
+        })
+        .to_string()
+    }
+
+    /// Publish an HMR event to all connected WebSocket clients.
+    ///
+    /// Returns the number of subscribers the event was delivered to. The file
+    /// watcher publishes on the same channel; this method exists for manual /
+    /// programmatic reload triggers.
+    pub fn publish(&self, event: HmrEvent) -> usize {
+        self.event_tx.send(event).unwrap_or(0)
+    }
+
+    /// Get number of currently connected WebSocket clients
+    pub fn client_count(&self) -> usize {
+        self.client_count.load(Ordering::SeqCst)
+    }
+
+    /// Stop the WebSocket server's accept loop.
+    ///
+    /// Existing client connections finish on their own when they disconnect or
+    /// when the manager (and its broadcast channel) is dropped.
+    pub fn stop(&self) {
+        let mut slot = self
+            .server_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(handle) = slot.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for HmrManager {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -456,18 +624,108 @@ mod tests {
         let config = HmrConfig::new();
         let manager = HmrManager::new(config);
 
-        assert_eq!(manager.client_count().await, 0);
+        assert_eq!(manager.client_count(), 0);
+    }
+
+    #[test]
+    fn test_reload_message_types() {
+        let event = |ext: &str| HmrEvent {
+            kind: HmrEventKind::Modified,
+            path: PathBuf::from(format!("src/app.{ext}")),
+            extension: Some(ext.to_string()),
+            timestamp: std::time::SystemTime::now(),
+        };
+
+        let css: serde_json::Value =
+            serde_json::from_str(&HmrManager::reload_message(&event("css"))).unwrap();
+        assert_eq!(css["type"], "css-update");
+        assert_eq!(css["path"], "src/app.css");
+
+        let js: serde_json::Value =
+            serde_json::from_str(&HmrManager::reload_message(&event("ts"))).unwrap();
+        assert_eq!(js["type"], "js-update");
+
+        let html: serde_json::Value =
+            serde_json::from_str(&HmrManager::reload_message(&event("html"))).unwrap();
+        assert_eq!(html["type"], "full-reload");
     }
 
     #[tokio::test]
-    async fn test_client_registration() {
-        let config = HmrConfig::new();
+    async fn test_websocket_server_delivers_reload_message() {
+        // Bind on an ephemeral port so the test never collides with a real server.
+        let config = HmrConfig::new().websocket_port(0);
         let manager = HmrManager::new(config);
+        let port = manager.start_websocket_server().await.unwrap();
 
-        manager.register_client("test-client-1".to_string()).await;
-        manager.register_client("test-client-2".to_string()).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .expect("client should connect to HMR WebSocket server");
 
-        assert_eq!(manager.client_count().await, 2);
+        // Wait for the server side of the handshake to complete.
+        for _ in 0..200 {
+            if manager.client_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(manager.client_count(), 1);
+
+        // Trigger a change notification via the publish path directly.
+        let delivered = manager.publish(HmrEvent {
+            kind: HmrEventKind::Modified,
+            path: PathBuf::from("public/styles/app.css"),
+            extension: Some("css".to_string()),
+            timestamp: std::time::SystemTime::now(),
+        });
+        assert_eq!(delivered, 1);
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for reload message")
+            .expect("stream ended before reload message")
+            .expect("websocket error");
+
+        let text = msg.into_text().expect("reload message should be text");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["type"], "css-update");
+        assert_eq!(json["path"], "public/styles/app.css");
+
+        // Disconnect and verify the per-connection task cleans up.
+        drop(ws);
+        for _ in 0..200 {
+            if manager.client_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(manager.client_count(), 0);
+
+        manager.stop();
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_handshake_never_counts_as_client() {
+        // A client that opens a raw TCP connection but never sends a WebSocket
+        // handshake must not be counted as a connected client, and the handshake
+        // is bounded by a timeout so the per-connection task cannot leak.
+        let config = HmrConfig::new().websocket_port(0);
+        let manager = HmrManager::new(config);
+        let port = manager.start_websocket_server().await.unwrap();
+
+        // Open TCP but send nothing — the handshake stays pending.
+        let _sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("raw TCP connect should succeed");
+
+        // Give the accept loop time to spawn the handshake task, then confirm
+        // the client count never rises: an unfinished handshake is not a client.
+        for _ in 0..40 {
+            assert_eq!(manager.client_count(), 0);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(manager.client_count(), 0);
+
+        manager.stop();
     }
 
     #[test]

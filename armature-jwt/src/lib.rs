@@ -104,6 +104,40 @@ impl JwtManager {
         Ok(Self { service })
     }
 
+    /// Create a verify-only JWT manager.
+    ///
+    /// Unlike [`JwtManager::new`], this does not require signing (encoding)
+    /// key material — only a decoding key (secret for HS*, public key for
+    /// RS*/ES*) is needed. This is the right constructor for a pure token
+    /// *verifier* that never mints tokens itself, e.g. one configured with
+    /// only a public key and no corresponding private key.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use armature_jwt::{JwtConfig, JwtManager, StandardClaims};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let signer = JwtManager::new(JwtConfig::new("shared-secret".to_string()))?;
+    /// let token = signer.sign(
+    ///     &StandardClaims::new()
+    ///         .with_subject("user".to_string())
+    ///         .with_expiration(3600),
+    /// )?;
+    ///
+    /// let verifier = JwtManager::verify_only(JwtConfig::new("shared-secret".to_string()))?;
+    /// let claims: StandardClaims = verifier.verify(&token)?;
+    /// assert_eq!(claims.sub, Some("user".to_string()));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn verify_only(config: JwtConfig) -> Result<Self> {
+        info!("Initializing verify-only JWT manager");
+        debug!("JWT algorithm: {:?}", config.algorithm);
+        let service = JwtService::verify_only(config)?;
+        Ok(Self { service })
+    }
+
     /// Sign a token with claims
     ///
     /// # Example

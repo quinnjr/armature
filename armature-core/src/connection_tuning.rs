@@ -392,128 +392,103 @@ impl TcpConfig {
     #[cfg(unix)]
     pub fn apply(&self, stream: &TcpStream) -> io::Result<()> {
         use libc::{
-            IPPROTO_TCP, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF, SOL_SOCKET, TCP_NODELAY,
-            setsockopt,
+            IP_TOS, IPPROTO_IP, IPPROTO_TCP, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF,
+            SOL_SOCKET, TCP_NODELAY,
         };
+
+        /// Set an integer socket option, logging a warning on failure.
+        fn set_opt(
+            fd: std::os::unix::io::RawFd,
+            level: libc::c_int,
+            option: libc::c_int,
+            value: libc::c_int,
+            name: &str,
+        ) {
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    level,
+                    option,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                tracing::warn!(
+                    option = name,
+                    value,
+                    error = %io::Error::last_os_error(),
+                    "failed to apply TCP socket option"
+                );
+            }
+        }
 
         let fd = stream.as_raw_fd();
 
         // TCP_NODELAY
         if self.nodelay {
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    IPPROTO_TCP,
-                    TCP_NODELAY,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, IPPROTO_TCP, TCP_NODELAY, 1, "TCP_NODELAY");
         }
 
         // TCP_QUICKACK (Linux only)
         #[cfg(target_os = "linux")]
         if self.quickack {
             const TCP_QUICKACK: libc::c_int = 12;
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    IPPROTO_TCP,
-                    TCP_QUICKACK,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, IPPROTO_TCP, TCP_QUICKACK, 1, "TCP_QUICKACK");
         }
 
         // SO_SNDBUF
         if let Some(size) = self.send_buffer {
-            unsafe {
-                let val: libc::c_int = size as libc::c_int;
-                setsockopt(
-                    fd,
-                    SOL_SOCKET,
-                    SO_SNDBUF,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, SOL_SOCKET, SO_SNDBUF, size as libc::c_int, "SO_SNDBUF");
         }
 
         // SO_RCVBUF
         if let Some(size) = self.recv_buffer {
-            unsafe {
-                let val: libc::c_int = size as libc::c_int;
-                setsockopt(
-                    fd,
-                    SOL_SOCKET,
-                    SO_RCVBUF,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, SOL_SOCKET, SO_RCVBUF, size as libc::c_int, "SO_RCVBUF");
         }
 
         // SO_REUSEADDR
         if self.reuse_addr {
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    SOL_SOCKET,
-                    SO_REUSEADDR,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, SOL_SOCKET, SO_REUSEADDR, 1, "SO_REUSEADDR");
         }
 
         // SO_REUSEPORT (Linux)
         #[cfg(target_os = "linux")]
         if self.reuse_port {
             const SO_REUSEPORT: libc::c_int = 15;
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    SOL_SOCKET,
-                    SO_REUSEPORT,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, SOL_SOCKET, SO_REUSEPORT, 1, "SO_REUSEPORT");
         }
 
         // TCP_CORK (Linux)
         #[cfg(target_os = "linux")]
         if self.cork {
             const TCP_CORK: libc::c_int = 3;
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    IPPROTO_TCP,
-                    TCP_CORK,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, IPPROTO_TCP, TCP_CORK, 1, "TCP_CORK");
+        }
+
+        // IP_TOS - traffic class for QoS
+        if let Some(tos) = self.tos {
+            set_opt(fd, IPPROTO_IP, IP_TOS, tos as libc::c_int, "IP_TOS");
+        }
+
+        // TCP_DEFER_ACCEPT (Linux): don't complete accept() until data arrives
+        #[cfg(target_os = "linux")]
+        if let Some(timeout) = self.defer_accept {
+            // Kernel takes seconds; clamp to at least 1 so a sub-second
+            // duration doesn't silently disable the option.
+            let secs = timeout.as_secs().max(1) as libc::c_int;
+            set_opt(
+                fd,
+                IPPROTO_TCP,
+                libc::TCP_DEFER_ACCEPT,
+                secs,
+                "TCP_DEFER_ACCEPT",
+            );
         }
 
         // SO_KEEPALIVE
         if let Some(ref keepalive) = self.keepalive {
-            unsafe {
-                let val: libc::c_int = 1;
-                setsockopt(
-                    fd,
-                    SOL_SOCKET,
-                    SO_KEEPALIVE,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            set_opt(fd, SOL_SOCKET, SO_KEEPALIVE, 1, "SO_KEEPALIVE");
 
             // Apply keepalive settings
             keepalive.apply_to_fd(fd);
@@ -1087,6 +1062,36 @@ mod tests {
         assert!(!config.nodelay); // Nagle's allowed for batching
         assert!(config.cork);
         assert!(config.reuse_port);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tcp_config_apply_sets_tos() {
+        use std::net::TcpListener;
+        use std::os::unix::io::AsRawFd;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let _accepted = listener.accept().unwrap();
+
+        let config = TcpConfig::low_latency();
+        config.apply(&stream).unwrap();
+
+        // Read back IP_TOS to verify the preset value was actually applied
+        let mut tos: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &mut tos as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(tos, 0x10);
     }
 
     #[test]

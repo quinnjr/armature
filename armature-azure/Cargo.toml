@@ -1,6 +1,6 @@
 [package]
 name = "armature-azure"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,21 +13,30 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["sync"] }
+tokio = { version = "1.52", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
 
 # Azure SDK core
-azure_core = { version = "0.21", optional = true }
-azure_identity = { version = "0.30", optional = true }
+azure_core = { version = "1.0", optional = true }
+azure_identity = { version = "1.0", optional = true }
 
 # Azure services (all optional)
-azure_storage = { version = "0.21", optional = true }
-azure_storage_blobs = { version = "0.21", optional = true }
-azure_storage_queues = { version = "0.21", optional = true }
-azure_data_cosmos = { version = "0.29", optional = true }
-azure_messaging_servicebus = { version = "0.21", optional = true }
-azure_security_keyvault = { version = "0.21", optional = true }
+azure_storage_blob = { version = "1.0", optional = true }
+azure_storage_queue = { version = "1.0", optional = true }
+azure_data_cosmos = { version = "0.36", optional = true }
+# The Service Bus SDK still rides the older azure_core 0.21 line and is SAS-based;
+# it has no token-credential path and needs an azure_core 0.21 HttpClient to run.
+# rustls is selected explicitly (no native-tls/OpenSSL).
+azure_messaging_servicebus = { version = "0.21", optional = true, default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_core_sb = { package = "azure_core", version = "0.21", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
+# reqwest 0.12 is the transport azure_core 0.21 already resolves to, so depending
+# on it directly reuses the same `reqwest::Client` type that azure_core 0.21
+# implements `HttpClient` for. This lets the Service Bus client inject a client
+# with an explicit request timeout instead of the untimed SDK default. rustls
+# only (no native-tls/OpenSSL), matching azure_core_sb.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
+azure_security_keyvault_secrets = { version = "1.0", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -42,18 +51,18 @@ parking_lot = "0.12"
 url = "2.5"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full", "test-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "test-util"] }
 
 [features]
 default = []
 # Core auth
 auth = ["azure_identity", "azure_core"]
 # Individual services
-blob = ["azure_storage", "azure_storage_blobs", "auth"]
-queue = ["azure_storage", "azure_storage_queues", "auth"]
+blob = ["azure_storage_blob", "auth"]
+queue = ["azure_storage_queue", "auth"]
 cosmos = ["azure_data_cosmos", "auth"]
-servicebus = ["azure_messaging_servicebus", "auth"]
-keyvault = ["azure_security_keyvault", "auth"]
+servicebus = ["azure_messaging_servicebus", "azure_core_sb", "auth", "reqwest"]
+keyvault = ["azure_security_keyvault_secrets", "auth"]
 # Service groups
 storage = ["blob", "queue"]
 messaging = ["servicebus"]

@@ -7,8 +7,8 @@ Service discovery for the Armature framework.
 - **Service Registration** - Register services on startup
 - **Service Discovery** - Find other services
 - **Health Checks** - Automatic health monitoring
-- **Load Balancing** - Client-side load balancing
-- **Multiple Backends** - Consul, etcd, Kubernetes
+- **Load Balancing** - Client-side load balancing (round-robin, random, or first)
+- **Multiple Backends** - Consul, etcd, or in-memory (for testing)
 
 ## Installation
 
@@ -20,20 +20,28 @@ armature-discovery = "0.1"
 ## Quick Start
 
 ```rust
-use armature_discovery::{Discovery, ConsulBackend};
+use armature_discovery::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let discovery = Discovery::consul("http://localhost:8500").await?;
+    let discovery = InMemoryDiscovery::new();
 
     // Register this service
-    discovery.register("my-service", "http://localhost:3000").await?;
+    let service = ServiceInstance::new("api-1", "api", "localhost", 8080)
+        .with_tag("v1")
+        .with_health_check("http://localhost:8080/health");
 
-    // Discover other services
-    let instances = discovery.discover("user-service").await?;
+    discovery.register(&service).await?;
 
-    // Get one instance (load balanced)
-    let instance = discovery.get_instance("user-service").await?;
+    // Discover other instances of a service
+    let instances = discovery.discover("api").await?;
+    for instance in instances {
+        println!("Found: {}", instance.url());
+    }
+
+    // Get one instance, load balanced
+    let resolver = ServiceResolver::new(discovery, LoadBalancingStrategy::RoundRobin);
+    let instance = resolver.resolve("api").await?;
 
     Ok(())
 }
@@ -44,20 +52,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Consul
 
 ```rust
-let discovery = Discovery::consul("http://localhost:8500").await?;
+use armature_discovery::ConsulDiscovery;
+
+let consul = ConsulDiscovery::new("http://localhost:8500")?;
+consul.register(&service).await?;
+let instances = consul.discover("api").await?;
 ```
+
+`discover` asks Consul to filter to instances whose health checks are
+currently passing (`?passing=true`), so unhealthy instances are never
+returned.
 
 ### etcd
 
 ```rust
-let discovery = Discovery::etcd("http://localhost:2379").await?;
+use armature_discovery::EtcdDiscovery;
+
+let etcd = EtcdDiscovery::new("http://localhost:2379", "/services")?;
+etcd.register(&service).await?;
+let instances = etcd.discover("api").await?;
 ```
 
-### Kubernetes
+### In-Memory
 
-```rust
-let discovery = Discovery::kubernetes().await?;
-```
+`InMemoryDiscovery` keeps everything in a process-local map. It implements
+the same `ServiceDiscovery` trait as the network-backed clients, so it's a
+drop-in stand-in for tests and local development.
 
 ## License
 

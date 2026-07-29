@@ -28,10 +28,22 @@ Armature's audit module provides comprehensive audit logging for security, compl
 | Application Logging | Audit Logging |
 |---------------------|---------------|
 | Debugging & monitoring | Compliance & security |
-| Can be lost/rotated | Immutable records |
+| Can be lost/rotated | Durable, append-only records |
 | General events | Who did what, when |
 | Verbose | Structured |
 | Optional | Required for compliance |
+
+**Durability vs. immutability:** [`FileBackend`] fsyncs every event before
+`write` returns, so a record is on disk before the call that produced it
+completes — a crash cannot lose an event that was successfully logged. It is
+**not** tamper-evident, though: the log is a plain JSON-lines file with no
+hash chaining, signing, or checksums, and [`RetentionManager`]'s pruning
+rewrites the file in place to drop expired lines. Anyone with filesystem
+access to the log can edit or delete entries without detection. If your
+compliance regime requires a cryptographically tamper-evident trail, pair
+this crate with an external WORM store, a hash-chained/signed log shipper, or
+an immutable object-storage backend (e.g. S3 Object Lock) fed from
+[`MultiBackend`] — this crate does not provide that guarantee on its own.
 
 ---
 
@@ -394,8 +406,14 @@ let audit_middleware = Arc::new(
         .log_request_body(true)      // Log request bodies
         .log_response_body(true)     // Log response bodies
         .max_body_size(10_000)       // Max 10KB body size
+        .fail_on_error(false)        // Default: fail open on audit-write errors.
+                                      // Set true to fail the request closed instead.
 );
 ```
+
+An audit-write failure always increments `audit_middleware.write_failure_count()`
+regardless of `fail_on_error`, so it stays observable even under the default
+fail-open behavior.
 
 ### What Gets Logged
 
@@ -665,7 +683,8 @@ logger.log(AuditEvent::new("deleted")).await?;
 ### 5. Handle Failures Gracefully
 
 ```rust
-// ✅ Good - don't fail the request if audit fails
+// ✅ Good - don't fail the request if audit fails, but don't lose the
+// failure either: log it and count it.
 if let Err(e) = logger.log(event).await {
     tracing::error!("Failed to log audit event: {}", e);
 }
@@ -673,6 +692,29 @@ if let Err(e) = logger.log(event).await {
 // ❌ Bad - failing request
 logger.log(event).await?; // Request fails if audit fails!
 ```
+
+**`AuditMiddleware` failure handling:** by default the middleware mirrors the
+snippet above — a request still completes even if its audit event could not
+be durably written. That failure is not silent, though:
+
+- Every write failure increments `AuditMiddleware::write_failure_count()`, an
+  in-process counter you can poll and export to whatever metrics system your
+  application uses (e.g. as an `audit_write_failures_total` gauge).
+- A `tracing::error!` is emitted with the underlying backend error.
+
+If your compliance posture requires that a request never succeed without a
+durable audit record, opt into fail-closed behavior instead:
+
+```rust
+let audit_middleware = Arc::new(
+    AuditMiddleware::new(logger)
+        .fail_on_error(true) // a failed audit write now fails the request
+);
+```
+
+This mirrors `RateLimitMiddleware::skip_on_error` in `armature-ratelimit`
+(inverted default): `fail_on_error` defaults to `false` to preserve the
+historical fail-open behavior.
 
 ---
 
@@ -814,7 +856,7 @@ manager.clone().start().await;
 
 - ✅ Track who did what, when
 - ✅ Mask sensitive data (PII, passwords, etc.)
-- ✅ Immutable audit trail
+- ✅ Durable, append-only-by-default audit trail (not tamper-evident — see [Overview](#overview))
 - ✅ Appropriate retention periods
 - ✅ Secure storage
 - ✅ Query capability

@@ -213,16 +213,44 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// Get a configuration value
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T> {
+    /// Resolve a key to a value.
+    ///
+    /// An exact (flat) key match takes precedence. Failing that, a dotted key
+    /// such as `"database.host"` is resolved by walking into nested objects
+    /// that were produced when loading structured config files (JSON/TOML).
+    fn resolve(&self, key: &str) -> Option<serde_json::Value> {
         let config = self.config.read().unwrap();
 
-        let value = config
-            .get(key)
+        // Exact flat-key match wins (this is how `set` and env vars store keys).
+        if let Some(value) = config.get(key) {
+            return Some(value.clone());
+        }
+
+        // Fall back to dot-path traversal into nested objects.
+        if key.contains('.') {
+            let mut parts = key.split('.');
+            let first = parts.next().unwrap();
+            let mut current = config.get(first)?.clone();
+            for part in parts {
+                let next = match &current {
+                    serde_json::Value::Object(map) => map.get(part)?.clone(),
+                    _ => return None,
+                };
+                current = next;
+            }
+            return Some(current);
+        }
+
+        None
+    }
+
+    /// Get a configuration value
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T> {
+        let value = self
+            .resolve(key)
             .ok_or_else(|| ConfigError::KeyNotFound(key.to_string()))?;
 
-        serde_json::from_value(value.clone())
-            .map_err(|e| ConfigError::DeserializationError(e.to_string()))
+        serde_json::from_value(value).map_err(|e| ConfigError::DeserializationError(e.to_string()))
     }
 
     /// Get a configuration value with default
@@ -232,28 +260,72 @@ impl ConfigManager {
 
     /// Get a string value
     pub fn get_string(&self, key: &str) -> Result<String> {
-        self.get(key)
+        let value = self
+            .resolve(key)
+            .ok_or_else(|| ConfigError::KeyNotFound(key.to_string()))?;
+        match value {
+            serde_json::Value::String(s) => Ok(s),
+            other => serde_json::from_value(other)
+                .map_err(|e| ConfigError::DeserializationError(e.to_string())),
+        }
     }
 
-    /// Get an integer value
+    /// Get an integer value.
+    ///
+    /// Values stored as strings (e.g. loaded from environment variables or a
+    /// `.env` file) are coerced by parsing.
     pub fn get_int(&self, key: &str) -> Result<i64> {
-        self.get(key)
+        let value = self
+            .resolve(key)
+            .ok_or_else(|| ConfigError::KeyNotFound(key.to_string()))?;
+        match value {
+            serde_json::Value::String(s) => s.trim().parse::<i64>().map_err(|e| {
+                ConfigError::DeserializationError(format!("cannot parse '{}' as integer: {}", s, e))
+            }),
+            other => serde_json::from_value(other)
+                .map_err(|e| ConfigError::DeserializationError(e.to_string())),
+        }
     }
 
-    /// Get a boolean value
+    /// Get a boolean value.
+    ///
+    /// Values stored as strings (e.g. loaded from environment variables or a
+    /// `.env` file) are coerced by parsing.
     pub fn get_bool(&self, key: &str) -> Result<bool> {
-        self.get(key)
+        let value = self
+            .resolve(key)
+            .ok_or_else(|| ConfigError::KeyNotFound(key.to_string()))?;
+        match value {
+            serde_json::Value::String(s) => s.trim().parse::<bool>().map_err(|e| {
+                ConfigError::DeserializationError(format!("cannot parse '{}' as bool: {}", s, e))
+            }),
+            other => serde_json::from_value(other)
+                .map_err(|e| ConfigError::DeserializationError(e.to_string())),
+        }
     }
 
-    /// Get a float value
+    /// Get a float value.
+    ///
+    /// Values stored as strings (e.g. loaded from environment variables or a
+    /// `.env` file) are coerced by parsing.
     pub fn get_float(&self, key: &str) -> Result<f64> {
-        self.get(key)
+        let value = self
+            .resolve(key)
+            .ok_or_else(|| ConfigError::KeyNotFound(key.to_string()))?;
+        match value {
+            serde_json::Value::String(s) => s.trim().parse::<f64>().map_err(|e| {
+                ConfigError::DeserializationError(format!("cannot parse '{}' as float: {}", s, e))
+            }),
+            other => serde_json::from_value(other)
+                .map_err(|e| ConfigError::DeserializationError(e.to_string())),
+        }
     }
 
-    /// Check if a key exists
+    /// Check if a key exists.
+    ///
+    /// Matches both flat keys and dotted paths into nested config objects.
     pub fn has(&self, key: &str) -> bool {
-        let config = self.config.read().unwrap();
-        config.contains_key(key)
+        self.resolve(key).is_some()
     }
 
     /// Remove a key from the configuration
@@ -533,6 +605,74 @@ mod tests {
         for i in 0..10 {
             assert!(manager.has(&format!("key{}", i)));
         }
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "armature-config-{}-{}-{}",
+            std::process::id(),
+            n,
+            name
+        ))
+    }
+
+    #[test]
+    fn test_load_file_json() {
+        let path = unique_temp_path("load.json");
+        std::fs::write(&path, r#"{"service_name": "api", "workers": 4}"#).unwrap();
+
+        let manager = ConfigManager::new();
+        manager
+            .load_file(path.to_str().unwrap(), FileFormat::Json)
+            .unwrap();
+
+        assert_eq!(manager.get_string("service_name").unwrap(), "api");
+        assert_eq!(manager.get_int("workers").unwrap(), 4);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_dot_path_into_loaded_nested_file() {
+        // Regression: a nested config file exposes leaves via dotted keys.
+        let path = unique_temp_path("nested.json");
+        std::fs::write(
+            &path,
+            r#"{"database": {"host": "db.example.com", "port": 5432}}"#,
+        )
+        .unwrap();
+
+        let manager = ConfigManager::new();
+        manager
+            .load_file(path.to_str().unwrap(), FileFormat::Json)
+            .unwrap();
+
+        assert_eq!(
+            manager.get_string("database.host").unwrap(),
+            "db.example.com"
+        );
+        assert_eq!(manager.get_int("database.port").unwrap(), 5432);
+        assert!(manager.has("database.host"));
+        assert!(!manager.has("database.missing"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_typed_getters_coerce_string_values() {
+        // Regression: env/.env values arrive as JSON strings; typed getters
+        // must parse-coerce them.
+        let manager = ConfigManager::new();
+        manager.set("port", "3000").unwrap();
+        manager.set("debug", "true").unwrap();
+        manager.set("rate", "0.25").unwrap();
+
+        assert_eq!(manager.get_int("port").unwrap(), 3000);
+        assert!(manager.get_bool("debug").unwrap());
+        assert_eq!(manager.get_float("rate").unwrap(), 0.25);
     }
 
     #[test]

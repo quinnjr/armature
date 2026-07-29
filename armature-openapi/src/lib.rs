@@ -6,10 +6,12 @@
 //! ## Features
 //!
 //! - 📝 **Programmatic API** - Build OpenAPI specs with fluent builder
-//! - 📊 **Swagger UI** - Interactive API documentation
+//! - 📊 **Swagger UI response helper** - `swagger_ui_response` renders an interactive
+//!   Swagger UI page, loading its JS/CSS assets from a CDN (not self-contained; requires
+//!   network access and is incompatible with a strict CSP)
 //! - 📤 **JSON/YAML Export** - Multiple export formats
 //! - 🔒 **Type-Safe** - Strongly typed OpenAPI 3.0 specification
-//! - 🔐 **Auth Schemes** - Bearer, API Key, OAuth2, OpenID
+//! - 🔐 **Auth Schemes** - Bearer, API Key, OAuth2, OpenID Connect
 //! - 📋 **Schema Support** - Request/response schemas
 //!
 //! ## Quick Start - Basic API Spec
@@ -104,6 +106,33 @@
 //! assert_eq!(built_spec.servers[1].url, "https://api.staging.com");
 //! assert_eq!(built_spec.servers[2].url, "http://localhost:3000");
 //! assert_eq!(built_spec.servers[0].description, Some("Production server".to_string()));
+//! ```
+//!
+//! ## README Quick Start
+//!
+//! This mirrors the example in `README.md` verbatim, so it is guaranteed to compile.
+//!
+//! ```
+//! use armature_openapi::{OpenApiBuilder, SwaggerConfig, swagger_ui_response, spec_json_response};
+//!
+//! // Build the spec by hand with the fluent builder.
+//! let spec = OpenApiBuilder::new("My API", "1.0.0")
+//!     .description("A wonderful API")
+//!     .server("http://localhost:3000", None)
+//!     .build();
+//!
+//! // Wrap it in a SwaggerConfig to serve it.
+//! let config = SwaggerConfig::new("/api-docs", spec).with_title("My API Documentation");
+//!
+//! // `swagger_ui_response(&config)` returns an `HttpResponse` rendering the Swagger UI HTML page.
+//! // `spec_json_response(&config)` returns an `HttpResponse` serving the raw spec as JSON.
+//! let ui_response = swagger_ui_response(&config).unwrap();
+//! let json_response = spec_json_response(&config).unwrap();
+//!
+//! assert_eq!(config.path, "/api-docs");
+//! assert_eq!(config.title, "My API Documentation");
+//! assert_eq!(ui_response.status, 200);
+//! assert_eq!(json_response.status, 200);
 //! ```
 
 pub mod builder;

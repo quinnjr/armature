@@ -2,6 +2,7 @@
 
 use crate::body::RequestBody;
 use crate::extensions::Extensions;
+use crate::headers::HeaderMap;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,7 +16,13 @@ use std::sync::Arc;
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
-    pub headers: HashMap<String, String>,
+    /// Request headers stored in a SmallVec-backed `HeaderMap`.
+    ///
+    /// For typical requests (<12 headers) this is stored inline on the stack,
+    /// avoiding the per-request HashMap heap allocation on the read path.
+    /// The API is HashMap-compatible (`get`/`insert`/`iter`/`contains_key`/...),
+    /// with case-insensitive header name lookup.
+    pub headers: HeaderMap,
     /// Request body as raw bytes.
     ///
     /// For zero-copy access, use `body_bytes()` to get a `Bytes` view,
@@ -38,7 +45,7 @@ impl HttpRequest {
         Self {
             method,
             path,
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Vec::new(),
             path_params: HashMap::new(),
             query_params: HashMap::new(),
@@ -53,7 +60,7 @@ impl HttpRequest {
         Self {
             method,
             path,
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Vec::new(),
             path_params: HashMap::new(),
             query_params: HashMap::new(),
@@ -71,7 +78,7 @@ impl HttpRequest {
         Self {
             method,
             path,
-            headers: HashMap::new(),
+            headers: HeaderMap::new(),
             body: Vec::new(), // Not used when body_bytes is set
             path_params: HashMap::new(),
             query_params: HashMap::new(),
@@ -147,7 +154,7 @@ impl HttpRequest {
         Self {
             method,
             path,
-            headers,
+            headers: headers.into(),
             body,
             path_params,
             query_params,
@@ -1048,6 +1055,36 @@ mod tests {
             .insert("Content-Type".to_string(), "application/json".to_string());
 
         assert_eq!(req.headers.len(), 2);
+    }
+
+    #[test]
+    fn test_http_request_from_parts_headermap_roundtrip() {
+        // `from_parts` still takes a HashMap for backwards compatibility, but
+        // now stores headers in a `HeaderMap`. Lookups must be case-insensitive.
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        headers.insert("X-Custom".to_string(), "abc".to_string());
+
+        let req = HttpRequest::from_parts(
+            "GET".to_string(),
+            "/api".to_string(),
+            headers,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        assert_eq!(req.headers.len(), 2);
+        // Case-insensitive lookup via HeaderMap.
+        assert_eq!(
+            req.headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+        assert_eq!(
+            req.headers.get("Content-Type"),
+            Some(&"application/json".to_string())
+        );
+        assert!(req.headers.contains_key("x-custom"));
     }
 
     #[test]

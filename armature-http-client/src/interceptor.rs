@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::{Response, Result};
+use crate::{HttpClientError, Response, Result};
 use async_trait::async_trait;
 use reqwest::Request;
 
@@ -157,25 +157,46 @@ impl RequestInterceptor for AuthInterceptor {
 
         match &self.auth_type {
             AuthType::Bearer(token) => {
-                headers.insert(
-                    http::header::AUTHORIZATION,
-                    format!("Bearer {}", token).parse().unwrap(),
-                );
+                let value = format!("Bearer {}", token).parse().map_err(|_| {
+                    HttpClientError::Interceptor(
+                        "bearer token contains characters that are not valid in an \
+                         HTTP header value"
+                            .to_string(),
+                    )
+                })?;
+                headers.insert(http::header::AUTHORIZATION, value);
             }
             AuthType::Basic { username, password } => {
                 use base64::Engine;
                 let credentials = base64::engine::general_purpose::STANDARD
                     .encode(format!("{}:{}", username, password));
-                headers.insert(
-                    http::header::AUTHORIZATION,
-                    format!("Basic {}", credentials).parse().unwrap(),
-                );
+                // base64 output is always header-safe, but stay fallible for
+                // consistency rather than panicking.
+                let value = format!("Basic {}", credentials).parse().map_err(|_| {
+                    HttpClientError::Interceptor(
+                        "basic auth credentials could not be encoded as a valid \
+                         HTTP header value"
+                            .to_string(),
+                    )
+                })?;
+                headers.insert(http::header::AUTHORIZATION, value);
             }
             AuthType::ApiKey { header, key } => {
-                headers.insert(
-                    http::header::HeaderName::from_bytes(header.as_bytes()).unwrap(),
-                    key.parse().unwrap(),
-                );
+                let name =
+                    http::header::HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                        HttpClientError::Interceptor(format!(
+                            "API key header name {:?} is not a valid HTTP header name",
+                            header
+                        ))
+                    })?;
+                let value = key.parse().map_err(|_| {
+                    HttpClientError::Interceptor(
+                        "API key contains characters that are not valid in an HTTP \
+                         header value"
+                            .to_string(),
+                    )
+                })?;
+                headers.insert(name, value);
             }
         }
 
@@ -184,7 +205,38 @@ impl RequestInterceptor for AuthInterceptor {
 }
 
 /// Retry-After header interceptor that respects rate limiting.
-pub struct RateLimitInterceptor;
+///
+/// When a response is a `429 Too Many Requests` carrying a numeric
+/// `Retry-After` header (seconds), this interceptor transparently sleeps for
+/// that duration before returning the response, so that a caller simply
+/// retrying immediately after `intercept` returns will not hammer the
+/// upstream service. The duration actually waited is capped by
+/// `max_wait`, to avoid a hostile/misconfigured server stalling the caller
+/// indefinitely.
+pub struct RateLimitInterceptor {
+    max_wait: std::time::Duration,
+}
+
+impl RateLimitInterceptor {
+    /// Create a new rate-limit interceptor with a default max wait of 60s.
+    pub fn new() -> Self {
+        Self {
+            max_wait: std::time::Duration::from_secs(60),
+        }
+    }
+
+    /// Create a rate-limit interceptor with a custom cap on how long it will
+    /// ever sleep for, regardless of what `Retry-After` requests.
+    pub fn with_max_wait(max_wait: std::time::Duration) -> Self {
+        Self { max_wait }
+    }
+}
+
+impl Default for RateLimitInterceptor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ResponseInterceptor for RateLimitInterceptor {
@@ -193,12 +245,59 @@ impl ResponseInterceptor for RateLimitInterceptor {
             && let Some(retry_after) = response.headers().get(http::header::RETRY_AFTER)
             && let Ok(seconds) = retry_after.to_str().unwrap_or("0").parse::<u64>()
         {
+            let wait = std::time::Duration::from_secs(seconds).min(self.max_wait);
             tracing::warn!(
                 retry_after_seconds = seconds,
-                "Rate limited, should retry after {} seconds",
-                seconds
+                waited_seconds = wait.as_secs(),
+                "Rate limited, waiting before returning response"
             );
+            tokio::time::sleep(wait).await;
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::Method;
+
+    fn dummy_request() -> Request {
+        Request::new(Method::GET, "https://example.com/".parse().unwrap())
+    }
+
+    /// A bearer token containing a byte that is invalid in an HTTP header
+    /// value (an embedded newline) must produce an `Err`, not a panic.
+    #[tokio::test]
+    async fn bearer_token_with_newline_returns_err_not_panic() {
+        let interceptor = AuthInterceptor::bearer("good\ntoken");
+        let result = interceptor.intercept(dummy_request()).await;
+        assert!(
+            matches!(result, Err(HttpClientError::Interceptor(_))),
+            "malformed bearer token should return Interceptor error, got: {result:?}"
+        );
+    }
+
+    /// An API key header name / value with an embedded newline must also
+    /// return an `Err` rather than panicking on `.unwrap()`.
+    #[tokio::test]
+    async fn api_key_with_newline_returns_err_not_panic() {
+        let bad_name = AuthInterceptor::api_key("X-Api\nKey", "value");
+        assert!(
+            matches!(
+                bad_name.intercept(dummy_request()).await,
+                Err(HttpClientError::Interceptor(_))
+            ),
+            "malformed API key header name should return an error"
+        );
+
+        let bad_value = AuthInterceptor::api_key("X-Api-Key", "bad\nvalue");
+        assert!(
+            matches!(
+                bad_value.intercept(dummy_request()).await,
+                Err(HttpClientError::Interceptor(_))
+            ),
+            "malformed API key value should return an error"
+        );
     }
 }

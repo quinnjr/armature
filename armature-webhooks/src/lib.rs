@@ -7,10 +7,10 @@
 //!
 //! - **Outgoing Webhooks**: Send HTTP callbacks to registered endpoints
 //! - **Incoming Webhooks**: Receive and verify webhooks from external services
-//! - **Signature Verification**: HMAC-SHA256 signing and verification
+//! - **Signature Verification**: HMAC-SHA256/SHA512 signing and verification
 //! - **Automatic Retries**: Configurable retry policies with exponential backoff
 //! - **Event System**: Subscribe endpoints to specific event types
-//! - **Delivery Tracking**: Monitor webhook delivery status and history
+//! - **Delivery Tracking**: Monitor delivery status and per-endpoint success/failure counters
 //!
 //! # Example: Sending Webhooks
 //!
@@ -51,7 +51,7 @@
 //! ```rust,no_run
 //! use armature_webhooks::{WebhookRegistry, WebhookEndpoint};
 //!
-//! let mut registry = WebhookRegistry::new();
+//! let registry = WebhookRegistry::new();
 //!
 //! // Register an endpoint for specific events
 //! registry.register(WebhookEndpoint::new("https://api.example.com/webhooks")
@@ -73,7 +73,7 @@ mod retry;
 mod signature;
 
 pub use client::WebhookClient;
-pub use config::{WebhookConfig, WebhookConfigBuilder};
+pub use config::{SigningAlgorithm, WebhookConfig, WebhookConfigBuilder};
 pub use endpoint::{WebhookEndpoint, WebhookEndpointBuilder};
 pub use error::WebhookError;
 pub use payload::{WebhookDelivery, WebhookDeliveryStatus, WebhookPayload};

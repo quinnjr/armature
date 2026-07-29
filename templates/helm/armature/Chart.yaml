@@ -17,5 +17,5 @@ sources:
   - https://github.com/armature-rs/armature
 annotations:
   artifacthub.io/category: integration-delivery
-  artifacthub.io/license: MIT
+  artifacthub.io/license: Apache-2.0
 

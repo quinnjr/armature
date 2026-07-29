@@ -1,5 +1,6 @@
 //! Data models
 
+use armature::armature_validation::{self, IsEmail, MinLength, NotEmpty, Validate};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -182,5 +183,63 @@ pub struct HealthResponse {
     pub version: String,
     pub timestamp: DateTime<Utc>,
     pub uptime_seconds: u64,
+}
+
+// =============================================================================
+// Request Validation
+// =============================================================================
+//
+// Wires `LoginRequest`/`RegisterRequest` into `armature-validation`'s
+// `Validate` trait so controllers can reject malformed input with structured,
+// field-level errors (see `ApiResponse::validation_error`).
+
+impl Validate for LoginRequest {
+    fn validate(&self) -> Result<(), Vec<armature_validation::ValidationError>> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = NotEmpty::validate(&self.email, "email") {
+            errors.push(e);
+        }
+        if let Err(e) = NotEmpty::validate(&self.password, "password") {
+            errors.push(e);
+        }
+
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+}
+
+impl Validate for RegisterRequest {
+    fn validate(&self) -> Result<(), Vec<armature_validation::ValidationError>> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = NotEmpty::validate(&self.email, "email") {
+            errors.push(e);
+        } else if let Err(e) = IsEmail::validate(&self.email, "email") {
+            errors.push(e);
+        }
+
+        if let Err(e) = NotEmpty::validate(&self.password, "password") {
+            errors.push(e);
+        } else if let Err(e) = MinLength(8).validate(&self.password, "password") {
+            errors.push(e);
+        }
+
+        if let Err(e) = NotEmpty::validate(&self.name, "name") {
+            errors.push(e);
+        }
+
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+}
+
+/// Adapts an `armature-validation` error into this API's own serializable
+/// [`ValidationError`] shape.
+impl From<armature_validation::ValidationError> for ValidationError {
+    fn from(e: armature_validation::ValidationError) -> Self {
+        Self {
+            field: e.field,
+            message: e.message,
+        }
+    }
 }
 

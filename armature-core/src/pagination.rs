@@ -108,7 +108,9 @@ impl OffsetPagination {
     /// assert_eq!(pagination.offset(), 100);
     /// ```
     pub fn offset(&self) -> usize {
-        (self.page - 1) * self.per_page
+        // Saturating arithmetic: huge `?page=` values must not overflow
+        // (debug panic / release wrap).
+        self.page.saturating_sub(1).saturating_mul(self.per_page)
     }
 
     /// Get limit for database queries
@@ -352,8 +354,20 @@ impl SortField {
     }
 
     /// Convert to SQL ORDER BY clause
+    ///
+    /// Note: the field name is interpolated verbatim. Only use this with
+    /// trusted or validated field names (see [`SortParams::from_query`],
+    /// which validates fields against `^[A-Za-z0-9_]+$`).
     pub fn to_sql(&self) -> String {
         format!("{} {}", self.field, self.direction.to_sql())
+    }
+
+    /// Check if a field name is a safe SQL identifier (`^[A-Za-z0-9_]+$`).
+    pub fn is_valid_field_name(field: &str) -> bool {
+        !field.is_empty()
+            && field
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 }
 
@@ -402,6 +416,11 @@ impl SortParams {
     ///
     /// Looks for `sort` or `order_by` parameter.
     /// Format: "field1,-field2,+field3" (- prefix = DESC, + or no prefix = ASC)
+    ///
+    /// Field names are validated against `^[A-Za-z0-9_]+$` and invalid
+    /// fields are silently dropped. This prevents attacker-controlled
+    /// input from being interpolated into SQL `ORDER BY` fragments via
+    /// [`SortParams::to_sql`].
     pub fn from_query(params: &HashMap<String, String>) -> Self {
         let sort_str = params
             .get("sort")
@@ -418,6 +437,7 @@ impl SortParams {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<SortField>().unwrap())
+            .filter(|f| SortField::is_valid_field_name(&f.field))
             .collect();
 
         Self::new(fields)
@@ -860,6 +880,20 @@ mod tests {
     }
 
     #[test]
+    fn test_offset_pagination_no_overflow() {
+        // Huge page values must not overflow offset computation.
+        let p = OffsetPagination::new(usize::MAX, MAX_PAGE_SIZE);
+        assert_eq!(p.offset(), usize::MAX);
+
+        let mut params = HashMap::new();
+        params.insert("page".to_string(), usize::MAX.to_string());
+        params.insert("per_page".to_string(), "100".to_string());
+        let p = OffsetPagination::from_query_params(&params);
+        // Must not panic (debug) or wrap (release).
+        let _ = p.offset();
+    }
+
+    #[test]
     fn test_offset_pagination_total_pages() {
         let p = OffsetPagination::new(1, 20);
         assert_eq!(p.total_pages(100), 5);
@@ -893,6 +927,34 @@ mod tests {
         assert_eq!(sort.fields[0].direction, SortDirection::Desc);
         assert_eq!(sort.fields[1].field, "name");
         assert_eq!(sort.fields[1].direction, SortDirection::Asc);
+    }
+
+    #[test]
+    fn test_sort_params_rejects_sql_injection() {
+        let mut params = HashMap::new();
+        params.insert(
+            "sort".to_string(),
+            "name; DROP TABLE users,-created_at,(SELECT 1),email".to_string(),
+        );
+
+        let sort = SortParams::from_query(&params);
+        // Only the valid identifiers survive.
+        assert_eq!(sort.fields.len(), 2);
+        assert_eq!(sort.fields[0].field, "created_at");
+        assert_eq!(sort.fields[1].field, "email");
+
+        let sql = sort.to_sql().unwrap();
+        assert_eq!(sql, "created_at DESC, email ASC");
+    }
+
+    #[test]
+    fn test_sort_field_name_validation() {
+        assert!(SortField::is_valid_field_name("created_at"));
+        assert!(SortField::is_valid_field_name("Field123"));
+        assert!(!SortField::is_valid_field_name(""));
+        assert!(!SortField::is_valid_field_name("name; DROP TABLE users"));
+        assert!(!SortField::is_valid_field_name("a.b"));
+        assert!(!SortField::is_valid_field_name("a b"));
     }
 
     #[test]

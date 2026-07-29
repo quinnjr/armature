@@ -20,7 +20,14 @@ pub struct RedisStore {
     conn: ConnectionManager,
     /// Key prefix
     prefix: String,
+    /// Per-operation timeout. Every store op runs under this bound so a
+    /// partitioned/unresponsive Redis returns [`RateLimitError::Timeout`]
+    /// instead of stalling the request path forever.
+    operation_timeout: Duration,
 }
+
+/// Default per-operation timeout when none is configured.
+const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl RedisStore {
     /// Create a new Redis store
@@ -41,6 +48,7 @@ impl RedisStore {
         Ok(Self {
             conn,
             prefix: "ratelimit".to_string(),
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
         })
     }
 
@@ -51,9 +59,31 @@ impl RedisStore {
         Ok(store)
     }
 
+    /// Override the per-operation timeout (default 3s).
+    pub fn with_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.operation_timeout = timeout;
+        self
+    }
+
     /// Get the full key with prefix
     fn key(&self, suffix: &str) -> String {
         format!("{}:{}", self.prefix, suffix)
+    }
+
+    /// Run a Redis future under the configured `operation_timeout`.
+    ///
+    /// When the op does not complete in time the future is dropped and this
+    /// resolves to [`RateLimitError::Timeout`] rather than blocking forever
+    /// (which would keep the middleware's `skip_on_error` guard from ever
+    /// engaging). Redis-level errors are mapped to [`RateLimitError::store`].
+    async fn with_op_timeout<F, T>(&self, fut: F) -> RateLimitResult<T>
+    where
+        F: std::future::Future<Output = redis::RedisResult<T>>,
+    {
+        match tokio::time::timeout(self.operation_timeout, fut).await {
+            Ok(result) => result.map_err(|e| RateLimitError::store(e.to_string())),
+            Err(_) => Err(RateLimitError::Timeout),
+        }
     }
 }
 
@@ -105,14 +135,16 @@ impl RateLimitStore for RedisStore {
         );
 
         let mut conn = self.conn.clone();
-        let result: (i32, i64) = script
-            .key(&full_key)
-            .arg(capacity)
-            .arg(refill_rate)
-            .arg(now)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        let result: (i32, i64) = self
+            .with_op_timeout(
+                script
+                    .key(&full_key)
+                    .arg(capacity)
+                    .arg(refill_rate)
+                    .arg(now)
+                    .invoke_async(&mut conn),
+            )
+            .await?;
 
         let allowed = result.0 == 1;
         let remaining = result.1 as u64;
@@ -142,14 +174,28 @@ impl RateLimitStore for RedisStore {
             .as_millis() as i64;
         let cutoff = now - window_ms;
 
-        // Lua script for atomic sliding window operation
+        // Lua script for atomic sliding window operation.
+        //
+        // The ZSET member MUST be unique per admitted request. The score stays
+        // equal to `now` so `ZREMRANGEBYSCORE` still prunes by timestamp, but
+        // the member is `now .. '-' .. <monotonic seq>` so two requests landing
+        // in the same millisecond add two distinct members instead of ZADD
+        // set-semantically overwriting a single member (which made `ZCARD`
+        // undercount and admit requests far beyond `max_requests` under a
+        // same-millisecond burst — a distributed rate-limit bypass).
         let script = redis::Script::new(
             r#"
             local key = KEYS[1]
+            local maxkey = KEYS[2]
+            local seqkey = KEYS[3]
             local max_requests = tonumber(ARGV[1])
             local now = tonumber(ARGV[2])
             local cutoff = tonumber(ARGV[3])
             local window_secs = tonumber(ARGV[4])
+            local ttl = window_secs + 10
+
+            -- Record the configured limit so `remaining` can report limit-count.
+            redis.call('SET', maxkey, max_requests, 'EX', ttl)
 
             -- Remove old entries
             redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
@@ -158,9 +204,11 @@ impl RateLimitStore for RedisStore {
             local count = redis.call('ZCARD', key)
 
             if count < max_requests then
-                -- Add new entry
-                redis.call('ZADD', key, now, now)
-                redis.call('EXPIRE', key, window_secs + 10)
+                -- Unique member so same-millisecond requests don't collapse.
+                local seq = redis.call('INCR', seqkey)
+                redis.call('EXPIRE', seqkey, ttl)
+                redis.call('ZADD', key, now, now .. '-' .. seq)
+                redis.call('EXPIRE', key, ttl)
                 return {1, max_requests - count - 1}
             else
                 return {0, 0}
@@ -168,16 +216,22 @@ impl RateLimitStore for RedisStore {
             "#,
         );
 
+        let swmax_key = self.key(&format!("swmax:{}", key));
+        let swseq_key = self.key(&format!("swseq:{}", key));
         let mut conn = self.conn.clone();
-        let result: (i32, i64) = script
-            .key(&full_key)
-            .arg(max_requests)
-            .arg(now)
-            .arg(cutoff)
-            .arg(window.as_secs())
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        let result: (i32, i64) = self
+            .with_op_timeout(
+                script
+                    .key(&full_key)
+                    .key(&swmax_key)
+                    .key(&swseq_key)
+                    .arg(max_requests)
+                    .arg(now)
+                    .arg(cutoff)
+                    .arg(window.as_secs())
+                    .invoke_async(&mut conn),
+            )
+            .await?;
 
         let allowed = result.0 == 1;
         let remaining = result.1 as u64;
@@ -199,29 +253,56 @@ impl RateLimitStore for RedisStore {
     ) -> RateLimitResult<(bool, u64)> {
         trace!(key = %key, max_requests = max_requests, window = ?window, "Redis fixed window check");
 
-        let window_secs = window.as_secs();
-        let now = std::time::SystemTime::now()
+        // Compute the window bucket in milliseconds so sub-second windows
+        // (e.g. 500ms) never divide by zero: `window.as_secs()` truncates to 0
+        // for any window under a second and `now / 0` panics.
+        let window_ms = (window.as_millis() as u64).max(1);
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        let window_id = now / window_secs;
+            .as_millis() as u64;
+        let window_id = now_ms / window_ms;
         let full_key = self.key(&format!("fw:{}:{}", key, window_id));
+        // TTL must outlive the window; ceil to whole seconds (min 1s) + slack.
+        let ttl_secs = (window_ms.div_ceil(1000).max(1) + 10) as i64;
 
         let mut conn = self.conn.clone();
 
-        // Increment and get current count
-        let count: i64 = conn
-            .incr(&full_key, 1)
-            .await
-            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        // Single atomic INCR-and-initialize. Doing the INCR, the TTL, and the
+        // two companion writes in one Lua script collapses the old 4 round-trips
+        // into 1 and removes the crash-between-INCR-and-EXPIRE race that could
+        // leave a permanently un-TTL'd (leaked) counter key.
+        let script = redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local fwmax = KEYS[2]
+            local fwcur = KEYS[3]
+            local max_requests = ARGV[1]
+            local window_id = ARGV[2]
+            local ttl = tonumber(ARGV[3])
 
-        // Set expiry on first request
-        if count == 1 {
-            let _: () = conn
-                .expire(&full_key, window_secs as i64 + 10)
-                .await
-                .map_err(|e| RateLimitError::store(e.to_string()))?;
-        }
+            local count = redis.call('INCR', key)
+            if count == 1 then
+                redis.call('EXPIRE', key, ttl)
+                redis.call('SET', fwmax, max_requests, 'EX', ttl)
+                redis.call('SET', fwcur, window_id, 'EX', ttl)
+            end
+            return count
+            "#,
+        );
+
+        let count: i64 = self
+            .with_op_timeout(
+                script
+                    .key(&full_key)
+                    .key(self.key(&format!("fwmax:{}", key)))
+                    .key(self.key(&format!("fwcur:{}", key)))
+                    .arg(max_requests)
+                    .arg(window_id)
+                    .arg(ttl_secs)
+                    .invoke_async(&mut conn),
+            )
+            .await?;
 
         let count = count as u64;
 
@@ -240,34 +321,49 @@ impl RateLimitStore for RedisStore {
 
         let mut conn = self.conn.clone();
 
-        // Delete all keys for this rate limit key
-        let patterns = [
+        // All fixed (non-wildcard) keys for this rate-limit key are removed in
+        // one variadic UNLINK (a single round-trip) instead of one DEL each.
+        let fixed_keys = [
             self.key(&format!("tb:{}", key)),
             self.key(&format!("sw:{}", key)),
-            self.key(&format!("fw:{}:*", key)),
+            self.key(&format!("swmax:{}", key)),
+            self.key(&format!("swseq:{}", key)),
+            self.key(&format!("fwmax:{}", key)),
+            self.key(&format!("fwcur:{}", key)),
         ];
+        let _: () = self
+            .with_op_timeout(redis::cmd("UNLINK").arg(&fixed_keys).query_async(&mut conn))
+            .await?;
 
-        for pattern in &patterns {
-            if pattern.contains('*') {
-                // Use SCAN for pattern matching
-                let keys: Vec<String> = redis::cmd("KEYS")
-                    .arg(pattern)
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| RateLimitError::store(e.to_string()))?;
+        // The fixed-window bucket keys carry the rolling window id, so they need
+        // a pattern sweep. Cursored SCAN instead of the blocking `KEYS`, with a
+        // single variadic UNLINK per batch (UNLINK reclaims memory off-thread).
+        let pattern = self.key(&format!("fw:{}:*", key));
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = self
+                .with_op_timeout(
+                    redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(100)
+                        .query_async(&mut conn),
+                )
+                .await?;
 
-                for key in keys {
-                    let _: () = conn
-                        .del(&key)
-                        .await
-                        .map_err(|e| RateLimitError::store(e.to_string()))?;
-                }
-            } else {
-                let _: () = conn
-                    .del(pattern)
-                    .await
-                    .map_err(|e| RateLimitError::store(e.to_string()))?;
+            if !keys.is_empty() {
+                let _: () = self
+                    .with_op_timeout(redis::cmd("UNLINK").arg(&keys).query_async(&mut conn))
+                    .await?;
             }
+
+            // A returned cursor of 0 signals the iteration is complete.
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
         }
 
         Ok(())
@@ -276,27 +372,42 @@ impl RateLimitStore for RedisStore {
     async fn remaining(&self, key: &str) -> RateLimitResult<u64> {
         let mut conn = self.conn.clone();
 
-        // Try token bucket first
+        // Token bucket: remaining == floor(tokens). Probed first so the common
+        // token-bucket case short-circuits after a single round-trip.
         let tb_key = self.key(&format!("tb:{}", key));
-        let tokens: Option<f64> = conn
-            .hget(&tb_key, "tokens")
-            .await
-            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        let tokens: Option<f64> = self.with_op_timeout(conn.hget(&tb_key, "tokens")).await?;
 
         if let Some(t) = tokens {
-            return Ok(t as u64);
+            return Ok(t.max(0.0) as u64);
         }
 
-        // Try sliding window
-        let sw_key = self.key(&format!("sw:{}", key));
-        let count: i64 = conn
-            .zcard(&sw_key)
-            .await
-            .map_err(|e| RateLimitError::store(e.to_string()))?;
+        // The three independent companion pointers (fixed-window bucket id +
+        // limit, sliding-window limit) are fetched in one MGET rather than up to
+        // three dependent GETs.
+        let (fwcur, fwmax, swmax): (Option<u64>, Option<u64>, Option<u64>) = self
+            .with_op_timeout(
+                redis::cmd("MGET")
+                    .arg(self.key(&format!("fwcur:{}", key)))
+                    .arg(self.key(&format!("fwmax:{}", key)))
+                    .arg(self.key(&format!("swmax:{}", key)))
+                    .query_async(&mut conn),
+            )
+            .await?;
 
-        if count > 0 {
-            // Can't determine max without knowing the config
-            return Ok(0);
+        // Fixed window: locate the live window bucket via the companion pointer
+        // and its recorded limit, then report limit - count.
+        if let (Some(window_id), Some(max)) = (fwcur, fwmax) {
+            let count: Option<u64> = self
+                .with_op_timeout(conn.get(self.key(&format!("fw:{}:{}", key, window_id))))
+                .await?;
+            return Ok(max.saturating_sub(count.unwrap_or(0)));
+        }
+
+        // Sliding window: remaining == limit - live entries.
+        if let Some(max) = swmax {
+            let sw_key = self.key(&format!("sw:{}", key));
+            let count: i64 = self.with_op_timeout(conn.zcard(&sw_key)).await?;
+            return Ok(max.saturating_sub(count as u64));
         }
 
         Ok(0)

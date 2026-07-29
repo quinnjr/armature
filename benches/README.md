@@ -12,7 +12,7 @@ The benchmark suite measures performance across **16 categories**:
 2. **Security Benchmarks** - JWT operations (sign, verify, algorithms)
 3. **Validation Benchmarks** - Form validation, email, URL, patterns
 4. **Data Benchmarks** - Queue jobs, cron expressions
-5. **Framework Comparison** - Comparison with Actix-web, Axum, Warp, Rocket
+5. **Internal Overhead Benchmarks** - Armature's own request/response, routing, DI, and handler dispatch overhead (not a cross-framework comparison — see [Framework Comparison](#framework-comparison) below for that)
 6. **Memory Benchmarks** - Allocation patterns, leak detection, object pools
 
 ### Infrastructure Benchmarks
@@ -34,8 +34,8 @@ The benchmark suite measures performance across **16 categories**:
 # Run all benchmarks
 cargo bench
 
-# Run framework comparison benchmarks
-cargo bench --bench framework_comparison
+# Run internal overhead benchmarks
+cargo bench --bench internal_overhead_benchmarks
 
 # Run HTTP benchmark server
 cargo run --release --example benchmark_server
@@ -68,8 +68,8 @@ cargo bench --bench validation_benchmarks
 # Data processing (queue, cron)
 cargo bench --bench data_benchmarks
 
-# Framework comparison (micro-benchmarks)
-cargo bench --bench framework_comparison
+# Internal overhead (micro-benchmarks)
+cargo bench --bench internal_overhead_benchmarks
 
 # Memory allocation patterns and leak detection
 cargo bench --bench memory_benchmarks
@@ -111,17 +111,20 @@ cargo bench --bench ratelimit_benchmarks
 cargo bench --bench security_benchmarks jwt
 
 # Run only routing benchmarks
-cargo bench --bench framework_comparison routing
+cargo bench --bench internal_overhead_benchmarks routing
 
 # Run only JSON operations
-cargo bench --bench framework_comparison json_operations
+cargo bench --bench internal_overhead_benchmarks json_operations
 ```
 
 ## Framework Comparison
 
-### Micro-Benchmarks
+### Micro-Benchmarks (Internal Overhead Only)
 
-The `framework_comparison` benchmark measures internal operations:
+The `internal_overhead_benchmarks` benchmark measures Armature's own internal
+operations — it does **not** compare against any other framework. For an
+actual cross-framework comparison, see "HTTP Benchmarks" and "Comparison
+Servers" below.
 
 - **Request Creation** - Building HttpRequest objects
 - **Response Creation** - Building HttpResponse with JSON
@@ -132,7 +135,7 @@ The `framework_comparison` benchmark measures internal operations:
 - **Handler Invocation** - Async handler execution
 
 ```bash
-cargo bench --bench framework_comparison
+cargo bench --bench internal_overhead_benchmarks
 ```
 
 ### HTTP Benchmarks
@@ -264,7 +267,10 @@ open target/criterion/report/index.html
 - **Queue Jobs** - Job creation, serialization
 - **Cron Expressions** - Parsing, next execution
 
-### Framework Comparison (`framework_comparison.rs`)
+### Internal Overhead Benchmarks (`internal_overhead_benchmarks.rs`)
+
+Measures Armature's own internal overhead only — not a cross-framework
+comparison.
 
 - **Request/Response** - Object creation overhead
 - **JSON** - Serialization with small/medium/large payloads
@@ -583,8 +589,8 @@ cargo bench
 # Run all benchmarks
 cargo bench
 
-# Run framework comparison
-cargo bench --bench framework_comparison
+# Run internal overhead benchmarks
+cargo bench --bench internal_overhead_benchmarks
 
 # HTTP benchmarks
 cargo run --release --example benchmark_server

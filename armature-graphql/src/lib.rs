@@ -6,6 +6,8 @@ pub mod federation;
 pub mod resolver;
 pub mod schema_builder;
 pub mod schema_docs;
+#[cfg(feature = "sdl-export")]
+pub mod sdl_static;
 
 pub use async_graphql;
 pub use async_graphql::{
@@ -137,6 +139,7 @@ pub struct SchemaBuilder<Query, Mutation, Subscription> {
     query: Option<Query>,
     mutation: Option<Mutation>,
     subscription: Option<Subscription>,
+    config: Option<GraphQLConfig>,
 }
 
 impl<Query, Mutation, Subscription> SchemaBuilder<Query, Mutation, Subscription>
@@ -150,6 +153,7 @@ where
             query: None,
             mutation: None,
             subscription: None,
+            config: None,
         }
     }
 
@@ -168,6 +172,14 @@ where
         self
     }
 
+    /// Attach a [`GraphQLConfig`] whose security/behavior knobs (introspection,
+    /// max depth, max complexity, validation, tracing) will be applied to the
+    /// built schema. Without this, the schema is built unrestricted.
+    pub fn config(mut self, config: GraphQLConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     pub fn build(self) -> Result<Schema<Query, Mutation, Subscription>, ArmatureError> {
         let query = self
             .query
@@ -179,7 +191,13 @@ where
             .subscription
             .ok_or_else(|| ArmatureError::Internal("Subscription root is required".to_string()))?;
 
-        Ok(Schema::build(query, mutation, subscription).finish())
+        let builder = Schema::build(query, mutation, subscription);
+        let builder = match &self.config {
+            Some(config) => config.configure(builder),
+            None => builder,
+        };
+
+        Ok(builder.finish())
     }
 }
 

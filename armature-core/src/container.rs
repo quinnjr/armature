@@ -4,8 +4,9 @@
 //! framework-specific integration.
 
 use crate::Error;
+use crate::lifecycle::LifecycleManager;
 use std::any::{Any, TypeId};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 // Re-export the core DI types (excluding ProviderRegistration to avoid conflict with traits.rs)
 pub use dependency_injector::{
@@ -20,6 +21,12 @@ pub use dependency_injector::{
 #[derive(Clone, Default)]
 pub struct Container {
     inner: DiContainer,
+    /// Lifecycle manager attached by [`Application::create`](crate::Application::create)
+    /// (via [`Container::attach_lifecycle`]) so that provider registration
+    /// can discover and register `OnModuleInit`/`OnModuleDestroy`/
+    /// `OnApplicationBootstrap`/`OnApplicationShutdown` hooks. See
+    /// [`Container::lifecycle_manager`]. Set at most once; unset by default.
+    lifecycle: Arc<OnceLock<Arc<LifecycleManager>>>,
 }
 
 impl Container {
@@ -28,6 +35,7 @@ impl Container {
     pub fn new() -> Self {
         Self {
             inner: DiContainer::new(),
+            lifecycle: Arc::new(OnceLock::new()),
         }
     }
 
@@ -36,15 +44,65 @@ impl Container {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: DiContainer::with_capacity(capacity),
+            lifecycle: Arc::new(OnceLock::new()),
         }
     }
 
     /// Create a scoped child container.
+    ///
+    /// The child shares the parent's attached [`LifecycleManager`] (if any),
+    /// since lifecycle wiring is a single application-wide concern set once
+    /// at the root.
     #[inline]
     pub fn create_scope(&self) -> Self {
         Self {
             inner: self.inner.scope(),
+            lifecycle: self.lifecycle.clone(),
         }
+    }
+
+    /// Attach a [`LifecycleManager`] to this container.
+    ///
+    /// Once attached, providers registered afterward through the provider
+    /// registration path (see [`crate::module::provider_registration`] and
+    /// `armature_proc_macro`'s `#[module(...)]` codegen) are probed for
+    /// lifecycle hook trait implementations (`OnModuleInit`,
+    /// `OnModuleDestroy`, `OnApplicationBootstrap`, `OnApplicationShutdown`)
+    /// and registered with the manager automatically. Calling this more than
+    /// once has no effect after the first call (first attachment wins).
+    ///
+    /// This is internal application wiring, called by
+    /// [`Application::create`](crate::Application::create); most users never
+    /// need to call it directly.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use armature_core::Container;
+    /// use armature_core::lifecycle::LifecycleManager;
+    /// use std::sync::Arc;
+    ///
+    /// let container = Container::new();
+    /// let manager = Arc::new(LifecycleManager::new());
+    ///
+    /// container.attach_lifecycle(&manager);
+    ///
+    /// assert!(container.lifecycle_manager().is_some());
+    /// ```
+    #[inline]
+    pub fn attach_lifecycle(&self, lifecycle: &Arc<LifecycleManager>) {
+        if self.lifecycle.set(lifecycle.clone()).is_err() {
+            tracing::debug!(
+                "attach_lifecycle called on a Container that already has a LifecycleManager attached; ignoring (first attachment wins)"
+            );
+        }
+    }
+
+    /// Returns the [`LifecycleManager`] attached via [`Container::attach_lifecycle`],
+    /// if any.
+    #[inline]
+    pub fn lifecycle_manager(&self) -> Option<Arc<LifecycleManager>> {
+        self.lifecycle.get().cloned()
     }
 
     /// Alias for create_scope.
@@ -293,7 +351,10 @@ impl std::fmt::Debug for Container {
 
 impl From<DiContainer> for Container {
     fn from(inner: DiContainer) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            lifecycle: Arc::new(OnceLock::new()),
+        }
     }
 }
 
@@ -342,6 +403,23 @@ mod tests {
         assert!(child.has::<TestService>());
         let resolved = child.resolve::<TestService>().unwrap();
         assert_eq!(resolved.value, "parent");
+    }
+
+    #[test]
+    fn test_create_scope_shares_lifecycle_manager() {
+        let parent = Container::new();
+        let manager = Arc::new(LifecycleManager::new());
+        parent.attach_lifecycle(&manager);
+
+        let scope = parent.create_scope();
+
+        let scope_manager = scope
+            .lifecycle_manager()
+            .expect("scope should inherit the parent's attached LifecycleManager");
+        assert!(
+            Arc::ptr_eq(&manager, &scope_manager),
+            "scope's LifecycleManager should be the same Arc instance as the parent's"
+        );
     }
 
     #[test]

@@ -74,6 +74,10 @@
 
 pub mod flag;
 
+/// Optional LaunchDarkly integration (enabled by the `launchdarkly` feature).
+#[cfg(feature = "launchdarkly")]
+pub mod launchdarkly;
+
 pub use flag::{
     Condition, EvaluationContext, FeatureFlag, Operator, Rollout, TargetingRule, Variation,
 };

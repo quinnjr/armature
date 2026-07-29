@@ -24,6 +24,9 @@ on:
         required: false
         default: 'false'
         type: boolean
+  schedule:
+    # Weekly on Sunday at 3am UTC (staggered from flamegraph.yml's 2am run)
+    - cron: '0 3 * * 0'
 
 # Grant GITHUB_TOKEN permissions for benchmark data
 permissions:
@@ -67,7 +70,7 @@ jobs:
       - name: Run routing benchmarks
         run: |
           mkdir -p target/benchmark-results
-          cargo bench --bench framework_comparison --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/routing.txt
+          cargo bench --bench internal_overhead_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/routing.txt
 
       - name: Run arena benchmarks
         run: |
@@ -215,7 +218,7 @@ jobs:
         run: |
           mkdir -p base-results
           # Run quick subset of benchmarks for comparison
-          cargo bench --bench framework_comparison --features full -- --noplot "routing" 2>&1 | tee base-results/routing.txt || true
+          cargo bench --bench internal_overhead_benchmarks --features full -- --noplot "routing" 2>&1 | tee base-results/routing.txt || true
           cargo bench --bench arena_benchmarks --features full -- --noplot "request_create" 2>&1 | tee base-results/arena.txt || true
 
       - name: Compare benchmarks

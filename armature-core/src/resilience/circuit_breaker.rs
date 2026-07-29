@@ -164,6 +164,7 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for CircuitBreake
 struct CircuitBreakerState {
     state: CircuitState,
     opened_at: Option<Instant>,
+    half_open_at: Option<Instant>,
     failure_timestamps: Vec<Instant>,
 }
 
@@ -186,7 +187,19 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     /// Create a new circuit breaker with the given configuration.
-    pub fn new(config: CircuitBreakerConfig) -> Arc<Self> {
+    pub fn new(mut config: CircuitBreakerConfig) -> Arc<Self> {
+        // A success threshold above the half-open request budget could never
+        // be met, wedging the breaker in half-open forever; clamp it.
+        if config.success_threshold > config.half_open_requests {
+            warn!(
+                name = %config.name,
+                success_threshold = config.success_threshold,
+                half_open_requests = config.half_open_requests,
+                "success_threshold exceeds half_open_requests, clamping"
+            );
+            config.success_threshold = config.half_open_requests;
+        }
+
         info!(
             name = %config.name,
             failure_threshold = config.failure_threshold,
@@ -199,6 +212,7 @@ impl CircuitBreaker {
             inner: RwLock::new(CircuitBreakerState {
                 state: CircuitState::Closed,
                 opened_at: None,
+                half_open_at: None,
                 failure_timestamps: Vec::new(),
             }),
             failure_count: AtomicU32::new(0),
@@ -379,6 +393,7 @@ impl CircuitBreaker {
             );
             inner.state = CircuitState::Open;
             inner.opened_at = Some(Instant::now());
+            inner.half_open_at = None;
             self.half_open_count.store(0, Ordering::SeqCst);
             self.success_count.store(0, Ordering::SeqCst);
         }
@@ -391,6 +406,7 @@ impl CircuitBreaker {
             info!(name = %self.config.name, "Circuit breaker CLOSED");
             inner.state = CircuitState::Closed;
             inner.opened_at = None;
+            inner.half_open_at = None;
             inner.failure_timestamps.clear();
             self.failure_count.store(0, Ordering::SeqCst);
             self.success_count.store(0, Ordering::SeqCst);
@@ -405,21 +421,45 @@ impl CircuitBreaker {
         }
 
         let inner = self.inner.read();
-        if inner.state != CircuitState::Open {
-            return;
-        }
+        match inner.state {
+            CircuitState::Closed => {}
+            CircuitState::Open => {
+                if let Some(opened_at) = inner.opened_at
+                    && opened_at.elapsed() >= self.config.reset_timeout
+                {
+                    drop(inner); // Release read lock before acquiring write lock
 
-        if let Some(opened_at) = inner.opened_at
-            && opened_at.elapsed() >= self.config.reset_timeout
-        {
-            drop(inner); // Release read lock before acquiring write lock
+                    let mut inner = self.inner.write();
+                    if inner.state == CircuitState::Open {
+                        debug!(name = %self.config.name, "Circuit breaker transitioning to HALF-OPEN");
+                        inner.state = CircuitState::HalfOpen;
+                        inner.half_open_at = Some(Instant::now());
+                        self.half_open_count.store(0, Ordering::SeqCst);
+                        self.success_count.store(0, Ordering::SeqCst);
+                    }
+                }
+            }
+            CircuitState::HalfOpen => {
+                // Re-arm stalled probing: if admitted probes never resolved
+                // (e.g. the caller's future was cancelled before recording a
+                // result), the half-open budget would stay exhausted forever.
+                // After another reset_timeout, allow probing again.
+                if let Some(half_open_at) = inner.half_open_at
+                    && half_open_at.elapsed() >= self.config.reset_timeout
+                {
+                    drop(inner); // Release read lock before acquiring write lock
 
-            let mut inner = self.inner.write();
-            if inner.state == CircuitState::Open {
-                debug!(name = %self.config.name, "Circuit breaker transitioning to HALF-OPEN");
-                inner.state = CircuitState::HalfOpen;
-                self.half_open_count.store(0, Ordering::SeqCst);
-                self.success_count.store(0, Ordering::SeqCst);
+                    let mut inner = self.inner.write();
+                    if inner.state == CircuitState::HalfOpen
+                        && inner
+                            .half_open_at
+                            .is_some_and(|at| at.elapsed() >= self.config.reset_timeout)
+                    {
+                        debug!(name = %self.config.name, "Circuit breaker re-arming HALF-OPEN probes");
+                        inner.half_open_at = Some(Instant::now());
+                        self.half_open_count.store(0, Ordering::SeqCst);
+                    }
+                }
             }
         }
     }
@@ -488,6 +528,7 @@ impl Clone for CircuitBreaker {
             inner: RwLock::new(CircuitBreakerState {
                 state: self.inner.read().state,
                 opened_at: self.inner.read().opened_at,
+                half_open_at: self.inner.read().half_open_at,
                 failure_timestamps: self.inner.read().failure_timestamps.clone(),
             }),
             failure_count: AtomicU32::new(self.failure_count.load(Ordering::SeqCst)),
@@ -621,6 +662,62 @@ mod tests {
 
         // Record successes to close
         cb.record_success();
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_clamps_success_threshold() {
+        // success_threshold > half_open_requests could never be met; the
+        // constructor clamps it so the breaker can still close.
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 5,
+            reset_timeout: Duration::from_millis(50),
+            half_open_requests: 2,
+            ..Default::default()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Trip the circuit and wait for half-open
+        cb.record_failure();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // The full half-open budget of successes must close the circuit
+        for _ in 0..2 {
+            let result: Result<(), CircuitBreakerError<&str>> = cb.call(|| async { Ok(()) }).await;
+            assert!(result.is_ok());
+        }
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_half_open_rearms_after_stalled_probes() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 1,
+            reset_timeout: Duration::from_millis(50),
+            half_open_requests: 1,
+            ..Default::default()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Trip the circuit and wait for half-open
+        cb.record_failure();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Admit a probe but never record a result (simulates a cancelled
+        // probe future); the half-open budget is now exhausted
+        assert!(cb.is_allowed());
+        assert!(!cb.is_allowed());
+
+        // After another reset_timeout the breaker must re-arm probing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(cb.is_allowed());
+
+        // And a successful probe can still close it
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
     }

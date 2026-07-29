@@ -1,0 +1,107 @@
+import { readFileSync } from 'node:fs';
+import { posix } from 'node:path';
+import { resolve } from 'node:path';
+import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
+import { docs, docFile } from './docs';
+import { url } from './url';
+
+/**
+ * Repository docs/ directory. The site builds from web/, so the markdown
+ * sources live one level up.
+ */
+export const DOCS_DIR = resolve(process.cwd(), '..', 'docs');
+
+/** Reverse lookup: markdown filename (basename) -> doc id. */
+const idByFile = new Map<string, string>();
+for (const doc of docs) {
+  const file = docFile(doc);
+  if (file !== null) {
+    idByFile.set(file.toLowerCase(), doc.id);
+  }
+}
+
+/**
+ * Rewrite intra-doc markdown links. The sources link to sibling `.md` files
+ * (`[Config](config-guide.md)`, `[README](../README.md)`), which would 404
+ * when resolved against the rendered page URLs. Links whose target is a
+ * registered doc become site routes; other repo files fall back to GitHub.
+ */
+export function rewriteDocLink(href: string): string {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('#') || href.startsWith('/')) {
+    return href;
+  }
+  const [pathPart, hash] = href.split('#', 2);
+  if (!pathPart.toLowerCase().endsWith('.md')) {
+    return href;
+  }
+  const suffix = hash ? `#${hash}` : '';
+  // Resolve relative to the docs/ directory the source file lives in.
+  const repoPath = posix.normalize(posix.join('docs', pathPart));
+  if (repoPath.startsWith('docs/') && !repoPath.slice('docs/'.length).includes('/')) {
+    const id = idByFile.get(repoPath.slice('docs/'.length).toLowerCase());
+    if (id) {
+      return `${url(`/docs/${id}`)}${suffix}`;
+    }
+  }
+  // Not a registered doc (or outside docs/) — link to the file on GitHub.
+  return `https://github.com/quinnjr/armature/blob/main/${repoPath}${suffix}`;
+}
+
+marked.use({
+  walkTokens(token) {
+    if (token.type === 'link') {
+      token.href = rewriteDocLink(token.href);
+    }
+  },
+});
+
+// The docs are repo-controlled, but they are injected via set:html on every
+// visitor's page — sanitize at build time so a bad markdown commit cannot
+// ship script to readers. The allowlist keeps everything marked emits.
+const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: sanitizeHtml.defaults.allowedTags.concat([
+    'h1',
+    'h2',
+    'img',
+    'details',
+    'summary',
+    'kbd',
+    'mark',
+    'del',
+    'ins',
+    'input',
+  ]),
+  allowedAttributes: {
+    ...sanitizeHtml.defaults.allowedAttributes,
+    a: ['href', 'name', 'target', 'rel', 'title'],
+    img: ['src', 'alt', 'title', 'width', 'height'],
+    input: ['type', 'checked', 'disabled'],
+    code: ['class'],
+    pre: ['class'],
+    span: ['class'],
+    '*': ['id', 'align', 'style'],
+  },
+  allowedStyles: {
+    '*': { 'text-align': [/^(left|center|right)$/] },
+  },
+};
+
+/** Render markdown source to sanitized HTML (exported for tests). */
+export function renderMarkdown(markdown: string): string {
+  return sanitizeHtml(marked.parse(markdown, { async: false }), SANITIZE_OPTIONS);
+}
+
+/** Read a markdown file from the repository docs/ directory and render it to HTML. */
+export function renderDocMarkdown(file: string): string {
+  let markdown: string;
+  try {
+    markdown = readFileSync(resolve(DOCS_DIR, file), 'utf-8');
+  } catch (e) {
+    throw new Error(`failed to read markdown source "${file}": ${(e as Error).message}`);
+  }
+  if (!markdown.trim()) {
+    throw new Error(`empty markdown source: ${file}`);
+  }
+  return renderMarkdown(markdown);
+}

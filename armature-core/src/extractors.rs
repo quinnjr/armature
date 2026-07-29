@@ -463,7 +463,8 @@ impl Headers {
 
 impl FromRequest for Headers {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        Ok(Headers(request.headers.clone()))
+        // Public API stays a HashMap; convert from the internal HeaderMap.
+        Ok(Headers(request.headers.clone().into()))
     }
 }
 

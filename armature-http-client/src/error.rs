@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, HttpClientError>;
 
 /// HTTP client errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum HttpClientError {
     /// Request failed after all retries exhausted.
     #[error("Request failed after {attempts} attempts: {message}")]
@@ -54,6 +55,17 @@ pub enum HttpClientError {
     /// Interceptor error.
     #[error("Interceptor error: {0}")]
     Interceptor(String),
+
+    /// A request interceptor installed a streaming (non-buffered) body that
+    /// cannot be replayed, but retries are configured. Such a body would be
+    /// consumed by the first attempt and silently sent empty on every retry,
+    /// so the request is rejected instead of sending an incomplete request.
+    #[error(
+        "streaming body set by interceptor is not retry-safe: the body cannot \
+         be buffered/replayed for retry attempts (disable retries or have the \
+         interceptor set a buffered body)"
+    )]
+    StreamingBodyNotRetryable,
 
     /// Underlying HTTP client error.
     #[error("HTTP error: {0}")]

@@ -52,6 +52,35 @@ impl TenantMiddleware {
     }
 }
 
+/// Internal header-name prefix that once carried the resolved tenant.
+///
+/// Tenant identity is now stored in [`HttpRequest::extensions`], never in
+/// headers. Any incoming header whose name starts with this prefix is
+/// attacker-controlled noise and is stripped before resolution so a client
+/// can never seed the request-local tenant identity.
+const INTERNAL_TENANT_HEADER_PREFIX: &str = "__tenant";
+
+/// Remove every client-supplied `__tenant*` header from the request.
+///
+/// Header lookup in [`HttpRequest`] is case-insensitive, so we match the
+/// prefix case-insensitively to avoid a `__Tenant_Id`-style bypass.
+fn strip_incoming_tenant_headers(request: &mut HttpRequest) {
+    let to_remove: Vec<String> = request
+        .headers
+        .names()
+        .filter(|name| {
+            name.as_bytes()
+                .get(..INTERNAL_TENANT_HEADER_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(INTERNAL_TENANT_HEADER_PREFIX.as_bytes()))
+        })
+        .cloned()
+        .collect();
+
+    for name in to_remove {
+        request.headers.remove_all(&name);
+    }
+}
+
 #[async_trait]
 impl Middleware for TenantMiddleware {
     async fn handle(
@@ -59,31 +88,34 @@ impl Middleware for TenantMiddleware {
         mut request: HttpRequest,
         next: armature_core::middleware::Next,
     ) -> Result<HttpResponse, Error> {
+        // Defense in depth: strip any client-supplied `__tenant*` headers
+        // BEFORE resolution. Tenant identity lives only in request-local
+        // extensions, so a spoofed header can never be mistaken for a
+        // resolved tenant (closes the isolation bypass).
+        strip_incoming_tenant_headers(&mut request);
+
         // Resolve tenant
         match self.resolver.resolve(&request).await {
             Ok(tenant) => {
-                // Store tenant in request context
-                // In a real implementation, this would use request-local storage
-                // For now, we'll use a simple approach
-
-                // Create tenant context
-                let _context = TenantContext::with_tenant(tenant.clone());
-
-                // Store in request headers (temporary approach)
-                // In production, use proper request-local storage
+                // Store the resolved tenant identity in request-local,
+                // type-safe storage that clients cannot influence.
                 request
-                    .headers
-                    .insert("__tenant_id".to_string(), tenant.id.clone());
-                request
-                    .headers
-                    .insert("__tenant_name".to_string(), tenant.name.clone());
+                    .extensions
+                    .insert(TenantContext::with_tenant(tenant));
 
                 // Continue with request
                 next(request).await
             }
             Err(e) => {
                 if self.optional {
-                    // Continue without tenant
+                    // Optional mode: proceed with NO tenant identity present.
+                    // Headers were stripped above, and no TenantContext was
+                    // inserted here, but defense-in-depth: remove any
+                    // TenantContext that may have been preset on the request
+                    // (e.g. by a server/framework default) before continuing,
+                    // so a resolution failure can never let a stale/preset
+                    // tenant context leak through.
+                    request.extensions.remove::<TenantContext>();
                     next(request).await
                 } else {
                     // Return error
@@ -97,16 +129,28 @@ impl Middleware for TenantMiddleware {
     }
 }
 
-/// Helper to extract tenant from request
+/// Helper to extract the resolved tenant id from a request.
 ///
-/// Extracts tenant information stored by TenantMiddleware.
+/// Reads the [`TenantContext`] that [`TenantMiddleware`] stores in
+/// [`HttpRequest::extensions`] on successful resolution. Returns `None` when
+/// no tenant was resolved (anonymous). Client-supplied headers are never
+/// consulted, so they cannot spoof the tenant.
 pub fn get_tenant_id(request: &HttpRequest) -> Option<String> {
-    request.headers.get("__tenant_id").cloned()
+    request
+        .extensions
+        .get::<TenantContext>()
+        .and_then(|ctx| ctx.tenant_id().map(str::to_string))
 }
 
-/// Helper to extract tenant name from request
+/// Helper to extract the resolved tenant name from a request.
+///
+/// Reads from [`HttpRequest::extensions`] (see [`get_tenant_id`]); never from
+/// headers.
 pub fn get_tenant_name(request: &HttpRequest) -> Option<String> {
-    request.headers.get("__tenant_name").cloned()
+    request
+        .extensions
+        .get::<TenantContext>()
+        .and_then(|ctx| ctx.tenant().map(|tenant| tenant.name.clone()))
 }
 
 #[cfg(test)]
@@ -174,6 +218,91 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn enforcing_mode_rejects_unresolved() {
+        let resolver = Arc::new(MockResolver { tenant: None });
+        let middleware = TenantMiddleware::new(resolver).with_optional(false);
+
+        // Even a spoofed header must not rescue an unresolved request.
+        let mut request = create_request();
+        request
+            .headers
+            .insert("__tenant_id".to_string(), "victim".to_string());
+
+        let result = middleware
+            .handle(
+                request,
+                Box::new(|_req| Box::pin(async move { Ok(HttpResponse::ok()) })),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn successful_resolution_exposes_tenant_via_extensions() {
+        let tenant = Tenant::new("tenant-1", "acme");
+        let resolver = Arc::new(MockResolver {
+            tenant: Some(tenant),
+        });
+        let middleware = TenantMiddleware::new(resolver);
+
+        // Client tries to spoof a different tenant; the resolved one must win.
+        let mut request = create_request();
+        request
+            .headers
+            .insert("__tenant_id".to_string(), "victim".to_string());
+        request
+            .headers
+            .insert("__tenant_name".to_string(), "victim-corp".to_string());
+
+        let result = middleware
+            .handle(
+                request,
+                Box::new(|req| {
+                    Box::pin(async move {
+                        assert_eq!(get_tenant_id(&req), Some("tenant-1".to_string()));
+                        assert_eq!(get_tenant_name(&req), Some("acme".to_string()));
+                        Ok(HttpResponse::ok())
+                    })
+                }),
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn optional_mode_ignores_client_supplied_tenant_header() {
+        // A resolver that FAILS, in optional mode, with a client trying to
+        // seed the internal tenant header. The spoof must NOT survive.
+        let resolver = Arc::new(MockResolver { tenant: None });
+        let middleware = TenantMiddleware::new(resolver).with_optional(true);
+
+        let mut request = create_request();
+        request
+            .headers
+            .insert("__tenant_id".to_string(), "victim".to_string());
+        request
+            .headers
+            .insert("__tenant_name".to_string(), "victim-corp".to_string());
+
+        let result = middleware
+            .handle(
+                request,
+                Box::new(|req| {
+                    Box::pin(async move {
+                        assert_eq!(get_tenant_id(&req), None, "spoofed tenant id survived");
+                        assert_eq!(get_tenant_name(&req), None, "spoofed tenant name survived");
+                        Ok(HttpResponse::ok())
+                    })
+                }),
+            )
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

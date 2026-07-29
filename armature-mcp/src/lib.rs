@@ -125,6 +125,9 @@ pub mod types;
 // Re-export inventory for macro usage
 pub use inventory;
 
+// Re-export the `#[mcp]` attribute macro
+pub use armature_proc_macro::mcp;
+
 // Re-export main types
 pub use auth::{
     ApiTokenAuth, JwtAuth, McpAuthConfig, McpAuthContext, McpAuthMethod, McpAuthenticator,

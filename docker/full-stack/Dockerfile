@@ -1,10 +1,40 @@
 # Armature Full-Stack Dockerfile
 # Production-optimized multi-stage build
 
+# The chef/planner boilerplate below (Stages 1-2) is intentionally duplicated
+# across all 4 Armature Dockerfiles rather than extracted into a shared base
+# image, since this repo builds each with plain `docker build` (no buildx
+# bake infra). Keep RUST_VERSION / CARGO_CHEF_VERSION in sync across:
+#   docker/full-stack/Dockerfile
+#   docker/microservices/Dockerfile.service
+#   docker/microservices/Dockerfile.worker
+#   docker/observability/Dockerfile.api
+ARG RUST_VERSION=1.94.1
+# Pinned to a specific cargo-chef release (not "latest") for reproducible
+# builds. Update periodically: https://github.com/LukeMathWalker/cargo-chef/releases
+ARG CARGO_CHEF_VERSION=0.1.68
+
 # ==================================================
-# Stage 1: Build
+# Stage 1: Chef - base image with cargo-chef installed
 # ==================================================
-FROM rust:1.83-alpine AS builder
+FROM lukemathwalker/cargo-chef:${CARGO_CHEF_VERSION}-rust-${RUST_VERSION}-alpine AS chef
+WORKDIR /app
+
+# ==================================================
+# Stage 2: Planner - compute the dependency-only recipe
+# ==================================================
+FROM chef AS planner
+
+# The whole workspace (all Cargo.toml manifests + sources) is required for
+# `cargo chef prepare` to resolve the dependency graph, but this stage only
+# ever produces recipe.json, which is all that gets copied forward.
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ==================================================
+# Stage 3: Build
+# ==================================================
+FROM chef AS builder
 
 WORKDIR /app
 
@@ -16,43 +46,24 @@ RUN apk add --no-cache \
     pkgconfig \
     git
 
-# Copy workspace manifests
-COPY Cargo.toml Cargo.lock ./
-
-# Copy all crate manifests
-COPY armature-core/Cargo.toml armature-core/
-COPY armature-proc-macro/Cargo.toml armature-proc-macro/
-COPY armature-log/Cargo.toml armature-log/
-COPY armature-auth/Cargo.toml armature-auth/
-COPY armature-cache/Cargo.toml armature-cache/
-COPY armature-redis/Cargo.toml armature-redis/
-COPY armature-validation/Cargo.toml armature-validation/
-
-# Create dummy source files for dependency caching
-RUN for crate in armature-*; do \
-        mkdir -p "$crate/src" && \
-        if [ "$crate" = "armature-proc-macro" ]; then \
-            echo "fn main() {}" > "$crate/src/lib.rs"; \
-        else \
-            echo "pub fn main() {}" > "$crate/src/lib.rs"; \
-        fi; \
-    done
-
-# Build dependencies only
-RUN cargo build --release --workspace 2>/dev/null || true
+# Build dependencies only. This layer is cache-keyed on recipe.json (which is
+# itself derived only from Cargo.toml/Cargo.lock), so it is skipped entirely
+# on rebuilds that only change application source.
+COPY --from=planner /app/recipe.json recipe.json
+# Scoped to the single example this image actually builds (full_example)
+# instead of --examples, so the cached dependency layer isn't inflated by
+# every other example in the workspace.
+RUN cargo chef cook --release --example full_example --recipe-path recipe.json
 
 # Copy actual source code
 COPY . .
-
-# Touch all source files to invalidate crate caches
-RUN find . -name "*.rs" -exec touch {} \;
 
 # Build the application
 RUN cargo build --release --example full_example && \
     strip /app/target/release/examples/full_example
 
 # ==================================================
-# Stage 2: Runtime
+# Stage 4: Runtime
 # ==================================================
 FROM alpine:3.19 AS runtime
 
@@ -92,4 +103,3 @@ ENTRYPOINT ["/sbin/tini", "--"]
 
 # Run the application
 CMD ["/app/server"]
-

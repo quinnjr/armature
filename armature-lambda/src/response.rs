@@ -104,3 +104,64 @@ impl Default for LambdaResponse {
         Self::new(200, Bytes::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_body_maps_to_text() {
+        let resp = LambdaResponse::ok("hello world");
+        let lambda = resp.into_lambda_response();
+        assert_eq!(lambda.status(), 200);
+        match lambda.body() {
+            Body::Text(s) => assert_eq!(s, "hello world"),
+            other => panic!("expected text body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base64_flag_forces_binary_body() {
+        let resp = LambdaResponse::ok("hello").base64();
+        let lambda = resp.into_lambda_response();
+        match lambda.body() {
+            Body::Binary(b) => assert_eq!(b, b"hello"),
+            other => panic!("expected binary body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_utf8_body_maps_to_binary() {
+        let resp = LambdaResponse::new(200, Bytes::from_static(&[0xff, 0xfe, 0x00]));
+        let lambda = resp.into_lambda_response();
+        match lambda.body() {
+            Body::Binary(b) => assert_eq!(b, &[0xff, 0xfe, 0x00]),
+            other => panic!("expected binary body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn headers_are_forwarded() {
+        let resp = LambdaResponse::json(&serde_json::json!({ "ok": true })).unwrap();
+        let lambda = resp.into_lambda_response();
+        assert_eq!(
+            lambda
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn error_response_sets_status_and_json() {
+        let resp = LambdaResponse::not_found();
+        assert_eq!(resp.status, 404);
+        let lambda = resp.into_lambda_response();
+        assert_eq!(lambda.status(), 404);
+        match lambda.body() {
+            Body::Text(s) => assert!(s.contains("Not Found")),
+            other => panic!("expected text body, got {other:?}"),
+        }
+    }
+}

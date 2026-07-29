@@ -1,6 +1,6 @@
 /* TEAM */
 Creator: Joseph R. Quinn
-Contact: pegasusheavyindustries@gmail.com
+Contact: quinn.josephr@proton.me
 GitHub: https://github.com/quinnjr
 Location: United States
 
@@ -15,14 +15,14 @@ Open Source Contributors - For making this possible
 Last update: 2025/12/15
 Language: English
 Standards: HTML5, CSS3, TypeScript, Rust
-Framework: Armature (Rust), Angular (Frontend)
+Framework: Armature (Rust), Astro (Frontend)
 Hosting: GitHub Pages
-Repository: https://github.com/pegasusheavy/armature
+Repository: https://github.com/quinnjr/armature
 
 /* TECHNOLOGY */
 Backend Framework: Armature (Rust)
-Frontend Framework: Angular 21
+Frontend Framework: Astro 5
 Styling: Tailwind CSS, Tailswatch Oxide Theme
-Build Tool: Cargo, Angular CLI
+Build Tool: Cargo, Astro
 CI/CD: GitHub Actions
 

@@ -124,16 +124,74 @@ impl CefFormatter {
 
         ext.push(format!("cat={}", event.category));
 
-        // Add custom metadata
-        for (key, value) in &event.metadata {
-            let val_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                _ => value.to_string(),
-            };
+        // Add custom metadata into distinct CEF custom slots: string-valued
+        // entries go into `cs1..cs6` (with `cs{n}Label`), numeric-valued
+        // entries go into `cn1..cn3` (with `cn{n}Label`). CEF's `cn1` is
+        // only reserved for `httpStatusCode` when that field is present
+        // above; otherwise numeric metadata may use `cn1` too. Once all
+        // slots for a value's kind are exhausted, remaining metadata is
+        // serialized as a single JSON blob into a non-standard
+        // `additionalMetadata` extension key (distinct from `cs6`, which
+        // may independently still hold a 6th string metadata value) rather
+        // than being silently dropped or overwriting an already-used slot.
+        const MAX_CS: usize = 6;
+        const MAX_CN: usize = 3;
+        // cn1 is reserved for httpStatusCode above only when it was set.
+        let cn_start: usize = if event.http_status.is_some() { 2 } else { 1 };
+
+        let mut next_cs = 1usize;
+        let mut next_cn = cn_start;
+        let mut overflow = serde_json::Map::new();
+
+        // Iterate in a stable, sorted-by-key order rather than the
+        // HashMap's arbitrary (and run-to-run varying) iteration order, so
+        // slot assignment (cs1..cs6 / cn1..cn3 / overflow) is deterministic
+        // for a given set of metadata keys. This keeps CEF output
+        // reproducible, which SIEM correlation rules pinned on slot numbers
+        // depend on.
+        let mut entries: Vec<_> = event.metadata.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (key, value) in entries {
+            let is_numeric = value.is_number();
+
+            if is_numeric && next_cn <= MAX_CN {
+                ext.push(format!("cn{}={}", next_cn, value));
+                ext.push(format!(
+                    "cn{}Label={}",
+                    next_cn,
+                    Self::escape_extension(key)
+                ));
+                next_cn += 1;
+                continue;
+            }
+
+            if !is_numeric && next_cs <= MAX_CS {
+                let val_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string(),
+                };
+                ext.push(format!(
+                    "cs{}={} cs{}Label={}",
+                    next_cs,
+                    Self::escape_extension(&val_str),
+                    next_cs,
+                    Self::escape_extension(key)
+                ));
+                next_cs += 1;
+                continue;
+            }
+
+            // Slots for this value's kind (or both) are exhausted: don't
+            // drop the data, carry it in the overflow blob instead.
+            overflow.insert(key.clone(), value.clone());
+        }
+
+        if !overflow.is_empty() {
+            let overflow_json = serde_json::Value::Object(overflow).to_string();
             ext.push(format!(
-                "cs1={} cs1Label={}",
-                Self::escape_extension(&val_str),
-                Self::escape_extension(key)
+                "additionalMetadata={}",
+                Self::escape_extension(&overflow_json)
             ));
         }
 
@@ -200,6 +258,138 @@ mod tests {
         assert!(result.contains("login"));
         assert!(result.contains("src=192.168.1.100"));
         assert!(result.contains("suser=alice"));
+    }
+
+    #[test]
+    fn test_cef_metadata_uses_distinct_custom_slots() {
+        let formatter = CefFormatter;
+        let event = sample_event()
+            .metadata("tenant", serde_json::json!("acme-corp"))
+            .metadata("risk_score", serde_json::json!("high"));
+        let config = sample_config();
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        // Both metadata values must appear, in distinct cs slots (not one
+        // overwriting the other).
+        assert!(
+            result.contains("cs1=acme-corp") || result.contains("cs2=acme-corp"),
+            "expected tenant value in a cs slot: {result}"
+        );
+        assert!(
+            result.contains("cs1=high") || result.contains("cs2=high"),
+            "expected risk_score value in a cs slot: {result}"
+        );
+        assert!(
+            result.contains("acme-corp") && result.contains("high"),
+            "both metadata values must survive formatting: {result}"
+        );
+        // The two values must not land in the same slot.
+        assert!(
+            !(result.contains("cs1=acme-corp") && result.contains("cs1=high")),
+            "metadata entries collided on the same cs slot: {result}"
+        );
+    }
+
+    #[test]
+    fn test_cef_metadata_overflow_preserves_all_string_values() {
+        let formatter = CefFormatter;
+        let mut event = sample_event();
+        // 8 string metadata entries: first 6 go into cs1..cs6, the
+        // remaining 2 must still appear, carried in additionalMetadata.
+        for i in 1..=8 {
+            event = event.metadata(format!("key{i}"), serde_json::json!(format!("val{i}")));
+        }
+        let config = sample_config();
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        for i in 1..=6 {
+            assert!(
+                result.contains(&format!("val{i}")),
+                "expected val{i} in a cs slot: {result}"
+            );
+        }
+        assert!(
+            result.contains("cs6="),
+            "expected cs6 slot to be used: {result}"
+        );
+        assert!(
+            result.contains("additionalMetadata="),
+            "expected overflow extension key: {result}"
+        );
+        for i in 7..=8 {
+            assert!(
+                result.contains(&format!("val{i}")),
+                "expected overflow val{i} to survive in additionalMetadata: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cef_numeric_metadata_uses_cn1_when_no_http_status() {
+        let formatter = CefFormatter;
+        let event = sample_event().metadata("risk_score", serde_json::json!(42));
+        let config = sample_config();
+        assert!(event.http_status.is_none());
+
+        let result = formatter.format(&event, &config).unwrap();
+
+        assert!(
+            result.contains("cn1=42"),
+            "expected numeric metadata to use cn1 when http_status is absent: {result}"
+        );
+        assert!(
+            result.contains("cn1Label=risk_score"),
+            "expected cn1Label to be set: {result}"
+        );
+    }
+
+    #[test]
+    fn test_cef_metadata_slot_assignment_is_deterministic() {
+        let formatter = CefFormatter;
+        let config = sample_config();
+
+        // More than 6 string metadata keys, so slot assignment (which keys
+        // land in cs1..cs6 vs the additionalMetadata overflow) exercises
+        // the full assignment logic. Build the event fresh for each run to
+        // rule out any incidental HashMap ordering artifacts from reuse.
+        let build_event = || {
+            let mut event = sample_event();
+            for i in 1..=8 {
+                event = event.metadata(format!("key{i}"), serde_json::json!(format!("val{i}")));
+            }
+            event
+        };
+
+        let result_a = formatter.format(&build_event(), &config).unwrap();
+        let result_b = formatter.format(&build_event(), &config).unwrap();
+
+        // Compare only the metadata-slot portion (from cs1 onward); the
+        // rest of the extension (e.g. `externalId`, a per-event UUID) is
+        // expected to differ between two freshly built events and isn't
+        // relevant to slot-assignment determinism.
+        let slots_a = &result_a[result_a.find("cs1=").expect("cs1 present")..];
+        let slots_b = &result_b[result_b.find("cs1=").expect("cs1 present")..];
+        assert_eq!(
+            slots_a, slots_b,
+            "CEF slot assignment must be deterministic across runs for the same input"
+        );
+
+        // Since keys are sorted lexicographically before assignment,
+        // key1..key6 must land in cs1..cs6 respectively, and key7/key8 must
+        // overflow into additionalMetadata.
+        for i in 1..=6 {
+            assert!(
+                result_a.contains(&format!("cs{i}=val{i} cs{i}Label=key{i}")),
+                "expected key{i}/val{i} pinned to cs{i}: {result_a}"
+            );
+        }
+        assert!(
+            result_a.contains("additionalMetadata="),
+            "expected overflow for key7/key8: {result_a}"
+        );
+        assert!(result_a.contains("val7") && result_a.contains("val8"));
     }
 
     #[test]

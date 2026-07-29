@@ -51,6 +51,7 @@ fn validate_algorithm(algorithm: &Algorithm) -> RateLimitResult<()> {
 
 /// Configuration for the rate limiter
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RateLimitConfig {
     /// Algorithm to use
     pub algorithm: Algorithm,
@@ -60,15 +61,55 @@ pub struct RateLimitConfig {
     pub key_prefix: String,
     /// Include rate limit headers in responses
     pub include_headers: bool,
-    /// Skip rate limiting for certain conditions
+    /// Whether to allow requests through when the backing store errors or
+    /// times out, instead of rejecting them.
+    ///
+    /// Defaults to `true` (fail-open) — see the [`Default`] impl for details.
+    /// Set to `false` for fail-closed behavior (deny traffic on backend
+    /// outage), which is generally preferable when rate limiting is used as
+    /// a security or abuse control.
+    ///
+    /// Every time this flag causes a store error to be bypassed, the
+    /// middleware records it: `RateLimitMiddleware::skip_on_error_count()`
+    /// (armature-ratelimit's `middleware.rs`) exposes a running counter and a
+    /// `tracing::warn!` is emitted at the point of bypass, so operators can
+    /// detect a fail-open backend outage even though it isn't rejected.
     pub skip_on_error: bool,
     /// Custom error message when rate limited
     pub error_message: Option<String>,
     /// Bypass keys (these keys will never be rate limited)
     pub bypass_keys: Vec<String>,
+    /// Per-operation timeout applied to the backing store (currently the Redis
+    /// store). A store op that does not complete within this bound fails with
+    /// [`crate::error::RateLimitError::Timeout`] instead of stalling the request
+    /// path forever, letting `skip_on_error` decide fail-open vs fail-closed.
+    pub operation_timeout: Duration,
+    /// Number of trusted reverse proxies in front of the application.
+    ///
+    /// Controls how the client IP is derived from `X-Forwarded-For`: the
+    /// rightmost hops are appended by *your* infrastructure and are
+    /// trustworthy, so the client is selected `trusted_proxy_depth`-from-the-
+    /// right. A value of `0` (the default) means **no** proxy is trusted and
+    /// `X-Forwarded-For`/`X-Real-IP` are ignored entirely, because those
+    /// headers are attacker-controlled when the request is not known to have
+    /// passed through a trusted proxy. Set this to the exact number of proxies
+    /// between the client and the app to enable IP rate limiting on proxied
+    /// traffic.
+    pub trusted_proxy_depth: usize,
 }
 
 impl Default for RateLimitConfig {
+    /// # Fail-open by default
+    ///
+    /// `skip_on_error` defaults to `true`: if the backing store (e.g. Redis)
+    /// errors or times out, requests are **allowed through** rather than
+    /// rejected. This favors availability over strict enforcement, which is
+    /// appropriate for many deployments but may be surprising if rate
+    /// limiting is being relied on as a security or abuse control, where a
+    /// backend outage should instead deny traffic. Callers that need
+    /// fail-closed behavior under backend outage should explicitly set
+    /// `skip_on_error: false` (or use [`RateLimiterBuilder::skip_on_error`]
+    /// with `false` when building via [`RateLimitConfig::builder`]).
     fn default() -> Self {
         Self {
             algorithm: Algorithm::TokenBucket {
@@ -81,6 +122,8 @@ impl Default for RateLimitConfig {
             skip_on_error: true,
             error_message: None,
             bypass_keys: Vec::new(),
+            operation_timeout: Duration::from_secs(3),
+            trusted_proxy_depth: 0,
         }
     }
 }
@@ -106,12 +149,23 @@ pub struct RateLimiterBuilder {
     skip_on_error: bool,
     error_message: Option<String>,
     bypass_keys: Vec<String>,
+    operation_timeout: Duration,
+    trusted_proxy_depth: usize,
     #[cfg(feature = "redis")]
     redis_url: Option<String>,
 }
 
 impl RateLimiterBuilder {
-    /// Create a new builder with default values
+    /// Create a new builder with default values.
+    ///
+    /// # Fail-open by default
+    ///
+    /// Like [`RateLimitConfig::default`], the builder defaults
+    /// `skip_on_error` to `true`: on a backing-store error or timeout,
+    /// requests are allowed through rather than rejected. If rate limiting
+    /// is being used as a security or abuse control, consider calling
+    /// [`Self::skip_on_error`]`(false)` to fail closed (deny traffic) when
+    /// the backend is unavailable instead.
     pub fn new() -> Self {
         Self {
             algorithm: None,
@@ -121,6 +175,8 @@ impl RateLimiterBuilder {
             skip_on_error: true,
             error_message: None,
             bypass_keys: Vec::new(),
+            operation_timeout: Duration::from_secs(3),
+            trusted_proxy_depth: 0,
             #[cfg(feature = "redis")]
             redis_url: None,
         }
@@ -185,9 +241,32 @@ impl RateLimiterBuilder {
         self
     }
 
-    /// Skip rate limiting on store errors
+    /// Set whether to skip (allow through) rate limiting on store errors.
+    ///
+    /// Defaults to `true` (fail-open); pass `false` for fail-closed behavior
+    /// (deny traffic) when the backing store is unavailable. See
+    /// [`RateLimiterBuilder::new`] for more on the default posture.
     pub fn skip_on_error(mut self, skip: bool) -> Self {
         self.skip_on_error = skip;
+        self
+    }
+
+    /// Set the per-operation timeout applied to the backing store.
+    ///
+    /// A store op that exceeds this bound fails with
+    /// [`crate::error::RateLimitError::Timeout`] rather than blocking the
+    /// request path indefinitely.
+    pub fn operation_timeout(mut self, timeout: Duration) -> Self {
+        self.operation_timeout = timeout;
+        self
+    }
+
+    /// Set the number of trusted reverse proxies in front of the app.
+    ///
+    /// See [`RateLimitConfig::trusted_proxy_depth`]. Defaults to `0`
+    /// (`X-Forwarded-For`/`X-Real-IP` are not trusted).
+    pub fn trusted_proxy_depth(mut self, depth: usize) -> Self {
+        self.trusted_proxy_depth = depth;
         self
     }
 
@@ -230,6 +309,8 @@ impl RateLimiterBuilder {
             skip_on_error: self.skip_on_error,
             error_message: self.error_message,
             bypass_keys: self.bypass_keys,
+            operation_timeout: self.operation_timeout,
+            trusted_proxy_depth: self.trusted_proxy_depth,
         };
 
         let store: Arc<dyn RateLimitStore> = match self.store_type {
@@ -239,7 +320,14 @@ impl RateLimiterBuilder {
                 let url = self.redis_url.ok_or_else(|| {
                     RateLimitError::config("Redis URL must be specified for Redis store")
                 })?;
-                Arc::new(crate::stores::RedisStore::new(&url).await?)
+                // Honor the configured key_prefix instead of the hardcoded
+                // "ratelimit" default so multiple limiters can share a Redis
+                // instance without colliding.
+                Arc::new(
+                    crate::stores::RedisStore::with_prefix(&url, self.key_prefix.clone())
+                        .await?
+                        .with_operation_timeout(self.operation_timeout),
+                )
             }
             #[cfg(not(feature = "redis"))]
             StoreType::Redis => {

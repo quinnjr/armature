@@ -143,8 +143,7 @@ impl MediaType {
 
     /// Check if this media type matches another (considering wildcards).
     pub fn matches(&self, other: &MediaType) -> bool {
-        let type_matches =
-            self.type_ == "*" || other.type_ == "*" || self.type_ == other.type_;
+        let type_matches = self.type_ == "*" || other.type_ == "*" || self.type_ == other.type_;
         let subtype_matches =
             self.subtype == "*" || other.subtype == "*" || self.subtype == other.subtype;
         type_matches && subtype_matches
@@ -186,15 +185,33 @@ impl fmt::Display for MediaType {
     }
 }
 
+/// Find the byte offset of a case-insensitive `;q=` in `s` without allocating.
+///
+/// Searching a lowercased copy would be incorrect: lowercasing can change the
+/// byte length of non-ASCII text, so offsets found in the copy may not be
+/// valid (or even char-aligned) in the original string.
+fn find_quality_param(s: &str) -> Option<usize> {
+    s.as_bytes()
+        .windows(3)
+        .position(|w| w[0] == b';' && w[1].eq_ignore_ascii_case(&b'q') && w[2] == b'=')
+}
+
 // ============================================================================
 // Accept Header
 // ============================================================================
 
 /// Represents a parsed `Accept` header with quality values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Accept {
     /// Media types with their quality values, sorted by preference.
     pub media_types: Vec<(MediaType, f32)>,
+}
+
+impl Default for Accept {
+    /// A missing Accept header accepts anything, per the HTTP spec.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Accept {
@@ -251,7 +268,7 @@ impl Accept {
     /// Extract quality value from a media type string.
     fn extract_quality(s: &str) -> (&str, f32) {
         // Find q= parameter
-        if let Some(q_pos) = s.to_lowercase().find(";q=") {
+        if let Some(q_pos) = find_quality_param(s) {
             let media_part = &s[..q_pos];
             let q_part = &s[q_pos + 3..];
 
@@ -395,23 +412,18 @@ impl LanguageTag {
         // If we have a subtag, it must match
         match (&self.subtag, &other.subtag) {
             (Some(a), Some(b)) => a == b,
-            (None, _) => true, // "en" matches "en-US"
+            (None, _) => true,        // "en" matches "en-US"
             (Some(_), None) => false, // "en-US" doesn't match just "en"
-        }
-    }
-
-    /// Get the full tag string.
-    pub fn to_string(&self) -> String {
-        match &self.subtag {
-            Some(sub) => format!("{}-{}", self.primary, sub),
-            None => self.primary.clone(),
         }
     }
 }
 
 impl fmt::Display for LanguageTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        match &self.subtag {
+            Some(sub) => write!(f, "{}-{}", self.primary, sub),
+            None => write!(f, "{}", self.primary),
+        }
     }
 }
 
@@ -454,15 +466,11 @@ impl AcceptLanguage {
     }
 
     fn extract_quality(s: &str) -> (&str, f32) {
-        if let Some(q_pos) = s.to_lowercase().find(";q=") {
+        if let Some(q_pos) = find_quality_param(s) {
             let lang_part = &s[..q_pos];
             let q_part = &s[q_pos + 3..];
 
-            let quality = q_part
-                .trim()
-                .parse::<f32>()
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
+            let quality = q_part.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
 
             (lang_part, quality)
         } else {
@@ -598,15 +606,11 @@ impl AcceptEncoding {
     }
 
     fn extract_quality(s: &str) -> (&str, f32) {
-        if let Some(q_pos) = s.to_lowercase().find(";q=") {
+        if let Some(q_pos) = find_quality_param(s) {
             let enc_part = &s[..q_pos];
             let q_part = &s[q_pos + 3..];
 
-            let quality = q_part
-                .trim()
-                .parse::<f32>()
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
+            let quality = q_part.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
 
             (enc_part, quality)
         } else {
@@ -689,15 +693,11 @@ impl AcceptCharset {
     }
 
     fn extract_quality(s: &str) -> (&str, f32) {
-        if let Some(q_pos) = s.to_lowercase().find(";q=") {
+        if let Some(q_pos) = find_quality_param(s) {
             let charset_part = &s[..q_pos];
             let q_part = &s[q_pos + 3..];
 
-            let quality = q_part
-                .trim()
-                .parse::<f32>()
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
+            let quality = q_part.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
 
             (charset_part, quality)
         } else {
@@ -738,7 +738,7 @@ impl HttpRequest {
             .get("Accept")
             .or_else(|| self.headers.get("accept"))
             .map(|h| Accept::parse(h))
-            .unwrap_or_else(Accept::new)
+            .unwrap_or_default()
     }
 
     /// Get the Accept-Language header parsed into language tags.
@@ -852,10 +852,7 @@ where
     X: FnOnce() -> String,
 {
     /// Set the JSON response generator.
-    pub fn json<NJ: FnOnce() -> serde_json::Value>(
-        self,
-        f: NJ,
-    ) -> ContentNegotiator<NJ, H, T, X> {
+    pub fn json<NJ: FnOnce() -> serde_json::Value>(self, f: NJ) -> ContentNegotiator<NJ, H, T, X> {
         ContentNegotiator {
             json_fn: Some(f),
             html_fn: self.html_fn,
@@ -925,7 +922,9 @@ where
 
         // If no formats available, return error
         if available.is_empty() {
-            return Err(Error::Internal("No response formats configured".to_string()));
+            return Err(Error::Internal(
+                "No response formats configured".to_string(),
+            ));
         }
 
         // Negotiate best media type
@@ -939,8 +938,8 @@ where
         if best.matches(&MediaType::json()) {
             if let Some(f) = self.json_fn {
                 let value = f();
-                let body = serde_json::to_vec(&value)
-                    .map_err(|e| Error::Serialization(e.to_string()))?;
+                let body =
+                    serde_json::to_vec(&value).map_err(|e| Error::Serialization(e.to_string()))?;
                 response.body = body;
                 response
                     .headers
@@ -1020,8 +1019,8 @@ pub fn respond_with<T: Serialize>(request: &HttpRequest, data: &T) -> Result<Htt
 
     if accept.prefers_html() {
         // For HTML, serialize as JSON in a pre tag (basic fallback)
-        let json = serde_json::to_string_pretty(data)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(data).map_err(|e| Error::Serialization(e.to_string()))?;
         let html = format!(
             "<!DOCTYPE html><html><body><pre>{}</pre></body></html>",
             html_escape(&json)
@@ -1111,6 +1110,32 @@ mod tests {
         assert_eq!(accept.quality_for(&MediaType::json()), 1.0);
         assert_eq!(accept.quality_for(&MediaType::html()), 0.9);
         assert_eq!(accept.quality_for(&MediaType::xml()), 0.0);
+    }
+
+    #[test]
+    fn test_extract_quality_case_insensitive() {
+        // ";Q=" must be recognized just like ";q="
+        let accept = Accept::parse("text/html;Q=0.8");
+        assert_eq!(accept.quality_for(&MediaType::html()), 0.8);
+    }
+
+    #[test]
+    fn test_extract_quality_non_ascii_no_panic() {
+        // U+212A (KELVIN SIGN) is 3 bytes but lowercases to 1-byte 'k'.
+        // Searching a lowercased copy used to yield an offset that sliced
+        // the original string mid-character and panicked.
+        let accept = Accept::parse("application/json\u{212A}\u{212A};q=0.5");
+        assert_eq!(accept.media_types.len(), 1);
+        assert_eq!(accept.media_types[0].1, 0.5);
+
+        let accept_lang = AcceptLanguage::parse("en\u{212A}\u{212A};q=0.5");
+        assert_eq!(accept_lang.languages[0].1, 0.5);
+
+        let accept_charset = AcceptCharset::parse("utf\u{212A}\u{212A};q=0.5");
+        assert_eq!(accept_charset.charsets[0].1, 0.5);
+
+        // Unknown encoding name, but extract_quality must not panic on it.
+        let _ = AcceptEncoding::parse("gzip\u{212A}\u{212A};q=0.5");
     }
 
     #[test]
@@ -1204,4 +1229,3 @@ mod tests {
         assert!(!request.prefers_html());
     }
 }
-

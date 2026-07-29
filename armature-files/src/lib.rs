@@ -1,51 +1,4 @@
-//! File Processing Pipeline for Armature Framework
-//!
-//! Provides a fluent API for file processing operations including:
-//! - Image manipulation (resize, crop, rotate, format conversion)
-//! - PDF generation and manipulation
-//! - Archive operations (zip/unzip)
-//! - Format detection and conversion
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! use armature_files::{Pipeline, ImageOp, OutputFormat};
-//!
-//! // Image processing pipeline
-//! let result = Pipeline::new()
-//!     .load("input.jpg")
-//!     .image(ImageOp::Resize { width: 800, height: 600 })
-//!     .image(ImageOp::Watermark { text: "© 2025".into(), position: Position::BottomRight })
-//!     .convert(OutputFormat::WebP { quality: 80 })
-//!     .save("output.webp")
-//!     .await?;
-//!
-//! // PDF generation
-//! let pdf = PdfBuilder::new()
-//!     .title("Report")
-//!     .add_text("Hello, World!", FontSize::H1)
-//!     .add_image("chart.png")
-//!     .add_page_break()
-//!     .add_table(data)
-//!     .build()?;
-//! ```
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                         Pipeline                             │
-//! │  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐     │
-//! │  │  Load   │──▶│ Process │──▶│ Convert │──▶│  Save   │     │
-//! │  └─────────┘   └─────────┘   └─────────┘   └─────────┘     │
-//! │       │              │              │              │         │
-//! │       ▼              ▼              ▼              ▼         │
-//! │  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐     │
-//! │  │  File   │   │  Image  │   │  Format │   │  File   │     │
-//! │  │  Bytes  │   │   PDF   │   │  Codec  │   │ Storage │     │
-//! │  └─────────┘   └─────────┘   └─────────┘   └─────────┘     │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
+#![doc = include_str!("../README.md")]
 
 mod error;
 mod pipeline;
@@ -153,14 +106,17 @@ impl FileMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputFormat {
     // Image formats
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
     Png,
-    WebP { quality: u8 },
+    /// Lossless WebP (the `image` crate does not currently support lossy/
+    /// quality-controlled WebP encoding; see `encode_image_format`).
+    WebP,
     Gif,
     Bmp,
     Ico,
     Tiff,
-    Avif { quality: u8 },
 
     // Document formats
     Pdf,
@@ -168,7 +124,26 @@ pub enum OutputFormat {
     // Archive formats
     Zip,
 
-    // Keep original format
+    /// Keep the source format.
+    ///
+    /// # The two paths are not equivalent
+    ///
+    /// [`Pipeline::execute`] treats `Convert(Original)` as a **byte-identical
+    /// passthrough**: the bytes are already in the requested format, so the
+    /// codec is never touched. (Image *operations* in the same pipeline still
+    /// force a decode/encode round trip — the passthrough only applies to the
+    /// conversion step itself.)
+    ///
+    /// [`crate::image::convert_format`] instead performs a **full decode and
+    /// re-encode** in the detected source format — for JPEG, at
+    /// [`crate::image::DEFAULT_JPEG_QUALITY`], costing a generation of quality
+    /// every call.
+    ///
+    /// The asymmetry is intentional: the pipeline knows the input bytes are
+    /// untouched and can skip the work, whereas `convert_format` is a
+    /// standalone "produce encoded output" call whose entire contract is to
+    /// return freshly encoded bytes. If you want a no-op, do not call
+    /// `convert_format` at all.
     Original,
 }
 
@@ -178,12 +153,11 @@ impl OutputFormat {
         match self {
             Self::Jpeg { .. } => "jpg",
             Self::Png => "png",
-            Self::WebP { .. } => "webp",
+            Self::WebP => "webp",
             Self::Gif => "gif",
             Self::Bmp => "bmp",
             Self::Ico => "ico",
             Self::Tiff => "tiff",
-            Self::Avif { .. } => "avif",
             Self::Pdf => "pdf",
             Self::Zip => "zip",
             Self::Original => "",
@@ -195,12 +169,11 @@ impl OutputFormat {
         match self {
             Self::Jpeg { .. } => "image/jpeg",
             Self::Png => "image/png",
-            Self::WebP { .. } => "image/webp",
+            Self::WebP => "image/webp",
             Self::Gif => "image/gif",
             Self::Bmp => "image/bmp",
             Self::Ico => "image/x-icon",
             Self::Tiff => "image/tiff",
-            Self::Avif { .. } => "image/avif",
             Self::Pdf => "application/pdf",
             Self::Zip => "application/zip",
             Self::Original => "application/octet-stream",
@@ -225,7 +198,12 @@ pub enum Position {
 }
 
 impl Position {
-    /// Calculate pixel coordinates given container and element dimensions
+    /// Calculate pixel coordinates given container and element dimensions.
+    ///
+    /// All arithmetic saturates: when the element is wider or taller than the
+    /// container (e.g. a watermark rendered larger than the thumbnail it is
+    /// being placed on) the coordinate clamps to `0` — i.e. the element is
+    /// anchored to the left/top edge — rather than underflowing.
     pub fn calculate(
         &self,
         container_width: u32,
@@ -234,28 +212,26 @@ impl Position {
         element_height: u32,
         padding: u32,
     ) -> (u32, u32) {
+        // Free space along each axis, never negative.
+        let free_x = container_width.saturating_sub(element_width);
+        let free_y = container_height.saturating_sub(element_height);
+        // Trailing-edge anchors additionally back off by `padding`.
+        let end_x = free_x.saturating_sub(padding);
+        let end_y = free_y.saturating_sub(padding);
+        // Leading-edge anchors must not push the element off the far edge.
+        let start_x = padding.min(free_x);
+        let start_y = padding.min(free_y);
+
         match self {
-            Self::TopLeft => (padding, padding),
-            Self::TopCenter => ((container_width - element_width) / 2, padding),
-            Self::TopRight => (container_width - element_width - padding, padding),
-            Self::CenterLeft => (padding, (container_height - element_height) / 2),
-            Self::Center => (
-                (container_width - element_width) / 2,
-                (container_height - element_height) / 2,
-            ),
-            Self::CenterRight => (
-                container_width - element_width - padding,
-                (container_height - element_height) / 2,
-            ),
-            Self::BottomLeft => (padding, container_height - element_height - padding),
-            Self::BottomCenter => (
-                (container_width - element_width) / 2,
-                container_height - element_height - padding,
-            ),
-            Self::BottomRight => (
-                container_width - element_width - padding,
-                container_height - element_height - padding,
-            ),
+            Self::TopLeft => (start_x, start_y),
+            Self::TopCenter => (free_x / 2, start_y),
+            Self::TopRight => (end_x, start_y),
+            Self::CenterLeft => (start_x, free_y / 2),
+            Self::Center => (free_x / 2, free_y / 2),
+            Self::CenterRight => (end_x, free_y / 2),
+            Self::BottomLeft => (start_x, end_y),
+            Self::BottomCenter => (free_x / 2, end_y),
+            Self::BottomRight => (end_x, end_y),
             Self::Custom(x, y) => (*x, *y),
         }
     }
@@ -322,5 +298,48 @@ mod tests {
 
         let (x, y) = Position::BottomRight.calculate(100, 100, 20, 20, 5);
         assert_eq!((x, y), (75, 75));
+    }
+
+    /// An element larger than its container must clamp to the origin instead
+    /// of underflowing `u32` (which panics in debug and wraps in release).
+    #[test]
+    fn position_calculate_saturates_on_oversized_element() {
+        // 430px of rendered watermark text on a 200x100 thumbnail.
+        let all = [
+            Position::TopLeft,
+            Position::TopCenter,
+            Position::TopRight,
+            Position::CenterLeft,
+            Position::Center,
+            Position::CenterRight,
+            Position::BottomLeft,
+            Position::BottomCenter,
+            Position::BottomRight,
+            Position::Custom(3, 7),
+        ];
+
+        for position in all {
+            let (x, y) = position.calculate(200, 100, 430, 150, 10);
+            if let Position::Custom(cx, cy) = position {
+                assert_eq!((x, y), (cx, cy));
+            } else {
+                assert_eq!(
+                    (x, y),
+                    (0, 0),
+                    "{position:?} should clamp an oversized element to the origin"
+                );
+            }
+        }
+    }
+
+    /// A container only slightly larger than the element must not let the
+    /// padding push the leading edge past the available space.
+    #[test]
+    fn position_calculate_clamps_padding_to_free_space() {
+        let (x, y) = Position::TopLeft.calculate(100, 100, 98, 98, 10);
+        assert_eq!((x, y), (2, 2));
+
+        let (x, y) = Position::BottomRight.calculate(100, 100, 98, 98, 10);
+        assert_eq!((x, y), (0, 0));
     }
 }

@@ -42,15 +42,22 @@ redirect!("/new-location")
 ```rust
 use armature_macros_utils::{validate, validate_required, validate_email};
 
-// Conditional validation
+// Conditional validation with a custom message
 validate!(age >= 18, "Must be 18 or older");
 
-// Required field validation
-validate_required!(name);
+// Custom validator function: calls is_valid_email(&email)
+validate!(email, is_valid_email, "Invalid email format");
+
+// Required field validation (one or more Option fields; names the missing one)
+validate_required!(name, email, password);
 
 // Email validation
 validate_email!(user_email);
 ```
+
+> `validate_email!` expands to code using `regex::Regex`, so the calling crate
+> must depend on the `regex` crate. The regex is compiled once via a
+> `static LazyLock`.
 
 ### Error Handling
 
@@ -68,12 +75,18 @@ ensure!(user.is_active(), "User account is inactive");
 
 ### Model Derives
 
+`#[derive(Model)]` supplies **field-wise `Debug` + `Clone`** and a
+`Default`-bounded `new()`. It does **not** implement `Serialize`/`Deserialize`
+(a derive macro cannot attach other derives) — add those yourself.
+`#[derive(Resource)]` exposes table metadata (`table_name()`/`primary_key()`),
+not CRUD queries.
+
 ```rust
 use armature_macros_utils::{Model, ApiModel, Resource};
 use serde::{Serialize, Deserialize};
 
-// Basic model
-#[derive(Model, Serialize, Deserialize)]
+// Basic model: Model gives Debug + Clone + new(); you add Default + serde.
+#[derive(Model, Default, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
     pub name: String,
@@ -118,6 +131,8 @@ async fn test_endpoint() {
 These crates work together:
 
 ```rust
+use armature_proc_macro::get;
+
 // Declarative macros
 use armature_macros::prelude::*;
 

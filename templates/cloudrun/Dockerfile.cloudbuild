@@ -7,7 +7,11 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:1.85-alpine AS builder
+FROM rust:1.94-alpine AS builder
+
+# Name of the compiled binary (your crate's [[bin]] name, usually the
+# package name). Override with: docker build --build-arg BIN_NAME=my-app
+ARG BIN_NAME=app
 
 WORKDIR /app
 
@@ -26,16 +30,19 @@ RUN rm -rf src
 
 # Build application
 COPY src ./src
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin ${BIN_NAME}
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
 
+# Redeclare: ARGs do not cross FROM boundaries
+ARG BIN_NAME=app
+
 WORKDIR /app
 
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/app /app/server
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/${BIN_NAME} /app/server
 
 ENV PORT=8080
 EXPOSE 8080

@@ -375,83 +375,83 @@
     },
     {
       "name": "05. Rate Limiting",
-      "description": "Rate limiting middleware demonstration.\n\nRun: `cargo run --example rate_limiting`\nPort: 3000",
+      "description": "Middleware chain demo (rate limiting, API key auth, timeout, body size limit) built on top of a real HTTP server.\n\nRun: `cargo run --example middleware_demo`\nPort: 3014\n\nIMPORTANT: The `MiddlewareChain` built in this example's `main()` is only ever constructed and populated -- it is never attached to the running `Application`, so none of the middleware below is actually enforced (every request succeeds regardless of volume, API key, or body size, and `/api/slow` always takes the full 10s). For a working demonstration of the actual rate-limiting algorithms, run the console-only `cargo run --example rate_limiting --features ratelimit` instead (no port, so it can't be exercised from Postman).\n\nSee docs/use-middleware-guide.md and docs/rate-limiting-guide.md for background.",
       "item": [
         {
-          "name": "Public Endpoint (10 req/min)",
+          "name": "Public Endpoint (no middleware enforced)",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}:3000/api/public",
+              "raw": "{{base_url}}:3014/api/public",
               "host": ["{{base_url}}"],
-              "port": "3000",
+              "port": "3014",
               "path": ["api", "public"]
             },
-            "description": "Public endpoint with 10 requests per minute limit."
+            "description": "Returns public data unconditionally. No rate limiting is enforced (the middleware chain is built but never attached to the server)."
           }
         },
         {
-          "name": "Authenticated Endpoint (100 req/min)",
+          "name": "Protected Endpoint (API key check not enforced)",
           "request": {
             "method": "GET",
             "header": [
               {
-                "key": "Authorization",
-                "value": "Bearer {{jwt_token}}"
+                "key": "x-api-key",
+                "value": "secret-key-123"
               }
             ],
             "url": {
-              "raw": "{{base_url}}:3000/api/authenticated",
+              "raw": "{{base_url}}:3014/api/protected",
               "host": ["{{base_url}}"],
-              "port": "3000",
-              "path": ["api", "authenticated"]
+              "port": "3014",
+              "path": ["api", "protected"]
             },
-            "description": "Authenticated endpoint with 100 requests per minute limit."
+            "description": "Returns protected data. Neither the example's ApiKeyMiddleware nor the handler itself actually check the x-api-key header, so this succeeds even without it."
           }
         },
         {
-          "name": "Premium Endpoint (1000 req/min)",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{jwt_token}}"
-              },
-              {
-                "key": "X-Premium-User",
-                "value": "true"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}:3000/api/premium",
-              "host": ["{{base_url}}"],
-              "port": "3000",
-              "path": ["api", "premium"]
-            },
-            "description": "Premium endpoint with 1000 requests per minute limit."
-          }
-        },
-        {
-          "name": "Check Rate Limit Status",
+          "name": "Slow Endpoint (timeout not enforced)",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}:3000/api/rate-limit/status",
+              "raw": "{{base_url}}:3014/api/slow",
               "host": ["{{base_url}}"],
-              "port": "3000",
-              "path": ["api", "rate-limit", "status"]
+              "port": "3014",
+              "path": ["api", "slow"]
             },
-            "description": "Check current rate limit status."
+            "description": "Sleeps for 10 seconds server-side. TimeoutMiddleware::new(5) is defined in the example but never attached, so this always takes the full 10s instead of being cut off at 5s. Increase your Postman request timeout if it fails early."
+          }
+        },
+        {
+          "name": "Upload Endpoint (body size limit not enforced)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"BodySizeLimitMiddleware(1MB) is defined but never attached, so bodies over 1MB are NOT rejected here.\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}:3014/api/upload",
+              "host": ["{{base_url}}"],
+              "port": "3014",
+              "path": ["api", "upload"]
+            },
+            "description": "Echoes back the uploaded byte count. No body size limit is actually enforced."
           }
         }
       ]
     },
     {
       "name": "06. Compression",
-      "description": "HTTP compression middleware.\n\nRun: `cargo run --example compression_example`\nPort: 3000",
+      "description": "Real, request-time HTTP compression via Armature's static asset server (Accept-Encoding negotiation -> gzip/brotli Content-Encoding), implemented in armature-core/src/static_assets.rs.\n\nRun: `cargo run --example static_assets`\nPort: 3000\n\nIMPORTANT: This server only supports gzip and brotli -- there is no zstd support here (zstd selection lives in the separate armature-compression crate and is never wired into a live server in this codebase), so the requests below use a no-Accept-Encoding case instead of a Zstd one.\n\nSee docs/compression.md for background.",
       "item": [
         {
           "name": "Get Large Response (Gzip)",
@@ -464,12 +464,12 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}:3000/api/large-data",
+              "raw": "{{base_url}}:3000/static/script.js",
               "host": ["{{base_url}}"],
               "port": "3000",
-              "path": ["api", "large-data"]
+              "path": ["static", "script.js"]
             },
-            "description": "Get a large response compressed with gzip."
+            "description": "script.js is compressible and over the 1KB minimum, so this returns Content-Encoding: gzip."
           }
         },
         {
@@ -483,31 +483,26 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}:3000/api/large-data",
+              "raw": "{{base_url}}:3000/cdn/bundle.123456.js",
               "host": ["{{base_url}}"],
               "port": "3000",
-              "path": ["api", "large-data"]
+              "path": ["cdn", "bundle.123456.js"]
             },
-            "description": "Get a large response compressed with Brotli."
+            "description": "The /cdn/* route uses max-performance config, which prefers Brotli. Response should include Content-Encoding: br."
           }
         },
         {
-          "name": "Get Large Response (Zstd)",
+          "name": "Get Large Response (No Accept-Encoding -- Zstd not supported)",
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "Accept-Encoding",
-                "value": "zstd"
-              }
-            ],
+            "header": [],
             "url": {
-              "raw": "{{base_url}}:3000/api/large-data",
+              "raw": "{{base_url}}:3000/static/script.js",
               "host": ["{{base_url}}"],
               "port": "3000",
-              "path": ["api", "large-data"]
+              "path": ["static", "script.js"]
             },
-            "description": "Get a large response compressed with Zstd."
+            "description": "Armature's static-asset compression only implements gzip and brotli (no zstd). This request sends no Accept-Encoding header at all, so the server returns the file uncompressed (identity) -- select_compression() requires the header to be present before it will compress anything."
           }
         },
         {
@@ -517,16 +512,16 @@
             "header": [
               {
                 "key": "Accept-Encoding",
-                "value": "gzip, br, zstd"
+                "value": "gzip, br"
               }
             ],
             "url": {
-              "raw": "{{base_url}}:3000/api/small-data",
+              "raw": "{{base_url}}:3000/static/logo.svg",
               "host": ["{{base_url}}"],
               "port": "3000",
-              "path": ["api", "small-data"]
+              "path": ["static", "logo.svg"]
             },
-            "description": "Small responses may not be compressed (threshold)."
+            "description": "logo.svg is classified as an Image, and images are always skipped by should_compress() regardless of size or Accept-Encoding, so no Content-Encoding header is returned."
           }
         }
       ]

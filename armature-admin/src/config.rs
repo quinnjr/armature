@@ -37,6 +37,32 @@ pub struct AdminConfig {
     pub footer_text: Option<String>,
 }
 
+impl AdminConfig {
+    /// Format a raw date value using the configured `date_format`.
+    ///
+    /// The value is parsed as an RFC 3339 / ISO-8601 date; on parse failure the
+    /// input is returned unchanged so unexpected shapes still render.
+    pub fn format_date(&self, raw: &str) -> String {
+        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map(|d| d.format(&self.date_format).to_string())
+            .unwrap_or_else(|_| raw.to_string())
+    }
+
+    /// Format a raw datetime value using the configured `datetime_format`.
+    ///
+    /// Accepts RFC 3339 timestamps (with or without timezone); on parse failure
+    /// the input is returned unchanged.
+    pub fn format_datetime(&self, raw: &str) -> String {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+            return dt.format(&self.datetime_format).to_string();
+        }
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
+            return dt.format(&self.datetime_format).to_string();
+        }
+        raw.to_string()
+    }
+}
+
 impl Default for AdminConfig {
     fn default() -> Self {
         Self {

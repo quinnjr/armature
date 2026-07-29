@@ -13,6 +13,16 @@ Deploy Armature applications to Google Cloud Run.
 
 ## Quick Start
 
+> **Binary name:** The Dockerfiles build with `--bin ${BIN_NAME}` and default
+> `BIN_NAME` to `app`. If your crate's `[[bin]]`/package name is not literally
+> `app`, pass it as a build arg, e.g.:
+> `docker build --build-arg BIN_NAME=<your-crate-name> -t myapp .`
+> Neither `gcloud builds submit --tag` nor the provided `cloudbuild.yaml`
+> forward Docker build args, so when building through Cloud Build either
+> name your crate's binary `app`, or add
+> `--build-arg=BIN_NAME=<your-crate-name>` to the `docker build` step in
+> `cloudbuild.yaml` yourself.
+
 ### Using gcloud
 
 ```bash

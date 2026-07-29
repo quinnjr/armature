@@ -197,6 +197,7 @@ pub struct ToolCallParams {
 /// Content types for tool results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ContentItem {
     Text {
         text: String,

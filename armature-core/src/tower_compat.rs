@@ -117,7 +117,7 @@ trait HttpRequestBuilderExt {
 
 impl HttpRequestBuilderExt for HttpRequest {
     fn with_headers_map(mut self, headers: HashMap<String, String>) -> Self {
-        self.headers = headers;
+        self.headers = headers.into();
         self
     }
 

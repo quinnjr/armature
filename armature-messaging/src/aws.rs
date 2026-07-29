@@ -7,20 +7,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use aws_sdk_sns::Client as SnsClient;
 use aws_sdk_sqs::Client as SqsClient;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Message, MessageBroker, MessageHandler, MessagingError, ProcessingResult, PublishOptions,
-    SubscribeOptions, Subscription, config::AwsConfig,
+    AckMode, Message, MessageBroker, MessageHandler, MessagingError, ProcessingResult,
+    PublishOptions, SubscribeOptions, Subscription, config::AwsConfig, dispatch,
 };
+
+/// One subscription's stop-flag and shared handler-task registry, tracked by
+/// [`AwsBroker`] so `close` can stop every consumer and drain its in-flight
+/// handler tasks.
+struct ConsumerHandle {
+    active: Arc<AtomicBool>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
+}
 
 /// AWS SQS/SNS message broker
 pub struct AwsBroker {
     sqs_client: SqsClient,
     sns_client: SnsClient,
     config: AwsConfig,
-    active_consumers: Arc<RwLock<Vec<Arc<AtomicBool>>>>,
+    active_consumers: Arc<RwLock<Vec<ConsumerHandle>>>,
     connected: Arc<AtomicBool>,
 }
 
@@ -321,30 +330,64 @@ impl MessageBroker for AwsBroker {
             .await
     }
 
+    /// Subscribe to an SQS queue.
+    ///
+    /// Only [`SubscribeOptions::ack_mode`] and [`SubscribeOptions::concurrency`]
+    /// are honored: `AckMode::None` leaves received messages in the queue
+    /// (they become visible again after the visibility timeout), while
+    /// `Auto`/`Manual` delete a message once the handler reports success;
+    /// `concurrency` bounds how many handlers may run concurrently across the
+    /// whole life of the subscription (not just within a single received
+    /// batch - the permit pool is created once and shared across every poll).
+    /// The remaining options are not applicable to SQS and are ignored:
+    /// `prefetch_count`/`from_beginning`/`filter` have no SQS equivalent
+    /// (batch size and long-poll behavior come from [`AwsConfig`]).
     async fn subscribe_with_options(
         &self,
         topic: &str,
         handler: Arc<dyn MessageHandler>,
-        _options: SubscribeOptions,
+        options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // Bounds how many per-message handler invocations may run
+        // concurrently (see `poll_messages`). Defaults to 1, which
+        // reproduces the previous strictly-sequential dispatch.
+        let concurrency = dispatch::concurrency_or_default(options.concurrency);
+
         let queue_url = self.get_queue_url(topic).await?;
         let active = Arc::new(AtomicBool::new(true));
+        let tasks = Arc::new(Mutex::new(JoinSet::new()));
+        let ack_mode = options.ack_mode;
 
         let subscription = AwsSubscription {
             queue_url: queue_url.clone(),
             active: active.clone(),
+            tasks: tasks.clone(),
         };
 
-        // Store active flag for cleanup
-        self.active_consumers.write().await.push(active.clone());
+        // Store active flag + task registry for cleanup, pruning any entries
+        // whose consumer task has already stopped so the vec does not grow
+        // unbounded.
+        {
+            let mut consumers = self.active_consumers.write().await;
+            consumers.retain(|c| c.active.load(Ordering::SeqCst));
+            consumers.push(ConsumerHandle {
+                active: active.clone(),
+                tasks: tasks.clone(),
+            });
+        }
 
         // Spawn consumer task
-        let sqs_client = self.sqs_client.clone();
-        let config = self.config.clone();
+        let poll_config = PollConfig {
+            client: self.sqs_client.clone(),
+            queue_url,
+            aws_config: self.config.clone(),
+            ack_mode,
+            concurrency,
+        };
         let topic_owned = topic.to_string();
 
         tokio::spawn(async move {
-            poll_messages(sqs_client, queue_url, handler, config, &topic_owned, active).await;
+            poll_messages(poll_config, handler, &topic_owned, active, tasks).await;
         });
 
         info!(queue = topic, "Subscribed to SQS queue");
@@ -359,31 +402,71 @@ impl MessageBroker for AwsBroker {
         info!("Closing AWS connections");
         self.connected.store(false, Ordering::SeqCst);
 
-        // Stop all consumers
+        // Stop all consumers first, then drain each's in-flight handler
+        // tasks - draining one consumer must not delay flipping the flag for
+        // the others.
         let consumers = self.active_consumers.read().await;
-        for active in consumers.iter() {
-            active.store(false, Ordering::SeqCst);
+        for consumer in consumers.iter() {
+            consumer.active.store(false, Ordering::SeqCst);
+        }
+        for consumer in consumers.iter() {
+            dispatch::drain_with_timeout(
+                &consumer.tasks,
+                dispatch::DEFAULT_DRAIN_TIMEOUT,
+                "aws-sqs",
+            )
+            .await;
         }
 
         Ok(())
     }
 }
 
-async fn poll_messages(
+/// Bundles `poll_messages`' connection/policy parameters (as opposed to the
+/// per-call `handler`/`topic`/`active` parameters) into one value so the
+/// function stays under clippy's argument-count limit.
+struct PollConfig {
     client: SqsClient,
     queue_url: String,
+    aws_config: AwsConfig,
+    ack_mode: AckMode,
+    concurrency: usize,
+}
+
+async fn poll_messages(
+    poll_config: PollConfig,
     handler: Arc<dyn MessageHandler>,
-    config: AwsConfig,
     topic: &str,
     active: Arc<AtomicBool>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
 ) {
+    let PollConfig {
+        client,
+        queue_url,
+        aws_config,
+        ack_mode,
+        concurrency,
+    } = poll_config;
+
+    // Bounds how many per-message handler invocations may run concurrently,
+    // across all received batches, for the whole life of the subscription
+    // (this semaphore is created once, not per-batch). A permit is acquired
+    // before spawning each message's task (tracked in `tasks` so
+    // `unsubscribe` can drain outstanding handlers on shutdown - see
+    // `dispatch::spawn_bounded`) and released when that task finishes, so at
+    // most `concurrency` handlers are ever in flight at once (concurrency ==
+    // 1 reproduces the previous strictly-sequential dispatch). Deleting/
+    // changing visibility is per-receipt-handle, so unlike Kafka's watermark
+    // offset commits, completions finishing out of dispatch order is safe.
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+
     while active.load(Ordering::SeqCst) {
         let result = client
             .receive_message()
             .queue_url(&queue_url)
-            .max_number_of_messages(config.max_number_of_messages)
-            .wait_time_seconds(config.long_poll_wait_seconds)
-            .visibility_timeout(config.visibility_timeout)
+            .max_number_of_messages(aws_config.max_number_of_messages)
+            .wait_time_seconds(aws_config.long_poll_wait_seconds)
+            .visibility_timeout(aws_config.visibility_timeout)
             .message_attribute_names("All")
             .send()
             .await;
@@ -394,55 +477,22 @@ async fn poll_messages(
                     for sqs_message in messages {
                         let message = sqs_message_to_message(&sqs_message, topic);
                         let receipt_handle = sqs_message.receipt_handle.clone();
+                        let handler = handler.clone();
+                        let client = client.clone();
+                        let queue_url = queue_url.clone();
 
-                        match handler.handle(message).await {
-                            Ok(result) => match result {
-                                ProcessingResult::Success => {
-                                    // Delete the message
-                                    if let Some(handle) = receipt_handle
-                                        && let Err(e) = client
-                                            .delete_message()
-                                            .queue_url(&queue_url)
-                                            .receipt_handle(&handle)
-                                            .send()
-                                            .await
-                                    {
-                                        error!(error = %e, "Failed to delete message");
-                                    }
-                                }
-                                ProcessingResult::Retry => {
-                                    // Change visibility timeout to make it available again
-                                    if let Some(handle) = receipt_handle
-                                        && let Err(e) = client
-                                            .change_message_visibility()
-                                            .queue_url(&queue_url)
-                                            .receipt_handle(&handle)
-                                            .visibility_timeout(0)
-                                            .send()
-                                            .await
-                                    {
-                                        warn!(error = %e, "Failed to change message visibility");
-                                    }
-                                }
-                                ProcessingResult::DeadLetter | ProcessingResult::Reject => {
-                                    // Delete the message (it should go to DLQ if configured)
-                                    if let Some(handle) = receipt_handle
-                                        && let Err(e) = client
-                                            .delete_message()
-                                            .queue_url(&queue_url)
-                                            .receipt_handle(&handle)
-                                            .send()
-                                            .await
-                                    {
-                                        error!(error = %e, "Failed to delete rejected message");
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                error!(error = %e, "Message handler error");
-                                // Message will become visible again after visibility timeout
-                            }
-                        }
+                        dispatch::spawn_bounded(&semaphore, &tasks, async move {
+                            handle_sqs_message(
+                                &client,
+                                &queue_url,
+                                &handler,
+                                message,
+                                receipt_handle,
+                                ack_mode,
+                            )
+                            .await;
+                        })
+                        .await;
                     }
                 }
             }
@@ -451,6 +501,71 @@ async fn poll_messages(
                 // Wait before retrying
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
+        }
+    }
+}
+
+/// Run the handler for a single SQS message and delete/change-visibility it
+/// based on the result. Broken out of `poll_messages` so it can be spawned
+/// as an independent per-message task under the concurrency semaphore.
+async fn handle_sqs_message(
+    client: &SqsClient,
+    queue_url: &str,
+    handler: &Arc<dyn MessageHandler>,
+    message: Message,
+    receipt_handle: Option<String>,
+    ack_mode: AckMode,
+) {
+    match handler.handle(message).await {
+        Ok(result) => match result {
+            ProcessingResult::Success => {
+                // Delete the message to acknowledge it. In `AckMode::None`
+                // no acknowledgment is performed, so the message is left in
+                // the queue and becomes visible again after the visibility
+                // timeout (at-least-once redelivery).
+                if ack_mode != AckMode::None
+                    && let Some(handle) = receipt_handle
+                    && let Err(e) = client
+                        .delete_message()
+                        .queue_url(queue_url)
+                        .receipt_handle(&handle)
+                        .send()
+                        .await
+                {
+                    error!(error = %e, "Failed to delete message");
+                }
+            }
+            ProcessingResult::Retry => {
+                // Change visibility timeout to make it available again
+                if let Some(handle) = receipt_handle
+                    && let Err(e) = client
+                        .change_message_visibility()
+                        .queue_url(queue_url)
+                        .receipt_handle(&handle)
+                        .visibility_timeout(0)
+                        .send()
+                        .await
+                {
+                    warn!(error = %e, "Failed to change message visibility");
+                }
+            }
+            ProcessingResult::DeadLetter | ProcessingResult::Reject => {
+                // Delete the message (it should go to DLQ if configured)
+                if let Some(handle) = receipt_handle
+                    && let Err(e) = client
+                        .delete_message()
+                        .queue_url(queue_url)
+                        .receipt_handle(&handle)
+                        .send()
+                        .await
+                {
+                    error!(error = %e, "Failed to delete rejected message");
+                }
+            }
+        },
+        Err(e) => {
+            error!(error = %e, "Message handler error");
+            // Message will become visible again after visibility timeout
         }
     }
 }
@@ -511,12 +626,16 @@ fn sqs_message_to_message(sqs_msg: &aws_sdk_sqs::types::Message, topic: &str) ->
 pub struct AwsSubscription {
     queue_url: String,
     active: Arc<AtomicBool>,
+    /// In-flight per-message handler tasks, drained (with a bounded timeout)
+    /// on `unsubscribe` instead of being abandoned.
+    tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 #[async_trait]
 impl Subscription for AwsSubscription {
     async fn unsubscribe(&self) -> Result<(), MessagingError> {
         self.active.store(false, Ordering::SeqCst);
+        dispatch::drain_with_timeout(&self.tasks, dispatch::DEFAULT_DRAIN_TIMEOUT, "aws-sqs").await;
         info!(queue_url = %self.queue_url, "Unsubscribed from SQS queue");
         Ok(())
     }

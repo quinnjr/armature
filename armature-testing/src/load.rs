@@ -252,35 +252,62 @@ where
 
         let mut handles = vec![];
 
-        // Determine number of requests per worker
-        let requests_per_worker = if let Some(_duration) = self.config.duration {
-            // Duration-based test
-            None
-        } else {
-            // Request count-based test
-            Some(self.config.total_requests / self.config.concurrency as u64)
-        };
+        let concurrency = self.config.concurrency as u64;
 
-        for _ in 0..self.config.concurrency {
+        // Requests-per-second pacing, applied per worker: to make the
+        // *aggregate* rate across all `concurrency` workers converge on
+        // `rate_limit`, each worker must space its own requests
+        // `concurrency / rate_limit` seconds apart.
+        let min_interval = self
+            .config
+            .rate_limit
+            .filter(|rps| *rps > 0.0)
+            .map(|rps| Duration::from_secs_f64(concurrency.max(1) as f64 / rps));
+
+        for worker_idx in 0..self.config.concurrency {
             let test_fn = self.test_fn.clone();
             let response_times = response_times.clone();
             let failed_count = failed_count.clone();
             let timeout = self.config.timeout;
             let duration = self.config.duration;
 
+            // Distribute `total_requests` across workers exactly: give the
+            // first `total_requests % concurrency` workers one extra
+            // request. This same formula also guards `concurrency >
+            // total_requests` for free — e.g. `new(10, 5)` yields base = 0,
+            // remainder = 5, so workers 0..5 run 1 request each and workers
+            // 5..10 run 0, for an exact total of 5 (not the previous 0 from
+            // `5 / 10 == 0` applied uniformly to every worker).
+            let requests_for_this_worker = if duration.is_some() {
+                None
+            } else {
+                let base = self.config.total_requests / concurrency.max(1);
+                let remainder = self.config.total_requests % concurrency.max(1);
+                Some(base + u64::from((worker_idx as u64) < remainder))
+            };
+
             let handle = tokio::spawn(async move {
                 let worker_start = Instant::now();
                 let mut request_count = 0u64;
 
+                // Whether the worker should stop *before* starting another
+                // request, given how many it has completed so far. Shared
+                // between the top-of-loop break check and the post-request
+                // pacing check below, so both agree on what counts as "the
+                // last request".
+                let should_stop = |request_count: u64| -> bool {
+                    if let Some(duration) = duration {
+                        worker_start.elapsed() >= duration
+                    } else if let Some(max_requests) = requests_for_this_worker {
+                        request_count >= max_requests
+                    } else {
+                        false
+                    }
+                };
+
                 loop {
                     // Check if we should stop
-                    if let Some(duration) = duration {
-                        if worker_start.elapsed() >= duration {
-                            break;
-                        }
-                    } else if let Some(max_requests) = requests_per_worker
-                        && request_count >= max_requests
-                    {
+                    if should_stop(request_count) {
                         break;
                     }
 
@@ -299,6 +326,22 @@ where
                     }
 
                     request_count += 1;
+
+                    // Pace to the configured rate limit, if any — but skip
+                    // the sleep after what will be this worker's last
+                    // request. N requests need only N-1 gaps *between* them;
+                    // sleeping after the final one just adds a trailing
+                    // delay that inflates duration-based runs by one
+                    // interval per worker for no benefit (nothing follows
+                    // it to be paced against).
+                    if !should_stop(request_count)
+                        && let Some(interval) = min_interval
+                    {
+                        let elapsed = req_start.elapsed();
+                        if elapsed < interval {
+                            tokio::time::sleep(interval - elapsed).await;
+                        }
+                    }
                 }
             });
 
@@ -456,5 +499,71 @@ mod tests {
         let stats = runner.run().await.unwrap();
         assert_eq!(stats.total_requests, 10);
         assert_eq!(stats.successful, 10);
+    }
+
+    #[tokio::test]
+    async fn run_executes_exactly_total_requests_when_not_evenly_divisible() {
+        // 100 / 3 == 33 with integer division; the old code ran
+        // 33 * 3 == 99, dropping one request. The remainder must be
+        // distributed across workers so all 100 actually run.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.store(0, Ordering::SeqCst);
+
+        let config = LoadTestConfig::new(3, 100);
+        let runner = LoadTestRunner::new(config, || async {
+            COUNTER.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let stats = runner.run().await.unwrap();
+        assert_eq!(COUNTER.load(Ordering::SeqCst), 100);
+        assert_eq!(stats.total_requests, 100);
+    }
+
+    #[tokio::test]
+    async fn run_executes_exactly_total_requests_when_concurrency_exceeds_total() {
+        // concurrency(5) > total_requests(2): old integer-division code
+        // computed 2 / 5 == 0 requests per worker, so nothing ran at all.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.store(0, Ordering::SeqCst);
+
+        let config = LoadTestConfig::new(5, 2);
+        let runner = LoadTestRunner::new(config, || async {
+            COUNTER.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let stats = runner.run().await.unwrap();
+        assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.total_requests, 2);
+    }
+
+    #[tokio::test]
+    async fn run_honors_rate_limit_by_pacing_requests() {
+        // 1 worker, rate-limited to 20 req/s => ~50ms between requests.
+        // 4 requests means 3 inter-request gaps (no trailing sleep after the
+        // last request), so the run should take at least ~150ms. An
+        // unthrottled run of near-instant requests would finish in well
+        // under a millisecond, and the old N-sleeps-for-N-requests bug would
+        // take ~200ms (4 gaps, including a pointless trailing one), so a
+        // window of [140ms, 195ms) reliably distinguishes "3 gaps honored"
+        // from both "rate_limit ignored" and "4 sleeps applied" without
+        // being tight enough to flake under CI scheduling jitter: 140ms
+        // gives ~10ms of slack under the 150ms target, and 195ms stays
+        // under the ~200ms the bug would produce.
+        let config = LoadTestConfig::new(1, 4).with_rate_limit(20.0);
+        let runner = LoadTestRunner::new(config, || async { Ok(()) });
+
+        let start = Instant::now();
+        let stats = runner.run().await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(stats.total_requests, 4);
+        assert!(
+            elapsed >= Duration::from_millis(140) && elapsed < Duration::from_millis(195),
+            "expected pacing to take ~150ms for 3 gaps at 50ms (not ~200ms for 4 sleeps), took {elapsed:?}"
+        );
     }
 }

@@ -176,4 +176,50 @@ mod tests {
         assert_eq!(result.id, "user-123");
         assert_eq!(result.email, "alice@example.com");
     }
+
+    #[tokio::test]
+    async fn test_query_bus_handler_not_found() {
+        let bus = QueryBus::new();
+
+        let query = GetUserQuery {
+            user_id: "user-456".to_string(),
+        };
+
+        let err = bus.execute(query).await.unwrap_err();
+        assert!(matches!(err, QueryError::HandlerNotFound));
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct CountUsersQuery;
+
+    impl Query for CountUsersQuery {
+        type Result = usize;
+    }
+
+    struct CountUsersHandler;
+
+    #[async_trait]
+    impl QueryHandler<CountUsersQuery> for CountUsersHandler {
+        async fn handle(&self, _query: CountUsersQuery) -> Result<usize, QueryError> {
+            Ok(7)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_bus_independent_types_do_not_collide() {
+        let bus = QueryBus::new();
+        bus.register::<GetUserQuery, _>(GetUserHandler);
+        bus.register::<CountUsersQuery, _>(CountUsersHandler);
+
+        let user = bus
+            .execute(GetUserQuery {
+                user_id: "user-789".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(user.id, "user-789");
+
+        let count = bus.execute(CountUsersQuery).await.unwrap();
+        assert_eq!(count, 7);
+    }
 }

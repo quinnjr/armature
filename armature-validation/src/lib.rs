@@ -155,6 +155,12 @@ pub use rules::*;
 pub use traits::*;
 pub use validators::*;
 
+/// Derive macro for the [`Validate`] trait.
+///
+/// See the crate-level documentation and README for the `#[validate(...)]`
+/// field-attribute syntax.
+pub use armature_proc_macro::Validate;
+
 /// Prelude for common imports.
 ///
 /// ```
@@ -165,10 +171,12 @@ pub mod prelude {
     pub use crate::pipe::ValidationPipe;
     pub use crate::rules::ValidationRules;
     pub use crate::traits::{Validate, Validator};
+    // Derive macro (macro namespace) alongside the `Validate` trait (type namespace).
     pub use crate::validators::{
         InRange, IsAlpha, IsAlphanumeric, IsEmail, IsPositive, IsUrl, Matches, Max, MaxLength, Min,
         MinLength, NotEmpty,
     };
+    pub use armature_proc_macro::Validate;
 }
 
 #[cfg(test)]

@@ -180,14 +180,14 @@ impl BodyLimitConfig {
             return *limit;
         }
 
-        // Check for prefix matches
-        for (pattern, limit) in &self.route_limits {
-            if path.starts_with(pattern) {
-                return *limit;
-            }
-        }
-
-        self.default_limit
+        // Check for prefix matches, preferring the longest (most specific)
+        // pattern so overlapping patterns resolve deterministically.
+        self.route_limits
+            .iter()
+            .filter(|(pattern, _)| path.starts_with(pattern.as_str()))
+            .max_by_key(|(pattern, _)| pattern.len())
+            .map(|(_, limit)| *limit)
+            .unwrap_or(self.default_limit)
     }
 
     /// Formats the error message for a limit violation.
@@ -504,6 +504,23 @@ mod tests {
             config.get_limit_for_path("/api/upload/123"),
             100 * sizes::MB
         );
+    }
+
+    #[test]
+    fn test_body_limit_config_overlapping_prefixes() {
+        // The longest (most specific) matching prefix must win regardless
+        // of HashMap iteration order.
+        let config = BodyLimitConfig::new()
+            .default_limit_kb(64)
+            .route_limit_mb("/api", 1)
+            .route_limit_mb("/api/upload", 100);
+
+        assert_eq!(
+            config.get_limit_for_path("/api/upload/file"),
+            100 * sizes::MB
+        );
+        assert_eq!(config.get_limit_for_path("/api/other"), sizes::MB);
+        assert_eq!(config.get_limit_for_path("/health"), 64 * sizes::KB);
     }
 
     #[test]
