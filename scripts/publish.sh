@@ -518,7 +518,16 @@ cd "$PROJECT_ROOT"
 
 # Get all workspace members
 get_workspace_members() {
-    grep -E '^\s+"armature-' Cargo.toml | sed 's/.*"\(armature-[^"]*\)".*/\1/' | sort -u
+    local crate
+    while IFS= read -r crate; do
+        # Skip crates explicitly marked `publish = false` (e.g. internal-only
+        # test-harness crates never meant to reach crates.io) -- attempting
+        # to publish them always fails with a hard cargo error.
+        if [[ -f "$crate/Cargo.toml" ]] && grep -qE '^publish\s*=\s*false' "$crate/Cargo.toml"; then
+            continue
+        fi
+        echo "$crate"
+    done < <(grep -E '^\s+"armature-' Cargo.toml | sed 's/.*"\(armature-[^"]*\)".*/\1/' | sort -u)
 }
 
 # Get workspace dependencies for a crate
