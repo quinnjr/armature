@@ -32,9 +32,14 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             feature_flag: --all-features
+          # Kafka (rdkafka-sys, a C/C++ build via cmake) additionally needs
+          # a musl-targeted C++ cross-compiler that `musl-tools` doesn't
+          # provide -- drop `messaging-kafka`/`messaging-full` (which
+          # transitively enables kafka via armature-messaging's own `full`
+          # feature) on musl too.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
+            feature_flag: --features full,messaging-rabbitmq,messaging-nats,simd-json,memory-profiling
           - target: x86_64-apple-darwin
             os: macos-latest
             feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
