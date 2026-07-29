@@ -12,7 +12,7 @@ We release patches for security vulnerabilities. Currently supported versions:
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please use [GitHub Security Advisories](https://github.com/pegasusheavy/armature/security/advisories/new) to privately report a vulnerability.
+Instead, please use [GitHub Security Advisories](https://github.com/quinnjr/armature/security/advisories/new) to privately report a vulnerability.
 
 #### What to Include
 
@@ -162,9 +162,9 @@ We actively monitor our dependencies for security vulnerabilities using:
 
 For security-related questions or concerns, contact:
 
-- **Security Reports**: Via [GitHub Security Advisories](https://github.com/pegasusheavy/armature/security/advisories/new)
-- **General Questions**: Open a [GitHub Issue](https://github.com/pegasusheavy/armature/issues)
-- **Organization**: Pegasus Heavy Industries LLC
+- **Security Reports**: Via [GitHub Security Advisories](https://github.com/quinnjr/armature/security/advisories/new)
+- **General Questions**: Open a [GitHub Issue](https://github.com/quinnjr/armature/issues)
+- **Maintainer**: Joseph Quinn
 
 ### Attribution
 

@@ -2,7 +2,7 @@
   "name": "armature-web",
   "version": "0.1.0",
   "description": "Documentation website for Armature Framework",
-  "author": "Pegasus Heavy Industries LLC",
+  "author": "Joseph Quinn <quinn.josephr@proton.me>",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
