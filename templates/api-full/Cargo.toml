@@ -15,7 +15,7 @@ rust-version = "1.94.1"
 # *different*, unrelated crate is published under the bare name `armature` —
 # so the dependency needs an explicit `package = "armature-framework"` or
 # Cargo will resolve the wrong crate entirely.
-armature = { package = "armature-framework", version = "0.2", features = ["auth", "jwt", "validation"] }
+armature = { package = "armature-framework", version = "0.3", features = ["auth", "jwt", "validation"] }
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
 armature-core = "0.5"
 

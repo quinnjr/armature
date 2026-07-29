@@ -238,10 +238,9 @@ impl MqBridgeConfig {
             MqEndpointType::Http => {
                 panic!("HTTP support requires 'mq-bridge-http' feature")
             }
-            MqEndpointType::File => Endpoint::new(EndpointType::File(FileConfig {
-                path: self.topic.clone(),
-                ..Default::default()
-            })),
+            MqEndpointType::File => {
+                Endpoint::new(EndpointType::File(FileConfig::new(self.topic.clone())))
+            }
         }
     }
 }

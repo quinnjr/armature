@@ -22,16 +22,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # SAML (armature-auth's `saml` feature -> samael -> openssl-sys +
+          # system xmlsec1) has never been built/tested on anything but
+          # Linux glibc in this project (see the Linux-only `test-saml` job
+          # in ci.yml) -- cross-compiling xmlsec1/openssl for musl, or
+          # building them on Windows/macOS, is unproven and out of scope
+          # here. Only the gnu target builds with every feature (including
+          # saml); the rest build every feature EXCEPT saml.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            feature_flag: --all-features
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
           - target: x86_64-apple-darwin
             os: macos-latest
+            feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
           - target: aarch64-apple-darwin
             os: macos-latest
+            feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            feature_flag: --features full,messaging-kafka,messaging-rabbitmq,messaging-nats,messaging-full,simd-json,memory-profiling
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -43,8 +55,17 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # SAML (xmlsec1) and Kafka (rdkafka-sys, via libcurl) system deps --
+      # only needed on the gnu target, which is the only one building with
+      # --all-features (see matrix comment above).
+      - name: Install SAML/Kafka system dependencies (Linux gnu)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl libcurl4-openssl-dev pkg-config
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --all-features
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.feature_flag }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -71,7 +92,7 @@ jobs:
           path: artifacts/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: Release ${{ github.ref_name }}
           body: |
