@@ -86,7 +86,7 @@ homepage = "https://quinnjr.github.io/armature"
 
 [package]
 name = "armature-framework"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94.1"
 autobenches = false  # Disable auto-discovery, use explicit [[bench]] only
