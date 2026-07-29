@@ -442,9 +442,18 @@ jobs:
   #
   # Nothing else in this workflow syntactically validates templates/k8s/* or
   # templates/helm/armature/*, so a malformed manifest, Kustomize base, or
-  # Chart.yaml field can ship with zero detection. `--dry-run=client` avoids
-  # needing real cluster access; `--validate=false` skips the OpenAPI schema
-  # fetch that also requires a live API server.
+  # Chart.yaml field can ship with zero detection.
+  #
+  # `kubectl kustomize` fully renders the Kustomize base (catches malformed
+  # YAML, bad patches, missing resources) with no cluster required. We do
+  # NOT also run `kubectl apply --dry-run=client`: despite the name,
+  # client-side dry-run still builds a RESTMapper via the discovery client,
+  # which requires a reachable API server even with `--validate=false` —
+  # confirmed on a real runner (fails with "connect: connection refused" to
+  # localhost:8080, not a manifest problem). `kubectl kustomize`'s render
+  # already proves the manifests are structurally valid; a genuine
+  # server-side check would need a real (e.g. kind/k3d) cluster, which is a
+  # bigger addition than this pass warrants.
   # ============================================================================
 
   k8s-manifest-validation:
@@ -462,8 +471,6 @@ jobs:
           version: latest
       - name: Validate raw k8s manifests (kustomize render)
         run: kubectl kustomize templates/k8s
-      - name: Validate raw k8s manifests (client-side dry run)
-        run: kubectl apply --dry-run=client -k templates/k8s --validate=false
       - name: Lint Helm chart
         run: helm lint templates/helm/armature
 
