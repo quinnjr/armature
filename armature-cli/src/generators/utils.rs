@@ -57,7 +57,13 @@ pub fn get_src_dir() -> CliResult<PathBuf> {
 /// Ensure a directory exists, creating it if necessary.
 pub fn ensure_dir(path: &Path) -> CliResult<()> {
     if !path.exists() {
-        std::fs::create_dir_all(path)?;
+        std::fs::create_dir_all(path).map_err(|e| {
+            CliError::Command(format!(
+                "failed to create directory {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
     }
     Ok(())
 }
@@ -73,7 +79,8 @@ pub fn write_file(path: &Path, content: &str, overwrite: bool) -> CliResult<()> 
         ensure_dir(parent)?;
     }
 
-    std::fs::write(path, content)?;
+    std::fs::write(path, content)
+        .map_err(|e| CliError::Command(format!("failed to write {}: {}", path.display(), e)))?;
     Ok(())
 }
 
@@ -83,13 +90,19 @@ pub fn update_mod_file(dir: &Path, module_name: &str) -> CliResult<()> {
     let mod_line = format!("pub mod {};\n", module_name);
 
     if mod_file.exists() {
-        let content = std::fs::read_to_string(&mod_file)?;
+        let content = std::fs::read_to_string(&mod_file).map_err(|e| {
+            CliError::Command(format!("failed to read {}: {}", mod_file.display(), e))
+        })?;
         if !content.contains(&format!("mod {};", module_name)) {
             let new_content = format!("{}{}", content, mod_line);
-            std::fs::write(&mod_file, new_content)?;
+            std::fs::write(&mod_file, new_content).map_err(|e| {
+                CliError::Command(format!("failed to write {}: {}", mod_file.display(), e))
+            })?;
         }
     } else {
-        std::fs::write(&mod_file, mod_line)?;
+        std::fs::write(&mod_file, mod_line).map_err(|e| {
+            CliError::Command(format!("failed to write {}: {}", mod_file.display(), e))
+        })?;
     }
 
     Ok(())

@@ -223,15 +223,21 @@ fn build_dependencies(template: &str, opts: &NewProjectOptions) -> (String, Stri
     // (see `[package] version` for `armature-framework` in the workspace
     // root Cargo.toml, currently 0.2.x) and with `repl_init_script()` in
     // `commands/repl.rs`, which pins the same `"0.2"` for `:dep armature`.
+    //
+    // NOTE: the crate name `armature` on crates.io is squatted by an
+    // unrelated actor-framework crate. This project's crate is published as
+    // `armature-framework`, so every generated dependency line must use
+    // `package = "armature-framework"` to rename it back to `armature` for
+    // `use armature::...` to keep working.
     let armature_dep = if armature_features.is_empty() {
-        "armature = \"0.2\"".to_string()
+        "armature = { version = \"0.2\", package = \"armature-framework\" }".to_string()
     } else {
         let quoted: Vec<String> = armature_features
             .iter()
             .map(|f| format!("\"{}\"", f))
             .collect();
         format!(
-            "armature = {{ version = \"0.2\", features = [{}] }}",
+            "armature = {{ version = \"0.2\", package = \"armature-framework\", features = [{}] }}",
             quoted.join(", ")
         )
     };
@@ -467,8 +473,13 @@ fn create_project_structure(
         }
     }
 
-    // Dockerfile: template default OR forced by --docker. Rendered once, from the
-    // handlebars template (uses the project's binary name).
+    // Dockerfile: template default OR forced by --docker.
+    //
+    // `lambda` and `cloudrun` get the real, deployment-correct Dockerfiles
+    // hand-crafted (and `docker build`-verified) in `templates/lambda/` and
+    // `templates/cloudrun/` — a Lambda Runtime Interface Client image and a
+    // distroless Cloud Run image, respectively — instead of the generic
+    // handlebars `dockerfile` template, which is neither.
     if template_wants_docker || opts.docker {
         let dockerfile_path = project_dir.join("Dockerfile");
         if !dockerfile_path.exists() {
@@ -478,15 +489,65 @@ fn create_project_structure(
                 names.snake.clone(),
                 names.kebab.clone(),
             );
-            let dockerfile = templates
-                .render("dockerfile", &devops)
-                .map_err(CliError::Template)?;
+            let dockerfile = match template {
+                // `dockerfile_lambda` is registered as a handlebars template
+                // purely for consistency with the template-registry pattern;
+                // the embedded Lambda Dockerfile is static (no `{{...}}`
+                // tokens) since `cargo-lambda` locates the built binary
+                // itself via a glob, so `&devops` is unused/ignored here.
+                "lambda" => templates
+                    .render("dockerfile_lambda", &devops)
+                    .map_err(CliError::Template)?,
+                "cloudrun" => {
+                    // Likewise registered as a handlebars template for
+                    // consistency, but the embedded Cloud Run Dockerfile is
+                    // static too — `&devops` is unused/ignored; the only
+                    // per-project substitution needed is the manual
+                    // `ARG BIN_NAME` patch below.
+                    let rendered = templates
+                        .render("dockerfile_cloudrun", &devops)
+                        .map_err(CliError::Template)?;
+                    // The embedded Dockerfile's `ARG BIN_NAME=app` default is
+                    // a generic placeholder. Cargo's default binary name is
+                    // the package name (`names.kebab`, per the generated
+                    // Cargo.toml's `[package] name`), so substitute it in
+                    // here — the same way `LAMBDA_SAM_CONTENT` /
+                    // `CLOUDRUN_SERVICE_CONTENT` below interpolate the
+                    // project name — so `docker build` with no extra flags
+                    // produces a working image out of the box.
+                    //
+                    // `str::replace` never errors and never signals when the
+                    // pattern wasn't found, so if the embedded Dockerfile is
+                    // ever reformatted this would silently become a no-op
+                    // and ship a broken Dockerfile with no indication
+                    // anything went wrong. Guard against that explicitly.
+                    if !rendered.contains("ARG BIN_NAME=app") {
+                        return Err(CliError::Template(
+                            "expected to find 'ARG BIN_NAME=app' in the cloudrun \
+                             Dockerfile template to substitute the project's binary \
+                             name, but it was not found — the embedded template may \
+                             have changed"
+                                .to_string(),
+                        ));
+                    }
+                    rendered.replace("ARG BIN_NAME=app", &format!("ARG BIN_NAME={}", names.kebab))
+                }
+                _ => templates
+                    .render("dockerfile", &devops)
+                    .map_err(CliError::Template)?,
+            };
             write_file(&dockerfile_path, &dockerfile, false)?;
             write_file(
                 &project_dir.join(".dockerignore"),
                 DOCKERIGNORE_CONTENT,
                 false,
             )?;
+        } else {
+            println!(
+                "  {} Skipping Dockerfile generation: {} already exists",
+                "→".cyan(),
+                dockerfile_path.display()
+            );
         }
     }
 
@@ -554,13 +615,14 @@ use armature::prelude::*;
 #[derive(Default)]
 pub struct HealthController;
 
+#[routes]
 impl HealthController {
     /// Liveness probe - is the service running?
     #[get("/")]
     pub async fn health(&self, _req: HttpRequest) -> Result<HttpResponse, Error> {
         HttpResponse::ok().with_json(&serde_json::json!({
             "status": "ok",
-            "timestamp": chrono::Utc::now().to_rfc3339()
+            "timestamp": unix_timestamp()
         }))
     }
 
@@ -576,6 +638,18 @@ impl HealthController {
             }
         }))
     }
+}
+
+/// Seconds since the Unix epoch, for the health check timestamp.
+///
+/// Uses `std::time` rather than `chrono` so this file doesn't pull in an
+/// extra dependency just for a health check.
+fn unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 "#;
 
@@ -946,7 +1020,10 @@ mod tests {
     fn build_dependencies_plain_when_no_features() {
         let opts = NewProjectOptions::default();
         let (armature_dep, extra) = build_dependencies("minimal", &opts);
-        assert_eq!(armature_dep, "armature = \"0.2\"");
+        assert_eq!(
+            armature_dep,
+            "armature = { version = \"0.2\", package = \"armature-framework\" }"
+        );
         assert!(extra.is_empty());
     }
 
@@ -958,7 +1035,10 @@ mod tests {
         };
         let (armature_dep, extra) = build_dependencies("minimal", &opts);
         // storage/mail are separate crates, not armature feature flags.
-        assert_eq!(armature_dep, "armature = \"0.2\"");
+        assert_eq!(
+            armature_dep,
+            "armature = { version = \"0.2\", package = \"armature-framework\" }"
+        );
         assert!(extra.contains("armature-storage"));
         assert!(extra.contains("armature-mail"));
     }

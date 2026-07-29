@@ -4,7 +4,7 @@ use armature_core::{Error, HttpRequest, HttpResponse, Middleware, Next};
 use async_trait::async_trait;
 use opentelemetry::{
     Context as OtelContext, KeyValue, global,
-    trace::{SpanKind, TraceContextExt, Tracer},
+    trace::{FutureExt, SpanKind, TraceContextExt, Tracer},
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -124,8 +124,14 @@ impl Middleware for TelemetryMiddleware {
 
         let cx = OtelContext::current_with_span(span);
 
-        // Execute request with tracing context
-        let response_result = next(req).await;
+        // Execute request with the request's tracing context attached as the
+        // ACTIVE context. Without this, `next(req)` runs under whatever
+        // context (if any) happened to be active on the polling task, so any
+        // span application code starts during request handling — or an
+        // outbound HTTP client injecting a `traceparent` for downstream
+        // propagation — would not nest under this request's span; it would
+        // start a new, disconnected trace instead.
+        let response_result = next(req).with_context(cx.clone()).await;
 
         // Add response attributes to span
         match &response_result {
@@ -358,6 +364,89 @@ mod tests {
         );
         assert_ne!(attrs.get("http.method").map(String::as_str), Some("method"));
         assert_ne!(attrs.get("http.route").map(String::as_str), Some("path"));
+    }
+
+    /// Regression: `next(req)` used to run without the request's OpenTelemetry
+    /// context attached as the ACTIVE context. As a result, any span started
+    /// by application code while handling the request (a DB call, an outbound
+    /// HTTP client injecting a `traceparent`, etc.) would not nest under the
+    /// request's root span — it would start a brand new, disconnected trace.
+    ///
+    /// This drives a real request through `handle()` with a real (in-memory)
+    /// `SdkTracerProvider` installed as the global provider, has the `Next`
+    /// closure simulate application code calling `global::tracer(...).start()`
+    /// mid-request (exactly as real handler code would), and asserts the
+    /// resulting child span's parent is the request's root span — both by
+    /// `parent_span_id` and by shared `trace_id`.
+    ///
+    /// `#[serial]`: mutates the process-global tracer provider; see the
+    /// matching note on `tracing_setup::tests::init_tracing_installs_w3c_propagator_that_parses_traceparent`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial_test::serial]
+    async fn handle_attaches_context_so_application_spans_nest_under_request_span() {
+        use opentelemetry::trace::Span as _;
+        use opentelemetry::trace::Tracer as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        global::set_tracer_provider(provider.clone());
+
+        // Constructed *after* the provider above is installed globally, so its
+        // cached tracer (see the doc comment on the `tracer` field) resolves
+        // to this test's in-memory provider.
+        let middleware = TelemetryMiddleware::new("test-service");
+
+        let req = HttpRequest::new("GET".to_string(), "/orders".to_string());
+        let next: Next = Box::new(|_req| {
+            Box::pin(async {
+                // Simulates application handler code — it has no access to
+                // the middleware's internal tracer, so like real code it goes
+                // through the global tracer, exactly like an outbound HTTP
+                // client would when injecting a `traceparent` for downstream
+                // propagation.
+                let tracer = global::tracer("app-code");
+                let mut child = tracer.start("db.query");
+                child.end();
+                Ok(HttpResponse::new(200))
+            })
+        });
+
+        let res = middleware.handle(req, next).await.unwrap();
+        assert_eq!(res.status, 200);
+
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+
+        let root = spans
+            .iter()
+            .find(|s| s.name == "GET /orders")
+            .expect("request root span must be exported");
+        let child = spans
+            .iter()
+            .find(|s| s.name == "db.query")
+            .expect("application-code span created inside next() must be exported");
+
+        assert!(
+            root.span_context.is_valid(),
+            "request root span must have a valid span context"
+        );
+        assert_eq!(
+            child.parent_span_id,
+            root.span_context.span_id(),
+            "application span created inside next() must be a direct child of the \
+             request's root span — it is not attached to the request context"
+        );
+        assert_eq!(
+            child.span_context.trace_id(),
+            root.span_context.trace_id(),
+            "application span created inside next() must share the request's trace id, \
+             not start a new, disconnected trace"
+        );
+
+        provider.shutdown().ok();
     }
 
     #[test]

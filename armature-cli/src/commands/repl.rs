@@ -101,9 +101,16 @@ fn is_evcxr_installed() -> bool {
 fn repl_init_script() -> String {
     let mut script = String::new();
     // Add the armature dependency and pull in the prelude. Kept in sync with
-    // the `armature = "0.2"` pin used for generated projects in
-    // `commands/new.rs::build_dependencies` / `templates.rs::ProjectData::new`.
-    script.push_str(":dep armature = \"0.2\"\n");
+    // the `armature = { version = "0.2", package = "armature-framework" }`
+    // pin used for generated projects in `commands/new.rs::build_dependencies`
+    // / `templates.rs::ProjectData::new`.
+    //
+    // NOTE: the crate name `armature` on crates.io is squatted by an
+    // unrelated actor-framework crate; this project's crate is published as
+    // `armature-framework`, so `package = "armature-framework"` is required
+    // to rename it back to `armature` for `use armature::prelude::*` below to
+    // resolve.
+    script.push_str(":dep armature = { version = \"0.2\", package = \"armature-framework\" }\n");
     script.push_str("use armature::prelude::*;\n");
     script
 }

@@ -4,18 +4,18 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ .Values.name | default "armature-api" }}
-  namespace: {{ .Values.namespace | default "armature" }}
+  name: armature-api
+  namespace: armature
   labels:
-    app.kubernetes.io/name: {{ .Values.name | default "armature-api" }}
+    app.kubernetes.io/name: armature-api
     app.kubernetes.io/managed-by: armature-cli
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ .Values.name | default "armature-api" }}
-  minReplicas: {{ .Values.autoscaling.minReplicas | default 2 }}
-  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 10 }}
+    name: armature-api
+  minReplicas: 2
+  maxReplicas: 10
   metrics:
     # CPU-based scaling
     - type: Resource
@@ -23,14 +23,14 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetCPU | default 70 }}
+          averageUtilization: 70
     # Memory-based scaling
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetMemory | default 80 }}
+          averageUtilization: 80
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300

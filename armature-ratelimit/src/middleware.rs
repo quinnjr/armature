@@ -8,6 +8,7 @@ use crate::error::RateLimitHeaders;
 use crate::extractor::{KeyExtractor, RequestInfo};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace, warn};
 
 /// Rate limiting middleware for Armature applications
@@ -29,6 +30,16 @@ pub struct RateLimitMiddleware {
     /// client IP is read from `X-Forwarded-For`; `0` (default) trusts no proxy
     /// and ignores the header. Mirrors `RateLimitConfig::trusted_proxy_depth`.
     trusted_proxy_depth: usize,
+    /// Count of store errors that were let through because `skip_on_error` is
+    /// `true`, observed by this middleware instance. Incremented every time
+    /// [`RateLimiter::check`] returns `Err` and the fail-open path is taken.
+    /// This is the minimum observable signal for the default fail-open
+    /// posture: with zero counters or logs, a backend outage silently
+    /// disables rate limiting (an abuse/brute-force control on endpoints like
+    /// login, password reset, or OTP) with nothing to detect it happened. See
+    /// [`Self::skip_on_error_count`]. Mirrors
+    /// `AuditMiddleware::write_failures` (armature-audit).
+    skip_on_error_count: AtomicU64,
 }
 
 /// Select the client IP from an `X-Forwarded-For` value using the number of
@@ -79,6 +90,7 @@ impl RateLimitMiddleware {
                 .unwrap_or_else(|| "Rate limit exceeded".to_string()),
             bypass_keys: config.bypass_keys,
             trusted_proxy_depth: config.trusted_proxy_depth,
+            skip_on_error_count: AtomicU64::new(0),
         }
     }
 
@@ -174,7 +186,17 @@ impl RateLimitMiddleware {
                 warn!(error = %e, "Rate limit check failed");
                 if self.skip_on_error {
                     // Fail open: the store is unavailable but the deployment has
-                    // opted to let traffic through rather than reject it.
+                    // opted to let traffic through rather than reject it. This is
+                    // silent to a caller that isn't watching logs/metrics, so
+                    // record it and warn loudly: rate limiting is commonly relied
+                    // on as an abuse/brute-force control (login, password reset,
+                    // OTP endpoints), and a backend outage bypasses it for
+                    // everyone on the default `skip_on_error: true`.
+                    self.skip_on_error_count.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        error = %e,
+                        "rate limiter backend error, skip_on_error is enabled — request was allowed through unchecked"
+                    );
                     RateLimitCheckResponse::Allowed { headers: None }
                 } else {
                     // Fail closed: `skip_on_error(false)` means a store error
@@ -226,6 +248,20 @@ impl RateLimitMiddleware {
     /// Get the underlying rate limiter
     pub fn limiter(&self) -> &RateLimiter {
         &self.limiter
+    }
+
+    /// Number of store errors observed by this middleware instance that were
+    /// let through because `skip_on_error` is `true`.
+    ///
+    /// Incremented every time a backend/store error occurs and the fail-open
+    /// path is taken, independent of whether headers or logging are enabled.
+    /// Wire this into whatever metrics system the application uses (e.g.
+    /// export it as a `ratelimit_skip_on_error_total` counter) to get an
+    /// observable signal that rate limiting was bypassed due to a backend
+    /// outage, even under the default fail-open configuration. See
+    /// [`crate::config::RateLimitConfig::skip_on_error`].
+    pub fn skip_on_error_count(&self) -> u64 {
+        self.skip_on_error_count.load(Ordering::Relaxed)
     }
 }
 
@@ -756,6 +792,42 @@ mod tests {
             response.is_allowed(),
             "skip_on_error(true) must allow on store error"
         );
+    }
+
+    /// Observability: every fail-open bypass caused by a backend error must be
+    /// counted via `skip_on_error_count`, so an operator can detect that rate
+    /// limiting was silently disabled during a backend outage.
+    #[tokio::test]
+    async fn test_skip_on_error_count_increments_on_backend_error() {
+        use crate::config::RateLimitConfig;
+
+        let config = RateLimitConfig {
+            skip_on_error: true,
+            ..Default::default()
+        };
+        let limiter = Arc::new(RateLimiter::new(
+            Arc::new(ErrorStore),
+            config.algorithm.clone(),
+            config,
+        ));
+        let middleware = RateLimitMiddleware::new(limiter);
+
+        let info =
+            RequestInfo::new("/api/test", "GET").with_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+        assert_eq!(middleware.skip_on_error_count(), 0);
+
+        let response = middleware.check(&info).await;
+        assert!(response.is_allowed());
+        assert_eq!(
+            middleware.skip_on_error_count(),
+            1,
+            "a fail-open bypass must be counted"
+        );
+
+        // A second backend error increments the counter again.
+        middleware.check(&info).await;
+        assert_eq!(middleware.skip_on_error_count(), 2);
     }
 
     #[test]

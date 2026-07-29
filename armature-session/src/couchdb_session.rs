@@ -6,7 +6,7 @@ use crate::config::SessionConfig;
 use crate::error::{SessionError, SessionResult};
 use crate::traits::{Session, SessionStore, generate_session_id};
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -144,8 +144,47 @@ impl CouchDbSessionStore {
     }
 
     /// Get the document ID for a session.
-    fn doc_id(&self, session_id: &str) -> String {
-        format!("{}:{}", self.config.namespace, session_id)
+    ///
+    /// `session_id` is treated by the [`SessionStore`] contract as an opaque
+    /// identifier that addresses exactly one session's own document, so it
+    /// is validated here — the single place all CRUD paths funnel through —
+    /// before it is ever used to build a document ID or request URL. Only
+    /// well-formed UUIDs (the format produced by [`generate_session_id`])
+    /// are accepted; anything else (e.g. a `session_id` containing `/`,
+    /// `?`, or a CouchDB-reserved segment like `_design`) is rejected
+    /// instead of being silently folded into a URL, where it could address
+    /// a different document, attachment, or view within the database.
+    fn doc_id(&self, session_id: &str) -> SessionResult<String> {
+        if uuid::Uuid::parse_str(session_id).is_err() {
+            return Err(SessionError::InvalidSessionId(format!(
+                "session_id must be a valid UUID, got: {session_id:?}"
+            )));
+        }
+
+        Ok(format!("{}:{}", self.config.namespace, session_id))
+    }
+
+    /// Build the request URL for an already-validated document ID.
+    ///
+    /// The document ID is percent-encoded as a single path segment
+    /// (defense-in-depth on top of the validation in [`Self::doc_id`]) so
+    /// it can never be interpreted as additional path segments by CouchDB
+    /// or the HTTP client.
+    fn doc_url_from_id(&self, doc_id: &str) -> SessionResult<String> {
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|e| SessionError::InvalidUrl(e.to_string()))?;
+
+        url.path_segments_mut()
+            .map_err(|_| SessionError::InvalidUrl("CouchDB base URL cannot be a base".to_string()))?
+            .push(doc_id);
+
+        Ok(url.to_string())
+    }
+
+    /// Validate `session_id` and build the request URL for its document.
+    fn doc_url(&self, session_id: &str) -> SessionResult<String> {
+        let doc_id = self.doc_id(session_id)?;
+        self.doc_url_from_id(&doc_id)
     }
 
     /// Build an authenticated request.
@@ -182,8 +221,7 @@ impl SessionStore for CouchDbSessionStore {
     }
 
     async fn get(&self, session_id: &str) -> SessionResult<Option<Session>> {
-        let doc_id = self.doc_id(session_id);
-        let url = format!("{}/{}", self.base_url, doc_id);
+        let url = self.doc_url(session_id)?;
 
         let response = self
             .request(reqwest::Method::GET, &url)
@@ -217,8 +255,8 @@ impl SessionStore for CouchDbSessionStore {
     }
 
     async fn save(&self, session: &Session) -> SessionResult<()> {
-        let doc_id = self.doc_id(&session.id);
-        let url = format!("{}/{}", self.base_url, doc_id);
+        let doc_id = self.doc_id(&session.id)?;
+        let url = self.doc_url_from_id(&doc_id)?;
 
         // Try to get current revision if document exists
         let rev = {
@@ -264,8 +302,7 @@ impl SessionStore for CouchDbSessionStore {
     }
 
     async fn delete(&self, session_id: &str) -> SessionResult<()> {
-        let doc_id = self.doc_id(session_id);
-        let url = format!("{}/{}", self.base_url, doc_id);
+        let url = self.doc_url(session_id)?;
 
         // Get current revision
         let response = self
@@ -489,11 +526,115 @@ mod tests {
     #[test]
     fn test_doc_id_generation() {
         let config = SessionConfig::couchdb("http://localhost:5984", "sessions").unwrap();
-        let store_result = tokio_test::block_on(async {
-            // Can't test without actual CouchDB, just test config
-            config.session_key("test-id")
-        });
-        assert!(store_result.starts_with("session:"));
+        // Can't test against actual CouchDB here, just the config helper.
+        assert!(config.session_key("test-id").starts_with("session:"));
+    }
+
+    /// Build a store without hitting the network (bypasses `new()`'s
+    /// connectivity check, which requires a live CouchDB instance).
+    fn make_store() -> CouchDbSessionStore {
+        CouchDbSessionStore {
+            client: Client::builder().build().expect("client builds without network access"),
+            config: SessionConfig::couchdb("http://localhost:5984", "sessions")
+                .expect("valid couchdb config"),
+            base_url: "http://localhost:5984/sessions".to_string(),
+        }
+    }
+
+    /// `session_id` values that must never reach URL construction: path
+    /// traversal / extra segments, a query-string injection, and CouchDB's
+    /// reserved `_design` (and `_local`) segment prefixes.
+    fn malicious_session_ids() -> Vec<&'static str> {
+        vec![
+            "foo/bar",
+            "../_all_dbs",
+            "foo?rev=1-abc",
+            "_design/sessions",
+            "_local/foo",
+            "not-a-uuid",
+            "",
+        ]
+    }
+
+    #[tokio::test]
+    async fn get_rejects_malformed_session_id() {
+        let store = make_store();
+        for bad_id in malicious_session_ids() {
+            let err = store
+                .get(bad_id)
+                .await
+                .expect_err(&format!("expected rejection for session_id {bad_id:?}"));
+            assert!(
+                matches!(err, SessionError::InvalidSessionId(_)),
+                "expected InvalidSessionId for {bad_id:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_malformed_session_id() {
+        let store = make_store();
+        for bad_id in malicious_session_ids() {
+            let session = Session::new(bad_id, Duration::from_secs(60));
+            let err = store
+                .save(&session)
+                .await
+                .expect_err(&format!("expected rejection for session_id {bad_id:?}"));
+            assert!(
+                matches!(err, SessionError::InvalidSessionId(_)),
+                "expected InvalidSessionId for {bad_id:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_malformed_session_id() {
+        let store = make_store();
+        for bad_id in malicious_session_ids() {
+            let err = store
+                .delete(bad_id)
+                .await
+                .expect_err(&format!("expected rejection for session_id {bad_id:?}"));
+            assert!(
+                matches!(err, SessionError::InvalidSessionId(_)),
+                "expected InvalidSessionId for {bad_id:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extend_rejects_malformed_session_id() {
+        let store = make_store();
+        for bad_id in malicious_session_ids() {
+            let err = store
+                .extend(bad_id, Duration::from_secs(60))
+                .await
+                .expect_err(&format!("expected rejection for session_id {bad_id:?}"));
+            assert!(
+                matches!(err, SessionError::InvalidSessionId(_)),
+                "expected InvalidSessionId for {bad_id:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn doc_id_accepts_well_formed_uuid() {
+        let store = make_store();
+        let session_id = generate_session_id();
+        let doc_id = store.doc_id(&session_id).expect("well-formed UUID accepted");
+        assert_eq!(doc_id, format!("session:{session_id}"));
+    }
+
+    #[test]
+    fn doc_url_percent_encodes_the_document_id() {
+        let store = make_store();
+        // Even a doc_id that (by construction) can't smuggle a `/` gets
+        // percent-encoded defense-in-depth; verify the URL still resolves
+        // to a single extra path segment under the base URL.
+        let url = store
+            .doc_url_from_id("session:not/real")
+            .expect("url builds");
+        assert_eq!(url, "http://localhost:5984/sessions/session:not%2Freal");
     }
 }
 

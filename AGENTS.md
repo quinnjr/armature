@@ -50,7 +50,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-log/            # Structured logging
 ├── armature-auth/           # JWT, OAuth2, SAML, RBAC, guards
 ├── armature-jwt/            # JWT token management (HS256/RS256/ES256)
-├── armature-security/       # CORS, CSP, HSTS, CSRF
+├── armature-security/       # CORS, CSP, HSTS
 ├── armature-config/         # Type-safe config (env, .env, JSON, TOML)
 ├── armature-cache/          # Redis/Memcached/in-memory caching
 ├── armature-redis/          # Centralized Redis client
@@ -60,7 +60,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-cqrs/           # Command/Query Responsibility Segregation
 ├── armature-graphql/        # GraphQL server (schema-first and code-first)
 ├── armature-openapi/        # OpenAPI/Swagger generation
-├── armature-opentelemetry/  # Distributed tracing (Jaeger, Zipkin, Prometheus)
+├── armature-opentelemetry/  # Distributed tracing (OTLP, Zipkin), metrics
 ├── armature-websocket/      # WebSocket with rooms and broadcasting
 ├── armature-messaging/      # RabbitMQ, Kafka, NATS
 ├── armature-aws/            # AWS SDK (S3, DynamoDB, SQS, SNS, Lambda, etc.)
@@ -107,7 +107,7 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-macros-utils/   # Macro utilities
 ├── docs/                    # 70+ guides
 ├── examples/                # 60+ working examples
-├── benches/                 # Benchmarks (micro, comparison, profiling)
+├── benches/                 # Benchmarks (micro, internal-overhead, cross-framework comparison via comparison_servers/)
 ├── tests/                   # Integration tests
 └── templates/               # Project scaffolding templates (excluded from workspace)
 ```
@@ -152,7 +152,7 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 
 - Target: Actix-competitive performance (currently 242k req/sec plaintext)
 - JSON serialization is a known optimization area
-- Benchmark suite in `benches/` covers micro, comparison, and profiling scenarios
+- Benchmark suite in `benches/` covers micro and internal-overhead scenarios (plus real cross-framework HTTP comparison via `benches/comparison_servers/` + the `http-benchmark` runner). Profiling (flamegraphs, DHAT/pprof) is not in `benches/` — it lives in `examples/profiling_server.rs`, `examples/memory_profile_server.rs`, and `scripts/memory-profile.sh`
 - Do not regress performance without justification — run `cargo bench` before and after changes
 
 ## When Making Changes

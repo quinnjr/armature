@@ -158,7 +158,13 @@ mod tests {
     /// Regression: before this fix the global propagator was left at the SDK
     /// default no-op, so an inbound W3C `traceparent` was never parsed into a
     /// remote parent context. `init_tracing` must install a real propagator.
+    ///
+    /// `#[serial]`: this test calls `global::set_tracer_provider`, which is
+    /// process-global state also mutated by
+    /// `middleware::tests::handle_attaches_context_so_application_spans_nest_under_request_span`;
+    /// run those tests one at a time so neither observes the other's provider.
     #[tokio::test]
+    #[serial_test::serial]
     async fn init_tracing_installs_w3c_propagator_that_parses_traceparent() {
         let mut config = TelemetryConfig::new("propagation-test");
         config.tracing.exporter = TracingExporter::None;

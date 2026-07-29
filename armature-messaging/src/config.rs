@@ -368,7 +368,29 @@ pub struct NatsConfig {
     /// Reconnection wait time
     #[serde(default = "default_reconnect_wait")]
     pub reconnect_wait: Duration,
-    /// Use JetStream
+    /// Enable JetStream persistence.
+    ///
+    /// When set, [`NatsBroker::publish`]/`publish_with_options` route
+    /// through the JetStream context instead of core NATS, giving published
+    /// messages stream persistence and a server ack (honored via
+    /// [`PublishOptions::confirm`]/`timeout`, mirroring the core-NATS
+    /// behavior).
+    ///
+    /// [`NatsBroker::subscribe`]/`subscribe_with_options` do **not**
+    /// currently route through JetStream even when this is enabled:
+    /// consuming from a stream requires provisioning decisions (stream
+    /// name, durable vs. ephemeral consumer, ack policy) that don't yet
+    /// have a place in this config or in [`SubscribeOptions`], so
+    /// subscriptions still use core NATS pub/sub with no persistence or
+    /// redelivery guarantees. Use [`NatsBroker::jetstream`] to drive the
+    /// `async-nats` JetStream consumer APIs directly if you need
+    /// JetStream-backed consumption today.
+    ///
+    /// [`NatsBroker::publish`]: crate::nats::NatsBroker::publish
+    /// [`NatsBroker::subscribe`]: crate::nats::NatsBroker::subscribe
+    /// [`NatsBroker::jetstream`]: crate::nats::NatsBroker::jetstream
+    /// [`PublishOptions::confirm`]: crate::PublishOptions::confirm
+    /// [`SubscribeOptions`]: crate::SubscribeOptions
     #[serde(default)]
     pub jetstream: bool,
     /// NATS credentials file path (secret: redacted from `Debug`, not serialized)
@@ -438,7 +460,9 @@ impl NatsConfig {
         self
     }
 
-    /// Enable JetStream
+    /// Enable JetStream persistence for publishing (see the `jetstream`
+    /// field doc for exactly what this does and does not affect - notably,
+    /// subscriptions do not yet route through JetStream).
     pub fn with_jetstream(mut self) -> Self {
         self.jetstream = true;
         self

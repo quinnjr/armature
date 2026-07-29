@@ -3,7 +3,7 @@
 //! This module provides high-performance static file serving with:
 //! - Configurable cache strategies
 //! - ETag support for conditional requests
-//! - Compression support (gzip, brotli)
+//! - Compression support (gzip, brotli, zstd)
 //! - Content-Type detection
 //! - Security (path traversal prevention)
 //! - File type-based cache policies
@@ -82,12 +82,16 @@ impl CacheStrategy {
 
 /// Compression algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CompressionAlgorithm {
     /// Gzip compression
     Gzip,
 
     /// Brotli compression (higher compression ratio than gzip)
     Brotli,
+
+    /// Zstandard compression (fast, with a ratio competitive with Brotli)
+    Zstd,
 }
 
 impl CompressionAlgorithm {
@@ -96,6 +100,7 @@ impl CompressionAlgorithm {
         match self {
             CompressionAlgorithm::Gzip => "gzip",
             CompressionAlgorithm::Brotli => "br",
+            CompressionAlgorithm::Zstd => "zstd",
         }
     }
 
@@ -104,6 +109,7 @@ impl CompressionAlgorithm {
         match self {
             CompressionAlgorithm::Gzip => ".gz",
             CompressionAlgorithm::Brotli => ".br",
+            CompressionAlgorithm::Zstd => ".zst",
         }
     }
 }
@@ -142,6 +148,18 @@ impl CompressionLevel {
             CompressionLevel::Default => 6,
             CompressionLevel::Best => 11,
             CompressionLevel::Custom(level) => (*level).min(11),
+        }
+    }
+
+    /// Get zstd compression level (1-22; 20+ requires substantially more
+    /// memory and time, so `Best` stops at 19 rather than the theoretical
+    /// max of 22).
+    pub fn zstd_level(&self) -> i32 {
+        match self {
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Default => 3,
+            CompressionLevel::Best => 19,
+            CompressionLevel::Custom(level) => (*level).min(22) as i32,
         }
     }
 }
@@ -817,14 +835,20 @@ impl StaticAssetServer {
         // Check if client supports our compression algorithms
         let supports_brotli = encodings.contains(&"br");
         let supports_gzip = encodings.contains(&"gzip");
+        let supports_zstd = encodings.contains(&"zstd");
 
-        // Select based on preference and support
+        // Select based on preference and support. When Brotli is preferred
+        // and supported it wins outright; otherwise the priority is
+        // gzip > zstd > brotli, with zstd filling the gap for clients that
+        // advertise it without also advertising gzip or brotli.
         if self.config.compression.prefer_brotli && supports_brotli {
             Some(CompressionAlgorithm::Brotli)
         } else if supports_gzip {
             Some(CompressionAlgorithm::Gzip)
         } else if supports_brotli {
             Some(CompressionAlgorithm::Brotli)
+        } else if supports_zstd {
+            Some(CompressionAlgorithm::Zstd)
         } else {
             None
         }
@@ -882,6 +906,11 @@ impl StaticAssetServer {
                     .map_err(|e| Error::Internal(format!("Brotli compression failed: {}", e)))?;
 
                 Ok(output)
+            }
+            CompressionAlgorithm::Zstd => {
+                let level = self.config.compression.level.zstd_level();
+                zstd::encode_all(std::io::Cursor::new(content), level)
+                    .map_err(|e| Error::Internal(format!("Zstd compression failed: {}", e)))
             }
         }
     }
@@ -1049,8 +1078,10 @@ mod tests {
     fn test_compression_algorithm() {
         assert_eq!(CompressionAlgorithm::Gzip.to_header_value(), "gzip");
         assert_eq!(CompressionAlgorithm::Brotli.to_header_value(), "br");
+        assert_eq!(CompressionAlgorithm::Zstd.to_header_value(), "zstd");
         assert_eq!(CompressionAlgorithm::Gzip.file_extension(), ".gz");
         assert_eq!(CompressionAlgorithm::Brotli.file_extension(), ".br");
+        assert_eq!(CompressionAlgorithm::Zstd.file_extension(), ".zst");
     }
 
     #[test]
@@ -1060,6 +1091,12 @@ mod tests {
         assert_eq!(CompressionLevel::Best.brotli_level(), 11);
         assert_eq!(CompressionLevel::Custom(8).brotli_level(), 8);
         assert_eq!(CompressionLevel::Custom(20).brotli_level(), 11); // Capped at 11
+
+        assert_eq!(CompressionLevel::Fast.zstd_level(), 1);
+        assert_eq!(CompressionLevel::Default.zstd_level(), 3);
+        assert_eq!(CompressionLevel::Best.zstd_level(), 19);
+        assert_eq!(CompressionLevel::Custom(8).zstd_level(), 8);
+        assert_eq!(CompressionLevel::Custom(50).zstd_level(), 22); // Capped at 22
     }
 
     #[test]
@@ -1219,6 +1256,78 @@ mod tests {
         // Nothing cached for oversized files.
         let cache = server.cache.as_ref().unwrap();
         assert_eq!(cache.lock().len(), 0);
+    }
+
+    #[test]
+    fn test_compress_content_round_trip_all_algorithms() {
+        let dir = TempDir::new();
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let data = b"Hello, World! This is a test string for compression.".repeat(20);
+
+        // Gzip round-trip.
+        let gz = server
+            .compress_content(&data, CompressionAlgorithm::Gzip)
+            .unwrap();
+        assert_ne!(gz, data);
+        let mut gz_decoder = flate2::read::GzDecoder::new(&gz[..]);
+        let mut gz_decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut gz_decoder, &mut gz_decompressed).unwrap();
+        assert_eq!(gz_decompressed, data);
+
+        // Brotli round-trip.
+        let br = server
+            .compress_content(&data, CompressionAlgorithm::Brotli)
+            .unwrap();
+        assert_ne!(br, data);
+        let mut br_decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut std::io::Cursor::new(&br), &mut br_decompressed).unwrap();
+        assert_eq!(br_decompressed, data);
+
+        // Zstd round-trip.
+        let zst = server
+            .compress_content(&data, CompressionAlgorithm::Zstd)
+            .unwrap();
+        assert_ne!(zst, data);
+        let zst_decompressed = zstd::decode_all(std::io::Cursor::new(&zst)).unwrap();
+        assert_eq!(zst_decompressed, data);
+    }
+
+    #[tokio::test]
+    async fn test_zstd_compressed_response_cached_by_encoding() {
+        let dir = TempDir::new();
+        dir.write("app.js", &vec![b'x'; 4096]);
+
+        let config = StaticAssetsConfig::new(dir.path.clone());
+        let server = StaticAssetServer::new(config).unwrap();
+
+        let mut req = get_req("/app.js");
+        req.headers
+            .insert("Accept-Encoding".to_string(), "zstd".to_string());
+
+        let resp1 = server.serve(&req).await.unwrap();
+        assert_eq!(resp1.status, 200);
+        assert_eq!(
+            resp1.headers.get("Content-Encoding"),
+            Some(&"zstd".to_string())
+        );
+
+        // The body actually decompresses back to the original content, not
+        // just a correctly-labeled but bogus encoding.
+        let decompressed = zstd::decode_all(std::io::Cursor::new(resp1.body_ref())).unwrap();
+        assert_eq!(decompressed, vec![b'x'; 4096]);
+
+        let etag1 = resp1.headers.get("ETag").cloned().unwrap();
+
+        // Cached under the zstd encoding key.
+        let cache = server.cache.as_ref().unwrap();
+        assert_eq!(cache.lock().len(), 1);
+
+        let resp2 = server.serve(&req).await.unwrap();
+        assert_eq!(resp2.body_ref(), resp1.body_ref());
+        assert_eq!(resp2.headers.get("ETag"), Some(&etag1));
+        assert_eq!(cache.lock().len(), 1);
     }
 
     #[tokio::test]

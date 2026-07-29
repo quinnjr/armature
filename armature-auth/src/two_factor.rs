@@ -44,6 +44,16 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Constant-time string comparison (prevents timing attacks on secret-derived
+/// values such as TOTP codes and backup codes).
+///
+/// Thin wrapper over the shared [`armature_core::crypto::constant_time_eq`]
+/// helper so all crates that compare secret-derived values use the same,
+/// single verified implementation.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    armature_core::crypto::constant_time_eq(a.as_bytes(), b.as_bytes())
+}
+
 /// Two-Factor Authentication errors
 #[derive(Debug, Error)]
 pub enum TwoFactorError {
@@ -172,7 +182,7 @@ impl TotpSecret {
             let check_time = ((timestamp as i64) + (offset * time_step as i64)) as u64;
             let expected_code = totp_custom::<Sha1>(time_step, 6, &secret_bytes, check_time);
 
-            if expected_code == code {
+            if constant_time_eq(&expected_code, code) {
                 return Ok(true);
             }
         }
@@ -269,8 +279,20 @@ impl BackupCodes {
     /// Verify and consume a backup code
     ///
     /// Returns true if code was valid and removes it from the list.
+    ///
+    /// Every stored code is compared against the candidate in constant time
+    /// and the scan always runs to completion (no early exit on match), so
+    /// neither which byte differs nor which position matches is observable
+    /// via timing.
     pub fn verify_and_consume(&mut self, code: &str) -> bool {
-        if let Some(pos) = self.codes.iter().position(|c| c == code) {
+        let mut found: Option<usize> = None;
+        for (i, c) in self.codes.iter().enumerate() {
+            if constant_time_eq(c, code) {
+                found = found.or(Some(i));
+            }
+        }
+
+        if let Some(pos) = found {
             self.codes.remove(pos);
             true
         } else {
@@ -303,11 +325,42 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "two-factor")]
+    fn test_verify_totp_rejects_wrong_code() {
+        // Functional-correctness check for the constant-time comparison in
+        // `TotpSecret::verify`: an incorrect code must still be rejected.
+        let secret = TotpSecret::generate();
+        let code = secret.generate_code(30).unwrap();
+
+        // Flip the last digit to produce a guaranteed-wrong, same-length code.
+        let mut wrong = code.clone();
+        let last = wrong.pop().unwrap();
+        let flipped = if last == '0' { '1' } else { '0' };
+        wrong.push(flipped);
+
+        assert!(!secret.verify(&wrong, 30).unwrap());
+        // Different-length input must also be rejected without panicking.
+        assert!(!secret.verify(&format!("{}9", code), 30).unwrap());
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("123456", "123456"));
+        assert!(!constant_time_eq("123456", "123457"));
+        assert!(!constant_time_eq("123456", "1234567"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
     fn test_qr_url() {
         let secret = TotpSecret::generate();
         let url = secret.to_qr_url("user@example.com", "MyApp").unwrap();
         assert!(url.starts_with("otpauth://totp/"));
-        assert!(url.contains("user@example.com"));
+        // The account name is percent-encoded (per RFC 3986) before being
+        // embedded in the URL, so "@" becomes "%40" rather than appearing
+        // literally — this is correct, safe encoding, not a bug.
+        assert!(url.contains("user%40example.com"));
         assert!(url.contains("MyApp"));
     }
 
@@ -330,5 +383,28 @@ mod tests {
         assert!(codes.verify_and_consume(&first_code));
         assert_eq!(codes.remaining(), 4);
         assert!(!codes.verify_and_consume(&first_code)); // Already used
+    }
+
+    #[test]
+    fn test_backup_code_rejects_unknown_code() {
+        // Functional-correctness check for the constant-time scan in
+        // `BackupCodes::verify_and_consume`: a code that was never issued
+        // must be rejected and the list left untouched.
+        let mut codes = BackupCodes::generate(5);
+        assert!(!codes.verify_and_consume("0000-0000"));
+        assert_eq!(codes.remaining(), 5);
+    }
+
+    #[test]
+    fn test_backup_code_consumes_any_matching_position() {
+        // The scan no longer short-circuits on the first match; make sure a
+        // code in the middle/end of the list is still found and consumed
+        // correctly, and that only that one code is removed.
+        let mut codes = BackupCodes::generate(5);
+        let last_code = codes.codes[4].clone();
+
+        assert!(codes.verify_and_consume(&last_code));
+        assert_eq!(codes.remaining(), 4);
+        assert!(!codes.codes.contains(&last_code));
     }
 }

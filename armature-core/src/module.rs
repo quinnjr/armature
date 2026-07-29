@@ -158,6 +158,33 @@ impl ModuleMetadata {
 
 /// Extended module trait with guards and metadata support
 pub trait ModuleExt: Send + Sync + 'static {
+    /// Returns the `TypeId` of the concrete type implementing this trait.
+    ///
+    /// Do not override this: like [`crate::traits::Module::module_type_id`],
+    /// the default implementation is monomorphized per concrete `Self`, so
+    /// its vtable entry always reports the *concrete* module type, even
+    /// when called through a `&dyn ModuleExt` trait object. Used by
+    /// [`ModuleRegistry::register_module`] to dedupe diamond-imported
+    /// modules and guard against cyclic import graphs.
+    fn module_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Self>()
+    }
+
+    /// Returns the key used to deduplicate this module during registration,
+    /// or `None` to opt this module out of dedup entirely.
+    ///
+    /// The default forwards to [`ModuleExt::module_type_id`], preserving the
+    /// existing dedup-by-concrete-type behavior for ordinary modules. Types
+    /// like [`DynamicModule`] where multiple distinct, differently
+    /// configured instances of the same concrete type are an expected,
+    /// legitimate pattern (e.g. the `for_root()`/`for_feature()`
+    /// configurable-module pattern) override this to return `None` so each
+    /// instance registers independently instead of every instance
+    /// collapsing into the first one registered.
+    fn dedup_key(&self) -> Option<std::any::TypeId> {
+        Some(self.module_type_id())
+    }
+
     /// Returns the list of provider types to register
     fn providers(&self) -> Vec<ProviderRegistration> {
         vec![]
@@ -326,6 +353,15 @@ impl DynamicModule {
 }
 
 impl ModuleExt for DynamicModule {
+    // Multiple differently-configured `DynamicModule` instances (the
+    // `for_root()`/`for_feature()` configurable-module pattern) all share
+    // the same concrete type, so `module_type_id()` alone can't distinguish
+    // them. Opt out of dedup entirely rather than collapsing every instance
+    // into whichever one registers first.
+    fn dedup_key(&self) -> Option<std::any::TypeId> {
+        None
+    }
+
     fn providers(&self) -> Vec<ProviderRegistration> {
         self.providers.clone()
     }
@@ -369,6 +405,24 @@ impl ModuleExt for DynamicModule {
 struct ArcModule(Arc<dyn ModuleExt>);
 
 impl ModuleExt for ArcModule {
+    // Forward to the wrapped module's own identity instead of using the
+    // default (which would report `ArcModule`'s own TypeId -- the same for
+    // every wrapped module, collapsing all of them together under the
+    // dedup logic in `ModuleRegistry::register_module`).
+    fn module_type_id(&self) -> std::any::TypeId {
+        self.0.module_type_id()
+    }
+
+    // Forward the wrapped module's own dedup opt-out/key for the same
+    // reason `module_type_id` is forwarded above: without this, a
+    // `DynamicModule` reached through `.import()`/`.re_export()` (which
+    // wrap it in `ArcModule`) would fall back to the default `dedup_key`
+    // impl here and lose its `None` opt-out, silently re-collapsing
+    // distinct configured instances nested under another module.
+    fn dedup_key(&self) -> Option<std::any::TypeId> {
+        self.0.dedup_key()
+    }
+
     fn providers(&self) -> Vec<ProviderRegistration> {
         self.0.providers()
     }
@@ -444,7 +498,13 @@ impl ModuleRegistry {
         self.registered.insert(TypeId::of::<M>());
     }
 
-    /// Register a module and its dependencies
+    /// Register a module and its dependencies.
+    ///
+    /// Each module registers at most once: registration is deduped by the
+    /// *concrete* module's `TypeId` (see [`ModuleExt::module_type_id`]), so
+    /// a module reachable via two different import paths (a "diamond"
+    /// import) is registered only the first time it's reached, and a
+    /// cyclic import graph does not recurse forever.
     pub fn register_module(
         &mut self,
         container: &Container,
@@ -455,6 +515,26 @@ impl ModuleRegistry {
             .metadata()
             .name
             .unwrap_or_else(|| "UnnamedModule".to_string());
+
+        // Mirrors the dedup pattern in `Application::register_module`
+        // (armature-core/src/application.rs) — if this logic changes, check
+        // whether that implementation needs the same fix.
+        //
+        // Dedup by `module.dedup_key()` rather than the bare
+        // `module_type_id()`: most modules key on their concrete `TypeId`
+        // (so diamond imports/cycles collapse to one registration), but
+        // `DynamicModule` returns `None` from `dedup_key()` to opt out,
+        // since multiple distinct, differently-configured instances of that
+        // same concrete type are an expected, legitimate pattern.
+        if let Some(module_id) = module.dedup_key()
+            && !self.registered.insert(module_id)
+        {
+            tracing::debug!(
+                module = %module_name,
+                "Module already registered, skipping"
+            );
+            return Ok(());
+        }
 
         tracing::debug!(module = %module_name, "Registering module");
 
@@ -625,6 +705,14 @@ impl ModuleBuilder {
 }
 
 /// Helper macro to create provider registrations
+///
+/// If the constructed provider implements any of the lifecycle hook traits
+/// (`OnModuleInit`, `OnModuleDestroy`, `OnApplicationBootstrap`,
+/// `OnApplicationShutdown`), and a [`crate::lifecycle::LifecycleManager`]
+/// has been attached to the container (see
+/// [`crate::container::Container::attach_lifecycle`], done automatically by
+/// [`crate::Application::create`]), those hooks are registered
+/// automatically. See the `lifecycle` module docs for details.
 #[macro_export]
 macro_rules! provider_registration {
     ($type:ty, $factory:expr) => {
@@ -632,8 +720,19 @@ macro_rules! provider_registration {
             type_id: std::any::TypeId::of::<$type>(),
             type_name: std::any::type_name::<$type>(),
             register_fn: |container| {
-                let instance = $factory;
-                container.register(instance);
+                let instance: $type = $factory;
+                let instance = ::std::sync::Arc::new(instance);
+                if let Some(__armature_lifecycle) = container.lifecycle_manager() {
+                    $crate::__armature_register_lifecycle_hooks!(
+                        &__armature_lifecycle,
+                        std::any::type_name::<$type>(),
+                        instance
+                    );
+                }
+                container.register_by_id(
+                    std::any::TypeId::of::<$type>(),
+                    instance as ::std::sync::Arc<dyn ::std::any::Any + Send + Sync>,
+                );
             },
         }
     };
@@ -762,5 +861,209 @@ mod tests {
 
         let debug_str = format!("{:?}", reg);
         assert!(debug_str.contains("TestGuard"));
+    }
+
+    // ---- ModuleRegistry::register_module diamond/cycle dedup (Finding 2) --
+
+    static REGISTRY_SHARED_PROVIDER_INIT_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    struct RegistrySharedProvider;
+
+    struct RegistrySharedModule;
+    impl ModuleExt for RegistrySharedModule {
+        fn providers(&self) -> Vec<ProviderRegistration> {
+            vec![ProviderRegistration {
+                type_id: TypeId::of::<RegistrySharedProvider>(),
+                type_name: "RegistrySharedProvider",
+                register_fn: |c| {
+                    REGISTRY_SHARED_PROVIDER_INIT_COUNT
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    c.register(RegistrySharedProvider);
+                },
+            }]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistrySharedModule")
+        }
+    }
+
+    struct RegistryLeftModule;
+    impl ModuleExt for RegistryLeftModule {
+        fn imports(&self) -> Vec<Box<dyn ModuleExt>> {
+            vec![Box::new(RegistrySharedModule)]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistryLeftModule")
+        }
+    }
+
+    struct RegistryRightModule;
+    impl ModuleExt for RegistryRightModule {
+        fn imports(&self) -> Vec<Box<dyn ModuleExt>> {
+            vec![Box::new(RegistrySharedModule)]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistryRightModule")
+        }
+    }
+
+    struct RegistryDiamondRootModule;
+    impl ModuleExt for RegistryDiamondRootModule {
+        fn imports(&self) -> Vec<Box<dyn ModuleExt>> {
+            vec![Box::new(RegistryLeftModule), Box::new(RegistryRightModule)]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistryDiamondRootModule")
+        }
+    }
+
+    #[test]
+    fn test_module_registry_diamond_import_registers_shared_module_once() {
+        REGISTRY_SHARED_PROVIDER_INIT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut registry = ModuleRegistry::new();
+
+        registry
+            .register_module(&container, &mut router, &RegistryDiamondRootModule)
+            .unwrap();
+
+        assert!(
+            container.has::<RegistrySharedProvider>(),
+            "shared module reachable via a diamond must still register"
+        );
+        assert_eq!(
+            REGISTRY_SHARED_PROVIDER_INIT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "diamond-imported module (reached via two different parents) must \
+             register exactly once, not zero (dropped) or two (duplicated)"
+        );
+    }
+
+    /// A module that (indirectly) imports itself. Without cycle dedup,
+    /// `register_module` recurses forever and overflows the stack.
+    struct RegistryCyclicModuleA;
+    struct RegistryCyclicModuleB;
+
+    impl ModuleExt for RegistryCyclicModuleA {
+        fn imports(&self) -> Vec<Box<dyn ModuleExt>> {
+            vec![Box::new(RegistryCyclicModuleB)]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistryCyclicModuleA")
+        }
+    }
+    impl ModuleExt for RegistryCyclicModuleB {
+        fn imports(&self) -> Vec<Box<dyn ModuleExt>> {
+            vec![Box::new(RegistryCyclicModuleA)]
+        }
+        fn metadata(&self) -> ModuleMetadata {
+            ModuleMetadata::new().name("RegistryCyclicModuleB")
+        }
+    }
+
+    #[test]
+    fn test_module_registry_cyclic_import_does_not_recurse_forever() {
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut registry = ModuleRegistry::new();
+
+        // Must return (not stack-overflow) once each module in the cycle has
+        // been visited exactly once.
+        registry
+            .register_module(&container, &mut router, &RegistryCyclicModuleA)
+            .unwrap();
+    }
+
+    // ---- DynamicModule dedup opt-out (Finding 1) ----
+
+    struct DynamicModuleProviderA;
+    struct DynamicModuleProviderB;
+
+    /// Two distinctly-configured `DynamicModule` instances (different
+    /// `.name`/providers) share the same concrete `DynamicModule` type, so
+    /// keying dedup on the bare `module_type_id()` alone would make the
+    /// second one silently no-op as a "duplicate" of the first. `DynamicModule`
+    /// opts out of dedup via `dedup_key() -> None`, so both must register.
+    #[test]
+    fn test_dynamic_module_instances_do_not_collapse_under_dedup() {
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut registry = ModuleRegistry::new();
+
+        let module_a = DynamicModule::new("FeatureA").with_provider(ProviderRegistration {
+            type_id: TypeId::of::<DynamicModuleProviderA>(),
+            type_name: "DynamicModuleProviderA",
+            register_fn: |c| c.register(DynamicModuleProviderA),
+        });
+
+        let module_b = DynamicModule::new("FeatureB").with_provider(ProviderRegistration {
+            type_id: TypeId::of::<DynamicModuleProviderB>(),
+            type_name: "DynamicModuleProviderB",
+            register_fn: |c| c.register(DynamicModuleProviderB),
+        });
+
+        registry
+            .register_module(&container, &mut router, &module_a)
+            .unwrap();
+        registry
+            .register_module(&container, &mut router, &module_b)
+            .unwrap();
+
+        assert!(
+            container.has::<DynamicModuleProviderA>(),
+            "first DynamicModule instance's providers must register"
+        );
+        assert!(
+            container.has::<DynamicModuleProviderB>(),
+            "second, distinctly-configured DynamicModule instance must also \
+             register -- it must not be dropped as a 'duplicate' of the \
+             first just because both share the same concrete DynamicModule \
+             type"
+        );
+    }
+
+    /// The same opt-out must survive being reached through `.import()`,
+    /// which wraps the imported module in `ArcModule`. If `ArcModule` didn't
+    /// forward `dedup_key()`, it would fall back to the default (keyed on
+    /// `module_type_id()`), and the second nested `DynamicModule` would
+    /// collapse into the first even though the top-level test above passes.
+    #[test]
+    fn test_dynamic_module_instances_do_not_collapse_when_imported() {
+        let container = Container::new();
+        let mut router = Router::new();
+        let mut registry = ModuleRegistry::new();
+
+        let feature_a = DynamicModule::new("FeatureA").with_provider(ProviderRegistration {
+            type_id: TypeId::of::<DynamicModuleProviderA>(),
+            type_name: "DynamicModuleProviderA",
+            register_fn: |c| c.register(DynamicModuleProviderA),
+        });
+
+        let feature_b = DynamicModule::new("FeatureB").with_provider(ProviderRegistration {
+            type_id: TypeId::of::<DynamicModuleProviderB>(),
+            type_name: "DynamicModuleProviderB",
+            register_fn: |c| c.register(DynamicModuleProviderB),
+        });
+
+        let root = DynamicModule::new("Root")
+            .import(feature_a)
+            .import(feature_b);
+
+        registry
+            .register_module(&container, &mut router, &root)
+            .unwrap();
+
+        assert!(
+            container.has::<DynamicModuleProviderA>(),
+            "first imported DynamicModule instance's providers must register"
+        );
+        assert!(
+            container.has::<DynamicModuleProviderB>(),
+            "second imported DynamicModule instance must also register \
+             through the ArcModule wrapper, not collapse into the first"
+        );
     }
 }

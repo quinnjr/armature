@@ -79,7 +79,7 @@
 pub mod leader;
 pub mod lock;
 
-pub use leader::{LeaderElection, LeaderElectionBuilder, LeaderError};
+pub use leader::{LeaderElection, LeaderElectionBuilder, LeaderError, LeaderFence};
 pub use lock::{DistributedLock, LockBuilder, LockError, LockGuard, RedisLock};
 
 /// Lua script that only deletes the key if the caller's token still matches

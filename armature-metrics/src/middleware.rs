@@ -5,6 +5,7 @@
 use armature_core::{Error, HttpRequest, HttpResponse, Middleware};
 use once_cell::sync::Lazy;
 use prometheus::{CounterVec, GaugeVec, HistogramVec};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -192,9 +193,15 @@ impl RequestMetricsMiddleware {
     /// length-truncated and then bounded: known paths keep their own label,
     /// newly seen paths are admitted until [`Self::max_path_cardinality`] is
     /// reached, after which they are folded into [`OTHER_PATH_LABEL`].
-    fn sanitize_path(&self, path: &str) -> String {
+    ///
+    /// Returns `Cow<'static, str>` rather than `String` so the constant-label
+    /// branches (path labelling disabled, `<other>` overflow/poisoned-lock
+    /// fallback) borrow a `'static` string instead of allocating a fresh copy
+    /// on every request; only genuinely new, dynamic paths incur an
+    /// allocation.
+    fn sanitize_path(&self, path: &str) -> Cow<'static, str> {
         if !self.include_path {
-            return "/".to_string();
+            return Cow::Borrowed("/");
         }
 
         // Limit raw path length first (defence in depth against huge labels).
@@ -219,30 +226,30 @@ impl RequestMetricsMiddleware {
         {
             let seen = match self.seen_paths.read() {
                 Ok(guard) => guard,
-                Err(_) => return OTHER_PATH_LABEL.to_string(),
+                Err(_) => return Cow::Borrowed(OTHER_PATH_LABEL),
             };
             if seen.contains(&candidate) {
-                return candidate;
+                return Cow::Owned(candidate);
             }
         }
 
         // New path: upgrade to a write lock to (maybe) admit it under the cap.
         let mut seen = match self.seen_paths.write() {
             Ok(guard) => guard,
-            Err(_) => return OTHER_PATH_LABEL.to_string(),
+            Err(_) => return Cow::Borrowed(OTHER_PATH_LABEL),
         };
 
         // Re-check under the write lock: another thread may have admitted this
         // same path between dropping the read lock and taking the write lock.
         if seen.contains(&candidate) {
-            return candidate;
+            return Cow::Owned(candidate);
         }
 
         if seen.len() < self.max_path_cardinality {
             seen.insert(candidate.clone());
-            candidate
+            Cow::Owned(candidate)
         } else {
-            OTHER_PATH_LABEL.to_string()
+            Cow::Borrowed(OTHER_PATH_LABEL)
         }
     }
 }
@@ -267,12 +274,12 @@ impl Middleware for RequestMetricsMiddleware {
 
         // Record request size
         HTTP_REQUEST_SIZE_BYTES
-            .with_label_values(&[&method, &path])
+            .with_label_values(&[method.as_str(), path.as_ref()])
             .observe(request_size);
 
         // Increment in-flight requests
         HTTP_REQUESTS_IN_FLIGHT
-            .with_label_values(&[&method, &path])
+            .with_label_values(&[method.as_str(), path.as_ref()])
             .inc();
 
         // Process request
@@ -280,7 +287,7 @@ impl Middleware for RequestMetricsMiddleware {
 
         // Decrement in-flight requests
         HTTP_REQUESTS_IN_FLIGHT
-            .with_label_values(&[&method, &path])
+            .with_label_values(&[method.as_str(), path.as_ref()])
             .dec();
 
         // Record metrics
@@ -293,17 +300,17 @@ impl Middleware for RequestMetricsMiddleware {
 
                 // Record request count
                 HTTP_REQUEST_COUNTER
-                    .with_label_values(&[&method, &path, &status])
+                    .with_label_values(&[method.as_str(), path.as_ref(), status.as_str()])
                     .inc();
 
                 // Record request duration
                 HTTP_REQUEST_DURATION
-                    .with_label_values(&[&method, &path, &status])
+                    .with_label_values(&[method.as_str(), path.as_ref(), status.as_str()])
                     .observe(duration);
 
                 // Record response size
                 HTTP_RESPONSE_SIZE_BYTES
-                    .with_label_values(&[&method, &path, &status])
+                    .with_label_values(&[method.as_str(), path.as_ref(), status.as_str()])
                     .observe(response_size);
             }
             Err(err) => {
@@ -311,11 +318,11 @@ impl Middleware for RequestMetricsMiddleware {
                 let status = err.status_code().to_string();
 
                 HTTP_REQUEST_COUNTER
-                    .with_label_values(&[&method, &path, &status])
+                    .with_label_values(&[method.as_str(), path.as_ref(), status.as_str()])
                     .inc();
 
                 HTTP_REQUEST_DURATION
-                    .with_label_values(&[&method, &path, &status])
+                    .with_label_values(&[method.as_str(), path.as_ref(), status.as_str()])
                     .observe(duration);
             }
         }

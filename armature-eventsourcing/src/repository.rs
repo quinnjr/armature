@@ -545,4 +545,60 @@ mod tests {
         let restored: CounterAggregate = serde_json::from_value(snapshot.state).unwrap();
         assert_eq!(restored.root.state.count, 99);
     }
+
+    #[tokio::test]
+    async fn load_snapshotted_matches_full_replay_after_real_incremental_save() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let repo = AggregateRepository::<CounterAggregate, _>::new(store.clone());
+
+        // Build the aggregate through several real load -> apply -> save cycles
+        // (the same flow a caller would actually drive), rather than
+        // hand-constructing state.
+        let mut aggregate = repo.load("agg-equiv").await.unwrap();
+        for amount in [3, 5, 7] {
+            let event = increment_event("agg-equiv", amount);
+            aggregate.apply_event(&event).unwrap();
+            aggregate.root.add_event(event);
+            repo.save(&mut aggregate).await.unwrap();
+        }
+        assert_eq!(aggregate.version(), 3);
+        assert_eq!(aggregate.root.state.count, 15);
+
+        // Take a REAL snapshot mid-stream, reflecting genuinely replayed state
+        // (not a fabricated value) at the current version (3).
+        repo.save_snapshot(&aggregate).await.unwrap();
+        assert!(
+            store.load_snapshot("agg-equiv").await.unwrap().is_some(),
+            "snapshot must actually be persisted so load_snapshotted exercises \
+             the snapshot path, not the no-snapshot fallback"
+        );
+
+        // Continue applying more real events after the snapshot.
+        for amount in [11, 13] {
+            let event = increment_event("agg-equiv", amount);
+            aggregate.apply_event(&event).unwrap();
+            aggregate.root.add_event(event);
+            repo.save(&mut aggregate).await.unwrap();
+        }
+        assert_eq!(aggregate.version(), 5);
+        assert_eq!(aggregate.root.state.count, 39);
+
+        // The invariant under test: snapshot + replay of newer events must
+        // produce exactly the same state as a full replay of the identical
+        // event log.
+        let snapshotted = repo.load_snapshotted("agg-equiv").await.unwrap();
+        let full = repo.load("agg-equiv").await.unwrap();
+
+        assert_eq!(snapshotted.version(), full.version());
+        assert_eq!(snapshotted.root.state.count, full.root.state.count);
+
+        // Byte-for-byte: compare the full serialized state rather than only
+        // the fields we thought to check individually.
+        let snapshotted_json = serde_json::to_value(&snapshotted).unwrap();
+        let full_json = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            snapshotted_json, full_json,
+            "snapshot+replay state must exactly equal full-replay state"
+        );
+    }
 }

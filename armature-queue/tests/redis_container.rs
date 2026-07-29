@@ -472,3 +472,243 @@ async fn enqueue_in_and_enqueue_at() {
     assert_eq!(dequeued.id, now_id);
     assert_ne!(dequeued.id, future_id);
 }
+
+/// Poll `processing_len` until it reaches `count`, or panic after `timeout`.
+/// Used to make sure a job's handler has actually started running -- not just
+/// been enqueued -- before racing it against `stop()`.
+async fn wait_for_processing_len(queue: &Queue, count: usize, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if queue.processing_len().await.unwrap() == count {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("processing_len never reached {count} within {timeout:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// `stop()`/`stop_with_timeout()` must let an in-flight job's handler finish
+/// before tearing down its task, not cancel it mid-flight. Regression test for
+/// the CRITICAL "Worker::stop() aborts in-flight jobs instead of draining
+/// gracefully" finding: `stop()` used to call `handle.abort()` unconditionally
+/// the instant it was invoked, killing any task currently inside
+/// `handler(job.clone()).await` before it could reach `queue.complete()`,
+/// permanently orphaning the job "Processing" in Redis. `docs/queue-guide.md`
+/// documents `stop()` followed by a 30s sleep to "wait for in-flight jobs to
+/// complete" -- a no-op against the old behavior, since the jobs it was meant
+/// to let finish were already dead by the time `stop()` returned.
+#[tokio::test]
+async fn stop_with_timeout_drains_in_flight_job_before_returning() {
+    armature_testkit::skip_if_no_docker!();
+    let redis = RedisContainer::start().await;
+    let queue = Queue::new(redis.url(), "graceful_stop").await.unwrap();
+    queue.clear().await.unwrap();
+
+    let config = WorkerConfig {
+        concurrency: 1,
+        poll_interval: Duration::from_millis(10),
+        job_timeout: Duration::from_secs(10),
+        log_execution: false,
+    };
+    let mut worker = Worker::with_config(queue.clone(), config);
+
+    worker
+        .register_handler("slow", |_job| async move {
+            // Long enough that `stop()` is guaranteed to be invoked while this
+            // handler is still mid-flight below.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok(())
+        })
+        .await;
+
+    let job_id = queue.enqueue("slow", json!({})).await.unwrap();
+    worker.start().await.unwrap();
+
+    // Don't stop until the handler has actually started, so `stop()` races a
+    // live execution rather than an idle poll loop.
+    wait_for_processing_len(&queue, 1, Duration::from_secs(5)).await;
+
+    // Grace period comfortably longer than the handler's 2s sleep: the
+    // in-flight job must be allowed to run to completion.
+    worker
+        .stop_with_timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let job = queue.get_job(job_id).await.unwrap().unwrap();
+    assert_eq!(
+        job.status.state,
+        JobState::Completed,
+        "a sufficient grace period must let the in-flight handler finish, not be cancelled"
+    );
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        0,
+        "a completed job must not be left orphaned in processing"
+    );
+}
+
+/// The flip side of the previous test: a grace period shorter than the
+/// handler's remaining runtime must still force-abort the stuck task once it
+/// elapses (the documented last-resort fallback), rather than `stop()` hanging
+/// forever waiting for a handler that will never finish in time. The job is
+/// left orphaned in `processing` in this case -- the expected trade-off for a
+/// timeout too short to let the handler finish, matching the pre-fix behavior
+/// for whichever job is still running when the grace period runs out.
+#[tokio::test]
+async fn stop_with_timeout_force_aborts_after_grace_period_elapses() {
+    armature_testkit::skip_if_no_docker!();
+    let redis = RedisContainer::start().await;
+    let queue = Queue::new(redis.url(), "graceful_stop_timeout")
+        .await
+        .unwrap();
+    queue.clear().await.unwrap();
+
+    let config = WorkerConfig {
+        concurrency: 1,
+        poll_interval: Duration::from_millis(10),
+        job_timeout: Duration::from_secs(30),
+        log_execution: false,
+    };
+    let mut worker = Worker::with_config(queue.clone(), config);
+
+    worker
+        .register_handler("slow", |_job| async move {
+            // Far longer than the 200ms grace period given to `stop_with_timeout`
+            // below, so the task is guaranteed to still be running when the
+            // deadline elapses.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(())
+        })
+        .await;
+
+    let job_id = queue.enqueue("slow", json!({})).await.unwrap();
+    worker.start().await.unwrap();
+    wait_for_processing_len(&queue, 1, Duration::from_secs(5)).await;
+
+    let started = std::time::Instant::now();
+    worker
+        .stop_with_timeout(Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stop_with_timeout must return once its grace period elapses, not block on the stuck handler"
+    );
+
+    let job = queue.get_job(job_id).await.unwrap().unwrap();
+    assert_ne!(
+        job.status.state,
+        JobState::Completed,
+        "a force-aborted handler must never reach completion"
+    );
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        1,
+        "force-abort after an insufficient grace period is the documented last resort: \
+         the job is left orphaned in processing, same as the pre-fix behavior"
+    );
+}
+
+/// The two tests above only ever exercise `concurrency: 1`, so a bug that
+/// scoped the grace-period deadline per-task instead of sharing a single
+/// deadline across the whole `JoinSet` -- e.g. restarting the countdown every
+/// time a task finished -- could slip through undetected. This test uses
+/// `concurrency: 2` with two jobs of different durations dequeued and
+/// executed concurrently, and asserts both complete within a single shared
+/// grace period, with the elapsed wall-clock time bounded well under `2x` the
+/// longer job's duration (which is what a per-task-reset deadline, or a
+/// regression to fully sequential draining, would produce instead).
+#[tokio::test]
+async fn stop_with_timeout_drains_multiple_concurrent_jobs_before_returning() {
+    armature_testkit::skip_if_no_docker!();
+    let redis = RedisContainer::start().await;
+    let queue = Queue::new(redis.url(), "graceful_stop_multi")
+        .await
+        .unwrap();
+    queue.clear().await.unwrap();
+
+    let config = WorkerConfig {
+        concurrency: 2,
+        poll_interval: Duration::from_millis(10),
+        job_timeout: Duration::from_secs(10),
+        log_execution: false,
+    };
+    let mut worker = Worker::with_config(queue.clone(), config);
+
+    worker
+        .register_handler("slow", |job| async move {
+            let sleep_ms = job.data["sleep_ms"]
+                .as_u64()
+                .expect("sleep_ms must be present in job data");
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            Ok(())
+        })
+        .await;
+
+    let short_id = queue
+        .enqueue("slow", json!({"sleep_ms": 500}))
+        .await
+        .unwrap();
+    let long_id = queue
+        .enqueue("slow", json!({"sleep_ms": 1500}))
+        .await
+        .unwrap();
+    worker.start().await.unwrap();
+
+    // Don't stop until both handlers have actually started, so
+    // `stop_with_timeout` races two live, concurrently-executing jobs rather
+    // than an idle poll loop.
+    wait_for_processing_len(&queue, 2, Duration::from_secs(5)).await;
+
+    let started = std::time::Instant::now();
+    // Grace period comfortably longer than the longer job (1.5s): both
+    // in-flight jobs must be allowed to run to completion.
+    let outcome = worker
+        .stop_with_timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.gracefully_completed, 2,
+        "both concurrent worker tasks must drain gracefully, got {outcome:?}"
+    );
+    assert_eq!(outcome.panicked, 0, "no task should have panicked");
+    assert_eq!(
+        outcome.force_aborted, 0,
+        "no task should have been force-aborted"
+    );
+
+    for (id, label) in [(short_id, "short (500ms)"), (long_id, "long (1.5s)")] {
+        let job = queue.get_job(id).await.unwrap().unwrap();
+        assert_eq!(
+            job.status.state,
+            JobState::Completed,
+            "{label} job must complete within the shared grace period"
+        );
+    }
+    assert_eq!(
+        queue.processing_len().await.unwrap(),
+        0,
+        "both completed jobs must not be left orphaned in processing"
+    );
+
+    // The two jobs ran concurrently against a single shared deadline: elapsed
+    // time is bounded by roughly the LONGER job's duration (~1.5s) -- not
+    // `2x` it (~3s), which is what a deadline that got reset/restarted per
+    // completed task (instead of shared across the whole drain) would allow.
+    assert!(
+        elapsed < Duration::from_millis(2 * 1_500),
+        "stop_with_timeout took {elapsed:?}; expected well under 2x the longer \
+         job's 1.5s duration -- the grace-period deadline must be shared across \
+         all concurrent worker tasks, not reset per task"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "stop_with_timeout returned in {elapsed:?}, too fast for the 1.5s \
+         long job to have actually run to completion"
+    );
+}

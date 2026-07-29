@@ -12,6 +12,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Constant-time string comparison (prevents timing attacks on secret-derived
+/// values such as API tokens).
+///
+/// Thin wrapper over the shared [`armature_core::crypto::constant_time_eq`]
+/// helper so all crates that compare secret-derived values use the same,
+/// single verified implementation.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    armature_core::crypto::constant_time_eq(a.as_bytes(), b.as_bytes())
+}
+
 /// Authentication method for MCP access
 #[derive(Clone)]
 #[non_exhaustive]
@@ -546,8 +556,30 @@ async fn authenticate_api_token(
             })?
     };
 
-    // Validate token
-    if !auth.tokens.contains(token) {
+    // Validate token in constant time. A plain `HashSet::contains` hashes the
+    // candidate then does a plaintext memcmp against whichever bucket it
+    // lands in, which leaks timing correlated with how much of the token
+    // matches a stored value once hashes collide into the same bucket.
+    // Instead, compare against every configured token (no early exit) using
+    // a constant-time comparison, trading the O(1) hash lookup for timing
+    // safety - acceptable given typical token-set sizes.
+    //
+    // NOTE: `auth.tokens` has no upper-bound enforcement here. Per-request
+    // cost is O(n) in the configured token-list size (every token is
+    // compared, unconditionally, with no early exit), so an operator who
+    // configures an unusually large token list turns each authentication
+    // attempt into a proportionally larger amount of work - a potential
+    // DoS-amplification vector if the list size is attacker-influenced or
+    // grows unbounded. This crate has no logging/metrics dependency
+    // available here to emit a runtime warning when the list exceeds a
+    // threshold (e.g. 1000 tokens); callers that configure `ApiTokenAuth`
+    // from an external or growing source should apply their own sanity
+    // limit on `tokens.len()` before constructing it.
+    let token_valid = auth.tokens.iter().fold(false, |matched, valid| {
+        matched | constant_time_eq(valid, token)
+    });
+
+    if !token_valid {
         return Err(McpError::InvalidRequest("Invalid API token".into()));
     }
 
@@ -1051,6 +1083,54 @@ mod tests {
 
         let result = authenticate_api_token(&auth, &headers).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_api_token_authentication_among_many_valid() {
+        // Functional-correctness check for the constant-time, non-short-
+        // circuiting scan in `authenticate_api_token`: a token that matches
+        // one of several configured tokens (not just the first) must still
+        // authenticate successfully.
+        let auth = ApiTokenAuth::new().with_tokens(vec![
+            "token-a-11111111",
+            "token-b-22222222",
+            "token-c-33333333",
+        ]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer token-c-33333333".to_string(),
+        );
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_api_token_authentication_rejects_prefix_of_valid_token() {
+        // A token that is a strict prefix (or same-length near-miss) of a
+        // valid token must still be rejected - guards against a length- or
+        // prefix-based comparison bug creeping back in.
+        let auth = ApiTokenAuth::new().with_tokens(vec!["valid-token-123"]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer valid-token-124".to_string(),
+        );
+
+        let result = authenticate_api_token(&auth, &headers).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("valid-token-123", "valid-token-123"));
+        assert!(!constant_time_eq("valid-token-123", "valid-token-124"));
+        assert!(!constant_time_eq("valid-token-123", "valid-token-1234"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
     }
 
     #[tokio::test]

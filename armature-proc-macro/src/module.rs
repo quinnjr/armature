@@ -73,7 +73,26 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         return;
                     }
                     match #ty::from_container(container) {
-                        Ok(instance) => container.register(instance),
+                        Ok(instance) => {
+                            // Wrap first (instead of `container.register(instance)`
+                            // directly) so the lifecycle probe below and the final
+                            // registration share the exact same `Arc`, and so the
+                            // probe runs at a monomorphic call site (required for
+                            // the autoref-specialization trick it relies on to
+                            // detect which lifecycle hook traits `#ty` implements).
+                            let instance = std::sync::Arc::new(instance);
+                            if let Some(__armature_lifecycle) = container.lifecycle_manager() {
+                                armature_core::__armature_register_lifecycle_hooks!(
+                                    &__armature_lifecycle,
+                                    std::any::type_name::<#ty>(),
+                                    instance
+                                );
+                            }
+                            container.register_by_id(
+                                std::any::TypeId::of::<#ty>(),
+                                instance as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+                            );
+                        }
                         Err(e) => {
                             tracing::debug!(
                                 "Could not resolve {} from container ({}), this provider must be registered manually",

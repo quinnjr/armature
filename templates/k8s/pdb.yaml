@@ -4,14 +4,14 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ .Values.name | default "armature-api" }}
-  namespace: {{ .Values.namespace | default "armature" }}
+  name: armature-api
+  namespace: armature
   labels:
-    app.kubernetes.io/name: {{ .Values.name | default "armature-api" }}
+    app.kubernetes.io/name: armature-api
     app.kubernetes.io/managed-by: armature-cli
 spec:
-  minAvailable: {{ .Values.pdb.minAvailable | default 1 }}
+  minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Values.name | default "armature-api" }}
+      app.kubernetes.io/name: armature-api
 

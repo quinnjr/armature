@@ -11,7 +11,11 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:1.85-alpine AS builder
+FROM rust:1.94-alpine AS builder
+
+# Name of the compiled binary (your crate's [[bin]] name, usually the
+# package name). Override with: docker build --build-arg BIN_NAME=my-app
+ARG BIN_NAME=app
 
 WORKDIR /app
 
@@ -30,17 +34,20 @@ RUN rm -rf src
 
 # Build application
 COPY src ./src
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin ${BIN_NAME}
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Azure Functions base image
 # -----------------------------------------------------------------------------
 FROM mcr.microsoft.com/azure-functions/base:4-slim AS runtime
 
+# Redeclare: ARGs do not cross FROM boundaries
+ARG BIN_NAME=app
+
 WORKDIR /home/site/wwwroot
 
 # Copy the binary
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/app /home/site/wwwroot/handler
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/${BIN_NAME} /home/site/wwwroot/handler
 
 # Copy function configuration files
 COPY host.json ./
@@ -97,8 +104,9 @@ EXPOSE 80
 # =============================================================================
 # Deployment Instructions
 # =============================================================================
-# 1. Build the image:
-#    docker build -t armature-functions -f Dockerfile.functions .
+# 1. Build the image (BIN_NAME defaults to "app"; set it to your crate's
+#    binary name if different):
+#    docker build --build-arg BIN_NAME=my-app -t armature-functions -f Dockerfile.functions .
 #
 # 2. Tag for ACR:
 #    docker tag armature-functions myregistry.azurecr.io/armature-functions:latest

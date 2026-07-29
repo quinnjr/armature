@@ -119,25 +119,25 @@ name = "armature"
 path = "src/lib.rs"
 
 [dependencies]
-armature-core = { path = "armature-core", version = "0.3.0" }
+armature-core = { path = "armature-core", version = "0.5.0" }
 armature-proc-macro = { path = "armature-proc-macro", version = "0.2.0" }
 armature-graphql = { path = "armature-graphql", version = "0.3.0", optional = true }
 armature-config = { path = "armature-config", version = "0.1.2", optional = true }
-armature-jwt = { path = "armature-jwt", version = "0.1.1", optional = true }
-armature-auth = { path = "armature-auth", version = "0.1.1", optional = true }
+armature-jwt = { path = "armature-jwt", version = "0.2.0", optional = true }
+armature-auth = { path = "armature-auth", version = "0.1.3", optional = true }
 armature-testing = { path = "armature-testing", version = "0.2.0", optional = true }
 armature-validation = { path = "armature-validation", version = "0.1.3", optional = true }
 armature-openapi = { path = "armature-openapi", version = "0.2.0", optional = true }
-armature-cache = { path = "armature-cache", version = "0.2.0", optional = true }
+armature-cache = { path = "armature-cache", version = "0.3.0", optional = true }
 armature-cron = { path = "armature-cron", version = "0.2.0", optional = true }
-armature-queue = { path = "armature-queue", version = "0.2.0", optional = true }
+armature-queue = { path = "armature-queue", version = "0.3.0", optional = true }
 armature-opentelemetry = { path = "armature-opentelemetry", version = "0.2.0", optional = true }
-armature-security = { path = "armature-security", version = "0.1.1", optional = true }
+armature-security = { path = "armature-security", version = "0.1.3", optional = true }
 armature-acme = { path = "armature-acme", version = "0.2.0", optional = true }
 armature-ratelimit = { path = "armature-ratelimit", version = "0.2.0", optional = true }
 armature-compression = { path = "armature-compression", version = "0.1.3", optional = true }
 armature-webhooks = { path = "armature-webhooks", version = "0.2.0", optional = true }
-armature-messaging = { path = "armature-messaging", version = "0.2.0", optional = true }
+armature-messaging = { path = "armature-messaging", version = "0.3.0", optional = true }
 
 # Re-export core functionality
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
@@ -234,9 +234,17 @@ tokio-test = "0.4"
 async-graphql = "7.2"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 regex = "1.12"
+# Needed by macro_utils_example: it exercises the declarative macros from
+# armature-macros and the proc macros from armature-macros-utils directly.
+armature-macros = { path = "armature-macros", version = "0.2.0" }
+armature-macros-utils = { path = "armature-macros-utils", version = "0.2.0" }
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks"] }
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json"] }
+# Needed by the distributed_locks_example: armature-distributed's RedisLock
+# API takes a `redis::aio::ConnectionManager` directly, so the example must
+# be able to name the `redis` crate itself to build one.
+redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
 ctrlc = "3.5"
 crossbeam = "0.8"  # Lock-free data structures for benchmarks
 
@@ -399,6 +407,12 @@ path = "armature-ferron"
 
 [dev-dependencies.armature-app]
 path = "armature-app"
+
+# Real WebSocket server/client (tokio-tungstenite based) used by the
+# websocket_chat example -- armature-core's `websocket` module only provides
+# in-process broadcast primitives with no client transport.
+[dev-dependencies.armature-websocket]
+path = "armature-websocket"
 
 [dev-dependencies.fastrand]
 version = "2.4"
@@ -591,7 +605,7 @@ name = "data_benchmarks"
 harness = false
 
 [[bench]]
-name = "framework_comparison"
+name = "internal_overhead_benchmarks"
 harness = false
 
 [[bench]]

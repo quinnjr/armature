@@ -1,14 +1,13 @@
-#![allow(deprecated)]
-#![allow(clippy::needless_question_mark)]
-
-//! Framework Comparison Benchmarks
+//! Internal Overhead Benchmarks
 //!
-//! This benchmark suite measures Armature's performance characteristics
-//! against patterns commonly benchmarked in other Rust web frameworks.
+//! This benchmark suite measures Armature's own internal performance
+//! characteristics (request/response construction, routing, DI, middleware,
+//! handler dispatch). It does **not** benchmark any other Rust web framework —
+//! for an actual cross-framework comparison, see the HTTP benchmark runner and
+//! comparison servers described below.
 //!
-//! ## Comparison Methodology
+//! ## What These Benchmarks Measure
 //!
-//! These benchmarks measure:
 //! 1. Request/Response object creation overhead
 //! 2. JSON serialization/deserialization performance
 //! 3. Routing performance with varying route counts
@@ -16,13 +15,13 @@
 //! 5. Dependency injection resolution speed
 //! 6. Handler invocation latency
 //!
-//! ## Running Comparisons
+//! ## Running These Benchmarks
 //!
 //! ```bash
-//! cargo bench --bench framework_comparison
+//! cargo bench --bench internal_overhead_benchmarks
 //! ```
 //!
-//! For real HTTP benchmarks, use the comparison runner:
+//! For real cross-framework HTTP benchmarks, use the comparison runner instead:
 //! ```bash
 //! cargo run --bin benchmark-runner
 //! ```
@@ -554,16 +553,21 @@ fn bench_handler_invocation(c: &mut Criterion) {
         Ok(HttpResponse::ok())
     }
 
+    // `?` inside `Ok(...)` is kept to mirror the fallible handler shape these
+    // benchmarks are measuring; clippy's suggested rewrite would collapse it away.
+    #[allow(clippy::needless_question_mark)]
     async fn json_handler_fn(_req: HttpRequest) -> Result<HttpResponse, Error> {
         let data = create_small_payload();
         Ok(HttpResponse::ok().with_json(&data)?)
     }
 
+    #[allow(clippy::needless_question_mark)]
     async fn param_handler_fn(req: HttpRequest) -> Result<HttpResponse, Error> {
         let id = req.path_params.get("id").cloned().unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({ "id": id }))?)
     }
 
+    #[allow(clippy::needless_question_mark)]
     async fn body_handler_fn(req: HttpRequest) -> Result<HttpResponse, Error> {
         let _payload: MediumPayload = req.json()?;
         Ok(HttpResponse::ok().with_json(&serde_json::json!({ "status": "received" }))?)
@@ -638,10 +642,14 @@ fn bench_full_cycle(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     // Define optimized handlers
+    // `?` inside `Ok(...)` is kept to mirror the fallible handler shape these
+    // benchmarks are measuring; clippy's suggested rewrite would collapse it away.
+    #[allow(clippy::needless_question_mark)]
     async fn health_handler(_req: HttpRequest) -> Result<HttpResponse, Error> {
         Ok(HttpResponse::ok().with_json(&serde_json::json!({"status": "ok"}))?)
     }
 
+    #[allow(clippy::needless_question_mark)]
     async fn get_user_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
         let id = req.path_params.get("id").cloned().unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -651,6 +659,7 @@ fn bench_full_cycle(c: &mut Criterion) {
         }))?)
     }
 
+    #[allow(clippy::needless_question_mark)]
     async fn create_user_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
         let _payload: MediumPayload = req.json()?;
         Ok(HttpResponse::created().with_json(&serde_json::json!({
@@ -667,24 +676,20 @@ fn bench_full_cycle(c: &mut Criterion) {
 
     // Health check
     group.bench_function("health_check", |b| {
-        let router = router.clone();
         b.iter(|| {
-            let r = router.clone();
-            runtime.block_on(async move {
+            runtime.block_on(async {
                 let req = HttpRequest::new("GET".to_string(), "/health".to_string());
-                let _ = r.route(black_box(req)).await;
+                let _ = router.route(black_box(req)).await;
             })
         })
     });
 
     // GET with path param
     group.bench_function("get_with_param", |b| {
-        let router = router.clone();
         b.iter(|| {
-            let r = router.clone();
-            runtime.block_on(async move {
+            runtime.block_on(async {
                 let req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
-                let _ = r.route(black_box(req)).await;
+                let _ = router.route(black_box(req)).await;
             })
         })
     });
@@ -692,17 +697,15 @@ fn bench_full_cycle(c: &mut Criterion) {
     // POST with body
     let body = serde_json::to_vec(&create_medium_payload()).unwrap();
     group.bench_function("post_with_body", |b| {
-        let router = router.clone();
         let body = body.clone();
         b.iter(|| {
-            let r = router.clone();
             let b = body.clone();
-            runtime.block_on(async move {
+            runtime.block_on(async {
                 let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
                 req.headers
                     .insert("Content-Type".to_string(), "application/json".to_string());
                 req.body = b;
-                let _ = r.route(black_box(req)).await;
+                let _ = router.route(black_box(req)).await;
             })
         })
     });
@@ -776,7 +779,7 @@ fn bench_allocations(c: &mut Criterion) {
 // =============================================================================
 
 criterion_group! {
-    name = framework_comparison;
+    name = internal_overhead_benchmarks;
     config = Criterion::default()
         .sample_size(100)
         .measurement_time(Duration::from_secs(5))
@@ -793,4 +796,4 @@ criterion_group! {
         bench_allocations
 }
 
-criterion_main!(framework_comparison);
+criterion_main!(internal_overhead_benchmarks);

@@ -91,6 +91,37 @@ impl RedisCache {
             Err(_) => Err(CacheError::Timeout),
         }
     }
+
+    /// `SCAN` for every key matching `pattern` and remove them all via
+    /// batched `UNLINK` calls. Used by [`CacheStore::clear`] to scope
+    /// clearing to `key_prefix` instead of `FLUSHDB`-ing the whole database.
+    ///
+    /// Keys are collected from the `SCAN` cursor first, then removed in
+    /// bounded-size `UNLINK` batches so a very large matching set doesn't
+    /// build one huge variadic command.
+    async fn scan_and_unlink(
+        conn: &mut ConnectionManager,
+        pattern: String,
+    ) -> redis::RedisResult<()> {
+        use futures::StreamExt;
+
+        /// Bound on how many keys go into a single `UNLINK` call.
+        const UNLINK_BATCH_SIZE: usize = 500;
+
+        let mut matched: Vec<String> = Vec::new();
+        {
+            let mut iter: redis::AsyncIter<'_, String> = conn.scan_match(pattern.as_str()).await?;
+            while let Some(key) = iter.next().await {
+                matched.push(key?);
+            }
+        }
+
+        for chunk in matched.chunks(UNLINK_BATCH_SIZE) {
+            let _: () = redis::cmd("UNLINK").arg(chunk).query_async(conn).await?;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -142,11 +173,36 @@ impl CacheStore for RedisCache {
         Ok(exists)
     }
 
+    /// Clear this cache's keys.
+    ///
+    /// When `key_prefix` is configured, this is **scoped** to that prefix: it
+    /// `SCAN`s for every key matching `{key_prefix}:*` and removes them with
+    /// batched `UNLINK` calls, so it only wipes keys this cache actually
+    /// wrote — not the whole Redis database/instance. `SCAN` is cursor-based
+    /// and non-blocking (unlike `KEYS`, which is O(N) and stalls the
+    /// single-threaded server for the entire keyspace); `UNLINK` reclaims
+    /// memory off the main thread instead of blocking on `DEL`.
+    ///
+    /// When no `key_prefix` is configured, this cache has no distinct slice
+    /// of the keyspace to scope to, so it falls back to the previous
+    /// unscoped `FLUSHDB` behavior — this remains destructive to the entire
+    /// Redis database/instance, so an unprefixed `RedisCache` sharing a
+    /// Redis instance with other services/tenants should not call `clear()`.
     async fn clear(&self) -> CacheResult<()> {
-        let mut conn = self.connection.clone();
-        let _: () = self
-            .with_op_timeout(redis::cmd("FLUSHDB").query_async(&mut conn))
-            .await?;
+        match self.config.key_prefix.as_deref() {
+            Some(prefix) if !prefix.is_empty() => {
+                let pattern = format!("{prefix}:*");
+                let mut conn = self.connection.clone();
+                self.with_op_timeout(Self::scan_and_unlink(&mut conn, pattern))
+                    .await?;
+            }
+            _ => {
+                let mut conn = self.connection.clone();
+                let _: () = self
+                    .with_op_timeout(redis::cmd("FLUSHDB").query_async(&mut conn))
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -254,6 +310,39 @@ impl CacheStore for RedisCache {
             .with_op_timeout(redis::cmd("DEL").arg(&full_keys).query_async(&mut conn))
             .await?;
         Ok(())
+    }
+
+    /// `RedisCache` backs `set_add`/`set_remove`/`set_members` with native
+    /// `SADD`/`SREM`/`SMEMBERS`, which are atomic — see [`CacheStore::supports_atomic_sets`].
+    fn supports_atomic_sets(&self) -> bool {
+        true
+    }
+
+    /// Native `SADD`: atomically adds `member` to a Redis Set, unlike the
+    /// trait default's non-atomic get/modify/set. This is what makes
+    /// [`crate::invalidation::TaggedCache`]'s tag index safe to update
+    /// concurrently from multiple instances sharing this backend.
+    async fn set_add(&self, set_key: &str, member: &str) -> CacheResult<()> {
+        let set_key = self.build_key(set_key);
+        let mut conn = self.connection.clone();
+        let _: () = self.with_op_timeout(conn.sadd(&set_key, member)).await?;
+        Ok(())
+    }
+
+    /// Native `SREM`: atomically removes `member` from a Redis Set.
+    async fn set_remove(&self, set_key: &str, member: &str) -> CacheResult<()> {
+        let set_key = self.build_key(set_key);
+        let mut conn = self.connection.clone();
+        let _: () = self.with_op_timeout(conn.srem(&set_key, member)).await?;
+        Ok(())
+    }
+
+    /// Native `SMEMBERS`.
+    async fn set_members(&self, set_key: &str) -> CacheResult<Vec<String>> {
+        let set_key = self.build_key(set_key);
+        let mut conn = self.connection.clone();
+        let members: Vec<String> = self.with_op_timeout(conn.smembers(&set_key)).await?;
+        Ok(members)
     }
 }
 

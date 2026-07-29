@@ -95,10 +95,15 @@ impl CacheStore for MemcachedCache {
         .await
         .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))?;
 
-        match result {
-            Ok(Some(value)) => Ok(Some(value)),
-            Ok(None) | Err(_) => Ok(None),
-        }
+        // The `memcache` crate's own ascii/binary protocol implementations of
+        // `get` already distinguish a genuine cache miss from an operational
+        // failure: both return `Ok(None)` for an absent key (there is no
+        // "NOT_FOUND" error response for `get`, unlike `delete`/`incr`/`touch`)
+        // and only ever return `Err` for real I/O, parse, client, or server
+        // errors. So there is nothing to narrow-match here — every `Err` is a
+        // genuine failure and must propagate, not collapse into `Ok(None)`
+        // indistinguishable from a miss.
+        result.map_err(CacheError::from)
     }
 
     async fn mget(&self, keys: &[&str]) -> CacheResult<Vec<Option<String>>> {
@@ -168,6 +173,19 @@ impl CacheStore for MemcachedCache {
         Ok(result.is_some())
     }
 
+    /// Clear this cache.
+    ///
+    /// **Protocol limitation, unscoped:** unlike `RedisCache::clear()` (which
+    /// scopes to `key_prefix` via `SCAN`+`UNLINK`), this always issues
+    /// memcached's `flush_all`, which invalidates **every** key on the
+    /// memcached server/pool — `key_prefix` is not, and cannot be, applied
+    /// here. The memcached text/binary protocols expose no key-enumeration
+    /// primitive (no `SCAN`/`KEYS` equivalent; `stats cachedump` is a
+    /// non-standard admin extension that isn't reliably available across
+    /// servers and isn't exposed by the `memcache` crate this backend uses),
+    /// so there is no way to discover "just this cache's keys" to delete
+    /// individually. A `MemcachedCache` sharing a memcached instance with
+    /// other services/tenants should not call `clear()`.
     async fn clear(&self) -> CacheResult<()> {
         let client = self.client.clone();
 

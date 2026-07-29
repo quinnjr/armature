@@ -1,6 +1,7 @@
 // Application bootstrapper and HTTP server
 
 use crate::epoll_tuning::EpollConfig;
+use crate::exception_filter::{ExceptionFilter, ExceptionFilterChain};
 use crate::guard::{Guard, GuardContext};
 use crate::http2::{Http2Builder, Http2Config, Http2Stats};
 use crate::http3::{Http3Config, Http3Stats};
@@ -18,6 +19,7 @@ use hyper::{Request, Response, body::Incoming as IncomingBody};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -50,6 +52,10 @@ pub struct Application {
     /// Optional socket tuning applied to listener and accepted sockets
     #[cfg_attr(not(unix), allow(dead_code))]
     epoll_config: Option<EpollConfig>,
+    /// Optional global exception filter chain (see [`Application::use_global_filter`]).
+    /// When unset, errors are converted via [`Error::to_client_response`]
+    /// exactly as before this field existed.
+    filter_chain: Option<ExceptionFilterChain>,
 }
 
 /// Default maximum request body size (10 MB).
@@ -100,6 +106,10 @@ struct ServeState {
     cors: Option<Arc<CorsConfig>>,
     guards: Arc<[ScopedGuard]>,
     max_body_size: usize,
+    /// Global exception filter chain (see [`Application::use_global_filter`]).
+    /// `None` preserves the original behavior: errors go straight to
+    /// [`Error::to_client_response`] via [`error_response`].
+    filter_chain: Option<Arc<ExceptionFilterChain>>,
 }
 
 /// CORS configuration for the application.
@@ -151,7 +161,52 @@ impl Application {
             guards: Vec::new(),
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             epoll_config: None,
+            filter_chain: None,
         }
+    }
+
+    /// Register a global exception filter.
+    ///
+    /// Filters run in priority order (highest first); the first filter
+    /// whose `catch()` returns `Some(response)` wins and its response is
+    /// returned to the client. Wired into every HTTP/1.1 and HTTP/2 request
+    /// path: every `service_fn` closure across [`Application::listen`],
+    /// [`Application::listen_on`], HTTP/2 cleartext, and HTTPS/TLS+ALPN
+    /// listeners funnels through the same shared `handle_request`, so both
+    /// the guard-rejection error path and the routing/handler error path try
+    /// the filter chain before falling back to
+    /// [`Error::to_client_response`]. HTTP/3 ([`Application::listen_h3`] /
+    /// [`Application::listen_dual_stack`]'s QUIC side) does **not** yet go
+    /// through the filter chain -- it's served by a separate `Http3Server`
+    /// code path (see `http3.rs`) that doesn't call `handle_request`.
+    ///
+    /// A registered filter's `catch()` runs with panic and timeout
+    /// isolation (see `respond_to_error`): a panicking or hanging filter
+    /// falls back to the same response [`Error::to_client_response`] would
+    /// have produced, rather than taking down the request or connection.
+    ///
+    /// Calling this repeatedly adds more filters to the same chain. Errors
+    /// not claimed by any filter fall back to the chain's own default
+    /// transformer (production-mode [`crate::error_transform::ErrorTransformer`]),
+    /// *not* [`Error::to_client_response`] -- this matches
+    /// [`crate::exception_filter::ExceptionFilterChain`]'s own documented
+    /// behavior. Without any call to this method, errors are converted via
+    /// [`Error::to_client_response`] exactly as before this method existed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use armature_core::{Application, Container, Router};
+    /// use armature_core::exception_filter::AllExceptionsFilter;
+    ///
+    /// let app = Application::new(Container::new(), Router::new())
+    ///     .use_global_filter(AllExceptionsFilter::new());
+    /// # let _ = app;
+    /// ```
+    pub fn use_global_filter<F: ExceptionFilter>(mut self, filter: F) -> Self {
+        let chain = self.filter_chain.take().unwrap_or_default();
+        self.filter_chain = Some(chain.add_filter(filter));
+        self
     }
 
     /// Configure CORS for the application. Handles preflight OPTIONS
@@ -241,6 +296,7 @@ impl Application {
             cors,
             guards: self.guards.clone().into(),
             max_body_size: self.max_body_size,
+            filter_chain: self.filter_chain.clone().map(Arc::new),
         }
     }
 
@@ -326,6 +382,21 @@ impl Application {
     }
 
     /// Create a new application from a root module with lifecycle support
+    ///
+    /// # Lifecycle hook failures are fail-open
+    ///
+    /// `OnModuleInit` and `OnApplicationBootstrap` hooks run automatically as
+    /// part of bootstrap (see below). If one or more hooks return an `Err`,
+    /// this is **not** fatal: the failures are logged (`warn!`/`error!`) and
+    /// startup continues to completion, returning a fully constructed
+    /// `Application` regardless. This is an intentional, documented design
+    /// choice -- not a bug -- so a single misbehaving provider's init hook
+    /// can't unconditionally prevent the process from starting. Callers that
+    /// need boot to abort on hook failure should inspect
+    /// [`LifecycleManager::call_module_init_hooks`]/
+    /// [`LifecycleManager::call_bootstrap_hooks`] results themselves (e.g. by
+    /// driving lifecycle manually instead of via `create`) or check logs/
+    /// metrics for hook failures after `create` returns.
     pub async fn create<M: Module + Default>() -> Self {
         info!("Bootstrapping Armature application");
         debug!(
@@ -341,6 +412,13 @@ impl Application {
 
         let lifecycle = Arc::new(LifecycleManager::new());
         debug!("Lifecycle manager initialized");
+
+        // Attach the lifecycle manager to the container *before* any
+        // provider is registered: the provider registration path (see
+        // `Container::attach_lifecycle`) probes each provider instance for
+        // lifecycle hook trait implementations at the moment it's
+        // registered, so this must happen before `register_module` below.
+        container.attach_lifecycle(&lifecycle);
 
         // Initialize the root module
         let root_module = M::default();
@@ -360,6 +438,10 @@ impl Application {
         );
 
         info!("Executing lifecycle hooks");
+
+        // Fail-open: hook errors below are logged, not propagated. See the
+        // "Lifecycle hook failures are fail-open" section on this method's
+        // doc comment.
 
         // Call module init hooks
         debug!("Calling OnModuleInit hooks");
@@ -399,6 +481,7 @@ impl Application {
             guards,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             epoll_config: None,
+            filter_chain: None,
         }
     }
 
@@ -1532,6 +1615,20 @@ async fn handle_request(
         trace!(body_size = body_size, "Request body received (zero-copy)");
     }
 
+    // Only needed when a global exception filter chain is configured: a
+    // filter's `catch()` receives the original request for context (path,
+    // headers, request id, ...), matching `ExceptionContext::from_request`.
+    // Guard evaluation and routing below each consume `armature_req` by
+    // value, so it must be captured before either runs.
+    //
+    // Limitation (documented, not confirmed to be a bug): because this clone
+    // is taken *before* guards run and *before* routing populates path
+    // params, `ExceptionContext::request` as seen by a filter's `catch()` is
+    // a pre-guard/pre-routing snapshot. Guard-added request extensions and
+    // resolved route/path params are therefore never visible to a filter --
+    // only headers, method, path, and body as they arrived on the wire.
+    let filter_ctx_request = state.filter_chain.as_ref().map(|_| armature_req.clone());
+
     // Evaluate guards before routing.
     //
     // Only guards whose scope prefix matches this request path are evaluated:
@@ -1554,10 +1651,9 @@ async fn handle_request(
             }
             Err(GuardRejection::Error(err)) => {
                 warn!(method = %method, path = %path, error = %err, "Guard returned an error");
-                return Ok(to_hyper_response(
-                    error_response(&err),
-                    state.cors.as_deref(),
-                ));
+                let response =
+                    respond_to_error(err, filter_ctx_request, state.filter_chain.clone()).await;
+                return Ok(to_hyper_response(response, state.cors.as_deref()));
             }
         }
     }
@@ -1571,7 +1667,7 @@ async fn handle_request(
         }
         Err(err) => {
             warn!(method = %method, path = %path, error = %err, "Request handling failed");
-            error_response(&err)
+            respond_to_error(err, filter_ctx_request, state.filter_chain.clone()).await
         }
     };
 
@@ -1595,6 +1691,112 @@ async fn handle_request(
 /// details never reach the client. The full error is logged at the call site.
 fn error_response(err: &Error) -> HttpResponse {
     err.to_client_response()
+}
+
+/// Default upper bound on how long a single global exception filter chain
+/// invocation is allowed to run before `respond_to_error` gives up on it and
+/// falls back to [`error_response`]. Chosen to comfortably cover any
+/// reasonable filter (a synchronous transform, at most a quick lookup) while
+/// still bounding worst-case added latency per request; mirrors the 5s
+/// safety-net convention already used for socket reads elsewhere in this
+/// file's test harness (see `micro.rs`'s `send_raw_request`).
+const DEFAULT_EXCEPTION_FILTER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Convert a handler/guard error into an `HttpResponse`, trying the
+/// application's global exception filter chain first (see
+/// [`Application::use_global_filter`]) before falling back to
+/// [`error_response`].
+///
+/// Both `filter_chain` and `ctx_request` are `None` unless a filter has
+/// actually been registered (see `handle_request`'s `filter_ctx_request`),
+/// so the fallback path is exercised for every request when no filter is
+/// configured -- identical to this framework's behavior before
+/// `use_global_filter` existed.
+///
+/// Thin wrapper over [`respond_to_error_with_timeout`] using
+/// [`DEFAULT_EXCEPTION_FILTER_TIMEOUT`]; see that function for the
+/// panic/timeout isolation guarantees around the filter chain invocation.
+async fn respond_to_error(
+    err: Error,
+    ctx_request: Option<HttpRequest>,
+    filter_chain: Option<Arc<ExceptionFilterChain>>,
+) -> HttpResponse {
+    respond_to_error_with_timeout(
+        err,
+        ctx_request,
+        filter_chain,
+        DEFAULT_EXCEPTION_FILTER_TIMEOUT,
+    )
+    .await
+}
+
+/// Same as [`respond_to_error`], but with an explicit filter-chain timeout
+/// (split out so tests can exercise the timeout path without an actual
+/// multi-second wait).
+///
+/// A registered exception filter runs arbitrary, user-supplied code
+/// (`ExceptionFilter::catch()`). Without isolation, a filter implementation
+/// that panics would unwind the request task and one that hangs would stall
+/// the connection forever -- either way taking down request handling for a
+/// bug in third-party filter code, on the error path no less, which is
+/// exactly when the server should be at its most robust. To prevent that,
+/// the filter chain call runs on its own `tokio::spawn`ed task:
+///
+/// - A panic inside `catch()` unwinds only that spawned task; it surfaces
+///   here as `Err(JoinError)` rather than propagating into the caller, and
+///   is treated the same as a timeout.
+/// - `tokio::time::timeout` bounds how long the task is waited on; if it
+///   fires, the still-running task is aborted so it doesn't leak.
+///
+/// In both failure modes, `err`'s fallback response ([`error_response`],
+/// identical to what would be returned with no filter chain configured at
+/// all) is used -- the filter is treated as if it had declined to handle the
+/// error (returned `None`), not as if the request itself had failed.
+async fn respond_to_error_with_timeout(
+    err: Error,
+    ctx_request: Option<HttpRequest>,
+    filter_chain: Option<Arc<ExceptionFilterChain>>,
+    filter_timeout: Duration,
+) -> HttpResponse {
+    match (filter_chain, ctx_request) {
+        (Some(chain), Some(request)) => {
+            // Computed before `err` is moved into the isolated task below,
+            // so it's available as the fallback on either a panic or a
+            // timeout without requiring `Error` to be `Clone`.
+            let fallback = error_response(&err);
+
+            let task = tokio::spawn(async move { chain.handle(&err, &request).await });
+            let abort_handle = task.abort_handle();
+
+            match tokio::time::timeout(filter_timeout, task).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(join_err)) => {
+                    error!(
+                        error = %join_err,
+                        "Exception filter task panicked; falling back to the default error response"
+                    );
+                    fallback
+                }
+                Err(_elapsed) => {
+                    // The task is still running (or about to start); stop it
+                    // so a hanging filter doesn't keep burning resources
+                    // forever in the background.
+                    abort_handle.abort();
+                    warn!(
+                        timeout_secs = filter_timeout.as_secs_f64(),
+                        "Exception filter chain timed out; falling back to the default error response"
+                    );
+                    fallback
+                }
+            }
+        }
+        _ => {
+            // No filter chain configured, or (defensively) no context
+            // request captured for it -- identical to the no-filter
+            // fallback.
+            error_response(&err)
+        }
+    }
 }
 
 /// Returns `true` if a request body of `len` bytes is within the configured
@@ -2210,6 +2412,212 @@ mod tests {
         );
     }
 
+    // ---- Application::create() dedups diamond/cyclic imports end-to-end --
+    //
+    // `test_register_module_diamond_import_registers_shared_module_once`
+    // above exercises `register_module` directly. These exercise the exact
+    // same dedup logic through the full public `Application::create()`
+    // entrypoint -- the actual bootstrap path real applications use -- and
+    // additionally cover a genuinely cyclic import graph (X imports Y
+    // imports X), which nothing above tests.
+
+    static CREATE_DIAMOND_PROVIDER_INIT_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    struct CreateDiamondSharedProvider;
+
+    async fn create_diamond_shared_handler(
+        _req: crate::HttpRequest,
+    ) -> Result<crate::HttpResponse, crate::Error> {
+        Ok(crate::HttpResponse::ok())
+    }
+
+    fn create_diamond_shared_controller_registration() -> crate::ControllerRegistration {
+        crate::ControllerRegistration {
+            type_id: std::any::TypeId::of::<()>(),
+            type_name: "CreateDiamondSharedController",
+            base_path: "/create-diamond-shared",
+            factory: |_c| Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>),
+            route_registrar: |_c, r, _b| {
+                r.get("/create-diamond-shared", create_diamond_shared_handler);
+                Ok(())
+            },
+        }
+    }
+
+    /// The shared module reached via both `CreateDiamondLeftModule` and
+    /// `CreateDiamondRightModule` below (the "diamond").
+    #[derive(Default)]
+    struct CreateDiamondSharedModule;
+    impl Module for CreateDiamondSharedModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![crate::ProviderRegistration {
+                type_id: std::any::TypeId::of::<CreateDiamondSharedProvider>(),
+                type_name: "CreateDiamondSharedProvider",
+                register_fn: |c| {
+                    CREATE_DIAMOND_PROVIDER_INIT_COUNT
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    c.register(CreateDiamondSharedProvider);
+                },
+            }]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![create_diamond_shared_controller_registration()]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[derive(Default)]
+    struct CreateDiamondLeftModule;
+    impl Module for CreateDiamondLeftModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(CreateDiamondSharedModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[derive(Default)]
+    struct CreateDiamondRightModule;
+    impl Module for CreateDiamondRightModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(CreateDiamondSharedModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[derive(Default)]
+    struct CreateDiamondRootModule;
+    impl Module for CreateDiamondRootModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![
+                Box::new(CreateDiamondLeftModule),
+                Box::new(CreateDiamondRightModule),
+            ]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_application_create_dedups_diamond_imported_module() {
+        CREATE_DIAMOND_PROVIDER_INIT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let app = Application::create::<CreateDiamondRootModule>().await;
+
+        assert!(
+            app.container.has::<CreateDiamondSharedProvider>(),
+            "shared module reachable via a diamond (through two different \
+             parent modules) must still register"
+        );
+        assert_eq!(
+            CREATE_DIAMOND_PROVIDER_INIT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "diamond-imported module's provider must register exactly once \
+             through Application::create, not zero (dropped) or two \
+             (duplicated)"
+        );
+
+        let route_count = app
+            .router
+            .routes
+            .iter()
+            .filter(|r| r.path == "/create-diamond-shared")
+            .count();
+        assert_eq!(
+            route_count, 1,
+            "diamond-imported module's controller route must register \
+             exactly once through Application::create"
+        );
+    }
+
+    #[derive(Default)]
+    struct CyclicImportXModule;
+    impl Module for CyclicImportXModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![Box::new(CyclicImportYModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    struct CyclicImportYModule;
+    impl Module for CyclicImportYModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            vec![]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            // Cycle: Y imports X, and X (above) imports Y. Each `imports()`
+            // call fabricates a *fresh* instance of the other module type on
+            // demand -- there's no literal infinitely-sized value here --
+            // but `register_module`'s TypeId-keyed `visited` set must still
+            // stop the recursion the second time either concrete type is
+            // reached, or this would recurse forever and blow the stack.
+            vec![Box::new(CyclicImportXModule)]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_application_create_terminates_on_cyclic_imports() {
+        // A generous bound: if the dedup guard in `register_module` ever
+        // regresses to unconditional recursion, this fails fast with a
+        // clear "timed out" failure instead of hanging the whole test
+        // binary. (A true regression could also manifest as a stack
+        // overflow, which no timeout can catch -- but a loud process abort
+        // is at least as diagnosable as a silent hang.)
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Application::create::<CyclicImportXModule>(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Application::create must terminate for a cyclic module import \
+             graph, not hang"
+        );
+    }
+
     #[test]
     fn test_with_guard_registers_global_prefix() {
         let app =
@@ -2217,5 +2625,405 @@ mod tests {
         assert_eq!(app.guards.len(), 1);
         assert!(app.guards[0].prefix.is_empty());
         assert!(app.guards[0].matches("/any/path"));
+    }
+
+    // ---- Application::create wires lifecycle hooks (Finding 1) ------------
+
+    static LIFECYCLE_PROBE_INIT_CALLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static LIFECYCLE_PROBE_BOOTSTRAP_CALLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    /// Records the order hooks actually ran in, so the test below can assert
+    /// the documented `OnModuleInit` -> `OnApplicationBootstrap` ordering
+    /// contract, not just that both eventually fired.
+    static LIFECYCLE_PROBE_ORDER: std::sync::Mutex<Vec<&'static str>> =
+        std::sync::Mutex::new(Vec::new());
+
+    #[derive(Clone, Default)]
+    struct LifecycleProbeProvider;
+
+    #[async_trait::async_trait]
+    impl crate::lifecycle::OnModuleInit for LifecycleProbeProvider {
+        async fn on_module_init(&self) -> crate::lifecycle::LifecycleResult {
+            LIFECYCLE_PROBE_INIT_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+            LIFECYCLE_PROBE_ORDER.lock().unwrap().push("init");
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::lifecycle::OnApplicationBootstrap for LifecycleProbeProvider {
+        async fn on_application_bootstrap(&self) -> crate::lifecycle::LifecycleResult {
+            LIFECYCLE_PROBE_BOOTSTRAP_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+            LIFECYCLE_PROBE_ORDER.lock().unwrap().push("bootstrap");
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleProbeModule;
+    impl Module for LifecycleProbeModule {
+        fn providers(&self) -> Vec<crate::ProviderRegistration> {
+            // Exercises the real `provider_registration!` macro path (the
+            // same one `armature_proc_macro`'s `#[module(...)]` codegen
+            // mirrors), not a hand-rolled `ProviderRegistration`.
+            vec![crate::provider_registration!(
+                LifecycleProbeProvider,
+                LifecycleProbeProvider
+            )]
+        }
+        fn controllers(&self) -> Vec<crate::ControllerRegistration> {
+            vec![]
+        }
+        fn imports(&self) -> Vec<Box<dyn Module>> {
+            vec![]
+        }
+        fn exports(&self) -> Vec<std::any::TypeId> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_application_create_fires_on_module_init_and_bootstrap_hooks() {
+        LIFECYCLE_PROBE_INIT_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        LIFECYCLE_PROBE_BOOTSTRAP_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        LIFECYCLE_PROBE_ORDER.lock().unwrap().clear();
+
+        let app = Application::create::<LifecycleProbeModule>().await;
+
+        assert!(
+            LIFECYCLE_PROBE_INIT_CALLED.load(std::sync::atomic::Ordering::SeqCst),
+            "OnModuleInit must fire automatically during Application::create"
+        );
+        assert!(
+            LIFECYCLE_PROBE_BOOTSTRAP_CALLED.load(std::sync::atomic::Ordering::SeqCst),
+            "OnApplicationBootstrap must fire automatically during Application::create"
+        );
+        assert!(app.container.has::<LifecycleProbeProvider>());
+
+        // Documented ordering contract: OnModuleInit must run to completion
+        // before OnApplicationBootstrap starts, not just "both eventually
+        // fired in some order".
+        let order = LIFECYCLE_PROBE_ORDER.lock().unwrap().clone();
+        assert_eq!(
+            order,
+            vec!["init", "bootstrap"],
+            "OnModuleInit must run before OnApplicationBootstrap"
+        );
+    }
+
+    // ---- Application::use_global_filter wiring (Finding 3) ----------------
+
+    struct AlwaysNotFoundGuard;
+    #[async_trait::async_trait]
+    impl Guard for AlwaysNotFoundGuard {
+        async fn can_activate(&self, _ctx: &GuardContext) -> Result<bool, Error> {
+            Err(Error::NotFound("boom".to_string()))
+        }
+    }
+
+    struct RecordingCatchAllFilter {
+        called: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl crate::exception_filter::ExceptionFilter for RecordingCatchAllFilter {
+        async fn catch(
+            &self,
+            error: &Error,
+            _ctx: &crate::exception_filter::ExceptionContext,
+        ) -> Option<HttpResponse> {
+            if let Error::NotFound(_) = error {
+                self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(
+                    HttpResponse::new(599)
+                        .with_json(&serde_json::json!({"caught_by": "RecordingCatchAllFilter"}))
+                        .unwrap(),
+                )
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_global_filter_populates_serve_state() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = Application::new(Container::new(), Router::new()).use_global_filter(
+            RecordingCatchAllFilter {
+                called: called.clone(),
+            },
+        );
+
+        assert!(app.filter_chain.is_some());
+        let state = app.serve_state(None);
+        assert!(
+            state.filter_chain.is_some(),
+            "serve_state must carry the configured filter chain through to ServeState"
+        );
+    }
+
+    #[test]
+    fn test_no_filter_configured_leaves_serve_state_filter_chain_none() {
+        let app = Application::new(Container::new(), Router::new());
+        let state = app.serve_state(None);
+        assert!(
+            state.filter_chain.is_none(),
+            "without use_global_filter, ServeState must carry no filter chain, \
+             preserving the original error_response fallback behavior"
+        );
+    }
+
+    /// Live end-to-end test: binds a real TCP listener, serves exactly one
+    /// connection through the real `handle_request` function (the same one
+    /// `Application::listen`/`listen_on` use), sends a raw HTTP request that
+    /// triggers a guard error, and asserts the response actually returned
+    /// over the wire is the one produced by the registered global filter --
+    /// not `error_response`'s default `to_client_response()` output.
+    #[tokio::test]
+    async fn test_use_global_filter_transforms_error_in_live_handle_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let filter_chain = Arc::new(
+            crate::exception_filter::ExceptionFilterChain::new().add_filter(
+                RecordingCatchAllFilter {
+                    called: called.clone(),
+                },
+            ),
+        );
+
+        let state = ServeState {
+            router: Arc::new(OptimizedRouter::from_router(&Router::new())),
+            cors: None,
+            guards: vec![ScopedGuard {
+                prefix: String::new(),
+                guard: Arc::new(AlwaysNotFoundGuard),
+            }]
+            .into(),
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            filter_chain: Some(filter_chain),
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<IncomingBody>| {
+                let state = state.clone();
+                async move { handle_request(req, state).await }
+            });
+            let _ = http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /anything HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        // Bounded the same way as micro.rs's `send_raw_request` test helper:
+        // relies on `Connection: close` above to unblock `read_to_end` once
+        // the server replies, with a safety timeout in case that path ever
+        // regresses and the connection is left open.
+        let mut raw_response = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut raw_response),
+        )
+        .await;
+        let raw_response = String::from_utf8_lossy(&raw_response);
+
+        assert!(
+            raw_response.starts_with("HTTP/1.1 599"),
+            "expected the filter's custom 599 status, got: {raw_response}"
+        );
+        assert!(
+            raw_response.contains("RecordingCatchAllFilter"),
+            "expected the filter's custom body, got: {raw_response}"
+        );
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "the registered filter's catch() must actually have run"
+        );
+    }
+
+    /// Handler that unconditionally returns an error, used to exercise the
+    /// routing/handler-error branch of `respond_to_error` (as opposed to the
+    /// guard-rejection branch `AlwaysNotFoundGuard` exercises above) end to
+    /// end through a real socket.
+    async fn always_erroring_handler(_req: HttpRequest) -> Result<HttpResponse, Error> {
+        Err(Error::NotFound("handler boom".to_string()))
+    }
+
+    /// Live end-to-end test, sibling of
+    /// `test_use_global_filter_transforms_error_in_live_handle_request`
+    /// above: no guard is involved at all here. A real route is registered
+    /// whose handler itself returns `Err(...)`, so this exercises the
+    /// *routing/handler-error* branch of `respond_to_error` (the guard test
+    /// above only ever exercises the guard-rejection branch, since its guard
+    /// rejects every request before routing is ever reached).
+    #[tokio::test]
+    async fn test_use_global_filter_transforms_handler_error_in_live_handle_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let filter_chain = Arc::new(
+            crate::exception_filter::ExceptionFilterChain::new().add_filter(
+                RecordingCatchAllFilter {
+                    called: called.clone(),
+                },
+            ),
+        );
+
+        let mut router = Router::new();
+        router.get("/broken", always_erroring_handler);
+
+        let state = ServeState {
+            router: Arc::new(OptimizedRouter::from_router(&router)),
+            cors: None,
+            // No guards at all: this response must come from the router's
+            // handler-error path, not guard rejection.
+            guards: Vec::new().into(),
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            filter_chain: Some(filter_chain),
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<IncomingBody>| {
+                let state = state.clone();
+                async move { handle_request(req, state).await }
+            });
+            let _ = http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /broken HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut raw_response = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut raw_response),
+        )
+        .await;
+        let raw_response = String::from_utf8_lossy(&raw_response);
+
+        assert!(
+            raw_response.starts_with("HTTP/1.1 599"),
+            "expected the filter's custom 599 status, got: {raw_response}"
+        );
+        assert!(
+            raw_response.contains("RecordingCatchAllFilter"),
+            "expected the filter's custom body, got: {raw_response}"
+        );
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "the registered filter's catch() must actually have run for a \
+             real handler error, not just a guard rejection"
+        );
+    }
+
+    // ---- respond_to_error isolates panicking/hanging filters (Finding 2) --
+
+    struct PanickingFilter;
+    #[async_trait::async_trait]
+    impl crate::exception_filter::ExceptionFilter for PanickingFilter {
+        async fn catch(
+            &self,
+            _error: &Error,
+            _ctx: &crate::exception_filter::ExceptionContext,
+        ) -> Option<HttpResponse> {
+            panic!("PanickingFilter deliberately panics for test coverage");
+        }
+    }
+
+    struct HangingFilter;
+    #[async_trait::async_trait]
+    impl crate::exception_filter::ExceptionFilter for HangingFilter {
+        async fn catch(
+            &self,
+            _error: &Error,
+            _ctx: &crate::exception_filter::ExceptionContext,
+        ) -> Option<HttpResponse> {
+            // Deliberately sleeps far longer than the timeout used in the
+            // test below, so it never actually completes -- exercising the
+            // "hanging filter" isolation path.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_to_error_falls_back_when_filter_panics() {
+        let chain = Arc::new(
+            crate::exception_filter::ExceptionFilterChain::new().add_filter(PanickingFilter),
+        );
+        let req = HttpRequest::new("GET".to_string(), "/panics".to_string());
+        let err = Error::Internal("boom".to_string());
+
+        // Must fall back to exactly what `error_response(&err)` (i.e. no
+        // filter at all) would have produced: a panicking filter is treated
+        // as though it declined to handle the error, not as a crashed
+        // request/connection.
+        let response = respond_to_error_with_timeout(
+            err,
+            Some(req),
+            Some(chain),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("Internal Server Error"),
+            "a panicking filter must fall back to the redacted default 5xx \
+             body, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_respond_to_error_falls_back_when_filter_hangs() {
+        let chain = Arc::new(
+            crate::exception_filter::ExceptionFilterChain::new().add_filter(HangingFilter),
+        );
+        let req = HttpRequest::new("GET".to_string(), "/hangs".to_string());
+        let err = Error::Internal("boom".to_string());
+
+        // A short timeout (rather than the 5s production default) keeps this
+        // test fast; what's under test is the fallback behavior on timeout,
+        // not the exact default duration (that's `DEFAULT_EXCEPTION_FILTER_TIMEOUT`,
+        // exercised indirectly via `respond_to_error`).
+        let start = std::time::Instant::now();
+        let response = respond_to_error_with_timeout(
+            err,
+            Some(req),
+            Some(chain),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8(response.into_body_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("Internal Server Error"),
+            "a hanging filter must fall back to the redacted default 5xx \
+             body, got: {body}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "a hanging filter must not block the caller past the configured \
+             timeout, took {elapsed:?}"
+        );
     }
 }

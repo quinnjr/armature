@@ -1408,9 +1408,11 @@ fn run_add_command(args: AddArgs) -> CliResult<()> {
     println!("  {} Changes to Cargo.toml:", "📝".cyan());
 
     if let Some(flag) = feature.feature_flag() {
-        // Enable feature on armature dependency
+        // Enable feature on armature dependency. `armature` on crates.io is
+        // squatted by an unrelated crate, so this project's crate is
+        // published as `armature-framework` and renamed back to `armature`.
         println!(
-            "    {} armature = {{ features = [\"{}\"] }}",
+            "    {} armature = {{ package = \"armature-framework\", features = [\"{}\"] }}",
             "+".green(),
             flag.green()
         );
@@ -1425,10 +1427,21 @@ fn run_add_command(args: AddArgs) -> CliResult<()> {
         return Ok(());
     }
 
-    // Add the dependency using cargo add
+    // Add the dependency using cargo add. `armature` on crates.io is squatted
+    // by an unrelated actor-framework crate; this project's crate is
+    // published as `armature-framework`, so it must be added with
+    // `--rename armature` to keep resolving as `armature` in source while
+    // depending on the real published package.
     let cargo_add_result = if let Some(flag) = feature.feature_flag() {
         std::process::Command::new("cargo")
-            .args(["add", "armature", "--features", flag])
+            .args([
+                "add",
+                "armature-framework",
+                "--rename",
+                "armature",
+                "--features",
+                flag,
+            ])
             .status()
     } else {
         std::process::Command::new("cargo")
@@ -2012,13 +2025,9 @@ async fn main() {
 
             GeneratorType::Model {
                 name,
-                fields: _,
-                migration: _,
-            } => {
-                info(&format!("Generating model: {}", name.cyan()));
-                warn("Model generation is coming soon!");
-                Ok(())
-            }
+                fields,
+                migration,
+            } => generate::model(&name, fields.as_deref(), migration).await,
 
             GeneratorType::Job { name, job_type } => {
                 let jt = match job_type {

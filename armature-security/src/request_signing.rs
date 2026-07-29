@@ -206,7 +206,10 @@ impl RequestVerifier {
         let expected = signer.sign(method, path, body, timestamp);
 
         // Constant-time comparison
-        Ok(constant_time_eq(signature, &expected))
+        Ok(armature_core::crypto::constant_time_eq(
+            signature.as_bytes(),
+            expected.as_bytes(),
+        ))
     }
 
     /// Verify request from HttpRequest
@@ -225,7 +228,13 @@ impl RequestVerifier {
             .parse()
             .map_err(|_| SigningError::InvalidTimestamp)?;
 
-        let body_str = String::from_utf8_lossy(&request.body);
+        // Use `body_ref()` rather than the `body` field directly: the production
+        // HTTP server stores incoming bodies via `HttpRequest::set_body_bytes`
+        // (zero-copy), which explicitly clears the legacy `body` field. Reading
+        // `request.body` here would see an empty body for every real request and
+        // make every signature check fail (or, for callers who skip verification
+        // on that basis, silently pass with the wrong data signed).
+        let body_str = String::from_utf8_lossy(request.body_ref());
 
         self.verify(
             &request.method,
@@ -235,20 +244,6 @@ impl RequestVerifier {
             signature,
         )
     }
-}
-
-/// Constant-time string comparison (prevent timing attacks)
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut result = 0u8;
-    for (byte_a, byte_b) in a.bytes().zip(b.bytes()) {
-        result |= byte_a ^ byte_b;
-    }
-
-    result == 0
 }
 
 /// Request signing middleware
@@ -403,6 +398,39 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_request_with_zero_copy_body() {
+        // Regression test: the production HTTP server stores incoming bodies
+        // via `HttpRequest::set_body_bytes` (zero-copy), which clears the
+        // legacy `body: Vec<u8>` field. `verify_request` must read the body
+        // through `body_ref()`/`body_bytes()` so it sees the real payload
+        // instead of treating every zero-copy request as having an empty
+        // body (which would make every real signed request fail
+        // verification).
+        let secret = "test-secret";
+        let signer = RequestSigner::new(secret);
+        let verifier = RequestVerifier::new(secret);
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = "{\"test\":\"data\"}";
+        let signature = signer.sign("POST", "/api/secure", body, timestamp);
+
+        let mut request = HttpRequest::new("POST".to_string(), "/api/secure".to_string());
+        request.headers.insert("X-Signature".to_string(), signature);
+        request
+            .headers
+            .insert("X-Timestamp".to_string(), timestamp.to_string());
+        // Simulate the real server path: body arrives as zero-copy Bytes,
+        // which empties the legacy `body` field.
+        request.set_body_bytes(bytes::Bytes::from_static(body.as_bytes()));
+        assert!(request.body.is_empty());
+
+        assert!(verifier.verify_request(&request).unwrap());
+    }
+
+    #[test]
     fn sign_is_real_hmac_sha256() {
         // Reference value computed independently via Python's hmac module:
         // hmac.new(b"secret", b"POST:/api/test:test body:1700000000", hashlib.sha256).hexdigest()
@@ -416,8 +444,9 @@ mod tests {
 
     #[test]
     fn test_constant_time_eq() {
-        assert!(constant_time_eq("abc", "abc"));
-        assert!(!constant_time_eq("abc", "abd"));
-        assert!(!constant_time_eq("abc", "abcd"));
+        use armature_core::crypto::constant_time_eq;
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
     }
 }

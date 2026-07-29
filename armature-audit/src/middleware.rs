@@ -4,6 +4,7 @@ use crate::{AuditEvent, AuditLogger, AuditSeverity, AuditStatus};
 use armature_auth::UserContext;
 use armature_core::{Error, HttpRequest, HttpResponse, Middleware};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Request/Response audit logging middleware
@@ -30,6 +31,25 @@ pub struct AuditMiddleware {
     /// non-repudiation guarantee. Only enable this in an environment where the
     /// token was already verified upstream and cannot be attacker-supplied.
     trust_unverified_jwt_subject: bool,
+    /// When an audit-write fails: `false` (default) fails open — the request
+    /// still completes normally and the failure is only observable via
+    /// [`AuditMiddleware::write_failure_count`] and a `tracing::error!` line.
+    /// `true` converts the failed audit write into a request-level error (a
+    /// `500`), but only *after* the wrapped handler has already run to
+    /// completion — see [`AuditMiddleware::fail_on_error`] (the builder
+    /// method) for the full explanation of what this does and does not
+    /// guarantee, including the retry/duplicate-execution hazard. Mirrors
+    /// `RateLimitMiddleware`'s `skip_on_error` (armature-ratelimit),
+    /// inverted: this flag defaults to preserving the previous fail-open
+    /// behavior.
+    fail_on_error: bool,
+    /// Count of audit-write failures observed by this middleware instance.
+    /// Incremented every time [`AuditLogger::log`] returns `Err`, regardless
+    /// of `fail_on_error`. This is the minimum observable signal called for by
+    /// the non-repudiation guarantee: even under the default fail-open
+    /// behavior, an operator can detect that a security-relevant event was
+    /// never durably recorded. See [`AuditMiddleware::write_failure_count`].
+    write_failures: AtomicU64,
 }
 
 impl AuditMiddleware {
@@ -55,6 +75,8 @@ impl AuditMiddleware {
             max_body_size: 10_000, // 10KB default
             subject_claim: "sub".to_string(),
             trust_unverified_jwt_subject: false,
+            fail_on_error: false,
+            write_failures: AtomicU64::new(0),
         }
     }
 
@@ -92,6 +114,125 @@ impl AuditMiddleware {
     pub fn max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;
         self
+    }
+
+    /// Set whether an audit-write failure fails the request closed.
+    ///
+    /// **Default: `false`** — fail open. The request completes normally even
+    /// if the audit event could not be durably written; the failure is only
+    /// observable via [`Self::write_failure_count`] and a logged
+    /// `tracing::error!`. This preserves the historical behavior.
+    ///
+    /// Set to `true` to fail the HTTP *response* closed: if the audit-log
+    /// write fails, this middleware converts an already-produced success
+    /// response into a `500` ([`armature_core::Error::internal`]).
+    ///
+    /// **This does NOT prevent, block, or roll back the wrapped action, and
+    /// does NOT provide true non-repudiation.** By the time this middleware
+    /// attempts the audit write, `next(request).await` has already run to
+    /// COMPLETION — any state-mutating side effects the wrapped handler
+    /// performed (database writes, external API calls, charges, etc.) have
+    /// already happened, successfully, before the audit record is even
+    /// attempted. `fail_on_error(true)` can only change what status code the
+    /// caller sees afterward; it cannot undo or gate the action itself. A
+    /// missing/failed audit record can therefore still correspond to an
+    /// action that genuinely succeeded, which is the opposite of what
+    /// "non-repudiation" implies.
+    ///
+    /// **Retry hazard:** because the underlying action already completed
+    /// before the `500` is returned, a caller that retries on that `500`
+    /// (as is often correct/expected for a `5xx`) may cause the action to
+    /// execute a second time. If you enable this option, make sure the
+    /// wrapped action is idempotent, or otherwise plan for the possibility
+    /// of duplicate execution on retry (double-charges, duplicate resource
+    /// creation, etc.).
+    ///
+    /// If your application needs true audit-before-commit semantics — the
+    /// action itself never completing unless its audit record is durably
+    /// persisted first — that has to be built at a different layer, e.g. by
+    /// making the underlying action/transaction itself audit-aware so the
+    /// audit write and the state mutation commit atomically together. This
+    /// middleware wraps the handler from the outside and cannot provide
+    /// that guarantee on its own.
+    ///
+    /// Mirrors `RateLimitMiddleware::skip_on_error` in `armature-ratelimit`
+    /// (with inverted polarity/default).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use armature_audit::*;
+    /// use std::sync::Arc;
+    ///
+    /// let logger = Arc::new(AuditLogger::builder()
+    ///     .backend(FileBackend::new("audit.log"))
+    ///     .build());
+    ///
+    /// // If the audit write itself fails, turn the response into a 500
+    /// // instead of silently succeeding. The wrapped handler's side effects
+    /// // have already happened by then — see the warnings above before
+    /// // relying on this for audit-before-action guarantees.
+    /// let middleware = AuditMiddleware::new(logger).fail_on_error(true);
+    /// ```
+    pub fn fail_on_error(mut self, fail_on_error: bool) -> Self {
+        self.fail_on_error = fail_on_error;
+        self
+    }
+
+    /// Number of audit-write failures observed by this middleware instance so
+    /// far.
+    ///
+    /// Incremented every time the underlying [`AuditLogger::log`] call fails,
+    /// independent of [`Self::fail_on_error`]. Wire this into whatever metrics
+    /// system the application uses (e.g. export it as a
+    /// `audit_write_failures_total` gauge/counter) to get an observable signal
+    /// that a security-relevant event was not durably recorded, even under the
+    /// default fail-open configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use armature_audit::*;
+    /// use armature_core::{HttpRequest, HttpResponse, Middleware};
+    /// use std::sync::Arc;
+    ///
+    /// // A backend whose every write fails, to simulate a durable-storage
+    /// // outage.
+    /// struct FailingBackend;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl AuditBackend for FailingBackend {
+    ///     async fn write(&self, _event: &AuditEvent) -> Result<(), AuditBackendError> {
+    ///         Err(AuditBackendError::Other("simulated backend failure".to_string()))
+    ///     }
+    ///
+    ///     async fn flush(&self) -> Result<(), AuditBackendError> {
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let logger = Arc::new(AuditLogger::builder().backend(FailingBackend).build());
+    /// let middleware = AuditMiddleware::new(logger);
+    /// assert_eq!(middleware.write_failure_count(), 0);
+    ///
+    /// let request = HttpRequest::new("GET".to_string(), "/".to_string());
+    /// let result = middleware
+    ///     .handle(
+    ///         request,
+    ///         Box::new(|_req| Box::pin(async move { Ok(HttpResponse::ok()) })),
+    ///     )
+    ///     .await;
+    ///
+    /// // Default `fail_on_error == false`, so the request still succeeds...
+    /// assert!(result.is_ok());
+    /// // ...but the failure is now observable via the counter.
+    /// assert_eq!(middleware.write_failure_count(), 1);
+    /// # }
+    /// ```
+    pub fn write_failure_count(&self) -> u64 {
+        self.write_failures.load(Ordering::Relaxed)
     }
 
     /// Determine the audit principal for a request.
@@ -227,7 +368,12 @@ impl Middleware for AuditMiddleware {
             None
         };
 
-        // Process request
+        // Process the request. IMPORTANT: this runs the wrapped handler —
+        // including any state-mutating side effects it performs (DB writes,
+        // external calls, etc.) — to COMPLETION before the audit-log write
+        // below is even attempted. See `fail_on_error`'s doc comment for why
+        // that means `fail_on_error(true)` cannot prevent or roll back the
+        // action, only change the status code reported afterward.
         let result = next(request).await;
 
         // Calculate duration
@@ -316,9 +462,25 @@ impl Middleware for AuditMiddleware {
             }
         };
 
-        // Log audit event (don't fail request if logging fails)
+        // Log the audit event. The wrapped handler above has already run to
+        // completion, successfully, by this point. By default
+        // (`fail_on_error == false`) a write failure does not fail the
+        // request — it is only surfaced via `write_failure_count` and this
+        // error log, preserving historical behavior. With
+        // `fail_on_error(true)` the write failure instead converts the
+        // response into a 500 — this fails the RESPONSE closed, not the
+        // action; it cannot undo work the handler already did. See
+        // `fail_on_error`'s doc comment for the full caveats (no rollback,
+        // no true non-repudiation, retry-duplication hazard).
         if let Err(e) = self.logger.log(event).await {
             tracing::error!("Failed to log audit event: {}", e);
+            self.write_failures.fetch_add(1, Ordering::Relaxed);
+
+            if self.fail_on_error {
+                return Err(Error::internal(format!(
+                    "audit log write failed and fail_on_error is enabled: {e}"
+                )));
+            }
         }
 
         result
@@ -328,7 +490,24 @@ impl Middleware for AuditMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuditLogger, MemoryBackend};
+    use crate::{AuditBackend, AuditBackendError, AuditLogger, MemoryBackend};
+
+    /// A backend whose every write fails, for exercising the
+    /// `fail_on_error`/`write_failure_count` behavior of [`AuditMiddleware`].
+    struct FailingBackend;
+
+    #[async_trait::async_trait]
+    impl AuditBackend for FailingBackend {
+        async fn write(&self, _event: &AuditEvent) -> Result<(), AuditBackendError> {
+            Err(AuditBackendError::Other(
+                "simulated backend failure".to_string(),
+            ))
+        }
+
+        async fn flush(&self) -> Result<(), AuditBackendError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_audit_middleware_creation() {
@@ -492,5 +671,55 @@ mod tests {
 
         assert!(truncated.len() <= 30); // 10 + "... [TRUNCATED]"
         assert!(truncated.contains("[TRUNCATED]"));
+    }
+
+    /// Default config (`fail_on_error == false`): a failing backend must not
+    /// fail the request, but the failure must be observable via
+    /// `write_failure_count`.
+    #[tokio::test]
+    async fn test_default_config_fails_open_but_counts_failure() {
+        let logger = Arc::new(AuditLogger::builder().backend(FailingBackend).build());
+        let middleware = AuditMiddleware::new(logger);
+
+        assert_eq!(middleware.write_failure_count(), 0);
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let result = middleware
+            .handle(
+                request,
+                Box::new(|_req| Box::pin(async move { Ok(HttpResponse::ok()) })),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "default fail_on_error=false must fail open on an audit-write error"
+        );
+        assert_eq!(
+            middleware.write_failure_count(),
+            1,
+            "the audit-write failure must be observable via the counter"
+        );
+    }
+
+    /// `fail_on_error(true)`: a failing backend must fail the request closed.
+    #[tokio::test]
+    async fn test_fail_on_error_true_fails_closed() {
+        let logger = Arc::new(AuditLogger::builder().backend(FailingBackend).build());
+        let middleware = AuditMiddleware::new(logger).fail_on_error(true);
+
+        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let result = middleware
+            .handle(
+                request,
+                Box::new(|_req| Box::pin(async move { Ok(HttpResponse::ok()) })),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "fail_on_error(true) must fail the request closed on an audit-write error"
+        );
+        assert_eq!(middleware.write_failure_count(), 1);
     }
 }

@@ -7,13 +7,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_nats::Client;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::{
     Message, MessageBroker, MessageHandler, MessagingConfig, MessagingError, ProcessingResult,
-    PublishOptions, SubscribeOptions, Subscription, config::NatsConfig,
+    PublishOptions, SubscribeOptions, Subscription, config::NatsConfig, dispatch,
 };
+
+/// Default timeout applied to the initial JetStream publish send itself
+/// (separate from - and always applied regardless of - the optional
+/// publish-acknowledgment timeout controlled by `PublishOptions`). Used only
+/// when the caller didn't set `PublishOptions::timeout`, so a
+/// blocked/backpressured send is never left completely unbounded just
+/// because `confirm` wasn't requested.
+const DEFAULT_JETSTREAM_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One subscription's stop-flag and shared handler-task registry, tracked by
+/// [`NatsBroker`] so `close` can stop every consumer and drain its in-flight
+/// handler tasks.
+struct ConsumerHandle {
+    active: Arc<AtomicBool>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
+}
 
 /// NATS message broker
 pub struct NatsBroker {
@@ -21,7 +38,7 @@ pub struct NatsBroker {
     config: NatsConfig,
     /// JetStream context, present when `NatsConfig::jetstream` is enabled.
     jetstream: Option<async_nats::jetstream::Context>,
-    active_flags: Arc<RwLock<Vec<Arc<AtomicBool>>>>,
+    active_consumers: Arc<RwLock<Vec<ConsumerHandle>>>,
     connected: Arc<AtomicBool>,
 }
 
@@ -102,7 +119,7 @@ impl NatsBroker {
             client,
             config,
             jetstream,
-            active_flags: Arc::new(RwLock::new(Vec::new())),
+            active_consumers: Arc::new(RwLock::new(Vec::new())),
             connected: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -163,17 +180,66 @@ impl MessageBroker for NatsBroker {
 
         debug!(subject = subject, message_id = %message.id, "Publishing message to NATS");
 
+        // `persistent`/`routing_key`/`exchange`/`partition_key` have no
+        // equivalent to apply on either path below: core NATS `publish` is a
+        // fire-and-forget send over a subject with no broker-side exchange,
+        // routing key, or partition concept, and JetStream's persistence is
+        // inherent to the stream (not a per-publish flag) with routing done
+        // by subject alone.
+        if let Some(ref js) = self.jetstream {
+            // Route through JetStream: the send happens synchronously inside
+            // `publish_with_headers` (it only returns a `PublishAckFuture`
+            // for the *acknowledgment*), so the message reaches the stream
+            // regardless of whether `confirm` is set below. This initial
+            // send is itself bounded by a timeout - not just the optional
+            // ack wait further down - so a blocked/backpressured send can't
+            // hang forever when the caller set `confirm: false` (and so has
+            // no protection from the ack-wait timeout below at all).
+            // `PublishOptions::timeout` is reused when set; otherwise falls
+            // back to `DEFAULT_JETSTREAM_SEND_TIMEOUT`.
+            let send_timeout = options.timeout.unwrap_or(DEFAULT_JETSTREAM_SEND_TIMEOUT);
+            let ack_future = tokio::time::timeout(
+                send_timeout,
+                js.publish_with_headers(subject.clone(), headers, message.payload.into()),
+            )
+            .await
+            .map_err(|_| {
+                MessagingError::Publish("Timed out sending message to NATS JetStream".to_string())
+            })?
+            .map_err(|e| MessagingError::Publish(e.to_string()))?;
+
+            // `confirm`/`timeout` mirror the core-NATS branch below, except
+            // the JetStream ack is a stronger guarantee: it confirms the
+            // broker durably stored the message on the stream, not just
+            // that it left the client's outbound buffer.
+            if options.confirm {
+                match options.timeout {
+                    Some(timeout) => tokio::time::timeout(timeout, ack_future)
+                        .await
+                        .map_err(|_| {
+                            MessagingError::Publish(
+                                "Timed out waiting for NATS JetStream publish acknowledgment"
+                                    .to_string(),
+                            )
+                        })?
+                        .map_err(|e| MessagingError::Publish(e.to_string()))?,
+                    None => ack_future
+                        .await
+                        .map_err(|e| MessagingError::Publish(e.to_string()))?,
+                };
+            }
+
+            return Ok(());
+        }
+
         self.client
             .publish_with_headers(subject.clone(), headers, message.payload.into())
             .await
             .map_err(MessagingError::from)?;
 
-        // NATS core `publish` is a fire-and-forget send over a subject: there
-        // is no broker-side exchange, routing key, or partition concept to
-        // map `persistent`/`routing_key`/`exchange`/`partition_key` onto, so
-        // those are intentionally not applied here. `confirm`/`timeout` are
-        // approximated by flushing the client's outbound buffer, which is
-        // the closest thing core NATS offers to a publish acknowledgement.
+        // `confirm`/`timeout` are approximated by flushing the client's
+        // outbound buffer, which is the closest thing core NATS offers to a
+        // publish acknowledgement.
         if options.confirm {
             let flush = self.client.flush();
             match options.timeout {
@@ -209,12 +275,21 @@ impl MessageBroker for NatsBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
-        if let Some(concurrency) = options.concurrency
-            && concurrency > 1
-        {
+        // Bounds how many per-message handler invocations may run
+        // concurrently (see `consume_messages`). Defaults to 1, which
+        // reproduces the previous strictly-sequential dispatch. Note this
+        // always uses core NATS pub/sub, even when `NatsConfig::jetstream`
+        // is enabled - see the doc comment on that field for why
+        // subscriptions don't yet route through JetStream.
+        let concurrency = dispatch::concurrency_or_default(options.concurrency);
+
+        if self.jetstream.is_some() {
             warn!(
-                concurrency,
-                "SubscribeOptions::concurrency is not implemented for NATS; messages are dispatched sequentially"
+                subject = topic,
+                "NatsConfig::jetstream is enabled but subscribe() still uses core NATS \
+                 pub/sub with no persistence or redelivery guarantees; use \
+                 NatsBroker::jetstream() to drive the async-nats JetStream consumer APIs \
+                 directly for JetStream-backed consumption"
             );
         }
 
@@ -232,24 +307,38 @@ impl MessageBroker for NatsBroker {
         };
 
         let active = Arc::new(AtomicBool::new(true));
+        let tasks = Arc::new(Mutex::new(JoinSet::new()));
 
         let subscription = NatsSubscription {
             topic: topic.to_string(),
             active: active.clone(),
+            tasks: tasks.clone(),
         };
 
-        // Store active flag for cleanup, pruning flags whose consumer task has
-        // already stopped so the vec does not grow unbounded.
+        // Store active flag + task registry for cleanup, pruning entries
+        // whose consumer task has already stopped so the vec does not grow
+        // unbounded.
         {
-            let mut flags = self.active_flags.write().await;
-            flags.retain(|flag| flag.load(Ordering::SeqCst));
-            flags.push(active.clone());
+            let mut consumers = self.active_consumers.write().await;
+            consumers.retain(|c| c.active.load(Ordering::SeqCst));
+            consumers.push(ConsumerHandle {
+                active: active.clone(),
+                tasks: tasks.clone(),
+            });
         }
 
         // Spawn consumer task
         let topic_owned = topic.to_string();
         tokio::spawn(async move {
-            consume_messages(subscriber, handler, &topic_owned, active).await;
+            consume_messages(
+                subscriber,
+                handler,
+                &topic_owned,
+                active,
+                tasks,
+                concurrency,
+            )
+            .await;
         });
 
         info!(subject = topic, "Subscribed to NATS subject");
@@ -264,10 +353,16 @@ impl MessageBroker for NatsBroker {
         info!("Closing NATS connection");
         self.connected.store(false, Ordering::SeqCst);
 
-        // Stop all subscriptions by setting active flags to false
-        let flags = self.active_flags.read().await;
-        for flag in flags.iter() {
-            flag.store(false, Ordering::SeqCst);
+        // Stop all subscriptions by setting active flags to false first, then
+        // drain each's in-flight handler tasks - draining one consumer must
+        // not delay flipping the flag for the others.
+        let consumers = self.active_consumers.read().await;
+        for consumer in consumers.iter() {
+            consumer.active.store(false, Ordering::SeqCst);
+        }
+        for consumer in consumers.iter() {
+            dispatch::drain_with_timeout(&consumer.tasks, dispatch::DEFAULT_DRAIN_TIMEOUT, "nats")
+                .await;
         }
 
         // Flush and close client
@@ -285,35 +380,65 @@ async fn consume_messages(
     handler: Arc<dyn MessageHandler>,
     topic: &str,
     active: Arc<AtomicBool>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
+    concurrency: usize,
 ) {
+    // Bounds how many per-message handler invocations may run concurrently.
+    // A permit is acquired before spawning each message's task (tracked in
+    // `tasks` so `unsubscribe` can drain outstanding handlers on shutdown -
+    // see `dispatch::spawn_bounded`) and released when that task finishes, so
+    // at most `concurrency` handlers are ever in flight at once. `concurrency
+    // == 1` reproduces the previous strictly sequential dispatch. Core NATS
+    // has no per-message acknowledgment, so unlike Kafka there is no
+    // ordering constraint on completion order.
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+
     while active.load(Ordering::SeqCst) {
         match subscriber.next().await {
             Some(nats_msg) => {
                 let message = nats_message_to_message(&nats_msg, topic);
+                let handler = handler.clone();
 
-                match handler.handle(message).await {
-                    Ok(result) => match result {
-                        ProcessingResult::Success => {
-                            debug!("Message processed successfully");
-                        }
-                        ProcessingResult::Retry => {
-                            debug!(
-                                "Message retry requested (NATS does not support built-in retry)"
-                            );
-                        }
-                        ProcessingResult::DeadLetter | ProcessingResult::Reject => {
-                            debug!("Message rejected");
-                        }
-                    },
-                    Err(e) => {
-                        error!(error = %e, "Message handler error");
-                    }
-                }
+                dispatch::spawn_bounded(&semaphore, &tasks, async move {
+                    handle_nats_message(&handler, message).await;
+                })
+                .await;
             }
             None => {
                 debug!("Subscriber stream ended");
+                // Flip `active` false right as the loop is genuinely about to
+                // exit for good (a stream error isn't possible here - core
+                // NATS subscribers only ever yield `None` once, when the
+                // subscription is unsubscribed/the connection is closed), so
+                // `is_active()` stops reporting `true` once the background
+                // task has actually died. Matches RabbitMQ's/Kafka's consume
+                // loops, which do the same on their own terminal exits.
+                active.store(false, Ordering::SeqCst);
                 break;
             }
+        }
+    }
+}
+
+/// Run the handler for a single NATS message. Broken out of
+/// `consume_messages` so it can be spawned as an independent per-message task
+/// under the concurrency semaphore (mirrors `aws.rs`'s `handle_sqs_message`
+/// and `rabbitmq.rs`'s `handle_delivery`).
+async fn handle_nats_message(handler: &Arc<dyn MessageHandler>, message: Message) {
+    match handler.handle(message).await {
+        Ok(result) => match result {
+            ProcessingResult::Success => {
+                debug!("Message processed successfully");
+            }
+            ProcessingResult::Retry => {
+                debug!("Message retry requested (NATS does not support built-in retry)");
+            }
+            ProcessingResult::DeadLetter | ProcessingResult::Reject => {
+                debug!("Message rejected");
+            }
+        },
+        Err(e) => {
+            error!(error = %e, "Message handler error");
         }
     }
 }
@@ -400,12 +525,16 @@ fn nats_message_to_message(nats_msg: &async_nats::Message, topic: &str) -> Messa
 pub struct NatsSubscription {
     topic: String,
     active: Arc<AtomicBool>,
+    /// In-flight per-message handler tasks, drained (with a bounded timeout)
+    /// on `unsubscribe` instead of being abandoned.
+    tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 #[async_trait]
 impl Subscription for NatsSubscription {
     async fn unsubscribe(&self) -> Result<(), MessagingError> {
         self.active.store(false, Ordering::SeqCst);
+        dispatch::drain_with_timeout(&self.tasks, dispatch::DEFAULT_DRAIN_TIMEOUT, "nats").await;
         info!(subject = %self.topic, "Unsubscribed from NATS subject");
         Ok(())
     }

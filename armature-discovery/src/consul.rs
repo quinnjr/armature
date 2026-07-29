@@ -295,6 +295,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_attaches_consul_check_block_when_health_check_url_is_set() {
+        let server = StubServer::builder()
+            .route(
+                "PUT",
+                "/v1/agent/service/register",
+                StubResponse::new(200, ""),
+            )
+            .start()
+            .await;
+
+        let consul = ConsulDiscovery::new(server.url()).unwrap();
+        let instance = ServiceInstance::new("svc-1", "api", "localhost", 8080)
+            .with_health_check("http://localhost:8080/health");
+
+        consul.register(&instance).await.unwrap();
+
+        let req = server.assert_received("PUT", "/v1/agent/service/register");
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(
+            body["Check"]["HTTP"], "http://localhost:8080/health",
+            "register() must forward health_check_url as Check.HTTP so Consul performs the round-trip health check: {body}"
+        );
+        assert_eq!(
+            body["Check"]["Interval"], "10s",
+            "register() must set Check.Interval: {body}"
+        );
+        assert_eq!(
+            body["Check"]["Timeout"], "5s",
+            "register() must set Check.Timeout: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn discover_percent_encodes_service_name_path_segment() {
         let server = StubServer::builder()
             .default_response(StubResponse::json(200, "[]"))

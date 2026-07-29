@@ -182,3 +182,44 @@ async fn memcached_expire_touches_ttl_in_place() {
         "expected NotFound, got {err:?}"
     );
 }
+
+/// Regression: `get_json` must propagate backend errors (connection failure,
+/// I/O error, etc.) as `Err`, not silently collapse them into `Ok(None)` —
+/// which is indistinguishable from a genuine cache miss. Kills the backing
+/// memcached container out from under an already-connected client and asserts
+/// the next `get_json` surfaces a real error.
+#[tokio::test]
+async fn memcached_get_json_propagates_backend_errors_not_masked_as_miss() {
+    armature_testkit::skip_if_no_docker!();
+
+    let image = GenericImage::new("memcached", "1.6-alpine").with_exposed_port(11211.tcp());
+    let container = image.start().await.expect("start memcached container");
+    let port = container
+        .get_host_port_ipv4(11211.tcp())
+        .await
+        .expect("memcached mapped port");
+    let url = format!("memcache://127.0.0.1:{port}");
+
+    let cache = connect(&url).await;
+    cache.clear().await.unwrap();
+
+    // Confirm normal operation first: a genuine miss is `Ok(None)`.
+    assert_eq!(cache.get_json("missing").await.unwrap(), None);
+    cache.set_json("k", "v".to_string(), None).await.unwrap();
+    assert_eq!(cache.get_json("k").await.unwrap(), Some("v".to_string()));
+
+    // Kill the backing container out from under the (already-connected)
+    // client. `stop_with_timeout(Some(0))` sends SIGKILL immediately instead
+    // of waiting out a graceful-shutdown grace period.
+    container
+        .stop_with_timeout(Some(0))
+        .await
+        .expect("stop memcached container");
+
+    // A subsequent `get_json` must surface a real error, not `Ok(None)`.
+    let err = cache.get_json("k").await.unwrap_err();
+    assert!(
+        matches!(err, armature_cache::CacheError::Memcached(_)),
+        "expected a propagated Memcached error, got {err:?}"
+    );
+}

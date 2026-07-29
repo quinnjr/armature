@@ -471,6 +471,13 @@ tokio::spawn(async move {
 
 ### 6. Graceful Shutdown
 
+`worker.stop()` itself waits for in-flight jobs to finish before returning --
+no extra `sleep()` needed. Internally it flips the running flag, then gives
+every worker task a grace period (defaulting to `WorkerConfig::job_timeout`)
+to notice the flag and return on its own once its current handler call
+completes, only force-aborting any task still running after that grace
+period elapses as a last resort.
+
 ```rust
 #[tokio::main]
 async fn main() -> Result<(), QueueError> {
@@ -484,15 +491,30 @@ async fn main() -> Result<(), QueueError> {
     tokio::signal::ctrl_c().await?;
 
     println!("Shutting down worker...");
+    // Waits (up to `job_timeout`) for in-flight jobs to complete before
+    // returning; only force-aborts stragglers once that grace period elapses.
     worker.stop().await?;
-
-    // Wait for in-flight jobs to complete
-    tokio::time::sleep(Duration::from_secs(30)).await;
 
     println!("Shutdown complete");
     Ok(())
 }
 ```
+
+Use [`Worker::stop_with_timeout`] instead of `stop()` to control the grace
+period explicitly -- e.g. to give in-flight jobs longer (or shorter) than the
+configured `job_timeout` to finish before they are force-aborted:
+
+```rust
+# use armature_queue::*;
+# use std::time::Duration;
+# async fn example(mut worker: Worker) -> QueueResult<()> {
+// Give in-flight jobs up to 60 seconds to finish before force-killing them.
+worker.stop_with_timeout(Duration::from_secs(60)).await?;
+# Ok(())
+# }
+```
+
+[`Worker::stop_with_timeout`]: https://docs.rs/armature-queue/latest/armature_queue/worker/struct.Worker.html#method.stop_with_timeout
 
 ## Integration with Armature
 

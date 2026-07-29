@@ -30,9 +30,11 @@ use crate::handler::BoxedHandler;
 use crate::route_constraint::RouteConstraints;
 use crate::routing::Router;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
-use parking_lot::RwLock;
+use lru::LruCache;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -174,12 +176,18 @@ impl CachedRoute {
 
 /// LRU cache for route matching results.
 ///
-/// Thread-safe with interior mutability via RwLock.
+/// Backed by [`lru::LruCache`], which tracks true access-recency order via an
+/// intrusive doubly-linked list: `get` promotes the accessed entry to
+/// most-recently-used, and eviction on `insert` always removes the actual
+/// least-recently-used entry — never an arbitrary one.
+///
+/// Thread-safe with interior mutability via a `Mutex`. A lookup mutates
+/// recency order, so — unlike a plain read-through cache — there is no
+/// benefit to a `RwLock`'s shared-read mode here; every operation needs
+/// exclusive access.
 pub struct RouteCache {
-    /// Cached routes by key
-    cache: RwLock<HashMap<RouteKey, CachedRoute>>,
-    /// Maximum cache size
-    max_size: usize,
+    /// Cached routes by key, in LRU order.
+    cache: Mutex<LruCache<RouteKey, CachedRoute>>,
     /// Statistics
     stats: RouteCacheStats,
 }
@@ -191,21 +199,25 @@ impl RouteCache {
     }
 
     /// Create cache with specific capacity.
+    ///
+    /// `lru::LruCache` requires a non-zero capacity; a caller-requested `0`
+    /// is clamped to the smallest usable capacity of 1 rather than panicking.
     pub fn with_capacity(max_size: usize) -> Self {
+        let capacity = NonZeroUsize::new(max_size).unwrap_or(NonZeroUsize::MIN);
         Self {
-            cache: RwLock::new(HashMap::with_capacity(max_size)),
-            max_size,
+            cache: Mutex::new(LruCache::new(capacity)),
             stats: RouteCacheStats::default(),
         }
     }
 
     /// Get a cached route.
     ///
-    /// Uses a shared read lock so concurrent lookups (the hot path) never
-    /// serialize against each other.
+    /// A true LRU lookup: on a hit, the entry is promoted to
+    /// most-recently-used, so it survives future evictions longer than
+    /// entries that haven't been accessed recently.
     #[inline]
     pub fn get(&self, key: &RouteKey) -> Option<CachedRoute> {
-        let cache = self.cache.read();
+        let mut cache = self.cache.lock();
         let result = cache.get(key).cloned();
 
         if result.is_some() {
@@ -218,28 +230,27 @@ impl RouteCache {
     }
 
     /// Insert a route into the cache.
+    ///
+    /// When the cache is already full and `key` is a new entry, the true
+    /// least-recently-used entry (by access order) is evicted to make room.
     pub fn insert(&self, key: RouteKey, route: CachedRoute) {
-        let mut cache = self.cache.write();
+        let mut cache = self.cache.lock();
 
-        // Incremental eviction: when full, evict a single existing entry to
-        // make room for the newcomer. This is O(1) amortized under the write
-        // lock instead of cloning half the keys and clearing them (O(n)),
-        // which previously blocked every reader for the duration.
-        if cache.len() >= self.max_size
-            && !cache.contains_key(&key)
-            && let Some(evict_key) = cache.keys().next().cloned()
-        {
-            cache.remove(&evict_key);
+        let len_before = cache.len();
+        let was_present = cache.peek(&key).is_some();
+
+        cache.put(key, route);
+
+        if !was_present && len_before >= cache.cap().get() {
             self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
 
-        cache.insert(key, route);
         self.stats.insertions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clear the cache.
     pub fn clear(&self) {
-        self.cache.write().clear();
+        self.cache.lock().clear();
     }
 
     /// Get cache statistics.
@@ -249,7 +260,7 @@ impl RouteCache {
 
     /// Get current cache size.
     pub fn len(&self) -> usize {
-        self.cache.read().len()
+        self.cache.lock().len()
     }
 
     /// Check if cache is empty.
@@ -1322,5 +1333,47 @@ mod tests {
         // Should have evicted some entries
         assert!(cache.len() <= 10);
         assert!(cache.stats().evictions() > 0);
+    }
+
+    /// Regression: eviction must follow true access recency, not
+    /// `HashMap`'s unspecified iteration order. A cache with random
+    /// eviction would only pass this by chance (roughly 1-in-N per key
+    /// where N is the capacity); a real LRU passes it deterministically
+    /// every time.
+    #[test]
+    fn test_route_cache_lru_eviction_respects_recency() {
+        let cache = RouteCache::with_capacity(3);
+
+        let key0 = RouteKey::new(HttpMethod::GET, "/route/0");
+        let key1 = RouteKey::new(HttpMethod::GET, "/route/1");
+        let key2 = RouteKey::new(HttpMethod::GET, "/route/2");
+        let key3 = RouteKey::new(HttpMethod::GET, "/route/3");
+
+        // Fill the cache to capacity, oldest to newest: key0, key1, key2.
+        cache.insert(key0.clone(), CachedRoute::static_route(0));
+        cache.insert(key1.clone(), CachedRoute::static_route(1));
+        cache.insert(key2.clone(), CachedRoute::static_route(2));
+
+        // Refresh key0 (the oldest entry): a real LRU promotes it to
+        // most-recently-used, so it must survive the next eviction even
+        // though key1 and key2 were inserted after it.
+        assert!(cache.get(&key0).is_some());
+
+        // Cache is full; inserting a new key must evict the true LRU entry
+        // — key1, the oldest entry that was never re-accessed — not an
+        // arbitrary one.
+        cache.insert(key3.clone(), CachedRoute::static_route(3));
+
+        assert!(
+            cache.get(&key0).is_some(),
+            "recently-accessed entry must survive eviction"
+        );
+        assert!(
+            cache.get(&key1).is_none(),
+            "genuinely-unaccessed entry must be evicted"
+        );
+        assert!(cache.get(&key2).is_some());
+        assert!(cache.get(&key3).is_some());
+        assert_eq!(cache.len(), 3);
     }
 }

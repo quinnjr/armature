@@ -127,6 +127,13 @@ tagged.invalidate_tags(&["users", "sessions"]).await?;
 # }
 ```
 
+The tag index is persisted in the backing `CacheStore` itself (not a local,
+per-process map), so it is visible across every instance sharing that store.
+Only backends that override `CacheStore::set_add`/`set_remove`/`set_members`
+with a native set type (`RedisCache`, via `SADD`/`SREM`/`SMEMBERS`) update it
+atomically; other backends fall back to a non-atomic read-modify-write, which
+can race under concurrent tagging of the same tag from different instances.
+
 ## Memcached (requires the `memcached` feature)
 
 ```rust,ignore

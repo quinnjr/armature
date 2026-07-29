@@ -6,10 +6,10 @@ Armature brings the elegant decorator syntax and powerful dependency injection f
 
 ## Features
 
-- **Completely Stateless**: No server-side sessions, fully stateless JWT-based authentication
+- **Stateless by Default**: JWT-based authentication requires no server-side session storage, though optional session-store backends (Redis, CouchDB, etc.) are available for applications that need stateful sessions
 - **Decorator Syntax**: Use Angular-style decorators via procedural macros
 - **Full Dependency Injection**: Automatic service injection into controllers based on field types
-- **Type-Safe DI Container**: Compile-time verified dependency resolution
+- **Type-Safe DI Container**: Generics-based dependency resolution with compile-time type checking
 - **Modular Architecture**: Organize your application into modules with providers and controllers
 - **Service Dependencies**: Services can depend on other services with automatic resolution
 - **Singleton Pattern**: Services are created once and shared across the application

@@ -7,9 +7,19 @@ use std::env;
 pub struct AppConfig {
     pub host: String,
     pub port: u16,
+    /// Used for the Playground's embedded link to the GraphQL endpoint.
+    /// Does **not** move the endpoint itself: `#[controller("/graphql")]`
+    /// in `main.rs` fixes the actual route at compile time (macro attributes
+    /// can't read runtime config), so changing this without also editing
+    /// that attribute leaves the Playground pointing at a route that isn't
+    /// mounted there.
     pub graphql_path: String,
+    /// Gates the `/playground` controller: when `false` it returns 404
+    /// instead of serving GraphiQL.
     pub graphql_playground: bool,
+    /// Enforced via `SchemaBuilder::limit_depth` when the schema is built.
     pub graphql_depth_limit: usize,
+    /// Enforced via `SchemaBuilder::limit_complexity` when the schema is built.
     pub graphql_complexity_limit: usize,
     pub jwt_secret: String,
 }

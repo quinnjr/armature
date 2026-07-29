@@ -119,9 +119,15 @@ impl Interceptor for LoggingInterceptor {
 /// Compare two byte strings for equality in constant time (with respect to
 /// their content — not their length), to avoid leaking how many leading
 /// bytes of a submitted credential matched the expected value via a timing
-/// side-channel. No `subtle`-equivalent crate is used elsewhere in this
-/// workspace, so this is a small manual implementation rather than a new
-/// dependency.
+/// side-channel.
+///
+/// A shared implementation now lives at `armature_core::crypto::constant_time_eq`
+/// (used by `armature-security`, `armature-auth`, and `armature-mcp`), but this
+/// crate keeps its own copy rather than depending on it: `armature-grpc` has no
+/// other need for `armature-core`, and pulling in the whole crate just to reuse
+/// this one function would be a disproportionately heavy dependency for a
+/// 10-line, easily-audited helper. Keep this implementation in sync with the
+/// shared one if either changes.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

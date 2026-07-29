@@ -107,7 +107,11 @@ fn bench_routing(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("path_parsing", |b| {
+    // NOTE: this benchmarks bare stdlib `str::split`, not any Armature path-parsing
+    // code — it's a raw baseline for comparison, not a measurement of Armature's own
+    // parser. For the real path-splitting benchmark, see
+    // `benches/simd_parser_benchmarks.rs`.
+    group.bench_function("raw_str_split_baseline", |b| {
         b.iter(|| {
             let path = black_box("/api/users/123/profile");
             let parts: Vec<&str> = path.split('/').collect();

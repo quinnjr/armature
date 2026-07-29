@@ -2,10 +2,19 @@
 name = "api-minimal"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94.1"
+
+# Mark this as a standalone project (not part of workspace)
+[workspace]
 
 [dependencies]
-armature = { path = "../../" }
+# Published on crates.io as "armature-framework" (the name "armature" is
+# already taken by an unrelated crate); the `package` key re-aliases it to
+# `armature` so `use armature::...` in this crate's source keeps working.
+armature = { version = "0.2", package = "armature-framework" }
+# armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
+armature-core = "0.4"
+async-trait = "0.1"
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
