@@ -41,7 +41,22 @@ tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", 
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[test]]
 name = "dispatch"
 required-features = ["tls"]
+
+# Explicit bench targets, matching the root package's `autobenches = false`
+# convention: a stray file under benches/ should not silently become a target.
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "write"
+harness = false
+
+[[bench]]
+name = "e2e"
+harness = false

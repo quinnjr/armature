@@ -126,12 +126,68 @@ Rejected, per RFC 9110/9111/9112, each with a named test:
 | `chunked` not the final transfer coding | 400, close |
 | an unsupported transfer coding | 501, close |
 | obs-fold, bare CR, or bare LF in the head | 400, close |
+| a byte in the request target outside RFC 3986's character set | 400, close |
+| a target matching none of RFC 9112 §3.2's four forms | 400, close |
 | whitespace before a field-name colon | 400, close |
 | missing or multiple `Host` on HTTP/1.1 | 400, close |
 | a framing field in a trailer section | 400, close |
 | head over byte or field-count limit | 431, close |
 | body over limit | 413, close |
 | header, body, or idle deadline exceeded | 408, close |
+
+## Measuring it
+
+The zero-allocation claim is a test, not a paragraph:
+
+```sh
+cargo test -p armature-h1 --release --test alloc_regression -- --nocapture
+```
+
+A counting global allocator warms the pools, snapshots the counter, serves 100
+more keep-alive requests, and asserts the delta is exactly zero — for plain GETs,
+a browser-sized GET, a `Content-Length` POST, and a chunked POST. Exactly zero
+rather than a threshold, because a threshold is a slow leak waiting to be
+tolerated. One test also compares an early window against one 500 requests in, so
+a per-request leak into a growing structure fails even if the absolute number
+looks small.
+
+Per-stage cost:
+
+```sh
+cargo bench -p armature-h1            # parse, write, and end-to-end over duplex
+```
+
+`benches/e2e.rs` runs over `tokio::io::duplex`, not a socket: a loopback TCP
+benchmark measures the kernel more than it measures this crate. It also pays a
+cross-thread wakeup per request, since `Connection` is `!Send` and the client half
+has to be driven from another thread — read `benches/parse.rs` and
+`benches/write.rs` for per-stage numbers without that overhead.
+
+Against hyper over a real socket:
+
+```sh
+scripts/bench-h1.sh                   # needs `cargo install oha`
+DURATION=30s CONNECTIONS=200 scripts/bench-h1.sh
+```
+
+It prints every version and command line it used, builds both servers before
+either runs, and compares against a bare-hyper server sending the same body. Read
+the p99, not the throughput headline: thread-per-core's cost is in the tail (see
+above), which is exactly what a requests/sec number hides.
+
+Fuzzing:
+
+```sh
+cd armature-h1 && cargo +nightly fuzz run framing_differential
+```
+
+Three targets: `parse_head` (no panic, and every `Bytes` in a parsed head points
+into the input rather than a copy), `chunked` (semantics invariant under how the
+input is split across reads), and `framing_differential` — the same bytes to
+`framing::decide` and to hyper, failing when both accept and disagree on body
+length, which is request smuggling by definition. That target is what found the
+two request-target validations in the table above. CI runs each for 60 seconds on
+pull requests touching this crate.
 
 ## Status
 

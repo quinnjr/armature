@@ -70,6 +70,10 @@ exclude = [
     "benches/comparison_servers/axum_server",
     "benches/comparison_servers/warp_server",
     "benches/comparison_servers/rocket_server",
+    # The armature-h1 baseline for scripts/bench-h1.sh. Excluded so its hyper
+    # dependency stays out of the workspace graph, where it would be a
+    # confusing thing to find next to a crate that exists to replace it.
+    "benches/comparison_servers/hyper_h1_server",
 ]
 # MSRV-aware resolver (stable since 1.84): honors `rust-version` when picking
 # dependency versions, so a fresh resolve won't pull deps that raised their MSRV
