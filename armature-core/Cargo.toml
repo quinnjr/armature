@@ -12,7 +12,7 @@ keywords = ["http", "async", "web", "framework"]
 categories = ["web-programming::http-server", "asynchronous"]
 
 [dependencies]
-armature-log = { path = "../armature-log", version = "0.2.0" }
+armature-log = { path = "../armature-log", version = "0" }
 inventory = "0.3"
 dependency-injector = "2.1.0"
 matchit = "0.9"  # High-performance router (same as Axum)
