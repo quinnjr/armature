@@ -13,7 +13,7 @@ categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 # Core dependencies
-armature-core = { path = "../armature-core", version = "0.5.0" }
+armature-core = { path = "../armature-core", version = "0" }
 async-trait = "0.1"
 thiserror = "2.0"
 tracing = "0.1"

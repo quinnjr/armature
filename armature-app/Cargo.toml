@@ -12,8 +12,8 @@ keywords = ["rhai", "scripting", "web", "framework", "application"]
 categories = ["web-programming", "development-tools"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.5.0" }
-armature-rhai = { path = "../armature-rhai", version = "0.2.0" }
+armature-core = { path = "../armature-core", version = "0" }
+armature-rhai = { path = "../armature-rhai", version = "0" }
 
 rhai = { version = "1.25", features = ["sync", "serde", "metadata"] }
 tokio = { version = "1.52", features = ["sync", "fs", "time", "rt-multi-thread", "macros", "signal"] }

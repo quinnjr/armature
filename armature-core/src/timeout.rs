@@ -144,17 +144,40 @@ impl TimeoutConfig {
     /// Gets the timeout for a specific path.
     ///
     /// Returns the route-specific timeout if configured, otherwise the default.
+    ///
+    /// Resolution order:
+    /// 1. An exact match against a configured route pattern wins outright.
+    /// 2. Otherwise, among all configured patterns that are a prefix of `path`,
+    ///    the **longest** matching pattern wins (longest-prefix-wins). This is
+    ///    deterministic regardless of `HashMap` iteration order. Ties between
+    ///    equal-length patterns are broken by string (byte) ordering, so the
+    ///    result is stable across process restarts.
+    /// 3. If no pattern matches, the configured default timeout is returned.
     pub fn get_timeout_for_path(&self, path: &str) -> Duration {
         // Check for exact match first
         if let Some(timeout) = self.route_timeouts.get(path) {
             return *timeout;
         }
 
-        // Check for prefix matches (e.g., "/api/upload" matches "/api/upload/123")
+        // Check for prefix matches (e.g., "/api/upload" matches "/api/upload/123").
+        // Longest-prefix-wins, with ties broken deterministically by pattern
+        // string ordering, so the result does not depend on HashMap iteration
+        // order (which is randomized per-process).
+        let mut best: Option<(&str, Duration)> = None;
         for (pattern, timeout) in &self.route_timeouts {
-            if path.starts_with(pattern) {
-                return *timeout;
+            if path.starts_with(pattern.as_str()) {
+                match best {
+                    Some((best_pattern, _))
+                        if pattern.len() < best_pattern.len()
+                            || (pattern.len() == best_pattern.len()
+                                && pattern.as_str() <= best_pattern) => {}
+                    _ => best = Some((pattern.as_str(), *timeout)),
+                }
             }
+        }
+
+        if let Some((_, timeout)) = best {
+            return timeout;
         }
 
         self.default
@@ -397,6 +420,28 @@ mod tests {
         assert_eq!(
             config.get_timeout_for_path("/api/upload/123"),
             Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_timeout_config_prefix_matching_longest_wins() {
+        // Two overlapping prefixes are configured with different timeouts.
+        // The longer (more specific) matching prefix must win, regardless of
+        // HashMap iteration order.
+        let config = TimeoutConfig::new()
+            .default_timeout(30)
+            .route_timeout("/api", 60)
+            .route_timeout("/api/upload", 300);
+
+        assert_eq!(
+            config.get_timeout_for_path("/api/upload/123"),
+            Duration::from_secs(300)
+        );
+
+        // A path matching only the shorter prefix still gets that timeout.
+        assert_eq!(
+            config.get_timeout_for_path("/api/other"),
+            Duration::from_secs(60)
         );
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "armature-core"
-version = "0.5.0"
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,17 +12,14 @@ keywords = ["http", "async", "web", "framework"]
 categories = ["web-programming::http-server", "asynchronous"]
 
 [dependencies]
-armature-log = { path = "../armature-log", version = "0.2.0" }
+armature-log = { path = "../armature-log", version = "0" }
 inventory = "0.3"
 dependency-injector = "2.1.0"
-matchit = "0.9"  # High-performance router (same as Axum)
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
 hyper = { version = "1.10", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1.4"
-tower = { version = "0.5", features = ["util"] }
-tower-service = "0.3"
 bytes = "1.12"
 smallvec = { version = "1.15", features = ["union", "const_generics"] }
 compact_str = "0.9"

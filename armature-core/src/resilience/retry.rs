@@ -172,13 +172,64 @@ impl Default for BackoffStrategy {
 }
 
 /// Generate a random factor between 0.0 and 1.0.
+///
+/// Backed by a per-thread xorshift64 PRNG (same technique as
+/// `LoadBalancer::next_random`) rather than raw clock nanoseconds, so that
+/// concurrent callers racing through backoff at nearly the same instant
+/// (the exact thundering-herd scenario jitter exists to decorrelate) don't
+/// end up sampling correlated values off shared clock resolution.
 fn rand_factor() -> f64 {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    (nanos % 1000) as f64 / 1000.0
+
+    thread_local! {
+        static RNG_STATE: Cell<u64> = Cell::new(seed_rng_state());
+    }
+
+    // Monotonically increasing per-process counter mixed into the seed so
+    // that threads spun up in quick succession (e.g. a burst of concurrent
+    // retry callers) don't derive identical initial states even if their
+    // clock reads land in the same tick.
+    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn seed_rng_state() -> u64 {
+        // Mix a wall-clock reading, a thread-local stack address (varies
+        // per-thread), and a global atomic counter. Unlike the previous
+        // implementation this mixing happens once per thread (at
+        // thread-local init) rather than on every call, so subsequent
+        // jitter draws advance via xorshift and are decorrelated from
+        // call timing even when many threads race through backoff at
+        // once.
+        let time_bits = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let addr_bits = {
+            let local = 0u8;
+            &local as *const u8 as u64
+        };
+        let counter_bits = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        let mut seed = time_bits
+            ^ addr_bits.rotate_left(17)
+            ^ counter_bits.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if seed == 0 {
+            // xorshift cannot recover from a zero state.
+            seed = 0x853c_49e6_748f_ea9b;
+        }
+        seed
+    }
+
+    RNG_STATE.with(|state| {
+        let mut x = state.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        state.set(x);
+        // Use the top 53 bits for a uniformly distributed f64 in [0, 1).
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    })
 }
 
 /// Retry configuration.

@@ -13,9 +13,9 @@ rust-version = "1.94.1"
 # unrelated, unmaintained crate) — `package = "armature-framework"` fetches
 # the right crate while keeping the local import name `armature`, matching
 # this crate's `[lib] name = "armature"`.
-armature = { package = "armature-framework", version = "0.3", features = ["graphql", "validation"] }
+armature = { package = "armature-framework", version = "0", features = ["graphql", "validation"] }
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
-armature-core = "0.5"
+armature-core = "0"
 async-graphql = { version = "7.0", features = ["chrono", "uuid"] }
 
 # Required for controller/module macros

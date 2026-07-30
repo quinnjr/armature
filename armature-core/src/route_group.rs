@@ -44,8 +44,13 @@ impl Guard for MultiGuard {
     }
 }
 
-/// A middleware that chains multiple middleware together
-/// Note: This is a placeholder for future middleware chaining implementation
+/// Holds an ordered list of middleware.
+///
+/// Note: `MultiMiddleware` does not implement the `Middleware` trait and
+/// therefore does not itself chain or dispatch anything. It is a simple
+/// container exposing `get_middleware()` so callers can retrieve the list;
+/// actual sequential middleware execution is handled elsewhere (see
+/// `MiddlewareChain` in `middleware.rs`).
 pub struct MultiMiddleware {
     middleware: Vec<Arc<dyn Middleware>>,
 }

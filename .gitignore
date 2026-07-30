@@ -18,7 +18,9 @@ Cargo.lock
 !.cursor/rules/
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # Git worktrees
 .worktrees/

@@ -38,7 +38,12 @@ pub enum LoadBalanceStrategy {
     Random,
     /// Power of Two Choices (pick 2 random, choose least loaded)
     PowerOfTwo,
-    /// Sticky: hash-based routing for session affinity
+    /// Sticky: hash-based routing for session affinity.
+    ///
+    /// Only honored via [`LoadBalancer::select_sticky`], which takes the
+    /// hash key explicitly. The key-less [`LoadBalancer::select`] entry
+    /// point has no key to hash on and falls back to round-robin (logging
+    /// a warning) when this strategy is configured.
     Sticky,
 }
 
@@ -268,6 +273,16 @@ impl LoadBalancer {
     }
 
     /// Select next worker based on strategy.
+    ///
+    /// # `Sticky` limitation
+    ///
+    /// This method takes no key, so it **cannot honor session affinity**
+    /// for [`LoadBalanceStrategy::Sticky`]: there is nothing here to hash
+    /// on. When the configured strategy is `Sticky`, this falls back to
+    /// plain round-robin and logs a `tracing::warn!` on every call. Callers
+    /// that need real hash-based sticky routing must call
+    /// [`LoadBalancer::select_sticky`] with an explicit key (e.g. a
+    /// connection or session id) instead of this method.
     #[inline]
     pub fn select(&self) -> usize {
         match self.strategy {
@@ -276,7 +291,15 @@ impl LoadBalancer {
             LoadBalanceStrategy::Weighted => self.select_weighted(),
             LoadBalanceStrategy::Random => self.select_random(),
             LoadBalanceStrategy::PowerOfTwo => self.select_power_of_two(),
-            LoadBalanceStrategy::Sticky => self.select_round_robin(), // Default for sticky
+            LoadBalanceStrategy::Sticky => {
+                tracing::warn!(
+                    "LoadBalancer::select() cannot honor Sticky session affinity: \
+                     no key is available at this call site. Falling back to \
+                     round-robin; call select_sticky(key) instead for real \
+                     hash-based routing."
+                );
+                self.select_round_robin()
+            }
         }
     }
 

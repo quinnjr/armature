@@ -241,11 +241,16 @@ impl<T> Deref for Query<T> {
 
 impl<T: DeserializeOwned> FromRequest for Query<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from params and deserialize
+        // Build a query string from params and deserialize.
+        //
+        // `query_params` holds already percent-decoded key/value pairs, so we
+        // must re-percent-encode each component before rejoining with `=`/`&`.
+        // Otherwise a decoded value containing a literal `&` or `=` would be
+        // silently reparsed as extra/incorrect key-value pairs.
         let query_string: String = request
             .query_params
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
             .collect::<Vec<_>>()
             .join("&");
 
@@ -348,11 +353,16 @@ impl<T> Deref for PathParams<T> {
 
 impl<T: DeserializeOwned> FromRequest for PathParams<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from path params and deserialize
+        // Build a query string from path params and deserialize.
+        //
+        // `path_params` holds already percent-decoded key/value pairs, so we
+        // must re-percent-encode each component before rejoining with `=`/`&`.
+        // Otherwise a decoded value containing a literal `&` or `=` would be
+        // silently reparsed as extra/incorrect key-value pairs.
         let params_string: String = request
             .path_params
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
             .collect::<Vec<_>>()
             .join("&");
 
@@ -829,6 +839,49 @@ mod tests {
         let query: Query<Pagination> = Query::from_request(&request).unwrap();
         assert_eq!(query.page, 1);
         assert_eq!(query.limit, 10);
+    }
+
+    #[test]
+    fn test_query_extraction_with_ampersand_and_equals_in_value() {
+        // Regression test: `query_params` stores already percent-decoded
+        // values. A decoded value containing a literal `&` or `=` (e.g. the
+        // original request was `?note=1%26b%3D2`) must not be corrupted when
+        // rejoined into a query string for deserialization.
+        let mut request = HttpRequest::new("GET".to_string(), "/items".to_string());
+        request
+            .query_params
+            .insert("note".to_string(), "1&b=2".to_string());
+        request
+            .query_params
+            .insert("name".to_string(), "a=b&c".to_string());
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Filters {
+            note: String,
+            name: String,
+        }
+
+        let query: Query<Filters> = Query::from_request(&request).unwrap();
+        assert_eq!(query.note, "1&b=2");
+        assert_eq!(query.name, "a=b&c");
+    }
+
+    #[test]
+    fn test_path_params_extraction_with_ampersand_and_equals_in_value() {
+        // Regression test: same corruption risk as query params, but for
+        // path params extracted via `PathParams<T>`.
+        let mut request = HttpRequest::new("GET".to_string(), "/items/x".to_string());
+        request
+            .path_params
+            .insert("slug".to_string(), "a&b=c".to_string());
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Params {
+            slug: String,
+        }
+
+        let params: PathParams<Params> = PathParams::from_request(&request).unwrap();
+        assert_eq!(params.slug, "a&b=c");
     }
 
     #[test]

@@ -7,9 +7,15 @@
 //!
 //! - **Connection Draining** - Wait for in-flight requests to complete
 //! - **Shutdown Hooks** - Register custom cleanup functions
-//! - **Health Status Integration** - Mark unhealthy during shutdown
 //! - **Timeout Support** - Force shutdown after timeout
 //! - **Signal Handling** - Respond to SIGTERM, SIGINT
+//!
+//! Note: this module does not itself update any health-check/readiness
+//! status. If your health probes (see [`crate::health`]) should report
+//! unhealthy/not-ready during shutdown, mark that status yourself (e.g. via
+//! a shutdown hook registered with [`ShutdownManager::add_hook`], or in the
+//! same task that calls [`ShutdownManager::initiate_shutdown`]) before or
+//! around calling it.
 //!
 //! # Quick Start
 //!
@@ -151,7 +157,11 @@ impl Drop for ConnectionGuard {
 
 /// Shutdown manager coordinates graceful shutdown
 ///
-/// Handles connection draining, shutdown hooks, and health status updates.
+/// Handles connection draining and shutdown hooks. It does not update any
+/// health-check/readiness status itself; callers who want probes to report
+/// unhealthy/not-ready during shutdown must set that status themselves
+/// (e.g. in a registered shutdown hook) before or around calling
+/// [`ShutdownManager::initiate_shutdown`].
 pub struct ShutdownManager {
     /// Connection tracker
     tracker: ConnectionTracker,
@@ -242,10 +252,14 @@ impl ShutdownManager {
     /// Initiate graceful shutdown
     ///
     /// This will:
-    /// 1. Mark health checks as unhealthy
-    /// 2. Stop accepting new connections
-    /// 3. Wait for in-flight requests to complete
-    /// 4. Execute shutdown hooks
+    /// 1. Stop accepting new connections
+    /// 2. Wait for in-flight requests to complete (drain)
+    /// 3. Execute shutdown hooks
+    ///
+    /// This method does not mark any health-check/readiness status as
+    /// unhealthy. If your probes should reflect shutdown state, do so
+    /// yourself (e.g. in a shutdown hook, or just before calling this
+    /// method) — see the module docs for details.
     ///
     /// # Examples
     ///
@@ -277,7 +291,7 @@ impl ShutdownManager {
         info!("Stopping acceptance of new connections");
         self.tracker.stop_accepting();
 
-        // Phase 3: Drain existing connections
+        // Phase 2: Drain existing connections
         info!(
             "Draining {} active connections",
             self.tracker.active_count()
@@ -291,7 +305,7 @@ impl ShutdownManager {
             );
         }
 
-        // Phase 4: Execute shutdown hooks
+        // Phase 3: Execute shutdown hooks
         info!("Executing shutdown hooks");
         let hooks = self.hooks.read().await;
 

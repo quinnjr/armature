@@ -398,7 +398,10 @@ pub fn num_physical_cpus() -> usize {
 ///
 /// # Platform Support
 ///
-/// - Linux: Uses `sched_setaffinity`
+/// - Linux: Uses `sched_setaffinity`. Only cores `0..64` are supported (the
+///   affinity mask is a single `u64`); `core >= 64` returns
+///   `AffinityError::InvalidCore` rather than silently pinning the wrong
+///   core.
 /// - macOS/Windows: No-op (returns Ok but doesn't pin)
 ///
 /// # Example
@@ -427,17 +430,26 @@ pub fn set_thread_affinity(core: usize) -> Result<(), AffinityError> {
 fn set_thread_affinity_linux(core: usize) -> Result<(), AffinityError> {
     use std::mem;
 
-    // Check if core is valid
+    // Check if core is valid.
+    //
+    // NOTE: the affinity mask below is a bare `u64`, so this implementation
+    // only supports cores in the range [0, 64). That is enforced here as a
+    // hard precondition (not just a description) since `core` may exceed 64
+    // on hosts with more than 64 logical CPUs (`num_cpus()` is unbounded).
+    // Shifting a `u64` by >= 64 bits is undefined behavior in the sense that
+    // it panics in debug builds and silently wraps (`core % 64`) in release
+    // builds, so we must reject out-of-range cores before building the mask.
     let num_cores = num_cpus();
-    if core >= num_cores {
+    let max_supported_core = num_cores.min(64);
+    if core >= max_supported_core {
         return Err(AffinityError::InvalidCore {
             core,
-            max: num_cores - 1,
+            max: max_supported_core.saturating_sub(1),
         });
     }
 
-    // cpu_set_t is 1024 bits = 128 bytes on Linux
-    // We use a simplified version that supports up to 64 cores
+    // cpu_set_t is 1024 bits = 128 bytes on Linux.
+    // We use a simplified version that supports up to 64 cores (enforced above).
     let mut mask: u64 = 0;
     mask |= 1u64 << core;
 
@@ -1354,6 +1366,29 @@ mod tests {
 
         let err2 = AffinityError::NotSupported;
         assert!(err2.to_string().contains("not supported"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_set_thread_affinity_rejects_core_above_64() {
+        // Regression test: the Linux affinity mask is a bare `u64`, so cores
+        // >= 64 must be rejected with `AffinityError::InvalidCore` instead of
+        // silently wrapping (`core % 64`, LLVM shift semantics in release
+        // builds) or panicking ("attempt to shift left with overflow" in
+        // debug builds).
+        let result = set_thread_affinity(64);
+        match result {
+            Err(AffinityError::InvalidCore { core, max }) => {
+                assert_eq!(core, 64);
+                assert!(max < 64);
+            }
+            other => panic!("expected InvalidCore for core=64, got {:?}", other),
+        }
+
+        // A far-out-of-range core (representative of 96/128-vCPU hosts)
+        // must also be rejected rather than silently succeeding.
+        let result = set_thread_affinity(127);
+        assert!(matches!(result, Err(AffinityError::InvalidCore { .. })));
     }
 
     #[test]

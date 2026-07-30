@@ -194,7 +194,6 @@ pub mod status;
 pub mod streaming;
 pub mod timeout;
 pub mod tls;
-pub mod tower_compat;
 pub mod traits;
 pub mod vectored_io;
 pub mod websocket;

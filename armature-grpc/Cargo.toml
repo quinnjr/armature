@@ -13,7 +13,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 # Logging
-armature-log = { path = "../armature-log", version = "0.2.0" }
+armature-log = { path = "../armature-log", version = "0" }
 
 # gRPC
 tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring"] }

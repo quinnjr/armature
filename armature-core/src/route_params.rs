@@ -1,6 +1,6 @@
 //! Zero-Allocation Route Parameter Extraction
 //!
-//! This module provides optimized route parameter handling:
+//! This module provides a standalone, optimized route parameter API:
 //!
 //! - **Zero-allocation matching**: Use borrowed strings and SmallVec
 //! - **Wildcard support**: `*` and `**` patterns for catch-all routes
@@ -11,6 +11,33 @@
 //! - No heap allocation for typical routes (≤8 params)
 //! - Borrowed strings avoid copying during matching
 //! - Optimized wildcard handling with single-pass parsing
+//!
+//! # Status: not (yet) wired into the live request path
+//!
+//! `CompiledPattern`, `Params`, and [`match_path_zero_alloc`] are a
+//! correct, independently-tested API, but [`Router`](crate::routing::Router)
+//! and [`OptimizedRouter`](crate::route_cache::OptimizedRouter) — the
+//! routers that actually serve requests — do not call into this module.
+//! They use their own matchers (`routing::match_path`,
+//! `route_cache::CompiledRoute`/`CachedRoute`), which return an owned
+//! `HashMap<String, String>` (the type `HttpRequest::path_params` requires)
+//! and avoid the `Vec<&str>` segment-splitting allocation via `SmallVec`,
+//! but still allocate one `String` per extracted parameter on every match.
+//!
+//! A full switch to this module's borrowed `Params<'a>` on the live path
+//! would need `HttpRequest::path_params` (and everything that reads it) to
+//! move off owned `HashMap<String, String>`, which is a public API change
+//! out of scope for a drop-in fix. Also note a semantic difference that
+//! blocks a direct swap even for the matching step alone: here a bare `*`
+//! pattern segment matches exactly one path segment
+//! ([`SegmentType::Wildcard`]), whereas `routing`/`route_cache` treat a
+//! bare `*` as a multi-segment catch-all (consuming all remaining
+//! segments), so substituting this module's matcher would silently change
+//! matching behavior for that pattern.
+//!
+//! If you need genuinely zero-allocation extraction, use this module's
+//! `CompiledPattern::match_path` / [`match_path_zero_alloc`] directly
+//! rather than going through `Router`/`OptimizedRouter`.
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
