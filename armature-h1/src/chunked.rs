@@ -24,12 +24,18 @@ const MAX_SIZE_DIGITS: usize = 16;
 pub enum ChunkEvent {
     /// Body bytes. May be a partial chunk when the whole chunk has not arrived.
     Data(Bytes),
-    /// The trailer section, possibly empty. Emitted exactly once, after the
-    /// terminating zero-length chunk.
+    /// A non-empty trailer section, after the terminating zero-length chunk.
     ///
-    /// Boxed because an inline [`HeaderVec`] is about a kilobyte, and paying
-    /// that on every `Data` event to carry a trailer section that is usually
-    /// empty would be backwards. Trailers are off the hot path; `Data` is not.
+    /// **Only emitted when trailers are actually present.** An empty trailer
+    /// section — the overwhelmingly common case — goes straight to [`End`], because
+    /// boxing an empty `HeaderVec` to announce that there is nothing in it would
+    /// put an allocation on the steady-state path for no information.
+    ///
+    /// Boxed because an inline [`HeaderVec`] is about a kilobyte, and paying that
+    /// on every `Data` event would be backwards. Trailers are off the hot path;
+    /// `Data` is not.
+    ///
+    /// [`End`]: ChunkEvent::End
     Trailers(Box<HeaderVec>),
     /// The body is complete. Terminal.
     End,
@@ -218,6 +224,11 @@ impl ChunkedDecoder {
                         // Empty line ends the trailer section.
                         buf.advance(consumed);
                         self.state = State::Ending;
+                        if self.trailers.is_empty() {
+                            // Nothing to report: skip the event rather than
+                            // allocating a box to say so.
+                            continue;
+                        }
                         return Ok(Some(ChunkEvent::Trailers(Box::new(std::mem::take(
                             &mut self.trailers,
                         )))));
@@ -375,28 +386,13 @@ mod tests {
     #[test]
     fn decodes_a_single_chunk() {
         let events = drain(&mut dec(), b"5\r\nhello\r\n0\r\n\r\n").unwrap();
-        assert_eq!(
-            events,
-            vec![
-                data("hello"),
-                ChunkEvent::Trailers(Box::new(HeaderVec::new())),
-                ChunkEvent::End
-            ]
-        );
+        assert_eq!(events, vec![data("hello"), ChunkEvent::End]);
     }
 
     #[test]
     fn decodes_multiple_chunks() {
         let events = drain(&mut dec(), b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap();
-        assert_eq!(
-            events,
-            vec![
-                data("abc"),
-                data("de"),
-                ChunkEvent::Trailers(Box::new(HeaderVec::new())),
-                ChunkEvent::End
-            ]
-        );
+        assert_eq!(events, vec![data("abc"), data("de"), ChunkEvent::End]);
     }
 
     /// Data events must be slices of the input, not copies.
@@ -443,11 +439,6 @@ mod tests {
 
         assert_eq!(payload, b"hello");
         assert!(collected.contains(&ChunkEvent::End));
-        assert!(
-            collected
-                .iter()
-                .any(|e| matches!(e, ChunkEvent::Trailers(_)))
-        );
     }
 
     #[test]
@@ -605,10 +596,6 @@ mod tests {
     fn end_is_terminal() {
         let mut d = dec();
         let mut buf = Bytes::from_static(b"0\r\n\r\n");
-        assert!(matches!(
-            d.poll(&mut buf).unwrap(),
-            Some(ChunkEvent::Trailers(_))
-        ));
         assert_eq!(d.poll(&mut buf).unwrap(), Some(ChunkEvent::End));
         assert!(d.is_done());
         // Further polls stay at End and consume nothing.
@@ -622,10 +609,8 @@ mod tests {
         let events = drain(&mut dec(), b"0\r\n\r\n").unwrap();
         assert_eq!(
             events,
-            vec![
-                ChunkEvent::Trailers(Box::new(HeaderVec::new())),
-                ChunkEvent::End
-            ]
+            vec![ChunkEvent::End],
+            "an empty trailer section produces no event"
         );
         assert_eq!(dec().decoded_len(), 0);
     }

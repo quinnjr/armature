@@ -157,6 +157,9 @@ pub struct Connection<IO, S> {
     date: Rc<RefCell<DateCache>>,
     deadline: ConnDeadline,
     out: BytesMut,
+    /// Reused across requests: allocating a fresh flag per request would put an
+    /// allocation back on the steady-state path.
+    body_read: Rc<Cell<bool>>,
 }
 
 impl<IO, S> Connection<IO, S>
@@ -178,6 +181,7 @@ where
             date,
             deadline,
             out: BytesMut::with_capacity(1024),
+            body_read: Rc::new(Cell::new(false)),
         }
     }
 
@@ -203,17 +207,23 @@ where
                 HeadOutcome::Ready => {}
             }
 
-            let (head, head_len) = {
-                let buf = self.shared.borrow().buf.clone().freeze();
-                match parse_head(&buf, &self.cfg.limits) {
-                    Ok(Some(pair)) => pair,
-                    // `read_until_head_or_idle` only returns Ready once a
-                    // terminator is present, so this is unreachable in practice.
-                    Ok(None) => return Ok(None),
-                    Err(e) => {
-                        self.write_error(Version::Http11, e.status()).await?;
-                        return Ok(None);
-                    }
+            // Split the head off rather than cloning the buffer. `BytesMut::clone`
+            // would copy every head byte and allocate to do it; `split_to` hands
+            // back a view of the same allocation, and the remainder stays put for
+            // the body or the next pipelined request.
+            let head_bytes = {
+                let mut st = self.shared.borrow_mut();
+                let end = parse::find_head_end(&st.buf).unwrap_or(st.buf.len());
+                st.buf.split_to(end).freeze()
+            };
+            let head = match parse_head(&head_bytes, &self.cfg.limits) {
+                Ok(Some((head, _))) => head,
+                // `read_until_head_or_idle` only returns Ready once a terminator
+                // is present, so this is unreachable in practice.
+                Ok(None) => return Ok(None),
+                Err(e) => {
+                    self.write_error(Version::Http11, e.status()).await?;
+                    return Ok(None);
                 }
             };
 
@@ -236,17 +246,13 @@ where
                 .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
             let is_head_request = head.method == Method::Head;
 
-            // Consume the head, leaving any body bytes already read.
-            {
-                let mut st = self.shared.borrow_mut();
-                let _ = st.buf.split_to(head_len);
-                st.pending_continue = expects_continue;
-            }
+            self.shared.borrow_mut().pending_continue = expects_continue;
 
             let dyn_io: Rc<RefCell<dyn BodyIo>> = self.shared.clone();
             // Shared with the body so the loop can tell, after the handler
             // returns, whether the body was consumed to its end.
-            let body_read = Rc::new(Cell::new(false));
+            self.body_read.set(false);
+            let body_read = self.body_read.clone();
             let body = Body::new(
                 kind,
                 dyn_io,
@@ -448,9 +454,10 @@ where
         let flushed = tokio::select! {
             biased;
             () = self.deadline.expired() => Err(io::Error::from(io::ErrorKind::TimedOut)),
-            r = Self::flush_into(&self.shared, &mut self.out) => r,
+            r = Self::write_all_from(&self.shared, &self.out) => r,
         };
         self.deadline.disarm();
+        self.out.clear();
         flushed?;
 
         if upgrading {
@@ -470,20 +477,25 @@ where
     }
 
     async fn flush(&mut self) -> io::Result<()> {
-        Self::flush_into(&self.shared, &mut self.out).await
+        Self::write_all_from(&self.shared, &self.out).await?;
+        self.out.clear();
+        Ok(())
     }
 
-    /// Write `out` in full, then flush.
+    /// Write `out` in full, then flush, then clear it for reuse.
+    ///
+    /// Writes straight from the buffer rather than `split()`ing it off. `split`
+    /// leaves the buffer with zero capacity, so the next response would have to
+    /// reallocate — one allocation per request, purely to avoid a borrow.
     ///
     /// Each `borrow_mut` is scoped to a single poll rather than held across the
     /// await. Holding it across would deadlock the moment anything else — a body
-    /// read, say — needed the same transport, and it is the kind of latent hazard
-    /// that only surfaces under a specific interleaving.
-    async fn flush_into(shared: &Rc<RefCell<IoState<IO>>>, out: &mut BytesMut) -> io::Result<()> {
-        if out.is_empty() {
+    /// read, say — needed the same transport, and that is the kind of latent
+    /// hazard that only surfaces under a specific interleaving.
+    async fn write_all_from(shared: &Rc<RefCell<IoState<IO>>>, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
             return Ok(());
         }
-        let bytes = out.split().freeze();
         let mut written = 0;
         while written < bytes.len() {
             let n = std::future::poll_fn(|cx| {
@@ -527,7 +539,8 @@ where
         }
         // Best effort: the peer may already be gone, and there is nothing
         // further to do about it either way.
-        let _ = Self::flush_into(&self.shared, &mut self.out).await;
+        let _ = Self::write_all_from(&self.shared, &self.out).await;
+        self.out.clear();
         Ok(())
     }
 }
