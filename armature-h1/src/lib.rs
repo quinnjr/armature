@@ -14,6 +14,7 @@
 
 mod bytestr;
 pub mod chunked;
+pub mod conn;
 pub mod deadline;
 pub mod framing;
 mod head;
@@ -27,6 +28,7 @@ pub mod write;
 
 pub use bytestr::ByteStr;
 pub use chunked::{ChunkEvent, ChunkedDecoder, ChunkedError};
+pub use conn::{ConnConfig, Connection, Disposition};
 pub use deadline::ConnDeadline;
 pub use framing::{BodyKind, FramingError};
 pub use head::Head;

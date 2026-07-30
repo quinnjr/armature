@@ -9,7 +9,7 @@ use crate::chunked::{ChunkEvent, ChunkedDecoder, ChunkedError};
 use crate::header::{HeaderId, HeaderVec};
 use crate::{BodyKind, Head};
 use bytes::Bytes;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -98,6 +98,20 @@ pub trait BodyIo {
     /// interim response lazy: a handler that rejects a request without reading
     /// its body never causes one to be sent.
     fn poll_send_continue(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+
+    /// Take up to `max` already-buffered bytes.
+    ///
+    /// The body pulls from the connection's single buffer rather than being
+    /// handed a private copy of it. That distinction is load-bearing: bytes past
+    /// the end of this body belong to the *next* pipelined request, and a body
+    /// that swallowed them would make the following request vanish.
+    fn take_buffered(&mut self, max: usize) -> Bytes;
+
+    /// Return bytes the body read but did not consume.
+    ///
+    /// Used after a chunked body's terminating chunk, where the decoder may have
+    /// been handed bytes belonging to the next request.
+    fn push_back(&mut self, bytes: Bytes);
 }
 
 /// Shared body-reading state.
@@ -113,6 +127,38 @@ struct BodyState {
     continue_sent: bool,
     needs_continue: bool,
     done: bool,
+    /// Shared with the connection, set when the body is fully consumed.
+    ///
+    /// The connection must know this: if a handler returns without reading the
+    /// body, the bytes still on the wire are body bytes, and treating them as
+    /// the next request line is precisely the smuggling scenario this crate
+    /// exists to prevent.
+    fully_read: Rc<Cell<bool>>,
+}
+
+impl BodyState {
+    /// Mark the body complete, publishing that fact to the connection.
+    ///
+    /// An error path calls this too: a body that failed is not "fully read", but
+    /// it is finished, and the connection closes on error regardless.
+    #[inline]
+    fn finish(&mut self) {
+        self.done = true;
+        self.fully_read.set(true);
+    }
+
+    /// Mark the body finished *without* claiming it was fully read.
+    ///
+    /// An errored body leaves an unknown number of bytes on the wire, so the
+    /// connection must close rather than try to find the next request line in
+    /// them. Keeping this distinct from [`finish`](Self::finish) is what stops a
+    /// handler that swallows a body error from silently enabling connection
+    /// reuse over undelimited bytes.
+    #[inline]
+    fn fail(&mut self) {
+        self.done = true;
+        self.fully_read.set(false);
+    }
 }
 
 /// A request body.
@@ -146,29 +192,34 @@ impl Body {
                 continue_sent: true,
                 needs_continue: false,
                 done: true,
+                fully_read: Rc::new(Cell::new(true)),
             },
         }
     }
 
-    /// A body of `kind`, starting from `buffered` and continuing from `io`.
+    /// A body of `kind`, reading through `io`.
     ///
     /// `needs_continue` requests a lazy `100 Continue`, sent on the first read.
+    /// The body pulls already-buffered bytes from `io` on demand rather than
+    /// taking a copy, so bytes belonging to the next pipelined request stay where
+    /// the connection can still see them.
     pub fn new(
         kind: BodyKind,
-        buffered: Bytes,
         io: Rc<RefCell<dyn BodyIo>>,
         needs_continue: bool,
         limits: &crate::Limits,
+        fully_read: Rc<Cell<bool>>,
     ) -> Self {
         let (remaining, decoder, done) = match kind {
             BodyKind::None => (0, None, true),
             BodyKind::Length(n) => (n, None, n == 0),
             BodyKind::Chunked => (0, Some(ChunkedDecoder::new(limits)), false),
         };
+        fully_read.set(done);
         Self {
             state: BodyState {
                 kind,
-                buffered,
+                buffered: Bytes::new(),
                 remaining,
                 decoder,
                 trailers: if done { Some(HeaderVec::new()) } else { None },
@@ -176,6 +227,7 @@ impl Body {
                 continue_sent: !needs_continue,
                 needs_continue,
                 done,
+                fully_read,
             },
         }
     }
@@ -194,6 +246,7 @@ impl Body {
                 continue_sent: true,
                 needs_continue: false,
                 done: len == 0,
+                fully_read: Rc::new(Cell::new(true)),
             },
         }
     }
@@ -216,6 +269,15 @@ impl Body {
         self.state.needs_continue && !self.state.continue_sent
     }
 
+    /// Whether the body was read to its end cleanly.
+    ///
+    /// False after an error, and false if the handler simply never read it. The
+    /// connection uses this to decide whether reuse is safe.
+    #[inline]
+    pub fn was_fully_read(&self) -> bool {
+        self.state.fully_read.get()
+    }
+
     /// The trailer section, once the body is fully read.
     #[inline]
     pub fn trailers(&self) -> Option<&HeaderVec> {
@@ -232,15 +294,18 @@ impl Body {
 
         // Lazily flush the interim response before the first byte is read.
         if !s.continue_sent {
-            if let Some(io) = &s.io {
-                match io.borrow_mut().poll_send_continue(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(e)) => {
-                        s.done = true;
-                        return Poll::Ready(Some(Err(BodyError::Io(e))));
-                    }
-                    Poll::Ready(Ok(())) => {}
+            // The RefMut is scoped tightly so the error arm can touch `s` again.
+            let sent = match &s.io {
+                Some(io) => io.borrow_mut().poll_send_continue(cx),
+                None => Poll::Ready(Ok(())),
+            };
+            match sent {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => {
+                    s.fail();
+                    return Poll::Ready(Some(Err(BodyError::Io(e))));
                 }
+                Poll::Ready(Ok(())) => {}
             }
             s.continue_sent = true;
         }
@@ -248,36 +313,47 @@ impl Body {
         loop {
             match s.kind {
                 BodyKind::None => {
-                    s.done = true;
+                    s.finish();
                     return Poll::Ready(None);
                 }
 
                 BodyKind::Length(_) => {
+                    if s.buffered.is_empty() && s.remaining > 0 {
+                        // Take at most what this body is owed, leaving anything
+                        // beyond it for the next request.
+                        let want = usize::try_from(s.remaining).unwrap_or(usize::MAX);
+                        if let Some(io) = &s.io {
+                            let got = io.borrow_mut().take_buffered(want);
+                            if !got.is_empty() {
+                                s.buffered = got;
+                            }
+                        }
+                    }
                     if !s.buffered.is_empty() {
                         let take = std::cmp::min(s.buffered.len() as u64, s.remaining) as usize;
                         let chunk = s.buffered.split_to(take);
                         s.remaining -= take as u64;
                         if s.remaining == 0 {
-                            s.done = true;
+                            s.finish();
                             s.trailers = Some(HeaderVec::new());
                         }
                         return Poll::Ready(Some(Ok(chunk)));
                     }
                     if s.remaining == 0 {
-                        s.done = true;
+                        s.finish();
                         s.trailers = Some(HeaderVec::new());
                         return Poll::Ready(None);
                     }
                     match Self::fill(s, cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(e)) => {
-                            s.done = true;
+                            s.fail();
                             return Poll::Ready(Some(Err(e)));
                         }
                         Poll::Ready(Ok(false)) => {
                             // EOF with bytes still owed. Never report success on
                             // a truncated body.
-                            s.done = true;
+                            s.fail();
                             return Poll::Ready(Some(Err(BodyError::Incomplete)));
                         }
                         Poll::Ready(Ok(true)) => continue,
@@ -285,10 +361,18 @@ impl Body {
                 }
 
                 BodyKind::Chunked => {
+                    if s.buffered.is_empty()
+                        && let Some(io) = &s.io
+                    {
+                        let got = io.borrow_mut().take_buffered(usize::MAX);
+                        if !got.is_empty() {
+                            s.buffered = got;
+                        }
+                    }
                     let decoder = s.decoder.as_mut().expect("chunked body has a decoder");
                     match decoder.poll(&mut s.buffered) {
                         Err(e) => {
-                            s.done = true;
+                            s.fail();
                             return Poll::Ready(Some(Err(BodyError::Chunked(e))));
                         }
                         Ok(Some(ChunkEvent::Data(d))) => return Poll::Ready(Some(Ok(d))),
@@ -297,20 +381,28 @@ impl Body {
                             continue;
                         }
                         Ok(Some(ChunkEvent::End)) => {
-                            s.done = true;
+                            s.finish();
                             if s.trailers.is_none() {
                                 s.trailers = Some(HeaderVec::new());
+                            }
+                            // Anything left belongs to the next pipelined
+                            // request; give it back rather than dropping it.
+                            if !s.buffered.is_empty() {
+                                let leftover = std::mem::take(&mut s.buffered);
+                                if let Some(io) = &s.io {
+                                    io.borrow_mut().push_back(leftover);
+                                }
                             }
                             return Poll::Ready(None);
                         }
                         Ok(None) => match Self::fill(s, cx) {
                             Poll::Pending => return Poll::Pending,
                             Poll::Ready(Err(e)) => {
-                                s.done = true;
+                                s.fail();
                                 return Poll::Ready(Some(Err(e)));
                             }
                             Poll::Ready(Ok(false)) => {
-                                s.done = true;
+                                s.fail();
                                 return Poll::Ready(Some(Err(BodyError::Incomplete)));
                             }
                             Poll::Ready(Ok(true)) => continue,
@@ -557,13 +649,15 @@ mod tests {
     /// A `BodyIo` that hands out canned reads and records interim responses.
     struct MockIo {
         reads: Vec<Bytes>,
+        buffered: Bytes,
         continues: usize,
     }
 
     impl MockIo {
-        fn new(reads: Vec<&'static [u8]>) -> Rc<RefCell<Self>> {
+        fn with_buffered(buffered: &'static [u8], reads: Vec<&'static [u8]>) -> Rc<RefCell<Self>> {
             Rc::new(RefCell::new(Self {
                 reads: reads.into_iter().rev().map(Bytes::from_static).collect(),
+                buffered: Bytes::from_static(buffered),
                 continues: 0,
             }))
         }
@@ -578,15 +672,27 @@ mod tests {
             self.continues += 1;
             Poll::Ready(Ok(()))
         }
+
+        fn take_buffered(&mut self, max: usize) -> Bytes {
+            let n = self.buffered.len().min(max);
+            self.buffered.split_to(n)
+        }
+
+        fn push_back(&mut self, bytes: Bytes) {
+            let mut joined = Vec::with_capacity(bytes.len() + self.buffered.len());
+            joined.extend_from_slice(&bytes);
+            joined.extend_from_slice(&self.buffered);
+            self.buffered = Bytes::from(joined);
+        }
     }
 
     fn body(kind: BodyKind, buffered: &'static [u8], reads: Vec<&'static [u8]>) -> Body {
         Body::new(
             kind,
-            Bytes::from_static(buffered),
-            MockIo::new(reads),
+            MockIo::with_buffered(buffered, reads),
             false,
             &Limits::default(),
+            Rc::new(Cell::new(false)),
         )
     }
 
@@ -665,13 +771,13 @@ mod tests {
     /// The interim response is sent on the first read and nowhere else.
     #[tokio::test]
     async fn continue_is_sent_lazily_on_first_read() {
-        let io = MockIo::new(vec![]);
+        let io = MockIo::with_buffered(b"hello", vec![]);
         let mut b = Body::new(
             BodyKind::Length(5),
-            Bytes::from_static(b"hello"),
             io.clone(),
             true,
             &Limits::default(),
+            Rc::new(Cell::new(false)),
         );
         assert!(b.continue_pending());
         assert_eq!(io.borrow().continues, 0, "nothing sent before a read");
@@ -685,13 +791,13 @@ mod tests {
     /// an interim response — that is the whole value of lazy 100-continue.
     #[tokio::test]
     async fn continue_is_not_sent_when_body_is_ignored() {
-        let io = MockIo::new(vec![]);
+        let io = MockIo::with_buffered(b"hello", vec![]);
         let b = Body::new(
             BodyKind::Length(5),
-            Bytes::from_static(b"hello"),
             io.clone(),
             true,
             &Limits::default(),
+            Rc::new(Cell::new(false)),
         );
         drop(b);
         assert_eq!(io.borrow().continues, 0);
