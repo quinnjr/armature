@@ -216,7 +216,6 @@ jobs:
   test-members:
     name: Test member crates (${{ matrix.crate }})
     needs: detect-changes
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -321,15 +320,25 @@ jobs:
             minimal: ""
           - crate: armature-toon
             minimal: ""
+    # `matrix` is not available in a job-level `if:` (GitHub Actions only
+    # resolves it in `steps.*.if`), so the changed-crate check below is
+    # applied per-step instead of gating the whole job. An out-of-scope
+    # crate's job still spins up and immediately no-ops through every step
+    # below (a few seconds of runner time for "Set up job"/checkout), rather
+    # than being skipped outright — the expensive part (toolchain install,
+    # dependency compilation, the actual test run) is what gets skipped.
     steps:
       - uses: actions/checkout@v6
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Install system dependencies
-        if: matrix.apt != ''
+        if: ${{ matrix.apt != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt }}
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Run tests
         # Docker is present on ubuntu-latest, so container-gated suites must
         # actually run here rather than self-skipping into a green pass.
@@ -337,10 +346,12 @@ jobs:
         # when this is set to "1" and no daemon is reachable. Every
         # container-gated suite in the crates above routes through that macro;
         # a hand-rolled `if !docker_available() { return; }` would bypass it.
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
         run: cargo test -p ${{ matrix.crate }} --all-features --verbose ${{ matrix.extra }}
       - name: Run doc tests
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
         run: cargo test -p ${{ matrix.crate }} --all-features --doc
       # Separate step so a minimal-feature failure is attributable rather than
       # buried in the --all-features run. Skipped for feature-less crates,
@@ -351,7 +362,7 @@ jobs:
       # needs an extra flag applied to this step too, give it its own matrix
       # key rather than reusing `extra`.
       - name: Run tests (minimal features)
-        if: matrix.minimal != ''
+        if: ${{ matrix.minimal != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
         run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
