@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod bytestr;
+pub mod chunked;
 pub mod framing;
 mod head;
 pub mod header;
@@ -21,6 +22,7 @@ mod method;
 pub mod parse;
 
 pub use bytestr::ByteStr;
+pub use chunked::{ChunkEvent, ChunkedDecoder, ChunkedError};
 pub use framing::{BodyKind, FramingError};
 pub use head::Head;
 pub use header::{HeaderId, HeaderVec};
