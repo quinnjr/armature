@@ -23,6 +23,7 @@ pub mod limits;
 mod method;
 pub mod parse;
 pub mod pool;
+pub mod server;
 pub mod service;
 pub mod write;
 
@@ -37,6 +38,7 @@ pub use limits::Limits;
 pub use method::{Method, Version};
 pub use parse::{ParseError, parse_head};
 pub use pool::BufPool;
+pub use server::{Config, Server, ServerHandle, TcpConfig};
 pub use service::{
     Body, BodyError, BodyIo, H1Service, Request, Response, ResponseBody, Transport, Upgraded,
 };
