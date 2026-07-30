@@ -55,37 +55,6 @@ pub mod context {
     pub use async_graphql::Context;
 }
 
-// Macro for defining resolvers with NestJS-like syntax
-#[macro_export]
-macro_rules! resolver {
-    (
-        $(#[$meta:meta])*
-        $vis:vis struct $name:ident {
-            $($field:ident: $field_ty:ty),* $(,)?
-        }
-
-        impl $impl_name:ident {
-            $(
-                $(#[$method_meta:meta])*
-                async fn $method:ident(&self $(, $arg:ident: $arg_ty:ty)*) -> $ret:ty $body:block
-            )*
-        }
-    ) => {
-        $(#[$meta])*
-        $vis struct $name {
-            $($field: $field_ty),*
-        }
-
-        #[async_graphql::Object]
-        impl $impl_name {
-            $(
-                $(#[$method_meta])*
-                async fn $method(&self $(, $arg: $arg_ty)*) -> $ret $body
-            )*
-        }
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

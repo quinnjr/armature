@@ -8,7 +8,10 @@ pub mod schema_builder;
 pub mod schema_docs;
 #[cfg(feature = "sdl-export")]
 pub mod sdl_static;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
+pub use armature_graphql_macros::resolver;
 pub use async_graphql;
 pub use async_graphql::{
     Context, EmptyMutation, EmptySubscription, Enum, Error, ID, InputObject, MergedObject,
@@ -20,6 +23,8 @@ pub use decorators::*;
 pub use resolver::*;
 pub use schema_builder::*;
 pub use schema_docs::*;
+#[cfg(feature = "websocket")]
+pub use websocket::{ALL_WEBSOCKET_PROTOCOLS, Protocols, select_protocol, serve_graphql_websocket};
 
 use armature_core::Error as ArmatureError;
 use armature_log::info;
