@@ -32,10 +32,17 @@ use crate::routing::Router;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
 use lru::LruCache;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Max path segments kept inline (on the stack) before a segment split falls
+/// back to heap allocation. Mirrors `routing::split_segments`'s inline
+/// capacity so the common case (`<= 8` segments) never allocates a `Vec`
+/// just to walk the path during matching/extraction.
+const INLINE_PATH_SEGMENTS: usize = 8;
 
 // ============================================================================
 // Cache Key
@@ -152,7 +159,8 @@ impl CachedRoute {
             return HashMap::new();
         }
 
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
+            path.split('/').filter(|s| !s.is_empty()).collect();
         let mut params = HashMap::with_capacity(self.param_indices.len());
 
         for (name, idx) in &self.param_indices {
@@ -412,7 +420,8 @@ impl CompiledRoute {
     /// Check if a path matches this pattern.
     #[inline]
     pub fn matches(&self, path: &str) -> bool {
-        let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let path_segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
+            path.split('/').filter(|s| !s.is_empty()).collect();
 
         if !self.has_catch_all && path_segments.len() != self.segments.len() {
             return false;
@@ -450,7 +459,8 @@ impl CompiledRoute {
             return HashMap::new();
         }
 
-        let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let path_segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
+            path.split('/').filter(|s| !s.is_empty()).collect();
         let mut params = HashMap::with_capacity(self.param_indices.len());
 
         for (name, idx) in &self.param_indices {

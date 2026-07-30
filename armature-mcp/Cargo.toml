@@ -1,6 +1,6 @@
 [package]
 name = "armature-mcp"
-version = "0.1.4"
+version = "0.1.5"
 edition.workspace = true
 # Inherits the workspace MSRV (1.94.1). This crate's own floor is 1.91 — the
 # `register_mcp_tool!` macro expands to an `inventory::submit!` `static` whose
@@ -17,10 +17,10 @@ keywords = ["mcp", "ai", "llm", "tools", "armature"]
 categories = ["web-programming", "development-tools"]
 
 [dependencies]
-armature-core = { path = "../armature-core", version = "0.5.0" }
-armature-http-client = { path = "../armature-http-client", version = "0.2.0" }
-armature-proc-macro = { path = "../armature-proc-macro", version = "0.2.0" }
-armature-jwt = { path = "../armature-jwt", version = "0.2.0" }
+armature-core = { path = "../armature-core", version = "0" }
+armature-http-client = { path = "../armature-http-client", version = "0" }
+armature-proc-macro = { path = "../armature-proc-macro", version = "0" }
+armature-jwt = { path = "../armature-jwt", version = "0" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
