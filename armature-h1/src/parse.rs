@@ -44,6 +44,9 @@ pub enum ParseError {
     /// A request target that is not valid UTF-8.
     #[error("request target is not valid UTF-8")]
     NonUtf8Target,
+    /// A request target containing characters a URI may not contain.
+    #[error("invalid character in request target")]
+    InvalidTarget,
     /// A version other than HTTP/1.0 or HTTP/1.1.
     #[error("unsupported HTTP version")]
     UnsupportedVersion,
@@ -170,6 +173,8 @@ pub fn parse_head(buf: &Bytes, limits: &Limits) -> Result<Option<(Head, usize)>,
     };
 
     let target_token = req.path.ok_or(ParseError::InvalidRequestLine)?;
+    validate_target(target_token.as_bytes())?;
+    validate_target_form(target_token.as_bytes(), &method)?;
     let target = ByteStr::from_utf8(buf.slice_ref(target_token.as_bytes()))
         .map_err(|_| ParseError::NonUtf8Target)?;
 
@@ -210,6 +215,112 @@ pub fn parse_head(buf: &Bytes, limits: &Limits) -> Result<Option<(Head, usize)>,
         },
         head_len,
     )))
+}
+
+/// Reject a request target containing characters no URI may contain.
+///
+/// `httparse` is permissive here: it accepts control characters, backslashes, and
+/// raw non-ASCII in the target. Every one of those is a normalization hazard —
+/// a backslash that one hop reads as a path separator and another does not, a
+/// control byte that survives into a log line or a proxied request line. So the
+/// target is restricted to the RFC 3986 character set (unreserved, sub-delims,
+/// plus `:/?#[]@%`), which covers origin-, absolute-, authority-, and
+/// asterisk-form alike.
+///
+/// The differential fuzz target against hyper found this gap: hyper parses the
+/// target into a `http::Uri` and rejects what does not fit, while this crate was
+/// passing the bytes straight through to routing.
+fn validate_target(target: &[u8]) -> Result<(), ParseError> {
+    if target.is_empty() {
+        return Err(ParseError::InvalidTarget);
+    }
+    for &b in target {
+        let ok = b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b':'
+                    | b'/'
+                    | b'?'
+                    | b'#'
+                    | b'['
+                    | b']'
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b'%'
+            );
+        if !ok {
+            return Err(ParseError::InvalidTarget);
+        }
+    }
+    Ok(())
+}
+
+/// Reject a request target that matches none of the four permitted forms.
+///
+/// RFC 9112 section 3.2 defines exactly four: origin-form (`/path`),
+/// absolute-form (`scheme://...`), authority-form (`host:port`, CONNECT only), and
+/// asterisk-form (`*`, OPTIONS only). A target matching none of them is not a
+/// request-target at all, and passing it to routing means routing on something
+/// whose meaning no two implementations need agree on.
+///
+/// Also found by the differential fuzz target: hyper parses the target into a
+/// `http::Uri`, which enforces these forms, and rejected targets this crate was
+/// accepting.
+fn validate_target_form(target: &[u8], method: &Method) -> Result<(), ParseError> {
+    // asterisk-form: OPTIONS only (RFC 9112 section 3.2.4).
+    if target == b"*" {
+        return if matches!(method, Method::Options) {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidTarget)
+        };
+    }
+
+    // authority-form: CONNECT only, and CONNECT accepts nothing else
+    // (RFC 9112 section 3.2.3).
+    if matches!(method, Method::Connect) {
+        let has_scheme = target.windows(3).any(|w| w == b"://");
+        let has_colon = target.contains(&b':');
+        return if !has_scheme && has_colon && !target.starts_with(b"/") {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidTarget)
+        };
+    }
+
+    // origin-form: the common case.
+    if target.starts_with(b"/") {
+        return Ok(());
+    }
+
+    // absolute-form: a valid scheme, then `://`.
+    if let Some(i) = target.windows(3).position(|w| w == b"://") {
+        let scheme = &target[..i];
+        let valid_scheme = scheme.first().is_some_and(|b| b.is_ascii_alphabetic())
+            && scheme
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        return if valid_scheme {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidTarget)
+        };
+    }
+
+    Err(ParseError::InvalidTarget)
 }
 
 /// Map an `httparse` error onto our error set.
@@ -313,6 +424,7 @@ mod tests {
         assert_eq!(ParseError::WhitespaceBeforeColon.status(), 400);
         assert_eq!(ParseError::InvalidRequestLine.status(), 400);
         assert_eq!(ParseError::NonUtf8Target.status(), 400);
+        assert_eq!(ParseError::InvalidTarget.status(), 400);
         assert_eq!(ParseError::HeadTooLarge.status(), 431);
         assert_eq!(ParseError::TooManyHeaders.status(), 431);
         assert_eq!(ParseError::UnsupportedVersion.status(), 505);
@@ -414,6 +526,97 @@ mod tests {
             parse(b"GET / HTTP/1.2\r\nHost: a\r\n\r\n"),
             Err(ParseError::UnsupportedVersion)
         );
+    }
+
+    /// httparse accepts backslashes and raw non-ASCII in the target; both are
+    /// normalization hazards across hops. Found by the differential fuzz target
+    /// against hyper, which parses the target into a `http::Uri` and rejects what
+    /// does not fit.
+    #[test]
+    fn rejects_invalid_target_characters() {
+        // Characters our validator owns: httparse passes these through.
+        for raw in [
+            &b"GET /a\\b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a<b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a>b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a{b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a|b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a^b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a\"b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+        ] {
+            assert_eq!(
+                parse_head(&Bytes::copy_from_slice(raw), &Limits::default()),
+                Err(ParseError::InvalidTarget),
+                "should have rejected: {}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+
+        // Control bytes and raw non-ASCII are rejected too, though httparse
+        // catches some of them first and reports a malformed request line. Either
+        // error closes the connection with 400, so which one fires does not matter
+        // — that it is rejected at all does.
+        for raw in [
+            &b"GET /a\x01b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a\x7fb HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a\x00b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a\xc3\xa9 HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a\xffb HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+        ] {
+            let err = parse_head(&Bytes::copy_from_slice(raw), &Limits::default())
+                .expect_err("a non-URI byte in a target must be rejected");
+            assert_eq!(err.status(), 400, "{err:?}");
+        }
+    }
+
+    /// RFC 9112 section 3.2 permits exactly four target forms. Anything else is
+    /// not a request-target, and routing on it means routing on something whose
+    /// meaning no two implementations need agree on. Found by the differential
+    /// fuzz target against hyper.
+    #[test]
+    fn rejects_targets_matching_no_permitted_form() {
+        for raw in [
+            // Neither origin-, absolute-, authority-, nor asterisk-form.
+            &b"GET foo/bar HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET a.example:80 HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET ://a.example/x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET 1http://a.example/x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            // asterisk-form is OPTIONS only.
+            &b"GET * HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            // CONNECT takes authority-form and nothing else.
+            &b"CONNECT /x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"CONNECT http://a.example/x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"CONNECT a.example HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+        ] {
+            assert_eq!(
+                parse_head(&Bytes::copy_from_slice(raw), &Limits::default()),
+                Err(ParseError::InvalidTarget),
+                "should have rejected: {}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_every_legitimate_target_form() {
+        for raw in [
+            &b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a%20b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /~user/a.b_c-d HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a?q=1;2,3!$&'()*+= HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a#frag HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET http://a.example:8080/x HTTP/1.1\r\nHost: a.example\r\n\r\n"[..],
+            &b"GET http://[::1]:8080/x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"CONNECT a.example:443 HTTP/1.1\r\nHost: a.example\r\n\r\n"[..],
+        ] {
+            assert!(
+                parse_head(&Bytes::copy_from_slice(raw), &Limits::default()).is_ok(),
+                "should have accepted: {}",
+                String::from_utf8_lossy(raw)
+            );
+        }
     }
 
     #[test]

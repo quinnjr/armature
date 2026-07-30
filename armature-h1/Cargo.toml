@@ -11,6 +11,9 @@ description = "Zero-allocation thread-per-core HTTP/1.1 server for the Armature 
 keywords = ["http", "server", "http1", "performance", "async"]
 categories = ["web-programming::http-server", "asynchronous", "network-programming"]
 readme = "README.md"
+# The fuzz crate is its own workspace and depends on hyper for the differential
+# target; neither belongs in the published package.
+exclude = ["fuzz/"]
 
 [dependencies]
 bytes = "1.12"
