@@ -14,7 +14,7 @@ rust-version = "1.94.1"
 # package, so the real crate -- published as "armature-framework" but exposing
 # its library as `armature` (see this repo's root `[lib] name = "armature"`)
 # -- must be pulled in under an explicit `package` rename.
-armature = { package = "armature-framework", version = "0.3", features = ["queue"] }
+armature = { package = "armature-framework", version = "0", features = ["queue"] }
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
 armature-core = "0.5"
 async-trait = "0.1"

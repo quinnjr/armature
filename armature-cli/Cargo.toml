@@ -47,10 +47,10 @@ openapiv3 = "2.2"
 reqwest = { version = "0.13", features = ["json"], default-features = false }
 
 # Mock server (uses armature-core)
-armature-core = { path = "../armature-core", version = "0.5.0" }
+armature-core = { path = "../armature-core", version = "0" }
 
 # Rhai application runner
-armature-app = { path = "../armature-app", version = "0.2.0" }
+armature-app = { path = "../armature-app", version = "0" }
 
 [dev-dependencies]
 tempfile = "3.27"

@@ -15,7 +15,7 @@ categories = ["web-programming", "api-bindings"]
 # NOTE: `armature-core` was declared here but referenced nowhere in `src/` or
 # `tests/`; it has been removed rather than left to pull ~140 transitive crates
 # into every build of this crate.
-armature-log = { path = "../armature-log", version = "0.2.0" }
+armature-log = { path = "../armature-log", version = "0" }
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
