@@ -631,11 +631,15 @@ impl Deref for ContentType {
 
 // ========== Method Extractor ==========
 
-/// Extracts the HTTP method
+/// Extracts the HTTP method.
+///
+/// Renamed from `Method` in 0.6: `armature_core::Method` is now the wire method
+/// type re-exported from `armature-h1`, and one crate root cannot hold both. The
+/// extractor is the less-used of the two names, so it is the one that moved.
 #[derive(Debug, Clone)]
-pub struct Method(pub String);
+pub struct MethodExtractor(pub crate::Method);
 
-impl Method {
+impl MethodExtractor {
     /// Check if the method is GET
     pub fn is_get(&self) -> bool {
         self.0 == "GET"
@@ -662,14 +666,14 @@ impl Method {
     }
 }
 
-impl FromRequest for Method {
+impl FromRequest for MethodExtractor {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        Ok(Method(request.method.clone()))
+        Ok(MethodExtractor(crate::Method::from(request.method.clone())))
     }
 }
 
-impl Deref for Method {
-    type Target = str;
+impl Deref for MethodExtractor {
+    type Target = crate::Method;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -874,7 +878,7 @@ mod tests {
     #[test]
     fn test_method() {
         let request = create_request();
-        let method: Method = Method::from_request(&request).unwrap();
+        let method: MethodExtractor = MethodExtractor::from_request(&request).unwrap();
 
         assert!(method.is_get());
         assert!(!method.is_post());

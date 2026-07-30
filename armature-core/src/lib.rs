@@ -209,6 +209,10 @@ pub mod micro;
 
 // Re-export commonly used types
 pub use application::*;
+/// The `Bytes`-backed string, method, and header-name types, re-exported from
+/// `armature-h1` so downstream crates need not depend on it directly.
+pub use armature_h1::header as header_id;
+pub use armature_h1::{ByteStr, HeaderId, Method};
 pub use body_limits::*;
 pub use connection::{
     Connection, ConnectionConfig, ConnectionEvent, ConnectionPool, ConnectionRecycler,
@@ -220,7 +224,7 @@ pub use container::*;
 pub use error::*;
 pub use extensions::Extensions;
 pub use extractors::{
-    Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers, Method, Path,
+    Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers, MethodExtractor, Path,
     PathParams, Query, RawBody, State,
 };
 pub use form::*;

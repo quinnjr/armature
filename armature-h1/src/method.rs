@@ -1,6 +1,7 @@
 //! Request method and protocol version.
 
 use crate::ByteStr;
+use std::fmt;
 
 /// An HTTP request method.
 ///
@@ -111,6 +112,46 @@ impl Method {
     #[inline]
     pub fn expects_response_body(&self) -> bool {
         !matches!(self, Method::Head)
+    }
+}
+
+impl From<&str> for Method {
+    /// Parse a method token, falling back to [`Method::Other`].
+    ///
+    /// Infallible on purpose: this exists so `armature-core`'s constructors can
+    /// take `impl Into<Method>` and keep every existing `HttpRequest::new("GET")`
+    /// call site compiling. An invalid token is not rejected here — it is carried
+    /// as `Other` and answered by routing, which is where a 405 belongs.
+    #[inline]
+    fn from(token: &str) -> Self {
+        Method::from_bytes(token.as_bytes()).unwrap_or_else(|| Method::Other(ByteStr::from(token)))
+    }
+}
+
+impl From<String> for Method {
+    #[inline]
+    fn from(token: String) -> Self {
+        Method::from_bytes(token.as_bytes()).unwrap_or_else(|| Method::Other(ByteStr::from(token)))
+    }
+}
+
+impl PartialEq<str> for Method {
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for Method {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl fmt::Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -227,5 +268,34 @@ mod tests {
         assert_eq!(Version::from_httparse(2), None);
         assert_eq!(Version::Http11.as_bytes(), b"HTTP/1.1");
         assert_eq!(Version::Http10.as_bytes(), b"HTTP/1.0");
+    }
+
+    #[test]
+    fn from_str_maps_well_known_and_preserves_unknown_case() {
+        assert_eq!(Method::from("GET"), Method::Get);
+        assert_eq!(Method::from("QUERY"), Method::Query);
+        // Methods are case-sensitive (RFC 9110 section 9.1): a lowercase token is
+        // not GET, it is a different method token entirely.
+        assert_eq!(
+            Method::from("get"),
+            Method::Other(ByteStr::from_static("get"))
+        );
+        assert_eq!(
+            Method::from("PURGE".to_string()),
+            Method::Other(ByteStr::from_static("PURGE"))
+        );
+    }
+
+    #[test]
+    fn compares_against_str_and_displays_as_its_token() {
+        assert!(Method::Delete == "DELETE");
+        assert!(Method::Delete != "GET");
+        // Bound to a variable rather than compared inline: clippy reads
+        // `Method::from(..) == ".."` as building an owned value just to compare,
+        // which is exactly what this test is checking works.
+        let unknown = Method::from("PURGE");
+        assert!(unknown == "PURGE");
+        assert_eq!(format!("{}", Method::Patch), "PATCH");
+        assert_eq!(format!("{unknown}"), "PURGE");
     }
 }

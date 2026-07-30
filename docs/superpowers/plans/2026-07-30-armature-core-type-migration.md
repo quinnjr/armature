@@ -891,55 +891,32 @@ Expected: FAIL — `method` is a `String`; `method_str` does not exist.
 
 In `armature-h1/src/method.rs`:
 
-```rust
-impl Method {
-    /// The method token as a string.
-    ///
-    /// Already present for the well-known variants; this covers `Other` too, so
-    /// callers never have to match on the variant just to log the method.
-    #[inline]
-    pub fn as_token(&self) -> &str {
-        match self {
-            Method::Get => "GET",
-            Method::Head => "HEAD",
-            Method::Post => "POST",
-            Method::Put => "PUT",
-            Method::Delete => "DELETE",
-            Method::Connect => "CONNECT",
-            Method::Options => "OPTIONS",
-            Method::Trace => "TRACE",
-            Method::Patch => "PATCH",
-            Method::Query => "QUERY",
-            Method::Other(t) => t.as_str(),
-        }
-    }
-}
+`Method::as_str` already exists and already covers `Other`, so this adds only the
+comparisons and `Display`:
 
+```rust
 impl PartialEq<str> for Method {
     #[inline]
     fn eq(&self, other: &str) -> bool {
-        self.as_token() == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<&str> for Method {
     #[inline]
     fn eq(&self, other: &&str) -> bool {
-        self.as_token() == *other
+        self.as_str() == *other
     }
 }
 
 impl fmt::Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_token())
+        f.write_str(self.as_str())
     }
 }
 ```
 
-Add `use std::fmt;` if the file does not already have it. If `Method::as_str`
-already exists with this behavior, reuse it and skip `as_token` — check before
-adding a second name for one thing, and use whichever name already exists
-consistently in the rest of this plan.
+Add `use std::fmt;` if the file does not already have it.
 
 - [ ] **Step 4: Change the field and the constructors**
 
@@ -972,7 +949,7 @@ impl HttpRequest {
     /// The method as a string, for logging and for code that compares tokens.
     #[inline]
     pub fn method_str(&self) -> &str {
-        self.method.as_token()
+        self.method.as_str()
     }
 }
 ```
@@ -2439,7 +2416,7 @@ In `armature-core/src/application.rs`'s `handle_request`:
     };
 
     // `method` is still needed as a string for the CORS check and the logs below.
-    let method_token = method.as_token().to_owned();
+    let method_token = method.as_str().to_owned();
     trace!(method = %method_token, path = %target, "Incoming request");
 
     // ... the existing OPTIONS/CORS short-circuit, using `method_token` ...
@@ -2990,7 +2967,7 @@ legitimate number from a regression being papered over.
 - `Method` is `armature_h1::Method` throughout, re-exported as
   `armature_core::Method`. `HttpMethod` remains the routing enum, converted at the
   boundary in `MethodIndex::build`.
-- `Method::as_token()` is the name used in Tasks 1, 3, 8, and 9. Task 3 Step 3
+- `Method::as_str()` is the name used in Tasks 1, 3, 8, and 9. Task 3 Step 3
   flags that `armature-h1` may already have `as_str` for this and says to keep one
   name — resolve it there, then use that name in the later tasks.
 - `PathParams` is `SmallVec<[(&'static str, Bytes); 4]>`, defined in

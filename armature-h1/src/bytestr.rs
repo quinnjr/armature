@@ -61,6 +61,45 @@ impl ByteStr {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Copy the contents into an owned `String`.
+    ///
+    /// The escape hatch for code that retains request data past the response:
+    /// holding a `ByteStr` pins the whole pooled buffer it slices (see this
+    /// crate's README on buffer pinning), and this breaks that link.
+    #[inline]
+    pub fn into_owned(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+impl From<&str> for ByteStr {
+    /// Copies. A borrowed `&str` has no `Bytes` to share.
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self(Bytes::copy_from_slice(s.as_bytes()))
+    }
+}
+
+impl From<String> for ByteStr {
+    /// Takes the existing allocation rather than copying it.
+    #[inline]
+    fn from(s: String) -> Self {
+        Self(Bytes::from(s.into_bytes()))
+    }
+}
+
+impl From<Bytes> for ByteStr {
+    /// Non-UTF-8 input yields an empty string.
+    ///
+    /// The `From` contract is infallible, and the alternatives are worse: a panic
+    /// puts a remote client in control of process liveness, and an unchecked
+    /// conversion would break `#![forbid(unsafe_code)]`. Use
+    /// [`ByteStr::from_utf8`] when the distinction matters.
+    #[inline]
+    fn from(bytes: Bytes) -> Self {
+        Self::from_utf8(bytes).unwrap_or_default()
+    }
 }
 
 impl Deref for ByteStr {
@@ -142,5 +181,26 @@ mod tests {
     fn empty_is_valid() {
         let s = ByteStr::from_utf8(Bytes::new()).unwrap();
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn from_string_takes_the_allocation_and_from_str_copies() {
+        let owned = String::from("/a/b");
+        let s = ByteStr::from(owned);
+        assert_eq!(s.as_str(), "/a/b");
+
+        let borrowed = ByteStr::from("/c");
+        assert_eq!(borrowed.as_str(), "/c");
+        assert_eq!(borrowed.into_owned(), "/c".to_string());
+    }
+
+    #[test]
+    fn from_non_utf8_bytes_is_empty_rather_than_panicking() {
+        // Infallible by signature, so invalid input has to go somewhere. Empty is
+        // the only answer that cannot be mistaken for real data; callers that need
+        // to know use `from_utf8`.
+        let s = ByteStr::from(Bytes::from_static(&[0xff, 0xfe]));
+        assert!(s.is_empty());
+        assert!(ByteStr::from_utf8(Bytes::from_static(&[0xff, 0xfe])).is_err());
     }
 }

@@ -303,6 +303,22 @@ pub fn count(v: &HeaderVec, id: &HeaderId) -> usize {
     v.iter().filter(|(k, _)| k == id).count()
 }
 
+/// Intern a field name: a well-known variant, or a lowercased [`HeaderId::Other`].
+///
+/// Lowercasing here means every later comparison is a plain byte compare instead
+/// of a case-insensitive one. It allocates only for a name that is not
+/// well-known, which is the uncommon case.
+#[inline]
+pub fn intern(name: &str) -> HeaderId {
+    if let Some(id) = HeaderId::from_bytes(name.as_bytes()) {
+        return id;
+    }
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        return HeaderId::Other(ByteStr::from(name.to_ascii_lowercase()));
+    }
+    HeaderId::Other(ByteStr::from(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +457,22 @@ mod tests {
         assert!(!v.spilled(), "16 headers must stay on the stack");
         v.push((HeaderId::Accept, Bytes::from_static(b"*/*")));
         assert!(v.spilled(), "17 headers is expected to spill");
+    }
+
+    #[test]
+    fn intern_prefers_well_known_and_lowercases_the_rest() {
+        assert_eq!(intern("Content-Length"), HeaderId::ContentLength);
+        assert_eq!(intern("content-length"), HeaderId::ContentLength);
+        // A custom name is lowercased once here so every later comparison is a
+        // plain byte compare rather than a case-insensitive one.
+        assert_eq!(
+            intern("X-Tenant-Id"),
+            HeaderId::Other(ByteStr::from_static("x-tenant-id"))
+        );
+        // Already lowercase: no allocation beyond the copy into Bytes.
+        assert_eq!(
+            intern("x-req-id"),
+            HeaderId::Other(ByteStr::from_static("x-req-id"))
+        );
     }
 }
