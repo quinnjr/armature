@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`armature-graphql-macros` `0.1.0` (new crate):** `#[resolver]` attribute macro, re-exported from `armature-graphql`. Lets a single `impl` block mix `#[query]`/`#[mutation]`/`#[subscription]`-tagged methods — mirroring NestJS's `@Resolver()`/`@Query()`/`@Mutation()`/`@Subscription()` — and splits them at compile time into the separate `<Type>Query`/`<Type>Mutation`/`<Type>Subscription` wrapper types `async-graphql` needs, each still driven by `async-graphql`'s real `#[Object]`/`#[Subscription]` macros.
+- **`armature-graphql` `0.3.0` → `0.4.0`:** GraphQL subscriptions over WebSocket (new `websocket` feature) — drives `async-graphql`'s `graphql-ws`/`graphql-transport-ws` protocol over a caller-supplied `tokio_tungstenite::WebSocketStream`, with a `WebSocketConfig` (keep-alive timeout, per-connection subscription cap, `connection_init` auth hook) for abuse-resistance. Static SDL analyzer (`sdl-export` feature) extended to recognize `#[resolver]`'s markers and to fully parse `#[derive(Interface)]` field arguments/descriptions/deprecation.
+  - **Breaking:** the old `#[macro_export] macro_rules! resolver!` in `decorators.rs` is removed, superseded by the `#[resolver]` attribute macro (different invocation syntax — an attribute, not a declarative macro call). No in-tree consumer used it.
+  - Removed the unused `async-graphql-axum` dependency.
+
+### Fixed
+
+- **Breaking (`armature-core`) — `0.5.0` → `0.6.0`:** full `/audit` reconciliation (22 findings). `Cors::call` now validates `Origin` against `allowed_origins` instead of always echoing the first configured origin (was silently permissive for any origin). `set_thread_affinity_linux` bounds `core` against `min(num_cpus(), 64)`, preventing a `u64` mask shift overflow. `pipeline.rs`'s `max_buf_size` clamped to hyper's 8192-byte minimum, fixing a panic against the `low_latency()`/`memory_efficient()` presets. `Query`/`PathParams` extractors re-percent-encode key/value pairs to avoid misparsing decoded values containing literal `&`/`=`. `TimeoutConfig::get_timeout_for_path` now does longest-prefix-match instead of first-`HashMap`-iteration-order-match. **Breaking:** `memory_opt::init_pools` now returns `bool` (`true` if it performed initialization, `false` if a pool was already set) instead of `()`. Removed the unused `matchit` dependency.
+
 ## [0.3.0] - 2026-07-29
 
 ### Security
