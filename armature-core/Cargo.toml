@@ -15,7 +15,6 @@ categories = ["web-programming::http-server", "asynchronous"]
 armature-log = { path = "../armature-log", version = "0.2.0" }
 inventory = "0.3"
 dependency-injector = "2.1.0"
-matchit = "0.9"  # High-performance router (same as Axum)
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
 hyper = { version = "1.10", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
