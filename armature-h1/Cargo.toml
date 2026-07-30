@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Zero-allocation thread-per-core HTTP/1.1 server for the Armature framework"
 keywords = ["http", "server", "http1", "performance", "async"]
 categories = ["web-programming::http-server", "asynchronous", "network-programming"]
+readme = "README.md"
 
 [dependencies]
 bytes = "1.12"
