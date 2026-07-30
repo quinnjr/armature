@@ -4,6 +4,7 @@ members = [
     "armature-core",
     "armature-proc-macro",
     "armature-graphql",
+    "armature-graphql-macros",
     "armature-config",
     "armature-jwt",
     "armature-auth",

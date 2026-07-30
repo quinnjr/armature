@@ -34,8 +34,8 @@
 //!
 //! `SubgraphSchemaBuilder` only builds an `async-graphql` [`Schema`] with
 //! federation directives enabled — it does not run an HTTP server. Serve the
-//! resulting schema yourself (e.g. with `async-graphql-axum`, which this
-//! crate already depends on) the same way you would serve any other
+//! resulting schema yourself (e.g. with `async-graphql-axum`, added as a
+//! dependency in your own binary) the same way you would serve any other
 //! `async-graphql` schema.
 //!
 //! ```rust,ignore
@@ -72,8 +72,9 @@
 //!     .build()?;
 //!
 //! // `schema.schema()` returns the underlying `async_graphql::Schema`; wire
-//! // it into your own HTTP router (e.g. `async_graphql_axum::GraphQL`) to
-//! // actually serve it. This crate does not include a server/runtime.
+//! // it into your own HTTP router (e.g. `async_graphql_axum::GraphQL`, added
+//! // as a dependency in your own binary) to actually serve it. This crate
+//! // does not include a server/runtime.
 //! ```
 //!
 //! ## Example: Querying subgraphs from a gateway
@@ -792,10 +793,17 @@ pub use gateway::*;
 // Federation Directives
 // =============================================================================
 
-/// Marker trait for entities that can be resolved across subgraph boundaries
+/// Optional, purely conventional marker trait for entities that can be
+/// resolved across subgraph boundaries.
 ///
-/// Entities are the core building blocks of Apollo Federation.
-/// They can be referenced and extended by other subgraphs.
+/// Implementing this trait documents intent, but it is not currently
+/// consumed anywhere by this crate's own code: no macro generates
+/// implementations of it, and no gateway or entity-resolution logic in this
+/// module calls `typename()` or `resolve()` on it. The actually-used
+/// mechanism for entity resolution is async-graphql's native
+/// `#[graphql(entity)]` attribute applied directly to a method on an
+/// `#[Object]`/`#[ComplexObject]` impl — see this module's top-level doc
+/// example (`find_by_id`) for how that is wired up in practice.
 pub trait FederatedEntity: Sized {
     /// The typename as it appears in the schema
     fn typename() -> &'static str;
@@ -924,6 +932,15 @@ pub fn compose_supergraph(
 // =============================================================================
 
 /// Information about a federated service
+///
+/// Not currently populated or used by [`FederationGateway`]/
+/// [`FederationGatewayBuilder`] (behind the `federation` feature) or
+/// anywhere else in this crate — nothing ever constructs, updates, or
+/// returns a `ServiceInfo`. If constructed via [`ServiceInfo::new`],
+/// `healthy` and `sdl` will always be their default values (`false` and
+/// `None`), since there is no other constructor or mutator. This is a
+/// disconnected DTO today: a future extension point, not live
+/// functionality.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
     /// The service name

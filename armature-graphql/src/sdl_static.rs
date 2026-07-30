@@ -11,6 +11,10 @@
 //! - `#[derive(Union)]` newtype-variant enums
 //! - `#[derive(Interface)]` enums with `#[graphql(field(name = "..", type = ".."))]`
 //! - `#[Scalar]` impl blocks
+//! - `armature_graphql_macros::resolver`'s `#[query]`/`#[mutation]`/
+//!   `#[subscription]`-tagged methods, folded into the conventional
+//!   "Query"/"Mutation"/"Subscription" root type entries (see
+//!   [`resolver_marker`])
 //!
 //! This is necessarily a subset of what the real macros support (they run
 //! as full proc-macros with type information this pass doesn't have) — the
@@ -216,8 +220,32 @@ impl SchemaBuilder {
         let is_subscription = has_attr_ident(&imp.attrs, "Subscription");
         let is_complex_object = has_attr_ident(&imp.attrs, "ComplexObject");
         let is_scalar = has_attr_ident(&imp.attrs, "Scalar");
+        // `armature_graphql_macros::resolver`: a single `impl` block whose
+        // methods are individually tagged `#[query]`/`#[mutation]`/
+        // `#[subscription]` and get split at compile time into separate
+        // `#[Object]`/`#[Subscription]` impls on synthesized wrapper types.
+        // Since those synthesized types don't exist in source text for this
+        // pass to see, route each tagged method's field straight into the
+        // conventional "Query"/"Mutation"/"Subscription" root type entries
+        // instead — matching how the generated wrapper types are meant to be
+        // composed via `#[derive(MergedObject)]`/`#[derive(MergedSubscription)]`.
+        let is_resolver = has_attr_ident(&imp.attrs, "resolver");
 
-        if !(is_object || is_subscription || is_complex_object || is_scalar) {
+        if !(is_object || is_subscription || is_complex_object || is_scalar || is_resolver) {
+            return;
+        }
+
+        if is_resolver {
+            for item in &imp.items {
+                let ImplItem::Fn(m) = item else { continue };
+                let Some(root_name) = resolver_marker(&m.attrs) else {
+                    continue;
+                };
+                let Some(field) = build_field(m) else {
+                    continue;
+                };
+                self.entry(TypeKind::Object, root_name).fields.push(field);
+            }
             return;
         }
 
@@ -232,52 +260,10 @@ impl SchemaBuilder {
 
         let def = self.entry(TypeKind::Object, &name);
         for item in &imp.items {
-            if let ImplItem::Fn(m) = item {
-                let attrs = graphql_attrs(&m.attrs);
-                if attrs.skip {
-                    continue;
-                }
-                let Some(ret_ty) = return_type(&m.sig.output) else {
-                    continue;
-                };
-                let field_name = attrs
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| to_camel_case(&m.sig.ident.to_string()));
-
-                let mut args = Vec::new();
-                for input in &m.sig.inputs {
-                    let FnArg::Typed(pat_type) = input else {
-                        continue;
-                    };
-                    if type_mentions_context(&pat_type.ty) {
-                        continue;
-                    }
-                    let arg_attrs = graphql_attrs(&pat_type.attrs);
-                    if arg_attrs.skip {
-                        continue;
-                    }
-                    let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
-                        continue;
-                    };
-                    let arg_name = arg_attrs
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| to_camel_case(&pat_ident.ident.to_string()));
-                    args.push(Arg {
-                        name: arg_name,
-                        type_str: graphql_type(&pat_type.ty),
-                        default: arg_attrs.default,
-                    });
-                }
-
-                def.fields.push(Field {
-                    name: field_name,
-                    description: doc_string(&m.attrs),
-                    args,
-                    type_str: graphql_type(ret_ty),
-                    deprecated: attrs.deprecation,
-                });
+            if let ImplItem::Fn(m) = item
+                && let Some(field) = build_field(m)
+            {
+                def.fields.push(field);
             }
         }
     }
@@ -460,6 +446,9 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
         if meta.path.is_ident("field") {
             let mut name = None;
             let mut type_str = None;
+            let mut desc = None;
+            let mut deprecation = None;
+            let mut args = Vec::new();
             meta.parse_nested_meta(|inner| {
                 if inner.path.is_ident("name") {
                     let value = inner.value()?;
@@ -469,6 +458,54 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
                     let value = inner.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     type_str = Some(lit.value());
+                } else if inner.path.is_ident("desc") {
+                    let value = inner.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    desc = Some(lit.value());
+                } else if inner.path.is_ident("deprecation") {
+                    if inner.input.peek(syn::Token![=]) {
+                        let value = inner.value()?;
+                        let lit: syn::LitStr = value.parse()?;
+                        deprecation = Some(Deprecation {
+                            reason: Some(lit.value()),
+                        });
+                    } else {
+                        deprecation = Some(Deprecation { reason: None });
+                    }
+                } else if inner.path.is_ident("arg") {
+                    let mut arg_name = None;
+                    let mut arg_type = None;
+                    let mut arg_default = None;
+                    inner.parse_nested_meta(|arg_meta| {
+                        if arg_meta.path.is_ident("name") {
+                            let value = arg_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            arg_name = Some(lit.value());
+                        } else if arg_meta.path.is_ident("type") {
+                            let value = arg_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            arg_type = Some(lit.value());
+                        } else if arg_meta.path.is_ident("default") {
+                            if arg_meta.input.peek(syn::Token![=]) {
+                                let value = arg_meta.value()?;
+                                if let Ok(lit) = value.parse::<syn::Lit>() {
+                                    arg_default = Some(literal_to_sdl(&lit));
+                                }
+                            } else {
+                                arg_default = Some("null".to_string());
+                            }
+                        } else {
+                            let _ = arg_meta.value().and_then(|v| v.parse::<syn::Lit>());
+                        }
+                        Ok(())
+                    })?;
+                    if let (Some(arg_name), Some(arg_type)) = (arg_name, arg_type) {
+                        args.push(Arg {
+                            name: arg_name,
+                            type_str: arg_type,
+                            default: arg_default,
+                        });
+                    }
                 } else {
                     let _ = inner.value().and_then(|v| v.parse::<syn::Lit>());
                 }
@@ -477,10 +514,10 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
             if let (Some(name), Some(type_str)) = (name, type_str) {
                 fields.push(Field {
                     name: to_camel_case(&name),
-                    description: None,
-                    args: Vec::new(),
+                    description: desc,
+                    args,
                     type_str,
-                    deprecated: None,
+                    deprecated: deprecation,
                 });
             }
         }
@@ -586,6 +623,65 @@ fn derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
 
 fn has_attr_ident(attrs: &[syn::Attribute], ident: &str) -> bool {
     attrs.iter().any(|a| a.path().is_ident(ident))
+}
+
+/// The conventional root type name a `#[resolver]`-tagged method's
+/// `#[query]`/`#[mutation]`/`#[subscription]` marker maps to.
+fn resolver_marker(attrs: &[syn::Attribute]) -> Option<&'static str> {
+    attrs.iter().find_map(|a| match a.path().get_ident() {
+        Some(ident) if ident == "query" => Some("Query"),
+        Some(ident) if ident == "mutation" => Some("Mutation"),
+        Some(ident) if ident == "subscription" => Some("Subscription"),
+        _ => None,
+    })
+}
+
+/// Build a [`Field`] from one `#[Object]`/`#[Subscription]`-style method,
+/// or `None` if it's `#[graphql(skip)]`-tagged or has no return type.
+fn build_field(m: &syn::ImplItemFn) -> Option<Field> {
+    let attrs = graphql_attrs(&m.attrs);
+    if attrs.skip {
+        return None;
+    }
+    let ret_ty = return_type(&m.sig.output)?;
+    let field_name = attrs
+        .name
+        .clone()
+        .unwrap_or_else(|| to_camel_case(&m.sig.ident.to_string()));
+
+    let mut args = Vec::new();
+    for input in &m.sig.inputs {
+        let FnArg::Typed(pat_type) = input else {
+            continue;
+        };
+        if type_mentions_context(&pat_type.ty) {
+            continue;
+        }
+        let arg_attrs = graphql_attrs(&pat_type.attrs);
+        if arg_attrs.skip {
+            continue;
+        }
+        let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
+            continue;
+        };
+        let arg_name = arg_attrs
+            .name
+            .clone()
+            .unwrap_or_else(|| to_camel_case(&pat_ident.ident.to_string()));
+        args.push(Arg {
+            name: arg_name,
+            type_str: graphql_type(&pat_type.ty),
+            default: arg_attrs.default,
+        });
+    }
+
+    Some(Field {
+        name: field_name,
+        description: doc_string(&m.attrs),
+        args,
+        type_str: graphql_type(ret_ty),
+        deprecated: attrs.deprecation,
+    })
 }
 
 fn doc_string(attrs: &[syn::Attribute]) -> Option<String> {
@@ -818,13 +914,99 @@ mod tests {
                     vec![]
                 }
 
+                async fn recent(&self, #[graphql(default = 10)] limit: i32) -> Vec<User> {
+                    vec![]
+                }
+
                 fn helper(&self) {}
             }
             "#,
         );
         assert!(sdl.contains("user(id: ID!): User\n"));
         assert!(sdl.contains("users(limit: Int): [User!]!\n"));
+        assert!(sdl.contains("recent(limit: Int! = 10): [User!]!\n"));
         assert!(!sdl.contains("helper"));
+    }
+
+    #[test]
+    fn resolver_impl_with_no_marked_methods_produces_no_root_type() {
+        let sdl = render(
+            r#"
+            struct UserResolver;
+
+            #[resolver]
+            impl UserResolver {
+                fn helper(&self) {}
+            }
+            "#,
+        );
+        assert!(!sdl.contains("type Query {"));
+        assert!(!sdl.contains("type Mutation {"));
+        assert!(!sdl.contains("type Subscription {"));
+        assert!(sdl.is_empty());
+    }
+
+    #[test]
+    fn resolver_macro_methods_fold_into_the_conventional_root_types() {
+        let sdl = render(
+            r#"
+            struct UserResolver;
+
+            #[resolver]
+            impl UserResolver {
+                #[query]
+                async fn user(&self, id: ID) -> Option<User> {
+                    None
+                }
+
+                #[mutation]
+                async fn create_user(&self, name: String) -> User {
+                    unreachable!()
+                }
+
+                #[subscription]
+                async fn user_created(&self) -> impl Stream<Item = User> {
+                    unreachable!()
+                }
+
+                fn helper(&self) {}
+            }
+            "#,
+        );
+        assert!(sdl.contains("type Query {\n  user(id: ID!): User\n"));
+        assert!(sdl.contains("type Mutation {\n  createUser(name: String!): User!\n"));
+        assert!(sdl.contains("type Subscription {\n  userCreated:"));
+        assert!(!sdl.contains("helper"));
+    }
+
+    #[test]
+    fn resolver_macro_fields_merge_with_plain_object_impls() {
+        let sdl = render(
+            r#"
+            struct Query;
+
+            #[Object]
+            impl Query {
+                async fn ping(&self) -> String {
+                    "pong".to_string()
+                }
+            }
+
+            struct UserResolver;
+
+            #[resolver]
+            impl UserResolver {
+                #[query]
+                async fn user(&self, id: ID) -> Option<User> {
+                    None
+                }
+            }
+            "#,
+        );
+        assert!(sdl.contains("ping: String!"));
+        assert!(sdl.contains("user(id: ID!): User"));
+        // Both merge into a single "Query" type, not two separate ones.
+        assert_eq!(sdl.matches("type Query {").count(), 1);
     }
 
     #[test]
@@ -895,6 +1077,29 @@ mod tests {
         assert!(sdl.contains("ACTIVE"));
         assert!(sdl.contains("PENDING_REVIEW"));
         assert!(sdl.contains("ARCHIVED_LEGACY"));
+    }
+
+    #[test]
+    fn interface_fields_from_graphql_field_attr() {
+        let sdl = render(
+            r#"
+            #[derive(Interface)]
+            #[graphql(field(
+                name = "name",
+                type = "String",
+                desc = "The entity's name.",
+                deprecation = "use displayName instead",
+                arg(name = "uppercase", type = "bool")
+            ))]
+            enum Named {
+                UserNamed(User),
+                PostNamed(Post),
+            }
+            "#,
+        );
+        assert!(sdl.contains("interface Named {"));
+        assert!(sdl.contains("\"The entity's name.\" name(uppercase: bool): String"));
+        assert!(sdl.contains("@deprecated(reason: \"use displayName instead\")"));
     }
 
     #[test]
