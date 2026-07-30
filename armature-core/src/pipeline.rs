@@ -1,15 +1,58 @@
 //! HTTP/1.1 Pipelining Support
 //!
-//! This module provides HTTP/1.1 pipelining capabilities, allowing multiple
-//! requests to be sent over a single TCP connection without waiting for
-//! responses. This significantly improves throughput for high-latency connections.
+//! This module wraps [`hyper::server::conn::http1::Builder`] and carries a
+//! [`PipelineConfig`] alongside connection-level statistics ([`PipelineStats`],
+//! [`ConnectionStats`]). HTTP/1.1 request pipelining itself (multiple requests
+//! in flight on one connection without waiting for each response) is handled
+//! by hyper's H1 connection driver, not by this module — this module only
+//! configures the subset of hyper's builder knobs that affect that behavior
+//! and tracks stats around it.
 //!
-//! ## How Pipelining Works
+//! ## What `PipelineConfig` actually controls today
 //!
-//! 1. Client sends multiple requests on the same connection
-//! 2. Server processes requests concurrently (or in order)
-//! 3. Responses are sent back in the order requests were received
-//! 4. Connection is kept alive for subsequent request batches
+//! [`PipelinedHttp1Builder::configure_hyper_builder`] forwards exactly two
+//! fields onto hyper's [`hyper::server::conn::http1::Builder`]:
+//!
+//! - `pipeline_flush` -> [`Builder::pipeline_flush`](hyper::server::conn::http1::Builder::pipeline_flush)
+//! - `read_buffer_size` -> [`Builder::max_buf_size`](hyper::server::conn::http1::Builder::max_buf_size)
+//!   (clamped up to hyper's documented 8192-byte minimum, since
+//!   `PipelineConfig::low_latency()`/`::memory_efficient()` set 4096, which
+//!   would otherwise panic)
+//!
+//! `tcp_nodelay` is applied separately by the caller (`Application`) directly
+//! to the accepted `TcpStream`, not by this module.
+//!
+//! The remaining `PipelineConfig` fields — `mode`, `max_concurrent`,
+//! `max_buffered_requests`, `keep_alive_timeout`, `max_requests_per_connection`,
+//! `write_buffer_size`, and `max_header_size` — are **not currently wired to
+//! any behavior**. They are recorded on the config (and `mode` is echoed into
+//! a `tracing` log line) but nothing branches on `mode`, and hyper's H1
+//! `Builder` has no direct equivalent for the others:
+//!
+//! - `keep_alive_timeout`: hyper's H1 builder only exposes `keep_alive(bool)`
+//!   (used, hardcoded to `true`) and a header-read timeout
+//!   ([`Builder::header_read_timeout`](hyper::server::conn::http1::Builder::header_read_timeout)),
+//!   which is a different concept (time to read request headers, not idle
+//!   keep-alive duration) and requires a [`hyper::rt::Timer`] the caller does
+//!   not currently supply. There is no builder-level idle-timeout knob to
+//!   wire this field into.
+//! - `max_header_size`: hyper's H1 builder exposes
+//!   [`Builder::max_headers`](hyper::server::conn::http1::Builder::max_headers),
+//!   but that method takes a **count** of headers (default 100), while this
+//!   field is documented and used elsewhere as a **byte size** (default
+//!   16384). Passing the byte value straight through would silently change
+//!   its meaning, so it is left unwired rather than misapplied.
+//! - `mode`, `max_concurrent`, `max_buffered_requests`,
+//!   `max_requests_per_connection`, `write_buffer_size`: these describe
+//!   request-scheduling / connection-lifecycle policy that hyper's per-
+//!   connection H1 builder has no API surface for at all; implementing them
+//!   would require custom logic layered above hyper (e.g. a semaphore around
+//!   concurrent handlers, a request counter that forces connection close, a
+//!   wrapping idle timer), which does not exist in this crate today.
+//!
+//! Selecting a `PipelineMode` currently has **no effect** on server
+//! behavior beyond appearing in logs and being queryable via
+//! [`PipelineMode::maintains_order`] / [`PipelineMode::is_concurrent`].
 //!
 //! ## Configuration
 //!
@@ -17,18 +60,12 @@
 //! use armature_core::pipeline::{PipelineConfig, PipelineMode};
 //!
 //! let config = PipelineConfig::builder()
-//!     .mode(PipelineMode::Concurrent)
-//!     .max_concurrent(16)
-//!     .pipeline_flush(true)
-//!     .keep_alive_timeout(Duration::from_secs(60))
+//!     .mode(PipelineMode::Concurrent) // currently informational only
+//!     .max_concurrent(16)             // currently unused
+//!     .pipeline_flush(true)           // wired to hyper's Builder
+//!     .keep_alive_timeout(Duration::from_secs(60)) // currently unused
 //!     .build();
 //! ```
-//!
-//! ## Performance Impact
-//!
-//! - **Without pipelining**: Each request waits for response (RTT per request)
-//! - **With pipelining**: Multiple requests share RTT overhead
-//! - **Expected gain**: 2-5x throughput improvement on high-latency connections
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -67,39 +104,80 @@ impl PipelineMode {
 }
 
 /// Configuration for HTTP/1.1 pipelining
+///
+/// See the [module docs](self) for exactly which of these fields are
+/// currently applied to server behavior versus recorded but unused.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// Pipeline processing mode
+    /// Pipeline processing mode.
+    ///
+    /// **Not currently wired**: nothing branches on this value; it is only
+    /// echoed into a `tracing` log line by the caller.
     pub mode: PipelineMode,
 
-    /// Maximum number of concurrent requests per connection
-    /// Only used in Concurrent and OutOfOrder modes
+    /// Maximum number of concurrent requests per connection.
+    ///
+    /// **Not currently wired**: hyper's H1 builder has no per-connection
+    /// concurrency-limit knob; enforcing this would require custom
+    /// scheduling logic above hyper that does not exist yet.
     pub max_concurrent: usize,
 
-    /// Enable pipeline flush optimization
-    /// When true, responses are flushed in batches for better I/O efficiency
+    /// Enable pipeline flush optimization.
+    /// When true, responses are flushed in batches for better I/O efficiency.
+    ///
+    /// **Wired**: forwarded to
+    /// [`hyper::server::conn::http1::Builder::pipeline_flush`].
     pub pipeline_flush: bool,
 
-    /// Maximum number of pipelined requests to buffer
+    /// Maximum number of pipelined requests to buffer.
+    ///
+    /// **Not currently wired**: hyper's H1 builder has no request-buffering
+    /// limit; there is no equivalent knob to apply this to.
     pub max_buffered_requests: usize,
 
-    /// Keep-alive timeout for idle connections
+    /// Keep-alive timeout for idle connections.
+    ///
+    /// **Not currently wired**: hyper's H1 builder only exposes
+    /// `keep_alive(bool)` (used, hardcoded `true`) and a header-read timeout
+    /// with different semantics that requires a [`hyper::rt::Timer`] this
+    /// crate does not currently supply. There is no direct idle-timeout
+    /// knob to wire this field into.
     pub keep_alive_timeout: Duration,
 
-    /// Maximum requests per connection before forcing close
-    /// Helps prevent resource exhaustion
+    /// Maximum requests per connection before forcing close.
+    /// Helps prevent resource exhaustion.
+    ///
+    /// **Not currently wired**: hyper's H1 builder has no request-count
+    /// limit; enforcing this would require closing the connection from
+    /// caller-side logic after N requests, which does not exist yet.
     pub max_requests_per_connection: Option<u64>,
 
-    /// Enable TCP_NODELAY for lower latency
+    /// Enable TCP_NODELAY for lower latency.
+    ///
+    /// **Wired**, but not by this module: the caller (`Application`) reads
+    /// this field directly and calls `TcpStream::set_nodelay` on the
+    /// accepted socket before handing it to hyper.
     pub tcp_nodelay: bool,
 
-    /// Read buffer size hint (bytes)
+    /// Read buffer size hint (bytes).
+    ///
+    /// **Wired**: forwarded to
+    /// [`hyper::server::conn::http1::Builder::max_buf_size`].
     pub read_buffer_size: usize,
 
-    /// Write buffer size hint (bytes)
+    /// Write buffer size hint (bytes).
+    ///
+    /// **Not currently wired**: hyper's H1 builder has no separate
+    /// write-buffer-size knob (only the combined `max_buf_size`, which
+    /// `read_buffer_size` already maps to).
     pub write_buffer_size: usize,
 
-    /// Maximum header size (bytes)
+    /// Maximum header size (bytes).
+    ///
+    /// **Not currently wired**: hyper's H1 builder exposes
+    /// [`hyper::server::conn::http1::Builder::max_headers`], but that
+    /// method limits a *count* of headers (default 100), not a byte size,
+    /// so this field cannot be applied to it without changing its meaning.
     pub max_header_size: usize,
 }
 
@@ -454,7 +532,14 @@ impl PipelinedHttp1Builder {
         Arc::clone(&self.stats)
     }
 
-    /// Configure a Hyper http1::Builder with pipelining options
+    /// Configure a hyper `http1::Builder` from this instance's [`PipelineConfig`].
+    ///
+    /// Only `pipeline_flush` and `read_buffer_size` are actually applied here;
+    /// see the [module docs](self) for why the remaining `PipelineConfig`
+    /// fields (`mode`, `max_concurrent`, `max_buffered_requests`,
+    /// `keep_alive_timeout`, `max_requests_per_connection`,
+    /// `write_buffer_size`, `max_header_size`) are not wired through hyper's
+    /// H1 builder.
     #[inline]
     pub fn configure_hyper_builder(&self) -> hyper::server::conn::http1::Builder {
         let mut builder = hyper::server::conn::http1::Builder::new();
@@ -462,8 +547,11 @@ impl PipelinedHttp1Builder {
         // Enable pipeline flush for batched response sending
         builder.pipeline_flush(self.config.pipeline_flush);
 
-        // Set maximum buffer sizes
-        builder.max_buf_size(self.config.read_buffer_size);
+        // Set maximum buffer sizes. hyper's `max_buf_size` panics below its
+        // documented minimum (8192 bytes); `PipelineConfig::low_latency()` and
+        // `::memory_efficient()` set `read_buffer_size: 4096`, so clamp up to
+        // avoid a panic while still honoring larger configured values.
+        builder.max_buf_size(self.config.read_buffer_size.max(8192));
 
         // Preserve header case (for compatibility)
         builder.preserve_header_case(true);
