@@ -22,6 +22,7 @@ pub mod limits;
 mod method;
 pub mod parse;
 pub mod pool;
+pub mod write;
 
 pub use bytestr::ByteStr;
 pub use chunked::{ChunkEvent, ChunkedDecoder, ChunkedError};
@@ -33,3 +34,4 @@ pub use limits::Limits;
 pub use method::{Method, Version};
 pub use parse::{ParseError, parse_head};
 pub use pool::BufPool;
+pub use write::{DateCache, OutBody, ResponseHead};
