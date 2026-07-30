@@ -13,5 +13,11 @@
 #![warn(missing_docs)]
 
 mod bytestr;
+pub mod header;
+pub mod limits;
+mod method;
 
 pub use bytestr::ByteStr;
+pub use header::{HeaderId, HeaderVec};
+pub use limits::Limits;
+pub use method::{Method, Version};
