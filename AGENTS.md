@@ -139,6 +139,7 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 - Response builder is fluent: `HttpResponse::ok().json(&data)?`
 - Extractors use attribute macros: `#[body]`, `#[param("id")]`, `#[query("page")]`, `#[header("authorization")]`
 - Services are singletons — created once, shared via `Arc`
+- **Changelogs are per-crate**: each crate keeps its own `CHANGELOG.md` (e.g. `armature-core/CHANGELOG.md`) in [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format with an `## [Unreleased]` section at the top. Write new entries there — the root `CHANGELOG.md` is the historical record through `0.3.0` plus workspace-wide notes, not a place for new per-crate entries. A crate with no `include`/`exclude` in its `Cargo.toml` packages its `CHANGELOG.md` automatically; no manifest change needed
 
 ## Git Workflow
 
@@ -161,6 +162,6 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 2. Run clippy with the CI flags shown above — do not introduce new warnings
 3. Run `cargo test --features full` to validate
 4. If adding a new crate, add it to the workspace `members` in root `Cargo.toml`
-5. If adding public API, add doc comments and a doc test
+5. If adding public API, add doc comments and a doc test; if bumping a crate's version, record the change in that crate's own `CHANGELOG.md`
 6. If adding a new feature, add an example in `examples/` and a guide in `docs/`
 7. Keep the NestJS/Angular decorator-style patterns consistent — don't introduce foreign paradigms

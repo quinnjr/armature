@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> As of 2026-07-30, per-crate changes are recorded in each crate's own
+> `CHANGELOG.md` (e.g. `armature-core/CHANGELOG.md`). This file remains the
+> historical record through `0.3.0` and the home of workspace-wide notes.
+
 ### Added
 
 - **`armature-graphql-macros` `0.1.0` (new crate):** `#[resolver]` attribute macro, re-exported from `armature-graphql`. Lets a single `impl` block mix `#[query]`/`#[mutation]`/`#[subscription]`-tagged methods — mirroring NestJS's `@Resolver()`/`@Query()`/`@Mutation()`/`@Subscription()` — and splits them at compile time into the separate `<Type>Query`/`<Type>Mutation`/`<Type>Subscription` wrapper types `async-graphql` needs, each still driven by `async-graphql`'s real `#[Object]`/`#[Subscription]` macros.
