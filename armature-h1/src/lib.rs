@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod bytestr;
+pub mod framing;
 mod head;
 pub mod header;
 pub mod limits;
@@ -20,6 +21,7 @@ mod method;
 pub mod parse;
 
 pub use bytestr::ByteStr;
+pub use framing::{BodyKind, FramingError};
 pub use head::Head;
 pub use header::{HeaderId, HeaderVec};
 pub use limits::Limits;
