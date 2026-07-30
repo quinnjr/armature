@@ -216,10 +216,7 @@ jobs:
   test-members:
     name: Test member crates (${{ matrix.crate }})
     needs: detect-changes
-    if: |
-      github.event_name != 'pull_request' ||
-      needs.detect-changes.outputs.full == 'true' ||
-      contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -373,10 +370,7 @@ jobs:
   test-payments-providers:
     name: Test armature-payments (${{ matrix.provider }} only)
     needs: detect-changes
-    if: |
-      github.event_name != 'pull_request' ||
-      needs.detect-changes.outputs.full == 'true' ||
-      contains(fromJson(needs.detect-changes.outputs.crates), 'armature-payments')
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), 'armature-payments') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
