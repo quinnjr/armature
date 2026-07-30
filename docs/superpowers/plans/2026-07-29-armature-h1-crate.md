@@ -161,7 +161,7 @@ mod tests {
     fn deref_gives_str_methods() {
         let s = ByteStr::from_static("/a/b?x=1");
         assert!(s.starts_with("/a"));
-        assert_eq!(s.split('?').next(), Some("/a"));
+        assert_eq!(s.split('?').next(), Some("/a/b"));
     }
 
     #[test]

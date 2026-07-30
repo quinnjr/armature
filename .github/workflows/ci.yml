@@ -235,6 +235,11 @@ jobs:
           # coverage job; minimal is skipped.
           - crate: armature-core
             minimal: ""
+          # armature-h1 gates its rustls acceptor and ALPN/h2c dispatch behind
+          # the `tls` feature, which no root feature reaches. `default = []`,
+          # so minimal is skipped as identical to the plain default build.
+          - crate: armature-h1
+            minimal: ""
           # The crates below have feature-gated surfaces that are reachable
           # only via --all-features, since none of them are pulled into the
           # root `full`/`full-with-saml` feature: armature-siem's `http`

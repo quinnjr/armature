@@ -2,6 +2,7 @@
 members = [
     "armature-log",
     "armature-core",
+    "armature-h1",
     "armature-proc-macro",
     "armature-graphql",
     "armature-config",

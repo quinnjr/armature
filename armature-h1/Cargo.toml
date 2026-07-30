@@ -1,0 +1,34 @@
+[package]
+name = "armature-h1"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Zero-allocation thread-per-core HTTP/1.1 server for the Armature framework"
+keywords = ["http", "server", "http1", "performance", "async"]
+categories = ["web-programming::http-server", "asynchronous", "network-programming"]
+
+[dependencies]
+bytes = "1.12"
+httparse = "1.10"
+memchr = "2.8"
+smallvec = { version = "1.15", features = ["union", "const_generics"] }
+httpdate = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+socket2 = { version = "0.6", features = ["all"] }
+core_affinity = "0.8"
+
+rustls = { version = "0.23", features = ["ring"], optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:tokio-rustls"]
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros", "test-util"] }
