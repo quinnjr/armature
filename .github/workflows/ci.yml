@@ -7,9 +7,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, 'release/**']
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, 'release/**']
   schedule:
     # Run nightly at 2 AM UTC
     - cron: '0 2 * * *'
@@ -19,6 +19,68 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ============================================================================
+  # CHANGE DETECTION (PR-only scoping for the per-crate test-members/
+  # test-payments-providers matrices)
+  #
+  # Only runs for pull_request events. Push (post-merge), schedule, and
+  # workflow_dispatch always get the full matrix — this job's outputs are
+  # never consulted in those cases (every consumer's `if:` short-circuits on
+  # `github.event_name != 'pull_request'` before touching `needs.*`).
+  #
+  # PRs targeting `main` or a `release/**` branch also always get the full
+  # matrix regardless of what changed — those are the pre-merge/pre-release
+  # gates, not a place to trade coverage for speed.
+  #
+  # Otherwise, diffs the PR against its merge-base and maps changed paths to
+  # `armature-*` crate directory names for `contains(fromJson(...), matrix.crate)`
+  # checks downstream. A change to anything most/all members depend on
+  # (workspace Cargo.toml/Cargo.lock, armature-core, armature-log) or to this
+  # workflow file itself forces the full matrix too, since a per-crate diff
+  # can't safely bound the blast radius of a shared-dependency change.
+  # ============================================================================
+
+  detect-changes:
+    name: Detect Changed Crates
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      full: ${{ steps.detect.outputs.full }}
+      crates: ${{ steps.detect.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BASE_REF" = "main" ] || [[ "$BASE_REF" == release/* ]]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "crates=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          changed=$(git diff --name-only "$merge_base"...HEAD)
+
+          if echo "$changed" | grep -qE '^(Cargo\.toml|Cargo\.lock|armature-core/|armature-log/|\.github/workflows/ci\.yml)'; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "crates=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          crates=$(echo "$changed" \
+            | grep -oE '^armature-[a-z0-9-]+/' \
+            | sed 's#/$##' \
+            | sort -u \
+            | jq -R . | jq -sc .)
+          echo "full=false" >> "$GITHUB_OUTPUT"
+          echo "crates=${crates:-[]}" >> "$GITHUB_OUTPUT"
+
   # ============================================================================
   # LINT
   # ============================================================================
@@ -153,6 +215,11 @@ jobs:
 
   test-members:
     name: Test member crates (${{ matrix.crate }})
+    needs: detect-changes
+    if: |
+      github.event_name != 'pull_request' ||
+      needs.detect-changes.outputs.full == 'true' ||
+      contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -305,6 +372,11 @@ jobs:
 
   test-payments-providers:
     name: Test armature-payments (${{ matrix.provider }} only)
+    needs: detect-changes
+    if: |
+      github.event_name != 'pull_request' ||
+      needs.detect-changes.outputs.full == 'true' ||
+      contains(fromJson(needs.detect-changes.outputs.crates), 'armature-payments')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
