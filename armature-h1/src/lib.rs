@@ -13,11 +13,15 @@
 #![warn(missing_docs)]
 
 mod bytestr;
+mod head;
 pub mod header;
 pub mod limits;
 mod method;
+pub mod parse;
 
 pub use bytestr::ByteStr;
+pub use head::Head;
 pub use header::{HeaderId, HeaderVec};
 pub use limits::Limits;
 pub use method::{Method, Version};
+pub use parse::{ParseError, parse_head};
