@@ -73,13 +73,26 @@ jobs:
             exit 0
           fi
 
-          crates=$(echo "$changed" \
+          # `grep` exits 1 when it matches nothing, and this job runs under
+          # `set -euo pipefail`, so a PR that touches no `armature-*/` crate
+          # used to fail the job outright instead of reporting "no crates
+          # changed". Two real cases hit it: a docs/CI-only PR, and a merge
+          # whose conflicts were all resolved toward the base branch — that
+          # produces an empty diff, which is legitimate for an ancestry-only
+          # merge. `|| true` keeps the pipeline alive; the emptiness check
+          # below is still needed because `echo "" | jq -R .` yields `[""]`,
+          # not `[]`.
+          matched=$(echo "$changed" \
             | grep -oE '^armature-[a-z0-9-]+/' \
             | sed 's#/$##' \
-            | sort -u \
-            | jq -R . | jq -sc .)
+            | sort -u || true)
+          if [ -z "$matched" ]; then
+            crates='[]'
+          else
+            crates=$(printf '%s\n' "$matched" | jq -R . | jq -sc .)
+          fi
           echo "full=false" >> "$GITHUB_OUTPUT"
-          echo "crates=${crates:-[]}" >> "$GITHUB_OUTPUT"
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
 
   # ============================================================================
   # LINT
