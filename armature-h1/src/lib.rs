@@ -14,18 +14,22 @@
 
 mod bytestr;
 pub mod chunked;
+pub mod deadline;
 pub mod framing;
 mod head;
 pub mod header;
 pub mod limits;
 mod method;
 pub mod parse;
+pub mod pool;
 
 pub use bytestr::ByteStr;
 pub use chunked::{ChunkEvent, ChunkedDecoder, ChunkedError};
+pub use deadline::ConnDeadline;
 pub use framing::{BodyKind, FramingError};
 pub use head::Head;
 pub use header::{HeaderId, HeaderVec};
 pub use limits::Limits;
 pub use method::{Method, Version};
 pub use parse::{ParseError, parse_head};
+pub use pool::BufPool;
