@@ -61,9 +61,6 @@ impl<Query, Mutation, Subscription> Clone for GraphQLSchema<Query, Mutation, Sub
     }
 }
 
-// Provider is automatically implemented via blanket impl
-// when Query, Mutation, Subscription all satisfy Send + Sync + 'static
-
 /// GraphQL request handling
 pub struct GraphQLRequest {
     pub query: String,
@@ -331,5 +328,18 @@ mod tests {
         let json = response.to_json().unwrap();
         assert!(json.contains("hello"));
         assert!(json.contains("world"));
+    }
+
+    #[test]
+    fn test_graphql_response_error_serialization() {
+        let response = GraphQLResponse::error("something went wrong".to_string());
+
+        let json = response.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["data"].is_null());
+        assert!(json.contains("\"data\":null"));
+        assert!(value["errors"].is_array());
+        assert_eq!(value["errors"][0], "something went wrong");
     }
 }

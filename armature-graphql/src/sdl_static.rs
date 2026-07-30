@@ -446,6 +446,9 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
         if meta.path.is_ident("field") {
             let mut name = None;
             let mut type_str = None;
+            let mut desc = None;
+            let mut deprecation = None;
+            let mut args = Vec::new();
             meta.parse_nested_meta(|inner| {
                 if inner.path.is_ident("name") {
                     let value = inner.value()?;
@@ -455,6 +458,54 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
                     let value = inner.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     type_str = Some(lit.value());
+                } else if inner.path.is_ident("desc") {
+                    let value = inner.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    desc = Some(lit.value());
+                } else if inner.path.is_ident("deprecation") {
+                    if inner.input.peek(syn::Token![=]) {
+                        let value = inner.value()?;
+                        let lit: syn::LitStr = value.parse()?;
+                        deprecation = Some(Deprecation {
+                            reason: Some(lit.value()),
+                        });
+                    } else {
+                        deprecation = Some(Deprecation { reason: None });
+                    }
+                } else if inner.path.is_ident("arg") {
+                    let mut arg_name = None;
+                    let mut arg_type = None;
+                    let mut arg_default = None;
+                    inner.parse_nested_meta(|arg_meta| {
+                        if arg_meta.path.is_ident("name") {
+                            let value = arg_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            arg_name = Some(lit.value());
+                        } else if arg_meta.path.is_ident("type") {
+                            let value = arg_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            arg_type = Some(lit.value());
+                        } else if arg_meta.path.is_ident("default") {
+                            if arg_meta.input.peek(syn::Token![=]) {
+                                let value = arg_meta.value()?;
+                                if let Ok(lit) = value.parse::<syn::Lit>() {
+                                    arg_default = Some(literal_to_sdl(&lit));
+                                }
+                            } else {
+                                arg_default = Some("null".to_string());
+                            }
+                        } else {
+                            let _ = arg_meta.value().and_then(|v| v.parse::<syn::Lit>());
+                        }
+                        Ok(())
+                    })?;
+                    if let (Some(arg_name), Some(arg_type)) = (arg_name, arg_type) {
+                        args.push(Arg {
+                            name: arg_name,
+                            type_str: arg_type,
+                            default: arg_default,
+                        });
+                    }
                 } else {
                     let _ = inner.value().and_then(|v| v.parse::<syn::Lit>());
                 }
@@ -463,10 +514,10 @@ fn collect_interface_fields(attr: &syn::Attribute, fields: &mut Vec<Field>) {
             if let (Some(name), Some(type_str)) = (name, type_str) {
                 fields.push(Field {
                     name: to_camel_case(&name),
-                    description: None,
-                    args: Vec::new(),
+                    description: desc,
+                    args,
                     type_str,
-                    deprecated: None,
+                    deprecated: deprecation,
                 });
             }
         }
@@ -863,13 +914,36 @@ mod tests {
                     vec![]
                 }
 
+                async fn recent(&self, #[graphql(default = 10)] limit: i32) -> Vec<User> {
+                    vec![]
+                }
+
                 fn helper(&self) {}
             }
             "#,
         );
         assert!(sdl.contains("user(id: ID!): User\n"));
         assert!(sdl.contains("users(limit: Int): [User!]!\n"));
+        assert!(sdl.contains("recent(limit: Int! = 10): [User!]!\n"));
         assert!(!sdl.contains("helper"));
+    }
+
+    #[test]
+    fn resolver_impl_with_no_marked_methods_produces_no_root_type() {
+        let sdl = render(
+            r#"
+            struct UserResolver;
+
+            #[resolver]
+            impl UserResolver {
+                fn helper(&self) {}
+            }
+            "#,
+        );
+        assert!(!sdl.contains("type Query {"));
+        assert!(!sdl.contains("type Mutation {"));
+        assert!(!sdl.contains("type Subscription {"));
+        assert!(sdl.is_empty());
     }
 
     #[test]
@@ -1003,6 +1077,29 @@ mod tests {
         assert!(sdl.contains("ACTIVE"));
         assert!(sdl.contains("PENDING_REVIEW"));
         assert!(sdl.contains("ARCHIVED_LEGACY"));
+    }
+
+    #[test]
+    fn interface_fields_from_graphql_field_attr() {
+        let sdl = render(
+            r#"
+            #[derive(Interface)]
+            #[graphql(field(
+                name = "name",
+                type = "String",
+                desc = "The entity's name.",
+                deprecation = "use displayName instead",
+                arg(name = "uppercase", type = "bool")
+            ))]
+            enum Named {
+                UserNamed(User),
+                PostNamed(Post),
+            }
+            "#,
+        );
+        assert!(sdl.contains("interface Named {"));
+        assert!(sdl.contains("\"The entity's name.\" name(uppercase: bool): String"));
+        assert!(sdl.contains("@deprecated(reason: \"use displayName instead\")"));
     }
 
     #[test]

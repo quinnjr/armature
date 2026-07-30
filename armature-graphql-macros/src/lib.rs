@@ -56,6 +56,14 @@
 //! Untagged methods in the `impl` block (plain helpers, no `#[query]`
 //! /`#[mutation]`/`#[subscription]`) are left in place on the original type
 //! and are not exposed as GraphQL fields.
+//!
+//! # `Clone` requirement
+//!
+//! The type `#[resolver]` is applied to must implement [`Clone`]. Each
+//! generated wrapper (`#[derive(Clone)] struct Wrapper(pub OriginalType)`)
+//! derives `Clone`, which only compiles if `OriginalType: Clone` — and
+//! `async-graphql`'s `MergedObject`/`MergedSubscription` composition also
+//! requires every component to be `Clone`.
 
 mod resolver;
 
@@ -65,6 +73,9 @@ use proc_macro::TokenStream;
 /// methods into the separate `async-graphql`-driven types a
 /// `Schema<Query, Mutation, Subscription>` needs. See the [crate-level
 /// docs](crate) for the full example and generated shape.
+///
+/// The type this attribute is applied to must implement `Clone` — see the
+/// [crate-level docs](crate#clone-requirement) for why.
 #[proc_macro_attribute]
 pub fn resolver(attr: TokenStream, item: TokenStream) -> TokenStream {
     resolver::resolver_impl(attr, item)

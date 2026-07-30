@@ -3,6 +3,14 @@ use quote::{format_ident, quote};
 use syn::{Error, Ident, ImplItem, ImplItemFn, ItemImpl, Type};
 
 /// Which generated GraphQL root a tagged method belongs to.
+///
+/// The marker names below (`"query"`/`"mutation"`/`"subscription"`, see
+/// [`Kind::marker`] and [`find_marker`]) are also independently recognized,
+/// by source-text parsing rather than macro expansion, by
+/// `armature-graphql`'s static SDL analyzer (`resolver_marker()` in
+/// `armature-graphql/src/sdl_static.rs`). There is no compiler-enforced link
+/// between the two lists — if a marker name here is ever renamed, or a new
+/// one is added, that function needs the matching update too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Query,
@@ -41,6 +49,9 @@ const ALL_KINDS: [Kind; 3] = [Kind::Query, Kind::Mutation, Kind::Subscription];
 /// erroring if more than one is present. Returns `None` for methods without
 /// any of the three markers — those are left untouched on the original
 /// type.
+///
+/// See the note on [`Kind`] about `armature-graphql`'s `sdl_static.rs`
+/// independently recognizing these same marker strings.
 fn find_marker(method: &ImplItemFn) -> syn::Result<Option<Kind>> {
     let mut found = None;
 
