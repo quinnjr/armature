@@ -24,8 +24,8 @@ tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", 
 socket2 = { version = "0.6", features = ["all"] }
 core_affinity = "0.8"
 
-rustls = { version = "0.23", features = ["ring"], optional = true }
-tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 
 [features]
 default = []
@@ -33,3 +33,12 @@ tls = ["dep:rustls", "dep:tokio-rustls"]
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros", "test-util"] }
+# Self-signed certificates for the TLS dispatch tests. Dev-only: the crate itself
+# never generates certificates.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[[test]]
+name = "dispatch"
+required-features = ["tls"]

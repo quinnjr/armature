@@ -25,6 +25,7 @@ pub mod parse;
 pub mod pool;
 pub mod server;
 pub mod service;
+pub mod tls;
 pub mod write;
 
 pub use bytestr::ByteStr;
@@ -42,4 +43,5 @@ pub use server::{Config, Server, ServerHandle, TcpConfig};
 pub use service::{
     Body, BodyError, BodyIo, H1Service, Request, Response, ResponseBody, Transport, Upgraded,
 };
+pub use tls::{H2C_PREFACE, H2Fallback, Preface, is_h2c_preface};
 pub use write::{DateCache, OutBody, ResponseHead};

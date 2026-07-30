@@ -168,12 +168,33 @@ where
     S: H1Service,
 {
     /// Wrap `io`, serving requests through `service`.
+    ///
+    /// Must be called inside a tokio runtime context: the connection's reusable
+    /// deadline timer is allocated here.
     pub fn new(io: IO, service: S, cfg: Rc<ConnConfig>, date: Rc<RefCell<DateCache>>) -> Self {
+        Self::with_buffered(io, service, cfg, date, Bytes::new())
+    }
+
+    /// Wrap `io` with `buffered` bytes already read from it.
+    ///
+    /// Used by protocol dispatch, which must read the first bytes of a connection
+    /// to decide whether this crate should serve it at all. Those bytes are part
+    /// of the request and cannot be re-read from the socket, so they are handed
+    /// back here rather than dropped.
+    pub fn with_buffered(
+        io: IO,
+        service: S,
+        cfg: Rc<ConnConfig>,
+        date: Rc<RefCell<DateCache>>,
+        buffered: Bytes,
+    ) -> Self {
         let deadline = ConnDeadline::new(cfg.tick);
+        let mut buf = BytesMut::with_capacity(READ_CHUNK.max(buffered.len()));
+        buf.extend_from_slice(&buffered);
         Self {
             shared: Rc::new(RefCell::new(IoState {
                 io,
-                buf: BytesMut::with_capacity(READ_CHUNK),
+                buf,
                 pending_continue: false,
             })),
             service,

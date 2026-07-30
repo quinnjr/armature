@@ -7,15 +7,19 @@
 
 use crate::Limits;
 use crate::conn::{ConnConfig, Connection};
-use crate::service::{H1Service, Upgraded};
+use crate::service::{H1Service, Transport, Upgraded};
+use crate::tls::{H2Fallback, Preface, is_h2c_preface};
 use crate::write::DateCache;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::cell::RefCell;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -62,6 +66,14 @@ pub struct Config {
     pub server_name: Option<Bytes>,
     /// How long to let in-flight connections finish after a shutdown signal.
     pub shutdown_grace: Duration,
+    /// Detect the h2c prior-knowledge preface on plaintext connections and route
+    /// it to the HTTP/2 fallback.
+    ///
+    /// Costs one small read before the first request is parsed, so it is opt-in.
+    pub detect_h2c: bool,
+    /// TLS, when serving HTTPS.
+    #[cfg(feature = "tls")]
+    pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 }
 
 impl Config {
@@ -78,7 +90,23 @@ impl Config {
             pin_cores: true,
             server_name: None,
             shutdown_grace: Duration::from_secs(10),
+            detect_h2c: false,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
+    }
+
+    /// Detect the h2c prior-knowledge preface on plaintext connections.
+    pub fn detect_h2c(mut self, on: bool) -> Self {
+        self.detect_h2c = on;
+        self
+    }
+
+    /// Serve TLS with this rustls configuration.
+    #[cfg(feature = "tls")]
+    pub fn with_tls(mut self, tls: std::sync::Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     /// Set the worker count.
@@ -194,6 +222,10 @@ impl Server {
 
     /// Serve until shutdown, blocking the calling thread.
     ///
+    /// Connections this crate will not serve — a negotiated `h2`, or an h2c
+    /// preface — are closed. Use [`serve_with_fallback`](Self::serve_with_fallback)
+    /// to route them somewhere instead.
+    ///
     /// `make` runs once per worker thread to produce that worker's service. Note
     /// the bounds: the *factory* is `Send`, because it crosses thread boundaries
     /// at startup; the *service* it produces is not, because it never does. That
@@ -202,6 +234,21 @@ impl Server {
     where
         F: Fn() -> S + Send + Clone + 'static,
         S: H1Service + 'static,
+    {
+        self.serve_with_fallback(make, || CloseH2)
+    }
+
+    /// Serve until shutdown, routing HTTP/2 connections to a fallback.
+    ///
+    /// `make_fallback` runs once per worker, like `make`, and for the same reason:
+    /// the factory crosses thread boundaries at startup, the fallback it produces
+    /// never does — so a fallback may hold non-`Send` state.
+    pub fn serve_with_fallback<F, S, G, H>(self, make: F, make_fallback: G) -> io::Result<()>
+    where
+        F: Fn() -> S + Send + Clone + 'static,
+        S: H1Service + 'static,
+        G: Fn() -> H + Send + Clone + 'static,
+        H: H2Fallback + 'static,
     {
         let Server {
             cfg, listeners, tx, ..
@@ -226,6 +273,7 @@ impl Server {
         for (worker, slot) in per_worker.iter_mut().enumerate() {
             let cfg = cfg.clone();
             let make = make.clone();
+            let make_fallback = make_fallback.clone();
             let rx = tx.subscribe();
             let core = core_ids.get(worker).copied();
             let Some(std_listener) = slot.take() else {
@@ -247,7 +295,7 @@ impl Server {
                         else {
                             return;
                         };
-                        rt.block_on(worker_loop(std_listener, make, cfg, rx));
+                        rt.block_on(worker_loop(std_listener, make, make_fallback, cfg, rx));
                     })?,
             );
         }
@@ -260,14 +308,17 @@ impl Server {
 }
 
 /// One worker's accept loop.
-async fn worker_loop<F, S>(
+async fn worker_loop<F, S, G, H>(
     std_listener: std::net::TcpListener,
     make: F,
+    make_fallback: G,
     cfg: Config,
     mut rx: watch::Receiver<bool>,
 ) where
     F: Fn() -> S,
     S: H1Service + 'static,
+    G: Fn() -> H,
+    H: H2Fallback + 'static,
 {
     std_listener.set_nonblocking(true).ok();
     let Ok(listener) = TcpListener::from_std(std_listener) else {
@@ -283,6 +334,7 @@ async fn worker_loop<F, S>(
     });
     let date = Rc::new(RefCell::new(DateCache::new()));
     let service = Rc::new(make());
+    let fallback = Rc::new(make_fallback());
 
     let local = tokio::task::LocalSet::new();
 
@@ -303,18 +355,10 @@ async fn worker_loop<F, S>(
                         let conn_cfg = conn_cfg.clone();
                         let date = date.clone();
                         let service = service.clone();
+                        let fallback = fallback.clone();
+                        let cfg = cfg.clone();
                         tokio::task::spawn_local(async move {
-                            let conn = Connection::new(
-                                stream,
-                                RcService(service),
-                                conn_cfg,
-                                date,
-                            );
-                            match conn.serve().await {
-                                Ok(Some(upgraded)) => drop_upgraded(upgraded),
-                                Ok(None) => {}
-                                Err(_) => {}
-                            }
+                            dispatch(stream, service, fallback, conn_cfg, date, cfg).await;
                         });
                     }
                 }
@@ -324,6 +368,122 @@ async fn worker_loop<F, S>(
 
     // Drain: give in-flight connections a bounded window to finish.
     let _ = tokio::time::timeout(cfg.shutdown_grace, local).await;
+}
+
+/// Decide what protocol a connection speaks, then serve or hand it off.
+///
+/// With TLS off and h2c detection off — the default — this reduces to serving
+/// HTTP/1 directly, with no extra read on the fast path.
+async fn dispatch<S, H>(
+    stream: tokio::net::TcpStream,
+    service: Rc<S>,
+    fallback: Rc<H>,
+    conn_cfg: Rc<ConnConfig>,
+    date: Rc<RefCell<DateCache>>,
+    cfg: Config,
+) where
+    S: H1Service + 'static,
+    H: H2Fallback + 'static,
+{
+    #[cfg(feature = "tls")]
+    if let Some(tls) = cfg.tls.clone() {
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+        let Ok(tls_stream) = acceptor.accept(stream).await else {
+            // A failed handshake is not a protocol error we can report over
+            // HTTP; the peer gets a TLS alert from rustls and the socket closes.
+            return;
+        };
+        let is_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
+        if is_h2 {
+            // Nothing has been read past the handshake, so there is no buffered
+            // application data to forward.
+            fallback.handle(Box::new(tls_stream), Bytes::new()).await;
+        } else {
+            serve_h1(tls_stream, service, conn_cfg, date, Bytes::new()).await;
+        }
+        return;
+    }
+
+    if cfg.detect_h2c {
+        match peek_preface(stream, &cfg).await {
+            Some((stream, buffered, Preface::Http2)) => {
+                // The preface is part of the HTTP/2 stream and cannot be re-read
+                // from the socket, so it must travel with the connection.
+                fallback.handle(Box::new(stream), buffered).await;
+            }
+            Some((stream, buffered, _)) => {
+                serve_h1(stream, service, conn_cfg, date, buffered).await;
+            }
+            None => {}
+        }
+        return;
+    }
+
+    serve_h1(stream, service, conn_cfg, date, Bytes::new()).await;
+}
+
+/// Read just enough to classify a plaintext connection.
+///
+/// Returns `None` if the peer closed or errored before deciding. `NeedMore` at
+/// EOF is reported as `Http1`, so a client that opens a connection and says
+/// nothing is handled by the HTTP/1 path's idle timeout rather than being routed
+/// to a fallback that has no bytes to work with.
+async fn peek_preface(
+    mut stream: tokio::net::TcpStream,
+    cfg: &Config,
+) -> Option<(tokio::net::TcpStream, Bytes, Preface)> {
+    let mut buf = BytesMut::with_capacity(crate::tls::H2C_PREFACE.len());
+    loop {
+        match is_h2c_preface(&buf) {
+            Preface::NeedMore => {}
+            decided => return Some((stream, buf.freeze(), decided)),
+        }
+        let deadline = tokio::time::timeout(cfg.limits.header_timeout, stream.read_buf(&mut buf));
+        match deadline.await {
+            Ok(Ok(0)) => {
+                // EOF mid-prefix: let the HTTP/1 path deal with it.
+                return Some((stream, buf.freeze(), Preface::Http1));
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => return None,
+        }
+    }
+}
+
+/// Serve one HTTP/1 connection to completion.
+async fn serve_h1<IO, S>(
+    io: IO,
+    service: Rc<S>,
+    conn_cfg: Rc<ConnConfig>,
+    date: Rc<RefCell<DateCache>>,
+    buffered: Bytes,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + 'static,
+    S: H1Service + 'static,
+{
+    let conn = Connection::with_buffered(io, RcService(service), conn_cfg, date, buffered);
+    // A clean close and an I/O error are the same outcome here: the connection is
+    // over and there is nobody left to tell.
+    if let Ok(Some(upgraded)) = conn.serve().await {
+        drop_upgraded(upgraded);
+    }
+}
+
+/// An [`H2Fallback`] that closes the connection.
+///
+/// The default. Closing is the honest outcome: mis-serving an HTTP/2 stream
+/// through an HTTP/1 parser would produce nonsense, and there is nothing useful
+/// to reply with over a protocol we do not speak.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CloseH2;
+
+impl H2Fallback for CloseH2 {
+    fn handle(&self, io: Box<dyn Transport>, buffered: Bytes) -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(async move {
+            drop(buffered);
+            drop(io);
+        })
+    }
 }
 
 /// An upgraded connection with nobody to hand it to.
