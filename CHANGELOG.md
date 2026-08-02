@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`armature-h1` `0.1.0` (new crate):** a zero-allocation HTTP/1.1 server layer.
+  See [`armature-h1/CHANGELOG.md`](armature-h1/CHANGELOG.md).
+
+### Changed
+
+- **Workspace-wide — `armature-core` `0.7.0` → `0.8.0`:** the request and response
+  types are now `Bytes`-backed and the serve path stops doing work no handler
+  asked for. This is a breaking change that every crate depending on
+  `armature-core` had to be migrated onto; each carries its own changelog entry,
+  and the full list of API changes is in
+  [`armature-core/CHANGELOG.md`](armature-core/CHANGELOG.md).
+
 - **`armature-graphql-macros` `0.1.0` (new crate):** `#[resolver]` attribute macro, re-exported from `armature-graphql`. Lets a single `impl` block mix `#[query]`/`#[mutation]`/`#[subscription]`-tagged methods — mirroring NestJS's `@Resolver()`/`@Query()`/`@Mutation()`/`@Subscription()` — and splits them at compile time into the separate `<Type>Query`/`<Type>Mutation`/`<Type>Subscription` wrapper types `async-graphql` needs, each still driven by `async-graphql`'s real `#[Object]`/`#[Subscription]` macros.
 - **`armature-graphql` `0.3.0` → `0.4.0`:** GraphQL subscriptions over WebSocket (new `websocket` feature) — drives `async-graphql`'s `graphql-ws`/`graphql-transport-ws` protocol over a caller-supplied `tokio_tungstenite::WebSocketStream`, with a `WebSocketConfig` (keep-alive timeout, per-connection subscription cap, `connection_init` auth hook) for abuse-resistance. Static SDL analyzer (`sdl-export` feature) extended to recognize `#[resolver]`'s markers and to fully parse `#[derive(Interface)]` field arguments/descriptions/deprecation.
   - **Breaking:** the old `#[macro_export] macro_rules! resolver!` in `decorators.rs` is removed, superseded by the `#[resolver]` attribute macro (different invocation syntax — an attribute, not a declarative macro call). No in-tree consumer used it.

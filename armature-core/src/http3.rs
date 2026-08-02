@@ -645,11 +645,13 @@ mod server {
         };
         let mut armature_req = HttpRequest::new(method, target);
 
-        // Copy headers
+        // Copy headers. One copy per value, because `HeaderValue` owns its own
+        // buffer; the name goes in as a `&str`, so a well-known header name
+        // costs nothing.
         for (name, value) in request.headers() {
-            if let Ok(v) = value.to_str() {
-                armature_req.headers.insert(name.to_string(), v.to_string());
-            }
+            armature_req
+                .headers
+                .insert(name.as_str(), Bytes::copy_from_slice(value.as_bytes()));
         }
 
         armature_req
@@ -707,7 +709,8 @@ mod server {
             stats.stream_closed();
             return Ok(());
         }
-        armature_req.body = body;
+        // `Bytes::from` takes over the accumulator's allocation rather than copying.
+        armature_req.body = Bytes::from(body);
 
         // Route the request using the async router. A routing error is mapped
         // through the canonical client-safe response so HTTP/3 returns proper
