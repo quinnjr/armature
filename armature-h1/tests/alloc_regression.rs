@@ -10,23 +10,40 @@
 
 use armature_h1::{ConnConfig, Connection, DateCache, Limits, Request, Response};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static COUNTING: AtomicBool = AtomicBool::new(false);
+// Per-thread rather than process-wide. `cargo test` runs the test functions on
+// separate threads concurrently, and a shared static counter attributes every
+// other test's allocations to whichever test happens to be armed — which showed
+// up as an identical, load-independent count in all four budgets.
+//
+// `const`-initialized so the TLS slot needs no lazy-init check and registers no
+// destructor: both would themselves allocate, from inside the allocator.
+thread_local! {
+    static ALLOCS: Cell<u64> = const { Cell::new(0) };
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Count one allocation against the current thread, if it is armed.
+///
+/// `try_with` rather than `with`: during TLS teardown the slot is gone, and a
+/// panic from inside `GlobalAlloc` would abort the process.
+fn tick() {
+    let armed = COUNTING.try_with(Cell::get).unwrap_or(false);
+    if armed {
+        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+    }
+}
 
 /// The system allocator, counting allocations while armed.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        tick();
         unsafe { System.alloc(layout) }
     }
 
@@ -35,16 +52,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        tick();
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        tick();
         unsafe { System.alloc_zeroed(layout) }
     }
 }
@@ -54,19 +67,19 @@ static ALLOCATOR: Counting = Counting;
 
 /// Arm the counter, resetting it to zero.
 fn arm() {
-    ALLOCS.store(0, Ordering::SeqCst);
-    COUNTING.store(true, Ordering::SeqCst);
+    ALLOCS.with(|c| c.set(0));
+    COUNTING.with(|c| c.set(true));
 }
 
 /// Disarm the counter and report what it saw.
 ///
-/// The counter is a process-wide static armed around `await` points, so it counts
-/// everything this thread does in the window — including the server task the
-/// runtime polls in between. That is the intent: the number covers the whole
+/// The counter is armed around `await` points on a current-thread runtime, so it
+/// counts everything this thread does in the window — including the server task
+/// the runtime polls in between. That is the intent: the number covers the whole
 /// request path, not just the client half.
 fn disarm() -> u64 {
-    COUNTING.store(false, Ordering::SeqCst);
-    ALLOCS.load(Ordering::SeqCst)
+    COUNTING.with(|c| c.set(false));
+    ALLOCS.with(Cell::get)
 }
 
 async fn hello(_req: Request) -> Response {
