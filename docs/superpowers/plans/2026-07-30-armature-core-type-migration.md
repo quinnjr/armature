@@ -121,7 +121,7 @@ orphan rule — `Method` and `ByteStr` are defined there.
   - `impl From<HttpMethod> for Method`, `impl TryFrom<&Method> for HttpMethod`
     in `armature-core`.
 
-- [ ] **Step 1: Write the failing tests in `armature-h1`**
+- [x] **Step 1: Write the failing tests in `armature-h1`**
 
 Append to `armature-h1/src/method.rs`'s test module:
 
@@ -189,12 +189,12 @@ Append to `armature-h1/src/header.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p armature-h1 --all-features`
 Expected: FAIL — `Method::from`, `ByteStr::from`, `intern` do not exist.
 
-- [ ] **Step 3: Implement in `armature-h1`**
+- [x] **Step 3: Implement in `armature-h1`**
 
 In `armature-h1/src/method.rs`, after `impl Method`:
 
@@ -287,12 +287,12 @@ pub fn intern(name: &str) -> HeaderId {
 }
 ```
 
-- [ ] **Step 4: Run the `armature-h1` tests to verify they pass**
+- [x] **Step 4: Run the `armature-h1` tests to verify they pass**
 
 Run: `cargo test -p armature-h1 --all-features`
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing conversion test in `armature-core`**
+- [x] **Step 5: Write the failing conversion test in `armature-core`**
 
 Append to `armature-core/src/traits.rs`'s test module (create one if absent):
 
@@ -335,12 +335,12 @@ mod method_conversion_tests {
 }
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test -p armature-core --features full method_conversion`
 Expected: FAIL — `armature-h1` is not a dependency and `crate::Method` does not resolve.
 
-- [ ] **Step 7: Add the dependency, the re-exports, and the conversions**
+- [x] **Step 7: Add the dependency, the re-exports, and the conversions**
 
 In `armature-core/Cargo.toml`, in `[dependencies]`:
 
@@ -416,12 +416,12 @@ impl TryFrom<&crate::Method> for HttpMethod {
 }
 ```
 
-- [ ] **Step 8: Run the test to verify it passes**
+- [x] **Step 8: Run the test to verify it passes**
 
 Run: `cargo test -p armature-core --features full method_conversion`
 Expected: PASS.
 
-- [ ] **Step 9: Run the full gate**
+- [x] **Step 9: Run the full gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -433,7 +433,7 @@ Expected: all green. Nothing else changed yet, so this is a cheap confirmation
 that adding the dependency did not create a cycle or a feature-unification
 surprise.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add armature-h1/src/method.rs armature-h1/src/bytestr.rs armature-h1/src/header.rs \
@@ -465,7 +465,7 @@ git commit -m "feat(core): adopt armature-h1's Method, ByteStr, and HeaderId"
     `&str`, `String`, `&'static str` via specialization-free overlap avoidance
     (see the implementation note), `Bytes`, `Vec<u8>`, `&[u8]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `armature-core/src/headers.rs`'s test module:
 
@@ -534,12 +534,12 @@ In `armature-core/src/headers.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full headers`
 Expected: FAIL — `get` returns `Option<&String>`, `get_id`/`get_bytes` do not exist.
 
-- [ ] **Step 3: Rewrite the storage and the facade**
+- [x] **Step 3: Rewrite the storage and the facade**
 
 Replace the `Header` struct and the `HeaderMap` accessors in
 `armature-core/src/headers.rs`:
@@ -789,12 +789,12 @@ values, and delete `Header::name_eq` (its case-insensitive compare is now
 `HeaderId` equality). Keep `INLINE_HEADERS`, `new`, `with_capacity`,
 `is_inline`, `len`, `is_empty`, and `clear` unchanged.
 
-- [ ] **Step 4: Run the header tests**
+- [x] **Step 4: Run the header tests**
 
 Run: `cargo test -p armature-core --features full headers`
 Expected: PASS.
 
-- [ ] **Step 5: Fix `armature-core`'s own call sites**
+- [x] **Step 5: Fix `armature-core`'s own call sites**
 
 `get` now yields `&str`, not `&String`. Find and fix:
 
@@ -815,7 +815,7 @@ The mechanical patterns, and what each becomes:
 Do **not** paper over a type error with `.to_string()` where the old code had a
 `&String` only incidentally — that reintroduces the allocation this task removes.
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -826,7 +826,7 @@ Expected: green. Failures outside `armature-core` are expected only if another
 crate touches `HeaderMap` directly; fix those here rather than deferring — the
 sweep in Task 10 is for `HttpRequest` fields, not for this.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add armature-core/src/headers.rs armature-core/src
@@ -851,7 +851,7 @@ git commit -m "refactor(core): store headers as (HeaderId, Bytes) behind a &str 
   - `impl PartialEq<str> for Method` and `impl PartialEq<&str> for Method` in
     `armature-h1` — so the ~41 `req.method == "GET"` comparisons keep compiling
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `armature-core/src/http.rs`'s test module:
 
@@ -882,12 +882,12 @@ In `armature-core/src/http.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full http::tests`
 Expected: FAIL — `method` is a `String`; `method_str` does not exist.
 
-- [ ] **Step 3: Add the `Method` string comparisons to `armature-h1`**
+- [x] **Step 3: Add the `Method` string comparisons to `armature-h1`**
 
 In `armature-h1/src/method.rs`:
 
@@ -918,7 +918,7 @@ impl fmt::Display for Method {
 
 Add `use std::fmt;` if the file does not already have it.
 
-- [ ] **Step 4: Change the field and the constructors**
+- [x] **Step 4: Change the field and the constructors**
 
 In `armature-core/src/http.rs`:
 
@@ -956,12 +956,12 @@ impl HttpRequest {
 
 Apply the same widening to `with_extensions_capacity` and `with_bytes_body`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p armature-core --features full http::tests`
 Expected: PASS.
 
-- [ ] **Step 6: Fix `armature-core`'s 25 struct-literal constructions and comparisons**
+- [x] **Step 6: Fix `armature-core`'s 25 struct-literal constructions and comparisons**
 
 ```bash
 cargo build -p armature-core --features full 2>&1 | grep -E '^error' -A3 | head -80
@@ -977,7 +977,7 @@ Patterns:
 | `match req.method.as_str() { "GET" => …` | `match req.method { Method::Get => …` |
 | `route.method.as_str() != request.method` | `route.method.as_str() != request.method_str()` |
 
-- [ ] **Step 7: Run the gate**
+- [x] **Step 7: Run the gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -987,7 +987,7 @@ cargo test -p armature-h1 --all-features
 ```
 Expected: green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add armature-h1/src/method.rs armature-core/src
@@ -1014,7 +1014,7 @@ git commit -m "refactor(core)!: HttpRequest.method is a Method rather than a Str
     `body_bytes()`, `set_body_bytes()`, `has_bytes_body()`, and `body_ref()` are
     kept as thin forwarders so their call sites survive.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -1058,12 +1058,12 @@ git commit -m "refactor(core)!: HttpRequest.method is a Method rather than a Str
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full http::tests`
 Expected: FAIL — `path_str`, `body_slice` missing; `body.as_ptr()` does not exist on `Vec` in the sense tested.
 
-- [ ] **Step 3: Change the fields**
+- [x] **Step 3: Change the fields**
 
 ```rust
 pub struct HttpRequest {
@@ -1144,12 +1144,12 @@ Option<Bytes>`, and add `body_slice()`. Keep `status`, `headers: LazyHeaders`,
 and `cookies` untouched — `LazyHeaders` is a `String`-keyed map for *response*
 headers and is out of scope for this plan.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p armature-core --features full http::tests`
 Expected: PASS.
 
-- [ ] **Step 5: Fix `armature-core`'s call sites**
+- [x] **Step 5: Fix `armature-core`'s call sites**
 
 ```bash
 cargo build -p armature-core --features full 2>&1 | grep -E '^error' -A3 | head -100
@@ -1166,7 +1166,7 @@ cargo build -p armature-core --features full 2>&1 | grep -E '^error' -A3 | head 
 | `resp.body.extend_from_slice(x)` | build a `BytesMut`, or `resp.body = Bytes::from([&resp.body[..], x].concat())` — flag any of these for Plan 3's `write_into`, do not micro-optimize here |
 | `String::from_utf8(req.body.clone())` | `String::from_utf8(req.body.to_vec())` |
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -1175,7 +1175,7 @@ cargo test --features full
 ```
 Expected: green.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add armature-core/src
@@ -1210,7 +1210,7 @@ it. This task makes that work happen on first access, or never.
     replacement for the old `query(name)`; 57 call sites move to it
   - `HttpRequest::query_string(&self) -> Option<&str>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `armature-core/src/query.rs` with only the test module first:
 
@@ -1293,12 +1293,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full query`
 Expected: FAIL — the module is not declared and `query()` takes an argument.
 
-- [ ] **Step 3: Implement `Query` and the parser**
+- [x] **Step 3: Implement `Query` and the parser**
 
 In `armature-core/src/query.rs`, above the test module:
 
@@ -1453,7 +1453,7 @@ fn decode(s: &str) -> Cow<'_, str> {
 }
 ```
 
-- [ ] **Step 4: Wire the cache into `HttpRequest`**
+- [x] **Step 4: Wire the cache into `HttpRequest`**
 
 In `armature-core/src/http.rs`:
 
@@ -1524,12 +1524,12 @@ impl HttpRequest {
 Delete the `query_params` field and the old `query(&self, name)` method. Add
 `pub mod query;` and `pub use query::QueryView;` to `armature-core/src/lib.rs`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p armature-core --features full query`
 Expected: PASS.
 
-- [ ] **Step 6: Migrate `armature-core`'s 46 `query_params` uses and 15 `query(name)` calls**
+- [x] **Step 6: Migrate `armature-core`'s 46 `query_params` uses and 15 `query(name)` calls**
 
 ```bash
 grep -rn 'query_params\|\.query(' --include='*.rs' armature-core/src | grep -v 'fn query' | head -60
@@ -1546,7 +1546,7 @@ grep -rn 'query_params\|\.query(' --include='*.rs' armature-core/src | grep -v '
 | `req.query("page")` | `req.query_param("page")` |
 | `req.query_params.clone()` | `req.query().to_hash_map()` |
 
-- [ ] **Step 7: Run the gate**
+- [x] **Step 7: Run the gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -1558,7 +1558,7 @@ If the failure count outside `armature-core` is large enough to obscure real
 errors, scope the gate to `cargo test -p armature-core --features full` for this
 task and let Task 10 restore the whole-workspace gate.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add armature-core/src/query.rs armature-core/src/http.rs armature-core/src/lib.rs armature-core/src
@@ -1585,7 +1585,7 @@ git commit -m "perf(core)!: parse the query string lazily instead of on every re
   - `HttpRequest::set_params(&mut self, params: RouteParams)`
   - `armature_core::param_intern::intern(name: &str) -> &'static str`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `armature-core/src/param_intern.rs`:
 
@@ -1642,12 +1642,12 @@ mod tests {
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full param`
 Expected: FAIL — `param_intern` does not exist; `path_params` is a `HashMap`.
 
-- [ ] **Step 3: Implement the interner**
+- [x] **Step 3: Implement the interner**
 
 `armature-core/src/param_intern.rs`:
 
@@ -1687,7 +1687,7 @@ pub fn intern(name: &str) -> &'static str {
 }
 ```
 
-- [ ] **Step 4: Change the field and accessors**
+- [x] **Step 4: Change the field and accessors**
 
 In `armature-core/src/http.rs`:
 
@@ -1727,12 +1727,12 @@ impl HttpRequest {
 
 Add `pub mod param_intern;` and `pub use http::RouteParams;` to `lib.rs`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p armature-core --features full param`
 Expected: PASS.
 
-- [ ] **Step 6: Migrate `armature-core`'s 24 `path_params` uses and 6 `param()` calls**
+- [x] **Step 6: Migrate `armature-core`'s 24 `path_params` uses and 6 `param()` calls**
 
 | Old | New |
 |---|---|
@@ -1743,12 +1743,12 @@ Expected: PASS.
 | `req.param("id").cloned()` | `req.param("id").map(str::to_owned)` |
 | `constraints.validate(&params)` (takes `&HashMap`) | change `RouteConstraints::validate` to take `&RouteParams`; it only reads names and values |
 
-- [ ] **Step 7: Run the gate**
+- [x] **Step 7: Run the gate**
 
 Run `cargo test -p armature-core --features full` (workspace-wide green returns in Task 10).
 Expected: `armature-core` green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add armature-core/src/param_intern.rs armature-core/src/http.rs armature-core/src/lib.rs armature-core/src
@@ -1770,7 +1770,7 @@ git commit -m "perf(core)!: path params are interned-name spans rather than a Ha
 - **The `Send + Sync` bounds stay.** The spec's `Rc<dyn Any>` follows B5, which is
   Plan 3. Changing it here breaks every `Send` future holding a request.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
     #[test]
@@ -1811,12 +1811,12 @@ git commit -m "perf(core)!: path params are interned-name spans rather than a Ha
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full extensions`
 Expected: FAIL — `spilled` does not exist on a `HashMap`-backed `Extensions`.
 
-- [ ] **Step 3: Swap the storage**
+- [x] **Step 3: Swap the storage**
 
 ```rust
 use smallvec::SmallVec;
@@ -1934,18 +1934,18 @@ Keep the module docs, adjusting the "Memory" bullet to say
 `SmallVec` rather than `HashMap`. Remove the now-unused `HashMap` import if
 nothing else in the file uses it.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p armature-core --features full extensions`
 Expected: PASS.
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run `cargo test -p armature-core --features full` and
 `cargo clippy -p armature-core --all-targets --features full -- -D warnings`.
 Expected: green — the public API did not change, so no call site should move.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add armature-core/src/extensions.rs
@@ -1977,7 +1977,7 @@ dependency of `armature-core` since before this plan and is not used anywhere.
     `*rest` → `{*rest}`
   - Private `MethodIndex` built lazily and invalidated by `add_route`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -2084,12 +2084,12 @@ dependency of `armature-core` since before this plan and is not used anywhere.
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p armature-core --features full routing`
 Expected: FAIL — `translate_pattern` does not exist; param capture returns a `HashMap`.
 
-- [ ] **Step 3: Implement the pattern translation**
+- [x] **Step 3: Implement the pattern translation**
 
 ```rust
 /// Rewrite an armature route pattern into `matchit` syntax.
@@ -2121,7 +2121,7 @@ pub(crate) fn translate_pattern(pattern: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Implement the method-indexed index**
+- [x] **Step 4: Implement the method-indexed index**
 
 ```rust
 use crate::param_intern;
@@ -2224,7 +2224,7 @@ impl MethodIndex {
 }
 ```
 
-- [ ] **Step 5: Replace `match_path`'s `HashMap` with `RouteParams`**
+- [x] **Step 5: Replace `match_path`'s `HashMap` with `RouteParams`**
 
 Rename `match_path` to `match_path_spans` and change its return type. The
 matching logic is unchanged; only the accumulator differs:
@@ -2248,7 +2248,7 @@ fn match_path_spans(pattern: &str, path_parts: &[&str]) -> Option<RouteParams> {
 }
 ```
 
-- [ ] **Step 6: Rewire `Router`**
+- [x] **Step 6: Rewire `Router`**
 
 ```rust
 pub struct Router {
@@ -2328,19 +2328,19 @@ Every `add_route` sibling (`get`, `post`, `put`, `delete`, `patch`, `options`,
 `self.add_route(..)` so the invalidation cannot be forgotten — that is what the
 `routes_added_after_the_first_dispatch_are_visible` test checks.
 
-- [ ] **Step 7: Run the tests**
+- [x] **Step 7: Run the tests**
 
 Run: `cargo test -p armature-core --features full routing`
 Expected: PASS, including `armature-core/tests/routing_tests.rs`,
 `route_constraints_tests.rs`, and `route_groups_tests.rs`.
 
-- [ ] **Step 8: Run the gate**
+- [x] **Step 8: Run the gate**
 
 Run `cargo test -p armature-core --features full` and
 `cargo clippy -p armature-core --all-targets --features full -- -D warnings`.
 Expected: green.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add armature-core/src/routing.rs armature-core/src/route_constraint.rs
@@ -2362,7 +2362,7 @@ git commit -m "perf(core): dispatch through method-indexed matchit trees"
 - Produces: no new API. The serve path stops allocating two `HashMap`s and stops
   percent-decoding queries no handler reads.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `armature-core/tests/integration_test.rs`:
 
@@ -2387,14 +2387,14 @@ async fn a_request_with_a_query_string_routes_and_reads_it_lazily() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails or passes for the wrong reason**
+- [x] **Step 2: Run to verify it fails or passes for the wrong reason**
 
 Run: `cargo test -p armature-core --features full --test integration_test`
 Expected: this may already pass from Task 8. If it does, that is fine — the point
 of the step is that it must be green *before* `application.rs` changes, so a
 regression there is attributable.
 
-- [ ] **Step 3: Rewrite the request construction**
+- [x] **Step 3: Rewrite the request construction**
 
 In `armature-core/src/application.rs`'s `handle_request`:
 
@@ -2451,25 +2451,25 @@ grep -rn 'HttpRequest::new\|query_params\|\.body = ' --include='*.rs' \
   armature-core/src/application.rs armature-core/src/micro.rs armature-core/src/worker.rs
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p armature-core --features full`
 Expected: PASS.
 
-- [ ] **Step 5: Delete the eager parser's hot-path claim**
+- [x] **Step 5: Delete the eager parser's hot-path claim**
 
 `simd_parser::parse_query_string_decoded` is now called by nothing on the serve
 path. Keep the function — it is public API — but update its doc comment to say it
 allocates a `HashMap` and that `HttpRequest::query()` is the request-path
 accessor. Do not delete it in this plan; that is a separate semver decision.
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run `cargo test -p armature-core --features full` and
 `cargo clippy -p armature-core --all-targets --features full -- -D warnings`.
 Expected: green.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add armature-core/src/application.rs armature-core/src/micro.rs \
@@ -2505,7 +2505,7 @@ that must not be split — a half-swept workspace does not compile.
 **Interfaces:**
 - Consumes: everything above. Produces no new API.
 
-- [ ] **Step 1: Enumerate the blast radius and write it down**
+- [x] **Step 1: Enumerate the blast radius and write it down**
 
 Run the two commands above and record the per-crate error counts in the commit
 message. The starting estimate from a pre-migration survey, for orientation only
@@ -2524,7 +2524,7 @@ message. The starting estimate from a pre-migration survey, for orientation only
 | `headers.get(` | 222 |
 | `headers.insert(` | 228 |
 
-- [ ] **Step 2: Sweep, in dependency order**
+- [x] **Step 2: Sweep, in dependency order**
 
 Work outward from `armature-core`: `armature-app`, `armature-macros`, then the
 leaf crates, then `examples/`, `templates/`, and `benches/`. The substitutions are
@@ -2543,7 +2543,7 @@ with one coordinator doing the single `cargo fmt` and gate run at the end.
 Concurrent formatters and concurrent `cargo` invocations on one target directory
 clobber each other.
 
-- [ ] **Step 3: Bump the version and the dependents**
+- [x] **Step 3: Bump the version and the dependents**
 
 ```bash
 sed -i 's/^version = "0.5.0"/version = "0.6.0"/' armature-core/Cargo.toml
@@ -2559,7 +2559,7 @@ Then check the templates, which pin the *framework* version rather than
 grep -rn 'armature-core' --include=Cargo.toml . | grep -v '0\.6'
 ```
 
-- [ ] **Step 4: Write the changelogs**
+- [x] **Step 4: Write the changelogs**
 
 `armature-core/CHANGELOG.md`, under a new `## 0.6.0` heading:
 
@@ -2612,7 +2612,7 @@ section and nothing more — per-crate changelogs are where the detail lives.
 Create `armature-h1/CHANGELOG.md` with a `## 0.1.0` section listing the crate's
 initial surface plus the `From` impls and `header::intern` added in Task 1.
 
-- [ ] **Step 5: Run the full gate, workspace-wide**
+- [x] **Step 5: Run the full gate, workspace-wide**
 
 ```bash
 cargo fmt --all -- --check
@@ -2626,7 +2626,7 @@ cargo test -p armature-h1 --all-features
 Doc tests matter more than usual here: the changed types appear in dozens of
 `///` examples, and a doc test is the only thing that compiles them.
 
-- [ ] **Step 6: Check the crates CI does not build with real features**
+- [x] **Step 6: Check the crates CI does not build with real features**
 
 CI builds 24 of 62 members with `--all-features`; the rest get default features
 only, so a break in one of them can pass CI. Before committing, run the
@@ -2639,7 +2639,7 @@ for c in $(grep -oE '^\s+- crate: (armature-[a-z0-9-]+)' .github/workflows/ci.ym
 done
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A
@@ -2663,7 +2663,7 @@ Without this, "kills ≈25 allocations" is a sentence in a spec.
   named budget, and a router benchmark comparing method-indexed dispatch against a
   linear scan.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `armature-core/tests/alloc_core.rs`:
 
@@ -2802,7 +2802,7 @@ async fn dispatch_allocates_only_for_captured_params() {
 }
 ```
 
-- [ ] **Step 2: Run it and record the real numbers**
+- [x] **Step 2: Run it and record the real numbers**
 
 Run: `cargo test -p armature-core --features full --test alloc_core -- --nocapture --test-threads=1`
 
@@ -2815,7 +2815,7 @@ number is explicable** — if `well_known_header_names_cost_no_allocation` repor
 12 rather than 6, something is allocating per name and the interning path needs
 fixing, not the budget raising.
 
-- [ ] **Step 3: Write the router benchmark**
+- [x] **Step 3: Write the router benchmark**
 
 `armature-core/benches/router.rs`:
 
@@ -2884,14 +2884,14 @@ name = "router"
 harness = false
 ```
 
-- [ ] **Step 4: Run the benchmark**
+- [x] **Step 4: Run the benchmark**
 
 Run: `cargo bench -p armature-core --bench router -- --warm-up-time 0.5 --measurement-time 2`
 Expected: completes; `match_route` is roughly flat across 4→512 routes. If it is
 not flat, the fallback list is absorbing routes that should be in the trees —
 check `translate_pattern` against the generated patterns.
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -2901,7 +2901,7 @@ cargo test -p armature-core --features full --test alloc_core -- --test-threads=
 ```
 Expected: green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add armature-core/tests/alloc_core.rs armature-core/benches/router.rs armature-core/Cargo.toml
@@ -2998,3 +2998,59 @@ legitimate number from a regression being papered over.
 (`write_into`) — Plan 3. The serve-path swap onto `armature-h1` and the
 zero-allocation end-to-end regression test — Plan 4. The `armature-websocket`
 upgrade adapter — Plan 5.
+
+---
+
+## Execution notes
+
+All eleven tasks are implemented. Deviations from the plan as written, and why:
+
+- **Version numbers.** The plan said `armature-core` `0.5.0` → `0.6.0`. The
+  branch was cut before `develop` moved the crate to `0.7.0`, so `develop` was
+  merged in first and the bump is `0.7.0` → `0.8.0`. The merge also took
+  `develop`'s deletion of `tower_compat` (the module this plan had migrated) and
+  its `SmallVec` path splitting in `route_cache::extract_params`, and dropped
+  `develop`'s `urlencoding` re-encoding of decoded query pairs in favour of this
+  plan's raw-query-string deserialization, which is strictly more faithful to
+  what the client sent.
+
+- **Every changed crate got a changelog and a patch bump**, not only the ones
+  the plan named. Twenty crates needed source changes and all of them have to be
+  republished against `armature-core 0.8`.
+
+- **Routing precedence is preserved, which the plan did not anticipate.**
+  `matchit` prefers a static segment over a parameter; this framework prefers the
+  earlier registration, and `route_cache` has a test asserting the two routers
+  agree. `MethodIndex::build` therefore leaves out any static route an earlier
+  same-method route already answers — it is unreachable under
+  first-registered-wins, and inserting it would have handed it the match. The
+  plan's conflict fallback covers only the patterns `matchit` outright rejects.
+
+- **`HttpRequest.path` holds the raw target**, query string included, so
+  `path_only()` was added for the callers that meant the routing path. The plan
+  implied this but did not name the accessor.
+
+- **`push_query_param` and `push_param`** were added so callers assembling a
+  request by hand have a replacement for the removed map insertion; the plan
+  only specified the read side.
+
+- **`RouteParamsExt`** (`get_str`/`get_bytes`) was added because `get` on a
+  `SmallVec` indexes rather than looks up by name, which every migrated call site
+  wanted.
+
+- **`ByteStr` gained a hand-written `Hash`.** The derived one hashed the
+  underlying `Bytes`, and `<[u8]>::hash` writes a length prefix where
+  `str::hash` writes a terminator — so the `Borrow<str>` impl added alongside it
+  would have made a `&str` lookup miss its own key.
+
+- **`armature-h1`'s allocation regression test was fixed en route.** Its counter
+  was a process-wide static, so the four budget tests counted each other and all
+  four reported the same load-independent number. Both it and the new
+  `alloc_core.rs` now count per thread.
+
+- **The `http3` feature is outside `full`**, so none of the per-task gates built
+  it; it was caught by the `--all-features` sweep in Task 10 and fixed there.
+
+- **Measured allocation budgets** (Task 11): construct 1, unread query 0, six
+  well-known headers 6, clone-with-1-MiB-body 0, dispatch-with-one-param 4.
+  Router dispatch is flat at 69.8 ns (4 routes) to 73.1 ns (512).
