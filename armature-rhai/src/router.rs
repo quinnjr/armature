@@ -198,7 +198,9 @@ impl ScriptRouter {
     /// before dispatching to the handler.
     fn find_route(&self, request: &HttpRequest) -> Option<(&Route, HashMap<String, String>)> {
         let method_str = request.method_str();
-        let path = &request.path;
+        // `request.path` is the raw request target and still carries the
+        // query string; patterns are matched against the routing path only.
+        let path = request.path_only();
 
         for route in &self.routes {
             // Check method if specified
@@ -487,6 +489,48 @@ mod tests {
             "script must be able to read the :id param"
         );
         assert_eq!(response.body_ref(), b"42");
+    }
+
+    #[tokio::test]
+    async fn test_static_route_matches_with_query_string() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("users.rhai"), r#"response.body("ok")"#).unwrap();
+
+        let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
+        let router = ScriptRouter::new(engine).get("/users", "users.rhai");
+
+        let response = router
+            .handle(HttpRequest::new("GET", "/users?a=1".to_string()))
+            .await;
+
+        assert_eq!(
+            response.status, 200,
+            "a query string must not affect route matching"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_route_param_excludes_query_string() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("user.rhai"),
+            r#"response.body(request.param("id"))"#,
+        )
+        .unwrap();
+
+        let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
+        let router = ScriptRouter::new(engine).get("/users/:id", "user.rhai");
+
+        let response = router
+            .handle(HttpRequest::new("GET", "/users/42?a=1".to_string()))
+            .await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body_ref(),
+            b"42",
+            "the captured param must not swallow the query string"
+        );
     }
 
     #[tokio::test]

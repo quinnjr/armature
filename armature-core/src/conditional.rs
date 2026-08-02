@@ -322,28 +322,20 @@ pub struct ConditionalHeaders {
 impl ConditionalHeaders {
     /// Parse conditional headers from an HTTP request.
     pub fn from_request(request: &HttpRequest) -> Self {
-        let if_none_match = request
-            .headers
-            .get("If-None-Match")
-            .or_else(|| request.headers.get("if-none-match"))
-            .map(ETagList::parse);
+        // One lookup each: header names intern case-insensitively, so the
+        // lowercased retry was always redundant.
+        let if_none_match = request.headers.get("If-None-Match").map(ETagList::parse);
 
-        let if_match = request
-            .headers
-            .get("If-Match")
-            .or_else(|| request.headers.get("if-match"))
-            .map(ETagList::parse);
+        let if_match = request.headers.get("If-Match").map(ETagList::parse);
 
         let if_modified_since = request
             .headers
             .get("If-Modified-Since")
-            .or_else(|| request.headers.get("if-modified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok());
 
         let if_unmodified_since = request
             .headers
             .get("If-Unmodified-Since")
-            .or_else(|| request.headers.get("if-unmodified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok());
 
         Self {
@@ -463,31 +455,25 @@ impl ConditionalRequest for HttpRequest {
         ConditionalHeaders::from_request(self)
     }
 
+    // One lookup per accessor: header names intern case-insensitively, so the
+    // lowercased retry was always redundant.
     fn if_none_match(&self) -> Option<ETagList> {
-        self.headers
-            .get("If-None-Match")
-            .or_else(|| self.headers.get("if-none-match"))
-            .map(ETagList::parse)
+        self.headers.get("If-None-Match").map(ETagList::parse)
     }
 
     fn if_match(&self) -> Option<ETagList> {
-        self.headers
-            .get("If-Match")
-            .or_else(|| self.headers.get("if-match"))
-            .map(ETagList::parse)
+        self.headers.get("If-Match").map(ETagList::parse)
     }
 
     fn if_modified_since(&self) -> Option<SystemTime> {
         self.headers
             .get("If-Modified-Since")
-            .or_else(|| self.headers.get("if-modified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok())
     }
 
     fn if_unmodified_since(&self) -> Option<SystemTime> {
         self.headers
             .get("If-Unmodified-Since")
-            .or_else(|| self.headers.get("if-unmodified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok())
     }
 

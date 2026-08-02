@@ -14,8 +14,10 @@ pub type QueryPairs = SmallVec<[(String, String); 8]>;
 
 /// A parsed view over a request's query string.
 ///
-/// Borrowed from the request, so it cannot outlive it — which is what lets the
-/// values be slices of the request's own memory rather than copies.
+/// Borrowed from the request, so it cannot outlive it: the view hands out
+/// `&str` into the request's memoized pairs, never copies of them. The pairs
+/// themselves are owned — percent-decoding has to produce new bytes — but they
+/// are built once, on first access, not per lookup.
 #[derive(Debug, Clone, Copy)]
 pub struct QueryView<'a> {
     pairs: &'a [(String, String)],

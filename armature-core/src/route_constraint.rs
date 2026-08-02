@@ -458,17 +458,25 @@ impl RouteConstraints {
     /// Validate all parameters against their constraints
     ///
     /// Returns Ok(()) if all constraints pass, or an Error if any fail.
+    ///
+    /// A parameter with no constraint is not checked, but a constrained
+    /// parameter that is present and not valid UTF-8 is rejected rather than
+    /// skipped: no constraint can pass on bytes it cannot read, so falling
+    /// through would silently bypass validation.
     pub fn validate(&self, params: &crate::RouteParams) -> Result<(), Error> {
         for (param_name, constraint) in &self.constraints {
-            if let Some(param_value) = params
-                .iter()
-                .find(|(k, _)| *k == param_name)
-                .and_then(|(_, v)| std::str::from_utf8(v).ok())
-            {
-                constraint.validate(param_value).map_err(|msg| {
-                    Error::BadRequest(format!("Invalid route parameter '{}': {}", param_name, msg))
-                })?;
-            }
+            let Some((_, raw)) = params.iter().find(|(k, _)| *k == param_name) else {
+                continue;
+            };
+            let value = std::str::from_utf8(raw).map_err(|_| {
+                Error::BadRequest(format!(
+                    "Invalid route parameter '{}': not valid UTF-8",
+                    param_name
+                ))
+            })?;
+            constraint.validate(value).map_err(|msg| {
+                Error::BadRequest(format!("Invalid route parameter '{}': {}", param_name, msg))
+            })?;
         }
         Ok(())
     }
@@ -639,5 +647,30 @@ mod tests {
         ));
 
         assert!(constraints.validate(&bad_params).is_err());
+    }
+
+    #[test]
+    fn test_non_utf8_param_is_rejected_not_skipped() {
+        let constraints = RouteConstraints::new().add("id", Box::new(IntConstraint));
+
+        let mut params = crate::RouteParams::new();
+        params.push((
+            crate::param_intern::intern("id"),
+            Bytes::from_static(&[0xff, 0xfe]),
+        ));
+
+        let err = constraints.validate(&params).unwrap_err();
+        assert!(
+            matches!(&err, Error::BadRequest(msg) if msg.contains("'id'")),
+            "{err:?}"
+        );
+
+        // An unconstrained parameter is still free to hold arbitrary bytes.
+        let mut other = crate::RouteParams::new();
+        other.push((
+            crate::param_intern::intern("slug"),
+            Bytes::from_static(&[0xff, 0xfe]),
+        ));
+        assert!(constraints.validate(&other).is_ok());
     }
 }

@@ -41,6 +41,9 @@ pub enum FramingError {
     /// A transfer coding other than `chunked` was requested.
     #[error("unsupported transfer coding")]
     UnsupportedTransferEncoding,
+    /// `Transfer-Encoding` appeared on an HTTP/1.0 request.
+    #[error("Transfer-Encoding on an HTTP/1.0 request")]
+    TransferEncodingOnHttp10,
     /// HTTP/1.1 requires exactly one `Host`.
     #[error("missing Host")]
     MissingHost,
@@ -79,16 +82,29 @@ impl FramingError {
 /// resolution — and disagreement between peers about which one wins — is the
 /// smuggling vector.
 pub fn decide(head: &Head, limits: &Limits) -> Result<BodyKind, FramingError> {
+    // Everything the rules below need about *presence* comes from one walk of
+    // the field list. Asking `count()` three times and then iterating again per
+    // field walked a 96-entry list up to five times over, for information a
+    // single pass already has.
+    let mut host_count = 0usize;
+    let mut has_len = false;
+    let mut has_te = false;
+    for (id, _) in head.headers.iter() {
+        match id {
+            HeaderId::Host => host_count += 1,
+            HeaderId::ContentLength => has_len = true,
+            HeaderId::TransferEncoding => has_te = true,
+            _ => {}
+        }
+    }
+
     // 1. Host. More than one is ambiguous at any version; HTTP/1.1 additionally
     //    requires at least one (RFC 9112 section 3.2).
-    match head.count(&HeaderId::Host) {
+    match host_count {
         0 if head.version == Version::Http11 => return Err(FramingError::MissingHost),
         n if n > 1 => return Err(FramingError::MultipleHost),
         _ => {}
     }
-
-    let has_len = head.count(&HeaderId::ContentLength) > 0;
-    let has_te = head.count(&HeaderId::TransferEncoding) > 0;
 
     // 2. Conflict. Checked before either field is analyzed.
     if has_len && has_te {
@@ -98,6 +114,16 @@ pub fn decide(head: &Head, limits: &Limits) -> Result<BodyKind, FramingError> {
     // 3. Transfer-Encoding. Codings accumulate across repeated fields in wire
     //    order, exactly as if they had been sent as one comma list.
     if has_te {
+        // RFC 9112 section 6.1: a server must not reuse a connection after
+        // receiving Transfer-Encoding in an HTTP/1.0 request. An HTTP/1.0 sender
+        // has no business emitting one at all, and a hop that ignores it and
+        // reads the body as unframed while we read it as chunked is the
+        // TE-downgrade smuggling vector. Rejecting closes the connection, which
+        // covers the "must not reuse" requirement as a side effect.
+        if head.version == Version::Http10 {
+            return Err(FramingError::TransferEncodingOnHttp10);
+        }
+
         let mut codings: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
         for value in head.all(&HeaderId::TransferEncoding) {
             let s = std::str::from_utf8(value).map_err(|_| FramingError::ChunkedNotFinal)?;
@@ -377,6 +403,40 @@ mod tests {
         );
     }
 
+    /// RFC 9112 section 6.1. An HTTP/1.0 sender cannot legitimately use chunked,
+    /// so a `Transfer-Encoding` here is a downgrade attempt: a hop that reads the
+    /// body as unframed while we read it as chunked disagrees about where the
+    /// message ends.
+    #[test]
+    fn rejects_transfer_encoding_on_http_10() {
+        assert_eq!(
+            decide_raw(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            Err(FramingError::TransferEncodingOnHttp10)
+        );
+        assert_eq!(
+            decide_raw(b"POST / HTTP/1.0\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            Err(FramingError::TransferEncodingOnHttp10)
+        );
+        // An unsupported coding on HTTP/1.0 is rejected for the version, before
+        // the coding is even looked at.
+        assert_eq!(
+            decide_raw(b"POST / HTTP/1.0\r\nTransfer-Encoding: gzip\r\n\r\n"),
+            Err(FramingError::TransferEncodingOnHttp10)
+        );
+    }
+
+    /// The conflict rule still wins: a version violation must not mask the
+    /// ambiguity that both framing fields together create.
+    #[test]
+    fn conflict_precedes_the_http_10_transfer_encoding_rule() {
+        assert_eq!(
+            decide_raw(
+                b"POST / HTTP/1.0\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            Err(FramingError::LengthAndTransferEncoding)
+        );
+    }
+
     #[test]
     fn rejects_oversized_declared_body() {
         let limits = Limits {
@@ -424,6 +484,7 @@ mod tests {
         assert_eq!(FramingError::MissingHost.status(), 400);
         assert_eq!(FramingError::MultipleHost.status(), 400);
         assert_eq!(FramingError::UnsupportedTransferEncoding.status(), 501);
+        assert_eq!(FramingError::TransferEncodingOnHttp10.status(), 400);
         assert_eq!(FramingError::BodyTooLarge.status(), 413);
     }
 }

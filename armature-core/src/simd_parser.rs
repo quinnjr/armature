@@ -27,6 +27,7 @@
 //! let name = intern_header_name("Content-Type");
 //! ```
 
+use crate::Error;
 use memchr::memchr;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -318,19 +319,23 @@ pub fn split_uri(uri: &str) -> (&str, Option<&str>) {
 ///
 /// This uses SIMD-optimized parsing internally via httparse.
 ///
-/// # Safety
-///
-/// The input must be valid HTTP headers terminated by \r\n\r\n.
+/// The input must be a complete header block terminated by `\r\n\r\n`. A
+/// truncated buffer is an error, not a short result: handing back the headers
+/// that happened to fit would let a caller act on a request whose remaining
+/// headers — `Authorization`, `Content-Length`, `Host` — had not arrived yet.
 ///
 /// # Returns
 ///
 /// A vector of (name, value) pairs for the headers.
 #[inline]
-pub fn parse_headers(buf: &[u8]) -> Result<Vec<(&str, &str)>, httparse::Error> {
+pub fn parse_headers(buf: &[u8]) -> Result<Vec<(&str, &str)>, Error> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
 
-    match req.parse(buf)? {
+    match req
+        .parse(buf)
+        .map_err(|e| Error::BadRequest(format!("Malformed request headers: {e}")))?
+    {
         httparse::Status::Complete(_) => {
             let result = req
                 .headers
@@ -340,16 +345,9 @@ pub fn parse_headers(buf: &[u8]) -> Result<Vec<(&str, &str)>, httparse::Error> {
                 .collect();
             Ok(result)
         }
-        httparse::Status::Partial => {
-            // Partial parse - return what we have
-            let result = req
-                .headers
-                .iter()
-                .filter(|h| !h.name.is_empty())
-                .map(|h| (h.name, std::str::from_utf8(h.value).unwrap_or("")))
-                .collect();
-            Ok(result)
-        }
+        httparse::Status::Partial => Err(Error::BadRequest(
+            "Incomplete request headers: buffer ends before the header block does".to_string(),
+        )),
     }
 }
 
@@ -362,29 +360,64 @@ pub fn parse_headers(buf: &[u8]) -> Result<Vec<(&str, &str)>, httparse::Error> {
 /// assert_eq!(method, "GET");
 /// assert_eq!(path, "/api/users");
 /// ```
+///
+/// A truncated request line is an error rather than a partial result:
+/// defaulting the missing fields would report `GET /` for a buffer that never
+/// said either, which a caller has no way to distinguish from a real request.
 #[inline]
-pub fn parse_request_line(buf: &[u8]) -> Result<(&str, &str, u8), httparse::Error> {
+pub fn parse_request_line(buf: &[u8]) -> Result<(&str, &str, u8), Error> {
     let mut headers = [httparse::EMPTY_HEADER; 0];
     let mut req = httparse::Request::new(&mut headers);
 
-    match req.parse(buf)? {
-        httparse::Status::Complete(_) | httparse::Status::Partial => {
-            let method = req.method.unwrap_or("GET");
-            let path = req.path.unwrap_or("/");
-            let version = req.version.unwrap_or(1);
-            Ok((method, path, version))
-        }
+    match req
+        .parse(buf)
+        .map_err(|e| Error::BadRequest(format!("Malformed request line: {e}")))?
+    {
+        httparse::Status::Complete(_) => match (req.method, req.path, req.version) {
+            (Some(method), Some(path), Some(version)) => Ok((method, path, version)),
+            _ => Err(Error::BadRequest(
+                "Incomplete request line: method, target, or version missing".to_string(),
+            )),
+        },
+        httparse::Status::Partial => Err(Error::BadRequest(
+            "Incomplete request line: buffer ends before CRLF".to_string(),
+        )),
     }
 }
 
 /// Check if a byte sequence contains only valid header name characters.
 ///
+/// A header field name is a `token` (RFC 9110 §5.6.2), so the legal set is
+/// alphanumerics plus ``! # $ % & ' * + - . ^ _ ` | ~``. An empty name is not a
+/// token and is rejected.
+///
 /// Scalar validation (`iter().all(..)`); it does not use SIMD.
 #[inline]
 pub fn is_valid_header_name(name: &[u8]) -> bool {
-    // Valid header name characters: a-z, A-Z, 0-9, -, _
-    name.iter()
-        .all(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    !name.is_empty() && name.iter().all(|&c| is_tchar(c))
+}
+
+/// Whether `c` is an RFC 9110 `tchar`.
+#[inline]
+const fn is_tchar(c: u8) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Fast path parameter extraction.
@@ -556,6 +589,24 @@ mod tests {
         assert!(is_valid_header_name(b"X_Custom_Header"));
         assert!(!is_valid_header_name(b"Header: Invalid"));
         assert!(!is_valid_header_name(b"Header\n"));
+
+        // The rest of the RFC 9110 tchar set, which an alphanumeric-plus-`-_`
+        // check used to reject even though it is legal on the wire.
+        for &c in b"!#$%&'*+.^`|~" {
+            assert!(is_valid_header_name(&[c]), "{:?} is a tchar", c as char);
+        }
+
+        // Still not tokens: separators, whitespace, controls, non-ASCII.
+        for &c in b"()/@[]{}\",;=?: \t\x7f\xff" {
+            assert!(
+                !is_valid_header_name(&[c]),
+                "{:?} is not a tchar",
+                c as char
+            );
+        }
+
+        // An empty name is not a token either.
+        assert!(!is_valid_header_name(b""));
     }
 
     #[test]
@@ -566,5 +617,18 @@ mod tests {
         assert_eq!(method, "GET");
         assert_eq!(path, "/api/users");
         assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn truncated_input_is_an_error_not_a_fabricated_default() {
+        // The request line has not arrived in full. Reporting `GET /` here
+        // would be indistinguishable from a client that really sent `GET /`.
+        assert!(parse_request_line(b"GET /api/us").is_err());
+        assert!(parse_request_line(b"").is_err());
+
+        // Same for a header block with no terminating blank line: the headers
+        // that did arrive must not be presented as the complete set.
+        assert!(parse_headers(b"GET / HTTP/1.1\r\nHost: example.com\r\n").is_err());
+        assert!(parse_headers(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").is_ok());
     }
 }

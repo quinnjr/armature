@@ -518,7 +518,9 @@ impl<'a> ArenaRequest<'a> {
         }
 
         // Names are interned: the arena request owns its names, and a request
-        // param name has to be `&'static str`.
+        // param name has to be `&'static str`. The interner is hard-capped
+        // (see [`crate::param_intern`]), so a name that came in off the wire
+        // rather than from a route pattern cannot grow the process.
         req.path_params = self
             .path_params
             .iter()

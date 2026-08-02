@@ -209,7 +209,12 @@ where
     /// Serve requests until the connection ends.
     ///
     /// `Ok(Some(_))` means the connection was upgraded and the caller must hand
-    /// it to the upgrade consumer.
+    /// it to the upgrade consumer. This return value is the *only* way an
+    /// upgraded transport leaves the crate: a handler signals an upgrade by
+    /// answering a request that asked for one with status 101, and whoever drove
+    /// this `Connection` receives the socket here. [`crate::Server`] has no
+    /// upgrade consumer to hand it to and closes instead, so a service that
+    /// upgrades must drive `Connection` itself.
     pub async fn serve(mut self) -> io::Result<Option<Upgraded>> {
         loop {
             // Wait for the next request to begin. An idle keep-alive connection
@@ -282,10 +287,28 @@ where
                 body_read.clone(),
             );
 
-            // The body deadline covers the handler's read of it.
+            // The body deadline covers the handler's read of it. Nothing else
+            // polls this deadline, so the handler call itself has to race it:
+            // arming a timer nobody awaits would leave a handler blocked on body
+            // bytes the peer never sends holding the connection forever.
+            //
+            // Cancelling the handler mid-await drops its `Body`, and with it the
+            // last borrow of the transport, so the 408 can be written here.
+            let call = self.service.call(Request { head, body });
             self.deadline.arm(self.cfg.limits.body_timeout);
-            let resp = self.service.call(Request { head, body }).await;
+            let resp = {
+                let deadline = &mut self.deadline;
+                tokio::select! {
+                    biased;
+                    () = deadline.expired() => None,
+                    r = call => Some(r),
+                }
+            };
             self.deadline.disarm();
+            let Some(resp) = resp else {
+                self.write_error(version, 408).await?;
+                return Ok(None);
+            };
 
             // An unconsumed or errored body leaves an unknown number of bytes on
             // the wire. Reusing the connection would mean looking for a request
@@ -399,7 +422,10 @@ where
         is_head_request: bool,
         wants_upgrade: bool,
     ) -> io::Result<Disposition> {
-        let upgrading = resp.status == 101 && resp.upgrade.is_some() && wants_upgrade;
+        // Status 101 alone does not take the connection: the peer must have
+        // asked for the upgrade, or the transport would be handed off to a
+        // protocol the client is not speaking.
+        let upgrading = resp.status == 101 && wants_upgrade;
         // An unread request body means the next bytes on the wire are body
         // bytes, not a request line. Rather than guess where the body ended,
         // close.
@@ -409,7 +435,6 @@ where
             status,
             mut headers,
             body,
-            upgrade,
         } = resp;
 
         if let Some(name) = &self.cfg.server_name
@@ -446,6 +471,12 @@ where
                 ResponseBody::Empty => {}
                 ResponseBody::Full(b) => self.out.extend_from_slice(&b),
                 ResponseBody::Stream(mut s) => {
+                    // Every write in the stream loop is deadline-guarded, not
+                    // just the last one: a peer that stops reading mid-stream
+                    // would otherwise pin the connection and its buffer
+                    // indefinitely. The deadline is re-armed per flush, so a
+                    // slow but progressing consumer is never cut off.
+                    //
                     // Flush the head first so the peer can begin processing.
                     self.flush().await?;
                     loop {
@@ -471,22 +502,9 @@ where
             }
         }
 
-        self.deadline.arm(self.cfg.limits.write_timeout);
-        let flushed = tokio::select! {
-            biased;
-            () = self.deadline.expired() => Err(io::Error::from(io::ErrorKind::TimedOut)),
-            r = Self::write_all_from(&self.shared, &self.out) => r,
-        };
-        self.deadline.disarm();
-        self.out.clear();
-        flushed?;
+        self.flush().await?;
 
         if upgrading {
-            if let Some(f) = upgrade {
-                // The consumer receives the transport via `Upgraded`; this
-                // callback lets the service observe the handoff.
-                let _ = f;
-            }
             return Ok(Disposition::Upgrade);
         }
 
@@ -497,10 +515,23 @@ where
         })
     }
 
+    /// Write the pending buffer under the write deadline, then clear it.
+    ///
+    /// The deadline is armed here rather than by the caller so that every write
+    /// on the response path is covered. A streaming body flushes once per chunk,
+    /// and guarding only the final flush would leave all the others unbounded —
+    /// which is exactly the position a peer that stops reading mid-stream puts
+    /// the connection in.
     async fn flush(&mut self) -> io::Result<()> {
-        Self::write_all_from(&self.shared, &self.out).await?;
+        self.deadline.arm(self.cfg.limits.write_timeout);
+        let flushed = tokio::select! {
+            biased;
+            () = self.deadline.expired() => Err(io::Error::from(io::ErrorKind::TimedOut)),
+            r = Self::write_all_from(&self.shared, &self.out) => r,
+        };
+        self.deadline.disarm();
         self.out.clear();
-        Ok(())
+        flushed
     }
 
     /// Write `out` in full, then flush, then clear it for reuse.
@@ -943,6 +974,212 @@ mod tests {
         )
         .await;
         assert!(out.contains("etag: v1"), "{out}");
+    }
+
+    /// A peer that stops reading mid-stream must not pin the connection and its
+    /// buffer. Every flush in the streaming loop is deadline-guarded, so this
+    /// fails if the guard is ever narrowed back to the final write.
+    #[tokio::test]
+    async fn write_timeout_cuts_off_a_stalled_streamed_body() {
+        const CHUNK: &[u8] = &[b'x'; 1024];
+
+        struct Endless;
+
+        impl crate::service::futures_stream::Stream for Endless {
+            fn poll_next(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Bytes, crate::BodyError>>> {
+                Poll::Ready(Some(Ok(Bytes::from_static(CHUNK))))
+            }
+        }
+
+        async fn streamer(_req: Request) -> Response {
+            Response::ok().with_body(ResponseBody::Stream(Box::pin(Endless)))
+        }
+
+        let limits = Limits {
+            write_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        // Small enough that the unread transport backs up within a chunk or two.
+        let (client, server) = tokio::io::duplex(256);
+        let local = tokio::task::LocalSet::new();
+        let conn = Connection::new(
+            server,
+            streamer,
+            cfg(limits),
+            Rc::new(RefCell::new(DateCache::new())),
+        );
+        let task = local.spawn_local(async move { conn.serve().await });
+
+        let served = local
+            .run_until(async move {
+                let mut client = client;
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+                    .await
+                    .unwrap();
+                // Deliberately never read. The client half is held open so the
+                // failure comes from the deadline rather than from a closed peer.
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .expect("the connection must not hang on a peer that stopped reading")
+                    .expect("join")
+            })
+            .await;
+
+        assert_eq!(
+            served.expect_err("a stalled write must fail").kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    /// A handler awaiting body bytes the peer never sends must be cut off. The
+    /// deadline being armed is not enough — nothing else polls it, so the
+    /// handler call has to lose a race against it.
+    #[tokio::test]
+    async fn body_timeout_yields_408_and_closes() {
+        let limits = Limits {
+            body_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let (mut client, server) = tokio::io::duplex(4096);
+        let local = tokio::task::LocalSet::new();
+        let conn = Connection::new(
+            server,
+            echo_service,
+            cfg(limits),
+            Rc::new(RefCell::new(DateCache::new())),
+        );
+        let task = local.spawn_local(async move { conn.serve().await });
+
+        let out = local
+            .run_until(async move {
+                // Declares five body bytes and sends three, then never sends the
+                // rest.
+                client
+                    .write_all(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhel")
+                    .await
+                    .unwrap();
+                let mut out = Vec::new();
+                let read =
+                    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut out))
+                        .await;
+                assert!(matches!(read, Ok(Ok(_))), "the server must close");
+                let _ = task.await;
+                String::from_utf8_lossy(&out).into_owned()
+            })
+            .await;
+
+        assert!(out.starts_with("HTTP/1.1 408 Request Timeout"), "{out}");
+        assert!(out.contains("connection: close"), "{out}");
+    }
+
+    /// Status 101 on a request that asked for an upgrade hands the transport
+    /// back to whoever drove the connection, together with the bytes the peer
+    /// already sent past the head. Those bytes are the first frames of the new
+    /// protocol and cannot be re-read from the socket.
+    #[tokio::test]
+    async fn upgrade_hands_back_the_transport_and_buffered_bytes() {
+        async fn switching(_req: Request) -> Response {
+            Response::new(101)
+                .header(HeaderId::Upgrade, Bytes::from_static(b"raw"))
+                .header(HeaderId::Connection, Bytes::from_static(b"upgrade"))
+        }
+
+        let (mut client, server) = tokio::io::duplex(4096);
+        let local = tokio::task::LocalSet::new();
+        let conn = Connection::new(
+            server,
+            switching,
+            cfg(Limits::default()),
+            Rc::new(RefCell::new(DateCache::new())),
+        );
+        let task = local.spawn_local(async move { conn.serve().await });
+
+        let (head, upgraded) = local
+            .run_until(async move {
+                client
+                    .write_all(
+                        b"GET / HTTP/1.1\r\nHost: a\r\nConnection: upgrade\r\nUpgrade: raw\r\n\r\nFIRSTFRAME",
+                    )
+                    .await
+                    .unwrap();
+                let mut buf = [0u8; 256];
+                let n = client.read(&mut buf).await.unwrap();
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let upgraded = task.await.expect("join").expect("serve");
+                (head, upgraded)
+            })
+            .await;
+
+        assert!(
+            head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "{head}"
+        );
+        assert!(
+            !head.contains("content-length"),
+            "101 frames no body: {head}"
+        );
+        let upgraded = upgraded.expect("the transport must be handed back");
+        assert_eq!(
+            &upgraded.buffered[..],
+            b"FIRSTFRAME",
+            "bytes past the head belong to the upgraded protocol"
+        );
+    }
+
+    /// 101 alone must not take the connection. Handing the transport to a
+    /// protocol the client never negotiated loses every subsequent request on
+    /// it.
+    #[tokio::test]
+    async fn status_101_without_a_client_upgrade_request_does_not_upgrade() {
+        async fn switching(_req: Request) -> Response {
+            Response::new(101)
+        }
+
+        let (mut client, server) = tokio::io::duplex(4096);
+        let local = tokio::task::LocalSet::new();
+        let conn = Connection::new(
+            server,
+            switching,
+            cfg(Limits::default()),
+            Rc::new(RefCell::new(DateCache::new())),
+        );
+        let task = local.spawn_local(async move { conn.serve().await });
+
+        let upgraded = local
+            .run_until(async move {
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut out = Vec::new();
+                let _ = tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut out))
+                    .await;
+                task.await.expect("join").expect("serve")
+            })
+            .await;
+
+        assert!(upgraded.is_none(), "no upgrade was negotiated");
+    }
+
+    /// `Connection` must never become `Send`. The per-core model rests on it:
+    /// the `Rc` and `RefCell` in per-core state are only sound because nothing
+    /// migrates threads. Asserting a *negative* impl on stable takes the
+    /// ambiguity trick — if `Connection` were `Send`, both impls below would
+    /// apply and this would stop compiling.
+    #[test]
+    fn connection_is_not_send() {
+        trait AmbiguousIfSend<A> {
+            fn assert() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+
+        type Svc = fn(Request) -> std::future::Ready<Response>;
+        let _ = <Connection<tokio::io::DuplexStream, Svc> as AmbiguousIfSend<_>>::assert;
     }
 
     #[tokio::test]

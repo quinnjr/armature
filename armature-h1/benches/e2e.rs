@@ -17,8 +17,8 @@
 //! which is real and included in the numbers below; the microbenchmarks in
 //! `parse.rs`/`write.rs` are the place to read per-stage cost without it.
 //!
-//! Each iteration drives an already-warm keep-alive connection, so pool growth and
-//! task setup sit outside the measurement — the same steady state the allocation
+//! Each iteration drives an already-warm keep-alive connection, so buffer growth
+//! and task setup sit outside the measurement — the same steady state the allocation
 //! regression test asserts costs zero allocations.
 
 use armature_h1::{ConnConfig, Connection, DateCache, Limits, Request, Response};
@@ -147,7 +147,7 @@ fn bench_serve<S, Fut>(
     let (mut client, server_thread) = spawn_server(service);
     let mut scratch = vec![0u8; 256 * 1024];
 
-    // Warm the pools and both connections' buffers so the measured iterations are
+    // Warm both connections' buffers so the measured iterations are
     // steady-state rather than first-request cost.
     rt.block_on(async {
         for _ in 0..100 {

@@ -12,6 +12,7 @@ use crate::route_constraint::RouteConstraints;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse, Method, RouteParams};
 use bytes::Bytes;
 use smallvec::SmallVec;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -236,6 +237,11 @@ impl Router {
     /// Match a route without executing the handler.
     /// Returns the handler and path parameters if a route matches.
     /// Useful for route lookup benchmarking and inspection.
+    ///
+    /// **Route constraints are not evaluated here.** A route whose parameters
+    /// would fail its [`RouteConstraints`] still matches, so this is not a
+    /// dispatch entry point — use [`Router::route`], which validates the
+    /// constraints before calling the handler.
     #[inline]
     pub fn match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, RouteParams)> {
         // Strip query string if present
@@ -326,21 +332,40 @@ pub(crate) fn translate_pattern(pattern: &str) -> String {
     out
 }
 
-/// Whether an earlier same-method route already answers everything `idx` would.
+/// Strip one trailing `/` so a target reaches `matchit` in the shape the
+/// segment matcher would have seen.
 ///
-/// Only decidable for a static pattern, which matches exactly one concrete path:
-/// if an earlier route matches that path, this route can never be reached under
-/// first-registered-wins. A pattern containing `:` or `*` is not a concrete
-/// path, so it is never reported as shadowed.
-fn is_shadowed_by_earlier(routes: &[Route], idx: usize) -> bool {
-    let route = &routes[idx];
-    if route.path.contains(':') || route.path.contains('*') {
-        return false;
+/// `matchit` treats a trailing slash as significant; `split_segments` — and
+/// therefore `match_path_spans` and `CompiledRoute::matches` — drops empty
+/// segments entirely. Normalizing keeps `/users/` matching `/users` on the
+/// tree's fast path instead of only via the fallback scan. Stranger shapes
+/// (`//users`, `/a//b`) are left to that scan.
+#[inline]
+fn normalize_target(path: &str) -> &str {
+    match path.strip_suffix('/') {
+        Some("") | None => path,
+        Some(stripped) => stripped,
     }
-    let parts: SmallVec<[&str; 8]> = split_segments(&route.path).collect();
-    routes[..idx].iter().any(|earlier| {
-        earlier.method == route.method && match_path_spans(&earlier.path, &parts).is_some()
-    })
+}
+
+/// The interned parameter names a pattern declares, in pattern order.
+type ParamNames = SmallVec<[&'static str; 4]>;
+
+/// Intern a pattern's parameter names once, at index-build time.
+///
+/// Patterns already written in `matchit` brace syntax are not recognized here;
+/// `MethodIndex::find` interns those on demand instead.
+fn param_names(pattern: &str) -> ParamNames {
+    split_segments(pattern)
+        .filter_map(|segment| {
+            segment.strip_prefix(':').or_else(|| {
+                segment
+                    .strip_prefix('*')
+                    .map(|name| if name.is_empty() { "*" } else { name })
+            })
+        })
+        .map(param_intern::intern)
+        .collect()
 }
 
 /// The number of method-indexed trees: the routable methods of [`HttpMethod`].
@@ -372,14 +397,21 @@ fn method_slot(method: &Method) -> Option<usize> {
 /// overlapping routes, so a rejected insert lands here and is scanned in
 /// registration order.
 struct MethodIndex {
-    trees: [Option<matchit::Router<usize>>; METHOD_SLOTS],
+    trees: [Option<matchit::Router<(usize, ParamNames)>>; METHOD_SLOTS],
     fallback: Vec<usize>,
 }
 
 impl MethodIndex {
     fn build(routes: &[Route]) -> Self {
-        let mut trees: [Option<matchit::Router<usize>>; METHOD_SLOTS] = Default::default();
+        let mut trees: [Option<matchit::Router<(usize, ParamNames)>>; METHOD_SLOTS] =
+            Default::default();
         let mut fallback = Vec::new();
+
+        // What an earlier same-method route could shadow a later static path
+        // with, split so the check stays linear in practice: an exact duplicate
+        // is a set probe, and only genuinely parameterized patterns need a scan.
+        let mut static_seen: [HashSet<String>; METHOD_SLOTS] = Default::default();
+        let mut patterns: [Vec<&str>; METHOD_SLOTS] = Default::default();
 
         for (idx, route) in routes.iter().enumerate() {
             let method = Method::from(route.method.clone());
@@ -387,15 +419,31 @@ impl MethodIndex {
                 fallback.push(idx);
                 continue;
             };
-            if is_shadowed_by_earlier(routes, idx) {
-                // Unreachable under first-registered-wins, and inserting it
-                // anyway would hand it the match: `matchit` prefers a static
-                // segment over a parameter, where this framework prefers the
-                // earlier registration. Dropping it keeps the two agreeing.
-                continue;
+
+            if route.path.contains(':') || route.path.contains('*') {
+                patterns[slot].push(&route.path);
+            } else {
+                // A static pattern names exactly one concrete path, so an
+                // earlier route matching that path makes this one unreachable
+                // under first-registered-wins. Inserting it anyway would hand
+                // it the match: `matchit` prefers a static segment over a
+                // parameter, where this framework prefers the earlier
+                // registration. Dropping it keeps the two agreeing.
+                let parts: SmallVec<[&str; 8]> = split_segments(&route.path).collect();
+                let duplicate = !static_seen[slot].insert(parts.join("/"));
+                let shadowed = duplicate
+                    || patterns[slot]
+                        .iter()
+                        .copied()
+                        .any(|earlier| match_path_spans(earlier, &parts).is_some());
+                if shadowed {
+                    continue;
+                }
             }
+
             let tree = trees[slot].get_or_insert_with(matchit::Router::new);
-            if tree.insert(translate_pattern(&route.path), idx).is_err() {
+            let value = (idx, param_names(&route.path));
+            if tree.insert(translate_pattern(&route.path), value).is_err() {
                 // A conflict, an unsupported pattern, or a duplicate. Preserve
                 // first-registered-wins by scanning instead.
                 fallback.push(idx);
@@ -411,37 +459,75 @@ impl MethodIndex {
 
         if let Some(slot) = method_slot(method)
             && let Some(tree) = self.trees[slot].as_ref()
-            && let Ok(m) = tree.at(path)
+            && let Ok(m) = tree.at(normalize_target(path))
         {
+            let (idx, names) = m.value;
             let mut params = RouteParams::new();
             for (name, value) in m.params.iter() {
-                params.push((
-                    param_intern::intern(name),
-                    Bytes::copy_from_slice(value.as_bytes()),
-                ));
+                // The names were interned when this very pattern was indexed,
+                // so the lookup hits and no process-global lock is taken on the
+                // request path. Brace-syntax patterns are the exception
+                // `param_names` does not cover; they intern here instead.
+                let interned = names
+                    .iter()
+                    .copied()
+                    .find(|candidate| *candidate == name)
+                    .unwrap_or_else(|| param_intern::intern(name));
+                params.push((interned, Bytes::copy_from_slice(value.as_bytes())));
             }
-            best = Some((*m.value, params));
+            best = Some((*idx, params));
         }
 
-        // A fallback route registered earlier than the tree match has to win, or
-        // adding a conflicting route later would silently change which handler
-        // serves an existing path.
-        for &idx in &self.fallback {
-            if best.as_ref().is_some_and(|(b, _)| *b < idx) {
+        let parts: SmallVec<[&str; 8]> = split_segments(path).collect();
+        match best.as_ref().map(|(idx, _)| *idx) {
+            // A fallback route registered earlier than the tree match has to
+            // win, or adding a conflicting route later would silently change
+            // which handler serves an existing path.
+            Some(idx) => {
+                if let Some(earlier) = Self::scan(
+                    routes,
+                    method,
+                    &parts,
+                    self.fallback.iter().copied(),
+                    Some(idx),
+                ) {
+                    best = Some(earlier);
+                }
+            }
+            // A tree miss is not a 404 on its own: `matchit` requires a
+            // catch-all to consume at least one segment, and it does not see
+            // targets whose empty segments only `split_segments` removes. The
+            // segment matcher — and `OptimizedRouter`, which must agree with it
+            // — accepts both, so widen the scan to every route of this method
+            // before giving up.
+            None => best = Self::scan(routes, method, &parts, 0..routes.len(), None),
+        }
+
+        best
+    }
+
+    /// The first of `candidates` (in registration order) matching `method` and
+    /// the pre-split `parts`, stopping once `limit` is passed.
+    fn scan(
+        routes: &[Route],
+        method: &Method,
+        parts: &[&str],
+        candidates: impl Iterator<Item = usize>,
+        limit: Option<usize>,
+    ) -> Option<(usize, RouteParams)> {
+        for idx in candidates {
+            if limit.is_some_and(|best| best < idx) {
                 break;
             }
             let route = &routes[idx];
             if Method::from(route.method.clone()) != *method {
                 continue;
             }
-            let parts: SmallVec<[&str; 8]> = split_segments(path).collect();
-            if let Some(params) = match_path_spans(&route.path, &parts) {
-                best = Some((idx, params));
-                break;
+            if let Some(params) = match_path_spans(&route.path, parts) {
+                return Some((idx, params));
             }
         }
-
-        best
+        None
     }
 }
 
@@ -498,8 +584,8 @@ fn match_path_spans(pattern: &str, path_parts: &[&str]) -> Option<RouteParams> {
     //
     // Names are interned from the pattern, which is a fixed set decided at
     // route-registration time, so the table cannot grow with traffic. It does
-    // mean a lock per captured parameter on the match path; the compiled router
-    // interns once at registration instead.
+    // mean a lock per captured parameter, which is why this stays off the tree
+    // fast path: both `MethodIndex` and `CompiledRoute` intern at build time.
     let mut params = RouteParams::new();
     if param_count > 0 {
         for (i, pattern_part) in split_segments(pattern).enumerate() {
@@ -787,11 +873,70 @@ mod tests {
 
     #[test]
     fn test_match_path_trailing_slash() {
-        let pattern = "/users";
-        let path = "/users/";
-        let result = match_path_str(pattern, path);
-        // Should handle trailing slash gracefully
-        assert!(result.is_some() || result.is_none());
+        // Empty segments are dropped, so a trailing slash is not significant.
+        let result = match_path_str("/users", "/users/");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 0);
+
+        let result = match_path_str("/users/:id", "/users/42/");
+        assert_eq!(result.unwrap().get_str("id"), Some("42"));
+    }
+
+    /// `matchit` treats a trailing slash as significant; the segment matcher
+    /// this index sits in front of does not, and `OptimizedRouter` does not
+    /// either. Dispatch has to follow the segment matcher.
+    #[tokio::test]
+    async fn a_trailing_slash_does_not_change_the_match() {
+        let mut router = Router::new();
+        router.get("/users", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        router.get("/users/:id", |req: HttpRequest| async move {
+            let id = req.param("id").unwrap_or("-").to_owned();
+            Ok::<_, Error>(HttpResponse::ok().with_body(id.into_bytes()))
+        });
+
+        assert_eq!(
+            router
+                .route(HttpRequest::new("GET", "/users/"))
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+        let resp = router
+            .route(HttpRequest::new("GET", "/users/42/"))
+            .await
+            .unwrap();
+        assert_eq!(resp.body_slice(), b"42");
+    }
+
+    /// `matchit` requires a catch-all to consume at least one segment, but the
+    /// documented contract — and `CompiledRoute::matches` — is zero or more.
+    #[tokio::test]
+    async fn a_catch_all_matches_zero_remaining_segments() {
+        let mut router = Router::new();
+        router.get("/files/*path", |req: HttpRequest| async move {
+            let mut r = HttpResponse::new(200);
+            r.body = Bytes::from(format!("[{}]", req.param("path").unwrap_or("-")));
+            Ok::<_, Error>(r)
+        });
+
+        for target in ["/files", "/files/"] {
+            let resp = router
+                .route(HttpRequest::new("GET", target))
+                .await
+                .unwrap_or_else(|_| panic!("{target} should match /files/*path"));
+            assert_eq!(resp.body_slice(), b"[]", "{target}");
+        }
+
+        // A path that never reaches the static prefix still 404s.
+        assert!(
+            router
+                .route(HttpRequest::new("GET", "/other"))
+                .await
+                .is_err()
+        );
     }
 
     #[test]

@@ -32,8 +32,25 @@ Types:
 
 Framing follows RFC 9112 §6: `framing::decide` resolves `Transfer-Encoding` and
 `Content-Length` together and rejects the combinations that enable request
-smuggling. Request targets are validated against RFC 3986's character set and
-RFC 9112 §3.2's four target forms.
+smuggling, including `Transfer-Encoding` on an HTTP/1.0 request (the TE-downgrade
+vector). Request targets are validated against RFC 3986's character set and
+RFC 9112 §3.2's four target forms; a `#` fragment is rejected, since RFC 9110
+§7.1 puts it outside the request target.
+
+The reverse direction is covered too: a handler-supplied header or trailer whose
+value contains CR, LF, or NUL — or whose `HeaderId::Other` name is not an RFC
+9110 token — is dropped rather than written, and the writer frames the response
+as if it had never been supplied. Response splitting is request smuggling run
+backwards.
+
+Every deadline in `Limits` is enforced against something that polls it: the
+header and idle deadlines against the head read, the body deadline against the
+handler call itself, and the write deadline against *every* flush of a streamed
+response rather than only the last.
+
+Protocol upgrades leave through `Connection::serve`'s `Ok(Some(Upgraded))`.
+`Server` has no upgrade-consumer hook and closes such connections; a service that
+upgrades must drive `Connection` itself.
 
 `Connection` is `!Send` by design — it holds `Rc`s — and is driven on a
 thread-per-core runtime with `SO_REUSEPORT`.

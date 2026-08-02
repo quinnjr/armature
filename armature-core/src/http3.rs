@@ -634,7 +634,9 @@ mod server {
     /// Split out from [`handle_request_resolver`] so the conversion is
     /// unit-testable without a live QUIC connection.
     pub(super) fn build_armature_request(request: &http::Request<()>) -> HttpRequest {
-        let method = request.method().to_string();
+        // `Method::from` matches the token against the well-known set, so the
+        // common case is a unit variant rather than a per-request `String`.
+        let method = crate::Method::from(request.method().as_str());
         // The full target, query included. Without the query, `?a=b` on a QUIC
         // request was silently dropped; carrying it in the target means the
         // router still matches on the path alone and a handler that asks for

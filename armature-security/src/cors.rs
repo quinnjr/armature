@@ -164,9 +164,14 @@ impl CorsConfig {
     }
 
     /// Allow all origins (wildcard) - NOT RECOMMENDED FOR PRODUCTION
+    ///
+    /// Wildcard origins and credentials are mutually exclusive (see
+    /// [`allow_credentials`](Self::allow_credentials)); enabling the wildcard
+    /// therefore turns credentials back off.
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_any_origin = true;
         self.allowed_origins = None;
+        self.allow_credentials = false;
         self
     }
 
@@ -254,7 +259,12 @@ impl CorsConfig {
     ///
     /// # Security Note
     ///
-    /// Cannot be used with allow_any_origin!
+    /// Cannot be used with `allow_any_origin`. Reflecting an arbitrary origin
+    /// alongside `Access-Control-Allow-Credentials: true` lets any site read
+    /// authenticated responses, so this setter revokes the wildcard rather
+    /// than trusting callers to keep the two apart. The origin allowlist is
+    /// left empty by that revocation, which fails closed: no origin is
+    /// echoed until one is added explicitly.
     ///
     /// # Examples
     ///
@@ -267,6 +277,9 @@ impl CorsConfig {
     /// ```
     pub fn allow_credentials(mut self, allow: bool) -> Self {
         self.allow_credentials = allow;
+        if allow {
+            self.allow_any_origin = false;
+        }
         self
     }
 
@@ -310,18 +323,27 @@ impl CorsConfig {
     }
 
     /// Check if method is allowed
+    ///
+    /// Entries are stored canonically upper-cased, so the comparison is done
+    /// case-insensitively against the (small) set rather than allocating a
+    /// re-cased copy of `method` on every call.
     pub fn is_method_allowed(&self, method: &str) -> bool {
-        self.allowed_methods.contains(&method.to_uppercase())
+        self.allowed_methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(method))
     }
 
     /// Check if header is allowed
+    ///
+    /// Preflight calls this once per requested header, so it compares against
+    /// the canonically lower-cased set in place instead of allocating.
     pub fn is_header_allowed(&self, header: &str) -> bool {
         if self.allow_any_header {
             return true;
         }
 
         if let Some(ref headers) = self.allowed_headers {
-            return headers.contains(&header.to_lowercase());
+            return headers.iter().any(|h| h.eq_ignore_ascii_case(header));
         }
 
         false
@@ -346,10 +368,14 @@ impl CorsConfig {
         // Add CORS headers
         self.add_cors_headers(&mut response, origin);
 
-        // Add preflight-specific headers
-        if let Some(method) = request.headers.get("access-control-request-method")
-            && self.is_method_allowed(method)
-        {
+        // Add preflight-specific headers. A method the policy does not permit
+        // is a rejected preflight, not a successful one missing a header:
+        // answering 204 makes the failure look like a transport problem to the
+        // browser and hides the misconfiguration from the operator.
+        if let Some(method) = request.headers.get("access-control-request-method") {
+            if !self.is_method_allowed(method) {
+                return Err(Error::Forbidden("Method not allowed".to_string()));
+            }
             response.headers.insert(
                 "Access-Control-Allow-Methods".to_string(),
                 self.allowed_methods
@@ -391,8 +417,15 @@ impl CorsConfig {
 
     /// Add CORS headers to response
     pub fn add_cors_headers(&self, response: &mut HttpResponse, origin: &str) {
+        // Wildcard + credentials is origin reflection with credentials: the
+        // builder refuses to produce that combination, and if it is reached
+        // any other way we emit no origin at all rather than the caller's.
+        if self.allow_any_origin && self.allow_credentials {
+            return;
+        }
+
         // Origin
-        if self.allow_any_origin && !self.allow_credentials {
+        if self.allow_any_origin {
             response
                 .headers
                 .insert("Access-Control-Allow-Origin".to_string(), "*".to_string());
@@ -402,10 +435,10 @@ impl CorsConfig {
                 origin.to_string(),
             );
 
-            // Vary header for caching
-            response
-                .headers
-                .insert("Vary".to_string(), "Origin".to_string());
+            // Vary header for caching. Appended, not inserted: the handler may
+            // already vary on Accept-Encoding or similar and overwriting that
+            // poisons shared caches.
+            append_vary(response, "Origin");
         }
 
         // Credentials
@@ -438,6 +471,23 @@ impl Default for CorsConfig {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Add `value` to the response's `Vary` field without dropping existing entries.
+fn append_vary(response: &mut HttpResponse, value: &str) {
+    let merged = match response.headers.get("Vary") {
+        Some(existing) => {
+            if existing
+                .split(',')
+                .any(|v| v.trim().eq_ignore_ascii_case(value))
+            {
+                return;
+            }
+            format!("{}, {}", existing, value)
+        }
+        None => value.to_string(),
+    };
+    response.headers.insert("Vary".to_string(), merged);
 }
 
 #[cfg(test)]
@@ -504,6 +554,77 @@ mod tests {
         assert!(cors.is_header_allowed("Content-Type"));
         assert!(cors.is_header_allowed("X-Custom-Header"));
         assert!(cors.is_header_allowed("anything"));
+    }
+
+    #[test]
+    fn credentials_never_reflect_an_arbitrary_origin() {
+        // `permissive()` + credentials is the two-call path into the classic
+        // origin-reflection-with-credentials hole: the attacker's origin echoed
+        // back next to `Allow-Credentials: true` grants any site authenticated
+        // cross-origin reads.
+        let cors = CorsConfig::permissive().allow_credentials(true);
+
+        assert!(!cors.allow_any_origin);
+        assert!(!cors.is_origin_allowed("https://evil.com"));
+
+        let mut response = HttpResponse::ok();
+        cors.add_cors_headers(&mut response, "https://evil.com");
+
+        assert_eq!(response.headers.get("Access-Control-Allow-Origin"), None);
+    }
+
+    #[test]
+    fn wildcard_revokes_credentials() {
+        let cors = CorsConfig::new()
+            .allow_origin("https://example.com")
+            .allow_credentials(true)
+            .allow_any_origin();
+
+        let mut response = HttpResponse::ok();
+        cors.add_cors_headers(&mut response, "https://evil.com");
+
+        assert_eq!(
+            response.headers.get("Access-Control-Allow-Origin"),
+            Some(&"*".to_string())
+        );
+        assert_eq!(
+            response.headers.get("Access-Control-Allow-Credentials"),
+            None
+        );
+    }
+
+    #[test]
+    fn vary_is_appended_not_overwritten() {
+        let cors = CorsConfig::new().allow_origin("https://example.com");
+
+        let mut response = HttpResponse::ok();
+        response
+            .headers
+            .insert("Vary".to_string(), "Accept-Encoding".to_string());
+        cors.add_cors_headers(&mut response, "https://example.com");
+
+        assert_eq!(
+            response.headers.get("Vary"),
+            Some(&"Accept-Encoding, Origin".to_string())
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_disallowed_method() {
+        let cors = CorsConfig::new()
+            .allow_origin("https://example.com")
+            .allow_methods(vec!["GET"]);
+
+        let mut request = HttpRequest::new("OPTIONS", "/api/users".to_string());
+        request.headers.insert("origin", "https://example.com");
+        request
+            .headers
+            .insert("access-control-request-method", "DELETE");
+
+        assert!(matches!(
+            cors.handle_preflight(&request),
+            Err(Error::Forbidden(_))
+        ));
     }
 
     #[test]

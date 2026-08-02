@@ -1,20 +1,27 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{
-    FnArg, Ident, ItemFn, LitStr, Pat, PatType, Type, parse_macro_input, punctuated::Punctuated,
-    token::Comma,
-};
+use syn::{FnArg, Ident, ItemFn, LitStr, Pat, PatType, Type, parse_macro_input};
 
 use crate::route_validation::validate_route_path;
 
-/// Parameter extraction kind
+/// Parameter extraction kind.
+///
+/// Note the split between *marker* kinds and *named* kinds. `Body`, `Query`,
+/// `Headers` and `RawBody` take no argument and are markers only: the request
+/// source is decided by the parameter's type through its
+/// `armature_core::extractors::FromRequest` impl (`Body<T>` reads the JSON
+/// body, `Query<T>` the query string, and so on). `verify_kind_matches_type`
+/// rejects a marker paired with a wrapper type that reads something else, so
+/// the annotation cannot lie about where the value comes from. The named kinds
+/// (`BodyField`, `QueryField`, `Param`, `Header`) do carry their own extraction
+/// semantics.
 #[derive(Debug)]
-enum ExtractorKind {
-    /// #[body] - Extract entire JSON body
+pub(crate) enum ExtractorKind {
+    /// #[body] - marker for a `Body<T>` parameter (entire JSON body)
     Body,
     /// #[body("field")] - Extract specific field from body
     BodyField(String),
-    /// #[query] - Extract all query parameters
+    /// #[query] - marker for a `Query<T>` parameter (all query parameters)
     Query,
     /// #[query("field")] - Extract specific query parameter
     QueryField(String),
@@ -22,16 +29,92 @@ enum ExtractorKind {
     Param(String),
     /// #[header("name")] - Extract header value
     Header(String),
-    /// #[headers] - Extract all headers
+    /// #[headers] - marker for a `Headers` parameter (all headers)
     Headers,
-    /// #[raw_body] - Extract raw body bytes
+    /// #[raw_body] - marker for a `RawBody` parameter (raw body bytes)
     RawBody,
     /// No extractor attribute - pass request directly
     Request,
 }
 
+/// The extractor attribute names recognized on a handler parameter.
+const EXTRACTOR_ATTRS: [&str; 7] = [
+    "body", "query", "param", "path", "header", "headers", "raw_body",
+];
+
+/// Does this parameter carry an extractor attribute?
+///
+/// Distinct from [`parse_extractor_attr`], which also reports `Request` for an
+/// unannotated `HttpRequest` parameter.
+pub(crate) fn has_extractor_attr(param: &PatType) -> bool {
+    param.attrs.iter().any(|attr| {
+        attr.path()
+            .get_ident()
+            .is_some_and(|ident| EXTRACTOR_ATTRS.contains(&ident.to_string().as_str()))
+    })
+}
+
+/// Does any parameter of this signature carry an extractor attribute?
+pub(crate) fn signature_has_extractors<'a>(inputs: impl IntoIterator<Item = &'a FnArg>) -> bool {
+    inputs.into_iter().any(|arg| match arg {
+        FnArg::Typed(pat_type) => has_extractor_attr(pat_type),
+        FnArg::Receiver(_) => false,
+    })
+}
+
+/// The `armature_core::extractors` wrapper types whose `FromRequest` impl is
+/// what actually decides which part of the request a marker extractor reads.
+fn known_wrapper(ty: &Type) -> Option<String> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let name = type_path.path.segments.last()?.ident.to_string();
+    matches!(
+        name.as_str(),
+        "State"
+            | "Body"
+            | "Query"
+            | "Path"
+            | "PathParams"
+            | "Header"
+            | "Headers"
+            | "RawBody"
+            | "Form"
+            | "ContentType"
+    )
+    .then_some(name)
+}
+
+/// Reject a marker extractor attached to a wrapper type that reads a different
+/// part of the request (`#[body] filters: Query<Filters>` would silently read
+/// the query string, because only the type is consulted at runtime).
+///
+/// Only *known* wrapper types are checked, so a type alias or a bespoke
+/// `FromRequest` implementation is still accepted.
+fn verify_kind_matches_type(kind: &ExtractorKind, ty: &Type) -> syn::Result<()> {
+    let (attr, expected) = match kind {
+        ExtractorKind::Body => ("#[body]", "Body"),
+        ExtractorKind::Query => ("#[query]", "Query"),
+        ExtractorKind::Headers => ("#[headers]", "Headers"),
+        ExtractorKind::RawBody => ("#[raw_body]", "RawBody"),
+        _ => return Ok(()),
+    };
+
+    match known_wrapper(ty) {
+        Some(found) if found != expected => Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "{attr} does not itself choose the request source — the parameter's type does, \
+                 and `{found}` reads a different part of the request. Use `{expected}<..>` here, \
+                 or annotate this parameter to match its type."
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Parse extractor attributes from a function parameter
-fn parse_extractor_attr(param: &PatType) -> Option<(ExtractorKind, Ident, Type)> {
+pub(crate) fn parse_extractor_attr(param: &PatType) -> Option<(ExtractorKind, Ident, Type)> {
     let param_name = match param.pat.as_ref() {
         Pat::Ident(pat_ident) => pat_ident.ident.clone(),
         _ => return None,
@@ -95,13 +178,18 @@ fn parse_extractor_attr(param: &PatType) -> Option<(ExtractorKind, Ident, Type)>
     None
 }
 
-/// Generate extraction code for a parameter
-fn generate_extraction(
+/// Generate extraction code for a parameter.
+///
+/// Errors when a marker extractor contradicts the parameter's type — see
+/// [`verify_kind_matches_type`].
+pub(crate) fn generate_extraction(
     kind: &ExtractorKind,
     param_name: &Ident,
     param_type: &Type,
-) -> proc_macro2::TokenStream {
-    match kind {
+) -> syn::Result<proc_macro2::TokenStream> {
+    verify_kind_matches_type(kind, param_type)?;
+
+    Ok(match kind {
         ExtractorKind::Body => {
             quote! {
                 let #param_name: #param_type = armature_core::extractors::FromRequest::from_request(&__request)?;
@@ -168,33 +256,7 @@ fn generate_extraction(
                 let #param_name: #param_type = __request.clone();
             }
         }
-    }
-}
-
-/// Remove extractor attributes from function parameters
-fn strip_extractor_attrs(inputs: &Punctuated<FnArg, Comma>) -> Punctuated<FnArg, Comma> {
-    inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Typed(pat_type) => {
-                let mut new_pat_type = pat_type.clone();
-                new_pat_type.attrs.retain(|attr| {
-                    let path = attr.path();
-                    if let Some(ident) = path.get_ident() {
-                        let name = ident.to_string();
-                        !matches!(
-                            name.as_str(),
-                            "body" | "query" | "param" | "path" | "header" | "headers" | "raw_body"
-                        )
-                    } else {
-                        true
-                    }
-                });
-                FnArg::Typed(new_pat_type)
-            }
-            other => other.clone(),
-        })
-        .collect()
+    })
 }
 
 pub fn route_impl(attr: TokenStream, item: TokenStream, method: &str) -> TokenStream {
@@ -247,8 +309,10 @@ pub fn route_impl(attr: TokenStream, item: TokenStream, method: &str) -> TokenSt
         if let FnArg::Typed(pat_type) = arg
             && let Some((kind, param_name, param_type)) = parse_extractor_attr(pat_type)
         {
-            let extraction = generate_extraction(&kind, &param_name, &param_type);
-            extractions.push(extraction);
+            match generate_extraction(&kind, &param_name, &param_type) {
+                Ok(extraction) => extractions.push(extraction),
+                Err(e) => return e.to_compile_error().into(),
+            }
             has_extractors = true;
         }
     }
@@ -260,8 +324,9 @@ pub fn route_impl(attr: TokenStream, item: TokenStream, method: &str) -> TokenSt
     };
 
     let expanded = if has_extractors {
-        // Generate a wrapper function that extracts parameters
-        let _stripped_inputs = strip_extractor_attrs(&input.sig.inputs);
+        // Generate a wrapper function that extracts parameters. The original
+        // parameter list is discarded entirely (the extractions re-introduce
+        // every binding by name), so the extractor attributes go with it.
         let extraction_code = quote! { #(#extractions)* };
 
         // Preserve self receiver if present

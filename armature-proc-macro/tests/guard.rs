@@ -396,3 +396,29 @@ async fn annotated_controller_does_not_affect_sibling_controller() {
         "the sibling controller's middleware must not wrap this route"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The no-argument forms must re-emit the handler untouched. They used to emit
+// the function's attributes and visibility *in front of* the whole `ItemFn` —
+// which already carries both — producing duplicated attributes and
+// `pub pub async fn`.
+// ---------------------------------------------------------------------------
+
+#[guard()]
+#[inline]
+pub async fn unguarded(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[use_guard()]
+pub async fn also_unguarded(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[tokio::test]
+async fn empty_guard_lists_leave_the_handler_intact() {
+    assert_eq!(unguarded(request()).await.unwrap().status, 200);
+    assert_eq!(also_unguarded(request()).await.unwrap().status, 200);
+}

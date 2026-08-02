@@ -31,6 +31,15 @@ impl ByteStr {
     }
 
     /// The contents as a string slice.
+    ///
+    /// **Not free.** The UTF-8 invariant is established once in
+    /// [`from_utf8`](Self::from_utf8), but re-checking it is the only way to
+    /// recover a `&str` without `unsafe`, which this crate forbids — so this
+    /// costs O(len) on every call. `Deref`, `Display`, `Hash`, `Ord`,
+    /// `AsRef<str>` and `Borrow<str>` all route through it, so a `ByteStr` used
+    /// as a map key pays the scan on every lookup as well as every insert. Use
+    /// [`as_bytes`](Self::as_bytes) where bytes will do; that one is a plain
+    /// slice.
     #[inline]
     pub fn as_str(&self) -> &str {
         // Invariant established in `from_utf8`; `from_static` is UTF-8 by type.
@@ -65,8 +74,8 @@ impl ByteStr {
     /// Copy the contents into an owned `String`.
     ///
     /// The escape hatch for code that retains request data past the response:
-    /// holding a `ByteStr` pins the whole pooled buffer it slices (see this
-    /// crate's README on buffer pinning), and this breaks that link.
+    /// holding a `ByteStr` pins the whole connection read buffer it slices (see
+    /// this crate's README on buffer pinning), and this breaks that link.
     #[inline]
     pub fn into_owned(&self) -> String {
         self.as_str().to_owned()

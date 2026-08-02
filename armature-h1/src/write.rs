@@ -5,8 +5,8 @@
 //! `writev` rather than being built up through intermediate allocations.
 
 use crate::Version;
-use crate::header::{self, HeaderId, HeaderVec};
-use bytes::{BufMut, BytesMut};
+use crate::header::{HeaderId, HeaderVec};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::time::SystemTime;
 
 /// The length of an IMF-fixdate: `Sun, 06 Nov 1994 08:49:37 GMT`.
@@ -66,7 +66,7 @@ pub enum OutBody {
     /// No body.
     None,
     /// A body of known length.
-    Fixed(bytes::Bytes),
+    Fixed(Bytes),
     /// A chunked body.
     Chunked,
 }
@@ -159,6 +159,74 @@ fn forbids_body_framing(status: u16) -> bool {
     matches!(status, 204 | 304) || (100..200).contains(&status)
 }
 
+/// Whether a field value can be written without splitting the response.
+///
+/// CR, LF, or NUL in a value terminates the field early and lets whatever
+/// follows be read as further header fields or as a body. That is response
+/// splitting — the mirror image of the request smuggling this crate is built to
+/// reject — and a handler that reflects request data into a header (a computed
+/// `Location`, an echoed correlation id) is one bad input away from it. The
+/// check lives here, at the last point before the bytes reach the wire, rather
+/// than at each of the call sites that could produce one.
+#[inline]
+fn valid_field_value(value: &[u8]) -> bool {
+    !value.iter().any(|b| matches!(b, b'\r' | b'\n' | 0))
+}
+
+/// Whether a field name is a token (RFC 9110 section 5.6.2).
+///
+/// Well-known [`HeaderId`]s render to fixed tokens by construction.
+/// [`HeaderId::Other`] carries whatever the parser or the handler put in it, and
+/// a name containing a colon, a space, or CRLF splits the response exactly as a
+/// value does.
+#[inline]
+fn valid_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// Whether this field may be emitted as-is.
+#[inline]
+fn writable(id: &HeaderId, value: &[u8]) -> bool {
+    let name_ok = match id {
+        HeaderId::Other(name) => valid_field_name(name.as_str()),
+        _ => true,
+    };
+    name_ok && valid_field_value(value)
+}
+
+/// The first value for `id` that will actually be emitted.
+///
+/// The framing, `Date`, and `Connection` decisions below must agree with what
+/// was written, not with what the handler supplied: a `Content-Length` dropped
+/// for containing CRLF would otherwise suppress the framing field too and leave
+/// the response undelimited — trading one splitting bug for another.
+#[inline]
+fn emitted<'a>(v: &'a HeaderVec, id: &HeaderId) -> Option<&'a Bytes> {
+    v.iter()
+        .find(|(k, val)| k == id && writable(k, val))
+        .map(|(_, val)| val)
+}
+
 /// Serialize a status line and header section into `out`.
 ///
 /// Emits `Date`, `Connection`, and the body framing field itself, but never
@@ -185,13 +253,23 @@ pub fn write_head(
 
     // Handler-supplied headers first, so the checks below can see them.
     for (id, value) in resp.headers.iter() {
+        if !writable(id, value) {
+            // The status line is already in `out`, so there is no error left to
+            // return; dropping the field is the only outcome that does not put
+            // attacker-chosen bytes on the wire.
+            tracing::warn!(
+                field = id.as_str(),
+                "dropping response header with an invalid field name or value"
+            );
+            continue;
+        }
         out.put_slice(id.as_str().as_bytes());
         out.put_slice(b": ");
         out.put_slice(value);
         out.put_slice(b"\r\n");
     }
 
-    if header::get(&resp.headers, &HeaderId::Date).is_none() {
+    if emitted(&resp.headers, &HeaderId::Date).is_none() {
         out.put_slice(b"date: ");
         out.put_slice(date);
         out.put_slice(b"\r\n");
@@ -199,8 +277,8 @@ pub fn write_head(
 
     // Body framing, unless the handler already framed it or the status forbids
     // framing entirely.
-    let handler_framed = header::get(&resp.headers, &HeaderId::ContentLength).is_some()
-        || header::get(&resp.headers, &HeaderId::TransferEncoding).is_some();
+    let handler_framed = emitted(&resp.headers, &HeaderId::ContentLength).is_some()
+        || emitted(&resp.headers, &HeaderId::TransferEncoding).is_some();
     if !handler_framed && !forbids_body_framing(resp.status) {
         match body {
             OutBody::Fixed(b) => {
@@ -217,7 +295,7 @@ pub fn write_head(
         }
     }
 
-    if header::get(&resp.headers, &HeaderId::Connection).is_none() {
+    if emitted(&resp.headers, &HeaderId::Connection).is_none() {
         match (version, keep_alive) {
             // Persistence is the HTTP/1.1 default; saying so would be noise.
             (Version::Http11, true) => {}
@@ -238,9 +316,20 @@ pub fn write_chunk(out: &mut BytesMut, data: &[u8]) {
 }
 
 /// Append the terminating zero-length chunk and trailer section.
+///
+/// Trailers are held to the same field-name and field-value rules as headers: a
+/// CRLF in a trailer value ends the trailer section early, and the bytes after
+/// it become the start of whatever the peer reads next.
 pub fn write_last_chunk(out: &mut BytesMut, trailers: &HeaderVec) {
     out.put_slice(b"0\r\n");
     for (id, value) in trailers.iter() {
+        if !writable(id, value) {
+            tracing::warn!(
+                field = id.as_str(),
+                "dropping trailer with an invalid field name or value"
+            );
+            continue;
+        }
         out.put_slice(id.as_str().as_bytes());
         out.put_slice(b": ");
         out.put_slice(value);
@@ -269,7 +358,6 @@ fn write_hex(out: &mut BytesMut, v: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use std::time::Duration;
 
     const EPOCH_DATE: &[u8] = b"Thu, 01 Jan 1970 00:00:00 GMT";
@@ -443,6 +531,90 @@ mod tests {
             false,
         );
         assert_eq!(got.matches("connection").count(), 1);
+    }
+
+    /// The mirror image of request smuggling: a CRLF in a handler-supplied value
+    /// ends the header section early, and everything after it is read as more
+    /// header fields or as a body.
+    #[test]
+    fn drops_header_values_that_would_split_the_response() {
+        let got = render(
+            Version::Http11,
+            &head_of(200, &[(HeaderId::Location, "/a\r\nX-Injected: 1")]),
+            &OutBody::None,
+            true,
+        );
+        assert!(!got.contains("X-Injected"), "{got}");
+        assert!(
+            !got.contains("location"),
+            "the whole field goes, not just the tail: {got}"
+        );
+    }
+
+    #[test]
+    fn drops_values_containing_bare_cr_lf_or_nul() {
+        for bad in ["a\rb", "a\nb", "a\0b"] {
+            let got = render(
+                Version::Http11,
+                &head_of(200, &[(HeaderId::Etag, bad)]),
+                &OutBody::None,
+                true,
+            );
+            assert!(!got.contains("etag"), "{bad:?} must be dropped: {got}");
+        }
+    }
+
+    /// `HeaderId::Other` carries whatever a handler put in it; a name with a
+    /// space or a colon splits the response just as a value does.
+    #[test]
+    fn drops_custom_field_names_that_are_not_tokens() {
+        let mut headers = HeaderVec::new();
+        for name in ["x bad", "x:bad", "x\r\nbad", ""] {
+            headers.push((
+                HeaderId::Other(crate::ByteStr::from(name)),
+                Bytes::from_static(b"1"),
+            ));
+        }
+        headers.push((
+            HeaderId::Other(crate::ByteStr::from_static("x-good")),
+            Bytes::from_static(b"1"),
+        ));
+        let got = render(
+            Version::Http11,
+            &ResponseHead {
+                status: 200,
+                headers,
+            },
+            &OutBody::None,
+            true,
+        );
+        assert!(!got.contains("bad"), "{got}");
+        assert!(got.contains("x-good: 1\r\n"), "{got}");
+    }
+
+    /// Dropping a field must not leave the response undelimited. The framing
+    /// decision follows what was written, so a rejected `Content-Length` puts the
+    /// writer back in charge of framing rather than suppressing it.
+    #[test]
+    fn a_dropped_content_length_does_not_suppress_framing() {
+        let got = render(
+            Version::Http11,
+            &head_of(200, &[(HeaderId::ContentLength, "5\r\nX-Injected: 1")]),
+            &OutBody::Fixed(Bytes::from_static(b"hello")),
+            true,
+        );
+        assert!(!got.contains("X-Injected"), "{got}");
+        assert_eq!(got.matches("content-length").count(), 1, "{got}");
+        assert!(got.contains("content-length: 5\r\n"), "{got}");
+    }
+
+    #[test]
+    fn write_last_chunk_drops_an_injecting_trailer() {
+        let mut trailers = HeaderVec::new();
+        trailers.push((HeaderId::Etag, Bytes::from_static(b"x\r\nX-Injected: 1")));
+        let mut out = BytesMut::new();
+        write_last_chunk(&mut out, &trailers);
+        assert_eq!(&out[..], b"0\r\n\r\n");
     }
 
     #[test]

@@ -182,6 +182,16 @@ fn unsupported_transfer_coding_501_close() {
         .assert_rejected_and_closed(501);
 }
 
+/// RFC 9112 section 6.1: a server must not reuse a connection after receiving
+/// `Transfer-Encoding` in an HTTP/1.0 request. Accepting it is the TE-downgrade
+/// smuggling vector — a hop that reads the body as unframed while this one reads
+/// it as chunked.
+#[test]
+fn transfer_encoding_on_http_10_400_close() {
+    raw_exchange(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+        .assert_rejected_and_closed(400);
+}
+
 #[test]
 fn missing_host_400_close() {
     raw_exchange(b"GET / HTTP/1.1\r\n\r\n").assert_rejected_and_closed(400);
@@ -275,6 +285,14 @@ fn absolute_form_target_accepted() {
     assert_eq!(e.status(), Some(200), "{}", e.body);
 }
 
+/// RFC 9110 section 7.1: the fragment is not part of the request target, and no
+/// RFC 9112 section 3.2 form contains one. Accepting it would route on bytes an
+/// upstream hop would have stripped.
+#[test]
+fn fragment_in_target_400_close() {
+    raw_exchange(b"GET /a#frag HTTP/1.1\r\nHost: a\r\n\r\n").assert_rejected_and_closed(400);
+}
+
 #[test]
 fn asterisk_form_options_accepted() {
     let e = raw_exchange(b"OPTIONS * HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
@@ -345,8 +363,14 @@ fn header_timeout_408_close() {
     assert!(e.closed, "must close: {}", e.body);
 }
 
+/// The body deadline must actually fire, not merely be armed.
+///
+/// Asserting only `closed` would pass with `body_timeout` entirely unenforced:
+/// the remaining bytes eventually arrive, the echo handler completes, and the
+/// connection then closes on the *idle* deadline instead. The status is the
+/// discriminator — an unenforced body deadline yields 200 with `hello`.
 #[test]
-fn body_timeout_closes() {
+fn body_timeout_408_close() {
     // Declares five body bytes, sends three, then stalls past the body deadline.
     let e = raw_exchange_slow(
         quick_limits(),
@@ -356,7 +380,18 @@ fn body_timeout_closes() {
         ],
         Duration::from_millis(1200),
     );
-    assert!(e.closed, "a stalled body must not hold the connection open");
+    e.assert_rejected_and_closed(408);
+    assert_eq!(
+        e.responses(),
+        1,
+        "the request must not also be served once the rest arrives: {}",
+        e.body
+    );
+    assert!(
+        !e.body.contains("hello"),
+        "the reply precedes the stalled bytes, so the handler never echoed them: {}",
+        e.body
+    );
 }
 
 /// An idle keep-alive connection is closed silently: no response is owed.

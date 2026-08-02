@@ -2118,18 +2118,7 @@ async fn main() {
 
         Commands::Dev(args) => dev::run(args.port, &args.host, &args.cargo_args).await,
 
-        Commands::Serve(args) => {
-            info(&format!(
-                "Starting production server on {}:{}",
-                args.host.cyan(),
-                args.port.to_string().cyan()
-            ));
-            if let Some(workers) = args.workers {
-                info(&format!("Workers: {}", workers));
-            }
-            warn("Production serve is coming soon!");
-            Ok(())
-        }
+        Commands::Serve(_) => Err(CliError::Unimplemented("serve".to_string())),
 
         Commands::Build(args) => build::run(args.release, &args.cargo_args).await,
 
@@ -2162,17 +2151,14 @@ async fn main() {
                     config::execute(None)
                 }
             }
-            Some(ConfigCommands::Show { key: _ }) => {
-                warn("Config show is coming soon!");
-                Ok(())
+            Some(ConfigCommands::Show { .. }) => {
+                Err(CliError::Unimplemented("config show".to_string()))
             }
-            Some(ConfigCommands::Set { key: _, value: _ }) => {
-                warn("Config set is coming soon!");
-                Ok(())
+            Some(ConfigCommands::Set { .. }) => {
+                Err(CliError::Unimplemented("config set".to_string()))
             }
-            Some(ConfigCommands::Init { env: _ }) => {
-                warn("Config init is coming soon!");
-                Ok(())
+            Some(ConfigCommands::Init { .. }) => {
+                Err(CliError::Unimplemented("config init".to_string()))
             }
             None => config::execute(None),
         },
@@ -2180,50 +2166,19 @@ async fn main() {
         Commands::Doctor => run_doctor().await,
 
         Commands::Upgrade(args) => {
-            print_mini_banner();
             if args.check {
-                info("Checking for updates...");
-                println!(
-                    "  {} Current version: {}",
-                    "→".cyan(),
-                    env!("CARGO_PKG_VERSION").bright_white()
-                );
-                warn("Update checking is coming soon!");
+                Err(CliError::Unimplemented("upgrade --check".to_string()))
             } else {
-                info("Upgrading Armature CLI...");
-                warn("Self-upgrade is coming soon!");
-                println!(
-                    "\n  {} Run: {}",
+                eprintln!(
+                    "\n  {} Install the latest release with: {}",
                     "💡".yellow(),
                     "cargo install armature-cli --force".dimmed()
                 );
+                Err(CliError::Unimplemented("upgrade".to_string()))
             }
-            Ok(())
         }
 
-        Commands::Deploy(args) => {
-            print_mini_banner();
-            let provider = args.provider.map(|p| match p {
-                CloudProvider::Aws => "AWS",
-                CloudProvider::Gcp => "GCP",
-                CloudProvider::Azure => "Azure",
-                CloudProvider::Fly => "Fly.io",
-                CloudProvider::Railway => "Railway",
-                CloudProvider::Render => "Render",
-                CloudProvider::Shuttle => "Shuttle",
-                CloudProvider::Docker => "Docker",
-            });
-            info(&format!(
-                "Deploying to {} ({})",
-                provider.unwrap_or("auto-detected").cyan(),
-                args.env.cyan()
-            ));
-            if args.dry_run {
-                info("Dry run - no changes will be made");
-            }
-            warn("Deploy command is coming soon!");
-            Ok(())
-        }
+        Commands::Deploy(_) => Err(CliError::Unimplemented("deploy".to_string())),
 
         Commands::Repl(args) => {
             if args.simple {
@@ -2272,17 +2227,14 @@ async fn main() {
                         }
                     }
                 }
-                PluginCommands::Install { name } => {
-                    info(&format!("Installing plugin: {}", name.cyan()));
-                    warn("Plugin system is coming soon!");
+                PluginCommands::Install { .. } => {
+                    return Err(CliError::Unimplemented("plugin install".to_string()));
                 }
-                PluginCommands::Uninstall { name } => {
-                    info(&format!("Uninstalling plugin: {}", name.cyan()));
-                    warn("Plugin system is coming soon!");
+                PluginCommands::Uninstall { .. } => {
+                    return Err(CliError::Unimplemented("plugin uninstall".to_string()));
                 }
-                PluginCommands::New { name } => {
-                    info(&format!("Creating plugin: {}", name.cyan()));
-                    warn("Plugin system is coming soon!");
+                PluginCommands::New { .. } => {
+                    return Err(CliError::Unimplemented("plugin new".to_string()));
                 }
             }
             Ok(())

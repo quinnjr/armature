@@ -25,7 +25,7 @@ rather than a claim:
 
 The 7-header row matching the 1-header row is the load-bearing evidence: header
 count does not drive allocation, because every header value is a `Bytes` slice of
-the connection's pooled read buffer rather than a `String`.
+the connection's read buffer rather than a `String`.
 
 See `tests/alloc_regression.rs`. If you change this crate and that test fails,
 the change regressed the entire premise.
@@ -65,8 +65,8 @@ owns its own `SO_REUSEPORT` listener, so the kernel load-balances accepts and a
 connection never migrates cores. Windows, Solaris, and illumos fall back to
 duplicated handles on one shared listener.
 
-Because nothing migrates, per-core state needs no synchronization: buffer pools,
-the `Date` cache, route caches, and your own service state are all plain
+Because nothing migrates, per-core state needs no synchronization: the `Date`
+cache, route caches, and your own service state are all plain
 `Rc`/`Cell`/`RefCell`. Handler futures are **not** required to be `Send`.
 
 **The cost, stated plainly:** a handler that blocks its core stalls every other
@@ -102,12 +102,17 @@ information.
 
 ## Buffer pinning
 
-Request data is a view into a pooled buffer. If a handler stores a header value
-or body chunk in long-lived state, it pins that whole buffer, which cannot then
-return to the pool. This is bounded — buffers are sized to one typical head — and
-it is *observable*: `BufPool::misses()` counts every buffer that could not be
-reclaimed. A rising count means handlers are retaining request data. Use
-`ByteStr::into_owned`-style copies for data you intend to keep.
+Request data is a view into the connection's read buffer. That buffer is
+allocated once per connection and reused for every request on it; there is **no**
+cross-connection buffer pool, and deliberately so — a buffer that outlives its
+connection is a buffer a handler may still hold a `Bytes` slice of, and the
+bookkeeping to detect that costs more than the allocation it saves.
+
+The consequence for you: if a handler stores a header value or body chunk in
+long-lived state, it pins that whole buffer for as long as it holds the slice.
+This is bounded — one buffer per live connection, sized to one typical head — but
+it is not free. Use `ByteStr::into_owned`-style copies for data you intend to
+keep past the response.
 
 ## Protocol support
 
@@ -117,6 +122,13 @@ request without reading its body causes no interim response), `HEAD`, `CONNECT`,
 `Upgrade` with raw-socket handoff, origin/absolute/asterisk-form targets,
 HTTP/1.0 semantics.
 
+**Caveat on `Upgrade`.** The handoff is available on `Connection::serve`, which
+returns `Ok(Some(Upgraded))` — the transport plus the bytes the peer already sent
+past the head — when a handler answers a request carrying `Connection: upgrade`
+with status 101. `Server` has no upgrade-consumer hook, unlike the pluggable
+HTTP/2 fallback, so under `Server::serve` an upgraded connection is **closed**.
+Drive `Connection` yourself if you need the socket.
+
 Rejected, per RFC 9110/9111/9112, each with a named test:
 
 | Condition | Response |
@@ -125,15 +137,26 @@ Rejected, per RFC 9110/9111/9112, each with a named test:
 | duplicate or conflicting `Content-Length` | 400, close |
 | `chunked` not the final transfer coding | 400, close |
 | an unsupported transfer coding | 501, close |
+| `Transfer-Encoding` on an HTTP/1.0 request | 400, close |
 | obs-fold, bare CR, or bare LF in the head | 400, close |
 | a byte in the request target outside RFC 3986's character set | 400, close |
 | a target matching none of RFC 9112 §3.2's four forms | 400, close |
+| a `#` fragment in the request target (RFC 9110 §7.1) | 400, close |
 | whitespace before a field-name colon | 400, close |
 | missing or multiple `Host` on HTTP/1.1 | 400, close |
 | a framing field in a trailer section | 400, close |
 | head over byte or field-count limit | 431, close |
 | body over limit | 413, close |
-| header, body, or idle deadline exceeded | 408, close |
+| header or body deadline exceeded | 408, close |
+| idle deadline exceeded between requests | silent close |
+| write deadline exceeded, at any point in a streamed body | close |
+
+On the response side, a handler-supplied header or trailer whose value contains
+CR, LF, or NUL — or whose custom name is not an RFC 9110 token — is **dropped**
+rather than written, and the writer frames the response itself as if the field
+had never been supplied. A reflected `Location` or an echoed correlation id is
+otherwise one bad input away from response splitting, which is request smuggling
+run backwards.
 
 ## Measuring it
 

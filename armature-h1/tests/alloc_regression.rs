@@ -102,8 +102,8 @@ fn limits() -> Limits {
 /// Serve `count` copies of `request` on one keep-alive connection, returning the
 /// allocations attributable to the steady state.
 ///
-/// `warm` requests run first with counting disarmed, so one-time costs — pool
-/// growth, buffer sizing, the task allocation, tokio's timer registration — are
+/// `warm` requests run first with counting disarmed, so one-time costs — buffer
+/// growth and sizing, the task allocation, tokio's timer registration — are
 /// excluded. What remains is per-request cost, which is the number that must not
 /// grow.
 fn steady_state_allocs<S, Fut>(request: &'static [u8], service: S, warm: usize, count: usize) -> u64

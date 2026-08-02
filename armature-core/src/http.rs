@@ -14,9 +14,10 @@ use std::sync::{Arc, OnceLock};
 /// Route parameters captured from the request target.
 ///
 /// Names are `&'static str` from the compiled route pattern (see
-/// [`crate::param_intern`]), values are slices of the target — so a matched
-/// route costs no allocation for either half. Four inline slots covers the
-/// overwhelming majority of routes.
+/// [`crate::param_intern`]), so the name half of a match is free. Values are
+/// `Bytes` the matchers fill with `Bytes::copy_from_slice`, so a match costs one
+/// small copy per captured value. Four inline slots covers the overwhelming
+/// majority of routes.
 pub type RouteParams = SmallVec<[(&'static str, Bytes); 4]>;
 
 /// Read helpers for [`RouteParams`].
@@ -72,7 +73,8 @@ pub struct HttpRequest {
     /// The request method.
     ///
     /// Was a `String`. An unrecognized token is carried as `Method::Other`
-    /// rather than rejected here; routing answers it with 405.
+    /// rather than rejected here; routing answers it with 404
+    /// ([`crate::Error::RouteNotFound`]) since no route can match the token.
     pub method: Method,
     /// The raw request target, query string included.
     ///
@@ -325,10 +327,11 @@ impl HttpRequest {
 
     /// Parse multipart form data
     pub fn multipart(&self) -> Result<Vec<crate::form::FormField>, crate::Error> {
+        // One lookup: header names intern case-insensitively, so the
+        // lowercased retry was always redundant.
         let content_type = self
             .headers
             .get("Content-Type")
-            .or_else(|| self.headers.get("content-type"))
             .ok_or_else(|| crate::Error::BadRequest("Missing Content-Type header".to_string()))?;
 
         let parser = crate::form::MultipartParser::from_content_type(content_type)?;
@@ -354,7 +357,12 @@ impl HttpRequest {
     /// Add one captured route parameter, interning its name.
     ///
     /// The router uses [`HttpRequest::set_params`] with names already interned
-    /// at registration; this is for callers assembling a request by hand.
+    /// at registration; this is for callers assembling a request by hand. The
+    /// interner is hard-capped ([`crate::param_intern::MAX_INTERNED`]), so
+    /// feeding this a request-derived name cannot grow the process without
+    /// bound — past the cap the name resolves to
+    /// [`crate::param_intern::OVERFLOW_NAME`] and the parameter is no longer
+    /// retrievable by its own name.
     pub fn push_param(&mut self, name: &str, value: impl Into<Bytes>) {
         self.path_params
             .push((crate::param_intern::intern(name), value.into()));
@@ -539,14 +547,15 @@ impl<'a> IntoIterator for &'a LazyHeaders {
 
 /// HTTP response wrapper
 ///
-/// The body is stored as `Vec<u8>` for backwards compatibility.
-/// For zero-copy body handling, use `with_bytes_body()` or `body_bytes()`.
+/// The body is `Bytes`, so handing a response to the writer — or cloning one out
+/// of a cache — is a refcount bump rather than a copy. Build one from an
+/// existing buffer with `with_bytes_body()`.
 ///
 /// ## Performance Note
 ///
 /// Response creation is optimized for minimal allocation:
 /// - `headers` uses `LazyHeaders` which doesn't allocate until first insert
-/// - `body` uses `Option<Vec<u8>>` which doesn't allocate for empty responses
+/// - `body` is an empty `Bytes` until set, which doesn't allocate
 /// - Use `FastResponse` from `armature_core::fast_response` for even faster creation
 #[derive(Debug)]
 pub struct HttpResponse {
@@ -1041,6 +1050,42 @@ mod tests {
         assert_eq!(a.method, Method::Get);
         assert_eq!(b.method, Method::Post);
         assert_eq!(c.method, Method::Put);
+    }
+
+    #[test]
+    fn from_parts_ignores_query_params_entirely() {
+        // The argument is kept for source compatibility only — the query comes
+        // from the target now. Pinned so a caller still passing a map can't
+        // silently depend on it being honoured.
+        let mut query = HashMap::new();
+        query.insert("page".to_string(), "2".to_string());
+
+        let req = HttpRequest::from_parts(
+            "GET",
+            "/items",
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            query,
+        );
+
+        assert_eq!(req.query_string(), None);
+        assert_eq!(req.query_param("page"), None);
+        assert_eq!(req.query().len(), 0);
+    }
+
+    #[test]
+    fn with_capacity_ignores_its_capacity_argument() {
+        // `Bytes` is handed a finished buffer rather than grown in place, so
+        // there is no body capacity to reserve. Any two capacities must produce
+        // indistinguishable responses.
+        let small = HttpResponse::with_capacity(200, 0);
+        let large = HttpResponse::with_capacity(200, 1 << 20);
+
+        assert_eq!(small.status, large.status);
+        assert_eq!(small.body.len(), large.body.len());
+        assert!(small.body.is_empty());
+        assert_eq!(small.headers.len(), large.headers.len());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Zero-Cost Abstractions for High-Performance HTTP Handling
 //!
-//! This module provides compile-time optimizations that eliminate runtime overhead:
+//! This module moves dispatch decisions to compile time:
 //!
 //! - **Const Generic Extractors**: Combine multiple extractors at compile-time
 //! - **Static Dispatch Middleware**: Middleware without `Box<dyn>` overhead
@@ -13,8 +13,18 @@
 //!
 //! # Performance Impact
 //!
-//! - Extractor chains: No heap allocation, inline extraction
+//! - Extractor chains: Inline extraction, no boxing per extractor
 //! - Static middleware: Compile-time dispatch, no vtable lookups
+//!
+//! Two caveats on "zero cost", both real and both measurable:
+//!
+//! - Every `Extract::extract` bumps a process-global counter
+//!   ([`ZeroCostStats`]). It is a relaxed `fetch_add`, but it is a shared cache
+//!   line and it is not feature-gated, so it is not free under contention.
+//! - "No heap allocation" holds for the extractors that hand back borrowed or
+//!   `Copy` data. [`PathParam`], [`Header`], [`ContentType`], and
+//!   [`Authorization`] each produce an owned `String`, because the value they
+//!   return has to outlive the borrow of the request.
 
 use crate::{Error, HttpRequest, HttpResponse};
 use std::future::Future;
@@ -165,7 +175,7 @@ pub struct RawBody(pub bytes::Bytes);
 impl Extract for RawBody {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("RawBody");
+        EXTRACTOR_STATS.record_extraction();
         Ok(RawBody(req.body_bytes()))
     }
 }
@@ -185,7 +195,7 @@ pub struct JsonBody<T>(pub T);
 impl<T: serde::de::DeserializeOwned> Extract for JsonBody<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("JsonBody");
+        EXTRACTOR_STATS.record_extraction();
         req.json().map(JsonBody)
     }
 }
@@ -205,7 +215,7 @@ pub struct QueryParams<T>(pub T);
 impl<T: serde::de::DeserializeOwned> Extract for QueryParams<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("QueryParams");
+        EXTRACTOR_STATS.record_extraction();
         // The raw query string, not the decoded pairs: re-encoding a decoded
         // pair cannot always reproduce what the client sent.
         serde_urlencoded::from_str(req.query_string().unwrap_or(""))
@@ -229,7 +239,7 @@ pub struct PathParam<const INDEX: usize>(pub String);
 impl<const INDEX: usize> Extract for PathParam<INDEX> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("PathParam");
+        EXTRACTOR_STATS.record_extraction();
         // Get the Nth path parameter, in capture order.
         req.path_params
             .get(INDEX)
@@ -263,7 +273,7 @@ impl Header {
     pub fn named(name: impl Into<String>, req: &HttpRequest) -> Self {
         let name = name.into();
         let value = req.headers.get(&name).map(str::to_owned);
-        EXTRACTOR_STATS.record_extraction("Header");
+        EXTRACTOR_STATS.record_extraction();
         Self { name, value }
     }
 
@@ -291,7 +301,7 @@ pub struct ContentType(pub Option<String>);
 impl Extract for ContentType {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("ContentType");
+        EXTRACTOR_STATS.record_extraction();
         Ok(ContentType(
             req.headers.get("content-type").map(str::to_owned),
         ))
@@ -319,7 +329,7 @@ pub struct Authorization(pub Option<String>);
 impl Extract for Authorization {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("Authorization");
+        EXTRACTOR_STATS.record_extraction();
         Ok(Authorization(
             req.headers.get("authorization").map(str::to_owned),
         ))
@@ -350,7 +360,7 @@ pub struct Method(pub crate::Method);
 impl Extract for Method {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("Method");
+        EXTRACTOR_STATS.record_extraction();
         Ok(Method(req.method.clone()))
     }
 }
@@ -370,7 +380,7 @@ pub struct RequestPath(pub crate::ByteStr);
 impl Extract for RequestPath {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("RequestPath");
+        EXTRACTOR_STATS.record_extraction();
         // The path without the query: `RequestPath` names the resource, and the
         // query is reachable through `QueryParams`.
         Ok(RequestPath(crate::ByteStr::from(req.path_only())))
@@ -586,7 +596,7 @@ where
         let method = req.method.clone();
         let path = req.path.clone();
 
-        MIDDLEWARE_STATS.record_call("Logging");
+        MIDDLEWARE_STATS.record_call();
 
         Box::pin(async move {
             let start = std::time::Instant::now();
@@ -673,7 +683,7 @@ where
         let inner = self.inner.clone();
         let duration = self.duration;
 
-        MIDDLEWARE_STATS.record_call("Timeout");
+        MIDDLEWARE_STATS.record_call();
 
         Box::pin(async move {
             match tokio::time::timeout(duration, inner.call(req)).await {
@@ -714,7 +724,7 @@ where
     fn call(&self, mut req: HttpRequest) -> Self::Future {
         let inner = self.inner.clone();
 
-        MIDDLEWARE_STATS.record_call("RequestId");
+        MIDDLEWARE_STATS.record_call();
 
         // Generate request ID if not present
         let request_id = req
@@ -881,11 +891,13 @@ pub struct ZeroCostStats {
 }
 
 impl ZeroCostStats {
-    fn record_extraction(&self, _name: &str) {
+    // These take no name: the counters are single totals, so a name argument
+    // implied a per-extractor breakdown that was never recorded.
+    fn record_extraction(&self) {
         self.extractions.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_call(&self, _name: &str) {
+    fn record_call(&self) {
         self.middleware_calls.fetch_add(1, Ordering::Relaxed);
     }
 

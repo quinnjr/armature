@@ -109,8 +109,8 @@ impl Hash for RouteKey {
 pub struct CachedRoute {
     /// Index into the route table
     pub route_index: usize,
-    /// Pre-extracted path parameters (name, segment_index)
-    pub param_indices: Vec<(String, usize)>,
+    /// Pre-extracted path parameters (interned name, segment_index)
+    pub param_indices: Vec<(&'static str, usize)>,
     /// Is this a static route (no params)?
     pub is_static: bool,
     /// Segment index of a catch-all parameter, if any.
@@ -132,7 +132,10 @@ impl CachedRoute {
     }
 
     /// Create a cached entry for a parameterized route.
-    pub fn with_params(route_index: usize, param_indices: Vec<(String, usize)>) -> Self {
+    ///
+    /// Names must already be interned via [`crate::param_intern::intern`];
+    /// taking them pre-interned is what keeps that lock off the request path.
+    pub fn with_params(route_index: usize, param_indices: Vec<(&'static str, usize)>) -> Self {
         Self {
             route_index,
             param_indices,
@@ -164,20 +167,14 @@ impl CachedRoute {
         let segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
 
-        for (name, idx) in &self.param_indices {
-            if self.catch_all_index == Some(*idx) {
+        for &(name, idx) in &self.param_indices {
+            if self.catch_all_index == Some(idx) {
                 // Catch-all: join all remaining segments
-                if let Some(rest) = segments.get(*idx..) {
-                    params.push((
-                        crate::param_intern::intern(name),
-                        Bytes::from(rest.join("/")),
-                    ));
+                if let Some(rest) = segments.get(idx..) {
+                    params.push((name, Bytes::from(rest.join("/"))));
                 }
-            } else if let Some(value) = segments.get(*idx) {
-                params.push((
-                    crate::param_intern::intern(name),
-                    Bytes::copy_from_slice(value.as_bytes()),
-                ));
+            } else if let Some(value) = segments.get(idx) {
+                params.push((name, Bytes::copy_from_slice(value.as_bytes())));
             }
         }
 
@@ -372,8 +369,12 @@ pub struct CompiledRoute {
     pub pattern: String,
     /// Parsed segments
     pub segments: Vec<RouteSegment>,
-    /// Parameter indices (name, segment_index)
-    pub param_indices: Vec<(String, usize)>,
+    /// Parameter indices (interned name, segment_index).
+    ///
+    /// Names are interned once here, at compile time, so the match path only
+    /// copies a `&'static str` instead of taking the interner's global lock
+    /// once per captured parameter per request.
+    pub param_indices: Vec<(&'static str, usize)>,
     /// Is this a static route?
     pub is_static: bool,
     /// Has catch-all segment?
@@ -402,12 +403,12 @@ impl CompiledRoute {
         for (idx, part) in pattern.split('/').filter(|s| !s.is_empty()).enumerate() {
             if let Some(name) = part.strip_prefix(':') {
                 segments.push(RouteSegment::Param(name.to_string()));
-                param_indices.push((name.to_string(), idx));
+                param_indices.push((crate::param_intern::intern(name), idx));
                 is_static = false;
             } else if let Some(name) = part.strip_prefix('*') {
                 let name = if name.is_empty() { "*" } else { name };
                 segments.push(RouteSegment::CatchAll(name.to_string()));
-                param_indices.push((name.to_string(), idx));
+                param_indices.push((crate::param_intern::intern(name), idx));
                 is_static = false;
                 has_catch_all = true;
             } else {
@@ -470,21 +471,18 @@ impl CompiledRoute {
         let path_segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
 
-        for (name, idx) in &self.param_indices {
-            if let Some(segment) = self.segments.get(*idx) {
+        for &(name, idx) in &self.param_indices {
+            if let Some(segment) = self.segments.get(idx) {
                 match segment {
                     RouteSegment::Param(_) => {
-                        if let Some(value) = path_segments.get(*idx) {
-                            params.push((
-                                crate::param_intern::intern(name),
-                                Bytes::copy_from_slice(value.as_bytes()),
-                            ));
+                        if let Some(value) = path_segments.get(idx) {
+                            params.push((name, Bytes::copy_from_slice(value.as_bytes())));
                         }
                     }
                     RouteSegment::CatchAll(_) => {
                         // Join remaining segments
-                        let remaining: String = path_segments[*idx..].join("/");
-                        params.push((crate::param_intern::intern(name), Bytes::from(remaining)));
+                        let remaining: String = path_segments[idx..].join("/");
+                        params.push((name, Bytes::from(remaining)));
                     }
                     _ => {}
                 }
@@ -865,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_cached_route_with_params() {
-        let cached = CachedRoute::with_params(0, vec![("id".to_string(), 1)]);
+        let cached = CachedRoute::with_params(0, vec![(crate::param_intern::intern("id"), 1)]);
         assert!(!cached.is_static);
 
         let params = cached.extract_params("/users/123");
@@ -1248,6 +1246,84 @@ mod tests {
         // Identical: both select the earlier-registered :id route.
         assert_eq!(optimized.body, linear.body);
         assert_eq!(optimized.body, Bytes::from_static(b"param:me"));
+    }
+
+    /// The linear `Router` and the compiled `OptimizedRouter` are independent
+    /// matchers over the same route table, and they have silently drifted apart
+    /// before (trailing slashes, zero-segment catch-alls). Drive a fixed matrix
+    /// of targets through both and require identical outcomes.
+    #[tokio::test]
+    async fn test_from_router_agrees_with_linear_router_on_a_target_matrix() {
+        let patterns = [
+            (HttpMethod::GET, "/health"),
+            (HttpMethod::GET, "/users/:id"),
+            (HttpMethod::GET, "/users/:id/posts/:post"),
+            (HttpMethod::GET, "/files/*path"),
+            (HttpMethod::POST, "/users"),
+        ];
+
+        let mut router = crate::routing::Router::new();
+        for (method, pattern) in patterns {
+            // The body identifies which route answered and with which captures,
+            // so a disagreement about *which* route matched is caught too, not
+            // just a disagreement about whether anything matched.
+            let label = pattern.to_string();
+            router.add_route(crate::routing::Route::new(
+                method,
+                pattern,
+                move |req: HttpRequest| {
+                    let label = label.clone();
+                    async move {
+                        let mut captures: Vec<String> = req
+                            .path_params
+                            .iter()
+                            .map(|(k, v)| format!("{k}={}", String::from_utf8_lossy(v)))
+                            .collect();
+                        captures.sort();
+                        let body = format!("{label} {}", captures.join(","));
+                        Ok::<_, Error>(HttpResponse::ok().with_body(body.into_bytes()))
+                    }
+                },
+            ));
+        }
+
+        let opt = OptimizedRouter::from_router(&router);
+
+        let targets = [
+            ("GET", "/health"),
+            ("GET", "/health/"),
+            ("GET", "/health/extra"),
+            ("GET", "/users"),
+            ("GET", "/users/42"),
+            ("GET", "/users/42/"),
+            ("GET", "/users/42?x=1"),
+            ("GET", "/users/42/posts/7"),
+            ("GET", "/users/42/posts"),
+            ("GET", "/files"),
+            ("GET", "/files/"),
+            ("GET", "/files/a"),
+            ("GET", "/files/a/b/c.txt"),
+            ("GET", "/"),
+            ("GET", "/nope"),
+            ("POST", "/users"),
+            ("POST", "/users/42"),
+            ("POST", "/health"),
+            ("PROPFIND", "/health"),
+        ];
+
+        for (method, target) in targets {
+            let linear = router.route(HttpRequest::new(method, target)).await;
+            let compiled = opt.route(HttpRequest::new(method, target)).await;
+            match (linear, compiled) {
+                (Ok(a), Ok(b)) => assert_eq!(a.body, b.body, "{method} {target}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!(
+                    "{method} {target}: linear matched={}, compiled matched={}",
+                    a.is_ok(),
+                    b.is_ok()
+                ),
+            }
+        }
     }
 
     #[tokio::test]

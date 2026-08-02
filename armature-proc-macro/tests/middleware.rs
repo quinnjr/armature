@@ -175,3 +175,27 @@ async fn controller_struct_middleware_preserves_declaration_order() {
         "middleware must not be rebuilt per request"
     );
 }
+
+// ---------------------------------------------------------------------------
+// As with `#[guard()]`, the no-argument forms must re-emit the handler
+// untouched rather than re-prefixing its own attributes and visibility.
+// ---------------------------------------------------------------------------
+
+#[middleware()]
+#[inline]
+pub async fn unwrapped(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[use_middleware()]
+pub async fn also_unwrapped(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[tokio::test]
+async fn empty_middleware_lists_leave_the_handler_intact() {
+    assert_eq!(unwrapped(request()).await.unwrap().status, 200);
+    assert_eq!(also_unwrapped(request()).await.unwrap().status, 200);
+}

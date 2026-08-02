@@ -170,17 +170,19 @@ impl CacheInterceptor {
 /// `Clone` (it carries zero-copy `Bytes` internals), so we rebuild it from its
 /// observable parts, preserving status, headers, cookies, and body.
 fn clone_response(response: &HttpResponse) -> HttpResponse {
-    let mut copy = HttpResponse::from_parts(
-        response.status,
-        response.headers.to_hashmap(),
-        response.body_ref().to_vec(),
-    );
+    let mut copy = HttpResponse::new(response.status);
+    for (name, value) in response.headers.iter() {
+        copy.headers.insert(name.clone(), value.clone());
+    }
     copy.cookies = response.cookies.clone();
-    copy
+    // The body is shared, not copied: `Bytes::clone` is a refcount bump, so
+    // serving a hit costs nothing proportional to the response size.
+    copy.with_bytes_body(response.body.clone())
 }
 
-/// Build the cache key for a request: `METHOD:{path.len()}:path` with a
-/// canonicalized query string appended, sorted by parameter name. Sorting
+/// Build the cache key for a request: `METHOD:{path.len()}:path` — where
+/// `path` is the target with the query stripped off — with a canonicalized
+/// query string appended, sorted by parameter name. Sorting
 /// means logically-identical requests with different parameter orderings map
 /// to the same entry, while any difference in a query value yields a distinct
 /// entry (so `?q=cats` and `?q=dogs` never share a cached body).
@@ -206,7 +208,11 @@ fn clone_response(response: &HttpResponse) -> HttpResponse {
 /// makes them `5:1&b=2` vs. `1:1` + `1:2` under distinct keys.)
 fn cache_key(request: &HttpRequest) -> String {
     let method = request.method.as_str();
-    let path = request.path.as_str();
+    // `path_only`, not `path`: the raw target carries the query verbatim, and
+    // folding that in ahead of the canonicalized form would make `?a=1&b=2` and
+    // `?b=2&a=1` distinct keys again — exactly what the sorting below exists to
+    // prevent.
+    let path = request.path_only();
 
     // Cheap upper-bound capacity pass so the common case (few short params)
     // needs no reallocation while building the key below.
@@ -393,6 +399,17 @@ mod tests {
 
         let context = ExecutionContext::new(request.clone());
         assert_eq!(context.request.body.len(), 3);
+    }
+
+    #[test]
+    fn cache_key_is_order_insensitive_across_query_orderings() {
+        let a = crate::HttpRequest::new("GET", "/search?a=1&b=2");
+        let b = crate::HttpRequest::new("GET", "/search?b=2&a=1");
+        assert_eq!(cache_key(&a), cache_key(&b));
+
+        // …but only orderings collapse. A different value is a different entry.
+        let c = crate::HttpRequest::new("GET", "/search?a=1&b=3");
+        assert_ne!(cache_key(&a), cache_key(&c));
     }
 
     #[test]

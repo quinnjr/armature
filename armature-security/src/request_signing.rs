@@ -5,9 +5,17 @@
 //! # Features
 //!
 //! - HMAC-SHA256 request signing
-//! - Timestamp-based replay protection
+//! - Timestamp-based freshness window (see below)
 //! - Custom header configuration
 //! - Signature verification middleware
+//!
+//! # Replay protection
+//!
+//! The timestamp check bounds how long a captured signature stays useful — it
+//! is a *freshness* window, not full replay protection. Without a nonce store
+//! an attacker who captures a signed request can replay it verbatim until the
+//! window closes. Pair this with an idempotency or nonce store if you need
+//! exactly-once semantics.
 //!
 //! # Usage
 //!
@@ -54,7 +62,16 @@ pub enum SigningError {
 
     #[error("Request expired (replay attack?)")]
     RequestExpired,
+
+    #[error("Timestamp is too far in the future")]
+    TimestampInFuture,
 }
+
+/// Tolerance for a client clock running ahead of ours.
+///
+/// Without an upper bound the freshness window is one-sided: a signature minted
+/// with a timestamp years in the future never ages out of it.
+const MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 
 /// Request signer
 ///
@@ -190,11 +207,16 @@ impl RequestVerifier {
         timestamp: u64,
         signature: &str,
     ) -> Result<bool, SigningError> {
-        // Check timestamp (replay protection)
+        // Bound the timestamp on both sides: too old is a stale replay, too far
+        // ahead is a signature minted to outlive the window entirely.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| SigningError::InvalidTimestamp)?
             .as_secs();
+
+        if timestamp > now.saturating_add(MAX_CLOCK_SKEW_SECONDS) {
+            return Err(SigningError::TimestampInFuture);
+        }
 
         let age = now.saturating_sub(timestamp);
         if age > self.max_age_seconds {
@@ -228,14 +250,12 @@ impl RequestVerifier {
             .parse()
             .map_err(|_| SigningError::InvalidTimestamp)?;
 
-        // Use `body_ref()` rather than the `body` field directly: the production
-        // HTTP server stores incoming bodies via `HttpRequest::set_body_bytes`
-        // (zero-copy), which explicitly clears the legacy `body` field. Reading
-        // `request.body` here would see an empty body for every real request and
-        // make every signature check fail (or, for callers who skip verification
-        // on that basis, silently pass with the wrong data signed).
+        // `body_ref()` is the zero-copy view of the request's `Bytes` body; the
+        // signature must cover exactly the payload the handler will see.
         let body_str = String::from_utf8_lossy(request.body_ref());
 
+        // Sign over the raw target (query string included) so query parameters
+        // are covered by the signature.
         self.verify(
             request.method_str(),
             &request.path,
@@ -284,8 +304,23 @@ impl RequestSigningMiddleware {
     }
 
     /// Check if path should be skipped
+    ///
+    /// Matched on whole segments of the routing path. A `starts_with` test over
+    /// the raw target would make `/healthcheck-admin`, `/health../admin` and
+    /// `/metrics/../v1/transfer` all skip signature verification, so a prefix
+    /// only counts when the next character is a separator, and any path
+    /// carrying a dot segment is verified rather than skipped.
     fn should_skip(&self, path: &str) -> bool {
-        self.skip_paths.iter().any(|p| path.starts_with(p))
+        if path.split('/').any(|seg| seg == "." || seg == "..") {
+            return false;
+        }
+
+        self.skip_paths.iter().any(|p| {
+            p == path
+                || path
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
     }
 }
 
@@ -296,8 +331,10 @@ impl Middleware for RequestSigningMiddleware {
         request: HttpRequest,
         next: armature_core::middleware::Next,
     ) -> Result<HttpResponse, Error> {
-        // Skip certain paths (health checks, metrics)
-        if !self.should_skip(&request.path) {
+        // Skip certain paths (health checks, metrics). Decided on the routing
+        // path, never the raw target: a query string must not be able to steer
+        // the skip decision.
+        if !self.should_skip(request.path_only()) {
             // Verify signature
             match self.verifier.verify_request(&request) {
                 Ok(true) => {
@@ -308,6 +345,11 @@ impl Middleware for RequestSigningMiddleware {
                 }
                 Err(SigningError::RequestExpired) => {
                     return Err(Error::BadRequest("Request expired".to_string()));
+                }
+                Err(SigningError::TimestampInFuture) => {
+                    return Err(Error::BadRequest(
+                        "Request timestamp is in the future".to_string(),
+                    ));
                 }
                 Err(SigningError::MissingSignature) => {
                     return Err(Error::BadRequest("Missing X-Signature header".to_string()));
@@ -398,14 +440,65 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_future_timestamp_rejected() {
+        let verifier = RequestVerifier::new("secret").with_max_age(10);
+
+        // A far-future timestamp used to be clamped to age 0 by the saturating
+        // subtraction, making the signature valid forever.
+        let future = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 315_360_000; // ~10 years
+
+        let result = verifier.verify("POST", "/api/test", "body", future, "signature");
+
+        assert!(matches!(result, Err(SigningError::TimestampInFuture)));
+    }
+
+    #[test]
+    fn test_small_clock_skew_is_tolerated() {
+        let secret = "test-secret";
+        let signer = RequestSigner::new(secret);
+        let verifier = RequestVerifier::new(secret);
+
+        let slightly_ahead = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 5;
+        let signature = signer.sign("POST", "/api/test", "body", slightly_ahead);
+
+        assert!(
+            verifier
+                .verify("POST", "/api/test", "body", slightly_ahead, &signature)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_should_skip_matches_whole_segments_only() {
+        let middleware = RequestSigningMiddleware::new("secret");
+
+        assert!(middleware.should_skip("/health"));
+        assert!(middleware.should_skip("/health/live"));
+        assert!(middleware.should_skip("/metrics"));
+
+        // Bypass attempts: prefix-but-not-segment, and traversal.
+        assert!(!middleware.should_skip("/healthcheck-admin"));
+        assert!(!middleware.should_skip("/healthz"));
+        assert!(!middleware.should_skip("/health../admin"));
+        assert!(!middleware.should_skip("/metrics/../v1/transfer"));
+        assert!(!middleware.should_skip("/metrics/./../admin"));
+        assert!(!middleware.should_skip("/api/health"));
+    }
+
+    #[test]
     fn test_verify_request_with_zero_copy_body() {
         // Regression test: the production HTTP server stores incoming bodies
-        // via `HttpRequest::set_body_bytes` (zero-copy), which clears the
-        // legacy `body: Vec<u8>` field. `verify_request` must read the body
-        // through `body_ref()`/`body_bytes()` so it sees the real payload
-        // instead of treating every zero-copy request as having an empty
-        // body (which would make every real signed request fail
-        // verification).
+        // via `HttpRequest::set_body_bytes` (zero-copy). `verify_request` must
+        // sign over that payload, otherwise every real signed request fails
+        // verification.
         let secret = "test-secret";
         let signer = RequestSigner::new(secret);
         let verifier = RequestVerifier::new(secret);

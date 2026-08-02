@@ -3,9 +3,13 @@
 //! Most requests have fewer than 12 headers, so they are stored inline on the
 //! stack. Names are interned to a [`HeaderId`] — an enum variant for the ~33
 //! well-known fields, a lowercased [`ByteStr`] for everything else — so a lookup
-//! is an integer comparison rather than a case-insensitive string compare. Values
-//! are [`Bytes`], so once Plan 4 wires the serve path through `armature-h1` they
-//! become slices of the connection read buffer rather than copies.
+//! for a well-known name is an integer comparison rather than a
+//! case-insensitive string compare. A custom name (`x-request-id` and friends)
+//! still costs an ASCII-insensitive compare per stored header, but no
+//! allocation: by-name lookups resolve the needle borrowed rather than
+//! materializing a `HeaderId::Other` per call. Values are [`Bytes`], so once
+//! Plan 4 wires the serve path through `armature-h1` they become slices of the
+//! connection read buffer rather than copies.
 //!
 //! ## Case normalization
 //!
@@ -25,7 +29,7 @@
 //! | Operation | HashMap | HeaderMap |
 //! |-----------|---------|-----------|
 //! | Insert (first 12) | Heap alloc | Stack only |
-//! | Lookup | O(1) hash of the name | O(n) integer compares |
+//! | Lookup | O(1) hash of the name | O(n) compares, no alloc |
 //! | Well-known name | `String` alloc | enum variant, no alloc |
 //! | Value clone | `String` copy | refcount bump |
 
@@ -39,6 +43,41 @@ use std::fmt;
 ///
 /// Most HTTP requests have 5–10 headers.
 pub const INLINE_HEADERS: usize = 12;
+
+/// A by-name lookup needle, resolved without allocating.
+///
+/// `header_id::intern` returns `HeaderId::Other(ByteStr::from(lowercased))` for
+/// any name outside the well-known table — a `String` plus a `Bytes` per call.
+/// Interning the needle would therefore charge an allocation to every lookup of
+/// exactly the custom names applications reach for most (`x-request-id`,
+/// `x-tenant-id`). A borrowed needle compares against the stored name instead,
+/// while a well-known name still collapses to a discriminant compare.
+enum Needle<'a> {
+    Known(HeaderId),
+    Custom(&'a str),
+}
+
+impl<'a> Needle<'a> {
+    #[inline]
+    fn new(name: &'a str) -> Self {
+        match HeaderId::from_bytes(name.as_bytes()) {
+            Some(id) => Needle::Known(id),
+            None => Needle::Custom(name),
+        }
+    }
+
+    /// Whether a stored header's name is this needle.
+    ///
+    /// `HeaderId::as_str` is always the canonical lowercase form, so the
+    /// custom arm only has to be insensitive on the needle's side.
+    #[inline]
+    fn matches(&self, id: &HeaderId) -> bool {
+        match self {
+            Needle::Known(known) => known == id,
+            Needle::Custom(name) => id.as_str().eq_ignore_ascii_case(name),
+        }
+    }
+}
 
 /// A header field: an interned name and a `Bytes` value.
 #[derive(Clone, PartialEq, Eq)]
@@ -221,7 +260,11 @@ impl HeaderMap {
     /// The raw value of `name`, case-insensitively.
     #[inline]
     pub fn get_bytes(&self, name: &str) -> Option<&Bytes> {
-        self.get_id(&header_id::intern(name))
+        let needle = Needle::new(name);
+        self.inner
+            .iter()
+            .find(|h| needle.matches(&h.id))
+            .map(|h| &h.value)
     }
 
     /// The raw value for an already-interned name.
@@ -284,17 +327,17 @@ impl HeaderMap {
     /// Remove a header by name (case-insensitive), returning its value.
     #[inline]
     pub fn remove(&mut self, name: &str) -> Option<Bytes> {
-        let id = header_id::intern(name);
-        let pos = self.inner.iter().position(|h| h.id == id)?;
+        let needle = Needle::new(name);
+        let pos = self.inner.iter().position(|h| needle.matches(&h.id))?;
         Some(self.inner.remove(pos).value)
     }
 
     /// Remove every header with the given name, returning how many were removed.
     #[inline]
     pub fn remove_all(&mut self, name: &str) -> usize {
-        let id = header_id::intern(name);
+        let needle = Needle::new(name);
         let before = self.inner.len();
-        self.inner.retain(|h| h.id != id);
+        self.inner.retain(|h| !needle.matches(&h.id));
         before - self.inner.len()
     }
 
@@ -335,10 +378,10 @@ impl HeaderMap {
     /// Every value for a header name, for multi-value fields.
     #[inline]
     pub fn get_all(&self, name: &str) -> Vec<&str> {
-        let id = header_id::intern(name);
+        let needle = Needle::new(name);
         self.inner
             .iter()
-            .filter(|h| h.id == id)
+            .filter(|h| needle.matches(&h.id))
             .filter_map(|h| h.value_str())
             .collect()
     }
@@ -598,6 +641,28 @@ mod tests {
             h.get_id(&HeaderId::ContentType).map(|b| &b[..]),
             Some(&b"application/json"[..])
         );
+    }
+
+    #[test]
+    fn custom_names_stay_case_insensitive_through_the_borrowed_needle() {
+        // Names outside the well-known table take the non-allocating compare
+        // path, which still has to honour RFC 9110 case-insensitivity in both
+        // directions — however the header was inserted, however it is asked for.
+        let mut h = HeaderMap::new();
+        h.insert("X-Request-ID", "abc123");
+        h.append("x-request-id", "def456");
+
+        assert_eq!(h.get("x-request-id"), Some("abc123"));
+        assert_eq!(h.get("X-REQUEST-ID"), Some("abc123"));
+        assert!(h.contains("X-Request-Id"));
+        assert_eq!(h.get_all("X-Request-Id"), vec!["abc123", "def456"]);
+
+        // A custom needle must not match a well-known stored name, or vice versa.
+        h.insert("Content-Type", "text/plain");
+        assert_eq!(h.get("x-content-type"), None);
+
+        assert_eq!(h.remove_all("X-Request-ID"), 2);
+        assert_eq!(h.get("x-request-id"), None);
     }
 
     #[test]

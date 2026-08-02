@@ -404,7 +404,16 @@ pub struct CacheKey {
     pub method: crate::Method,
     /// Request path
     pub path: crate::ByteStr,
-    /// Query string (sorted for consistency)
+    /// Canonicalized query string: the decoded pairs sorted by name, each key
+    /// and value length-prefixed as `{len}:{bytes}`.
+    ///
+    /// Not a re-rendered query string — the pairs arrive percent-decoded, so a
+    /// value may itself contain `&` or `=`. Joined naively, `?a=1%26b%3D2` (one
+    /// param whose value is `1&b=2`) and `?a=1&b=2` (two params) both render
+    /// `a=1&b=2` and would share a cache entry, letting one request be served
+    /// the other's body. The length prefix fixes where each field ends
+    /// regardless of the bytes inside it, so distinct pair sets always differ
+    /// here.
     pub query: String,
     /// Vary header values that affect caching
     pub vary_values: Vec<(String, String)>,
@@ -422,14 +431,16 @@ impl CacheKey {
 
     /// Generate a cache key from a request with Vary headers.
     pub fn from_request_with_vary(request: &HttpRequest, vary_headers: &[&str]) -> Self {
-        // Sort query params for consistent keys
+        // Sort query params for consistent keys, then length-prefix each field
+        // so decoded delimiters can't merge two different pair sets into one
+        // key (see the `query` field docs).
+        use fmt::Write as _;
         let mut query_params: Vec<_> = request.query().iter().collect();
         query_params.sort_by(|a, b| a.0.cmp(b.0));
-        let query = query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
+        let mut query = String::new();
+        for (k, v) in &query_params {
+            let _ = write!(query, "{}:{}={}:{}&", k.len(), k, v.len(), v);
+        }
 
         // Collect Vary header values
         let mut vary_values: Vec<(String, String)> = vary_headers
@@ -1428,9 +1439,22 @@ mod tests {
         let key = CacheKey::from_request(&request);
         assert_eq!(key.method, "GET");
         assert_eq!(key.path, "/api/users");
-        // Query params should be sorted
-        assert!(key.query.contains("limit=10"));
-        assert!(key.query.contains("page=1"));
+        // Sorted by name, with each field length-prefixed.
+        assert_eq!(key.query, "5:limit=2:10&4:page=1:1&");
+    }
+
+    #[test]
+    fn cache_key_query_does_not_collide_across_decoded_delimiters() {
+        // One param whose decoded value is `1&b=2` …
+        let one = HttpRequest::new("GET", "/search?a=1%26b%3D2");
+        // … versus two params that render the same way once decoded.
+        let two = HttpRequest::new("GET", "/search?a=1&b=2");
+
+        assert_ne!(
+            CacheKey::from_request(&one),
+            CacheKey::from_request(&two),
+            "distinct requests must not share a cache entry"
+        );
     }
 
     #[test]

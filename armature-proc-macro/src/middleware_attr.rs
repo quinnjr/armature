@@ -65,10 +65,10 @@ fn build_middleware_wrapper(args: &UseMiddlewareArgs, input: &ItemFn) -> TokenSt
 
     let middlewares: Vec<_> = args.middlewares.iter().collect();
     if middlewares.is_empty() {
-        return TokenStream::from(quote! {
-            #(#func_attrs)*
-            #func_vis #input
-        });
+        // `#input` is the whole `ItemFn` — it already carries its own
+        // attributes and visibility, so prefixing them again would emit
+        // duplicated attributes and `pub pub async fn`.
+        return TokenStream::from(quote! { #input });
     }
 
     let async_marker = if is_async {
@@ -120,41 +120,23 @@ fn build_middleware_wrapper(args: &UseMiddlewareArgs, input: &ItemFn) -> TokenSt
         });
     }
 
-    // Fallback (self-receiver or extractor-only handlers): inject a request
-    // parameter and run the body directly inside the chain handler.
-    let (wrapper_inputs, req_expr) = if has_self_receiver(input) {
-        (
-            quote! { &self, __request: armature_core::HttpRequest },
-            quote! { __request },
-        )
+    // Anything else — a `self` receiver, or a handler with no request
+    // parameter at all — cannot be wrapped. The chain's `HandlerFn` is a
+    // `'static` `Arc<dyn Fn..>`, so it can capture neither `self` nor the
+    // handler's original parameter bindings; the code this arm used to emit
+    // could never compile for either case. Reject it explicitly instead.
+    let reason = if has_self_receiver(input) {
+        "handlers with a `self` receiver are not supported (move the middleware onto the controller struct: `#[middleware(..)] struct MyController;`)"
     } else {
-        (
-            quote! { __request: armature_core::HttpRequest },
-            quote! { __request },
-        )
+        "the handler must take an `armature_core::HttpRequest` parameter"
     };
 
-    TokenStream::from(quote! {
-        #(#func_attrs)*
-        #func_vis #async_marker fn #func_name(#wrapper_inputs) #func_output {
-            use armature_core::middleware::{MiddlewareChain, Middleware};
-            use std::sync::Arc;
-
-            let mut __middleware_chain = MiddlewareChain::new();
-            #(#middleware_setup)*
-
-            let __inner_handler: armature_core::middleware::HandlerFn = Arc::new(
-                move |__req: armature_core::HttpRequest| {
-                    Box::pin(async move { #func_body })
-                        as std::pin::Pin<Box<dyn std::future::Future<
-                            Output = Result<armature_core::HttpResponse, armature_core::Error>,
-                        > + Send>>
-                },
-            );
-
-            __middleware_chain.apply(#req_expr, __inner_handler).await
-        }
-    })
+    syn::Error::new(
+        func_name.span(),
+        format!("#[middleware] cannot wrap `{func_name}`: {reason}"),
+    )
+    .to_compile_error()
+    .into()
 }
 
 /// Implementation of `#[middleware(...)]`.

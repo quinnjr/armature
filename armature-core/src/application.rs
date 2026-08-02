@@ -211,6 +211,15 @@ impl Application {
 
     /// Configure CORS for the application. Handles preflight OPTIONS
     /// requests automatically and adds CORS headers to every response.
+    ///
+    /// # Precedence over registered OPTIONS routes
+    ///
+    /// The preflight handler answers *every* `OPTIONS` request with `204` before
+    /// the router is consulted — it does not check whether a route exists, since
+    /// a preflight is sent for a path the browser is about to call with some
+    /// other method. A handler registered with `Router::options` is therefore
+    /// unreachable while CORS is configured. If you need to serve `OPTIONS`
+    /// yourself, leave CORS off here and add it as middleware you control.
     pub fn with_cors(mut self, config: CorsConfig) -> Self {
         self.cors_config = Some(Arc::new(config));
         self
@@ -1519,16 +1528,24 @@ async fn handle_request(
 
     // Convert hyper request to our HttpRequest
     let method = crate::Method::from(req.method().as_str());
-    // Borrowed, not owned: the target is copied once into the request below and
-    // `path` is only used for logging and guard-scope prefix matching.
-    let path = req.uri().path().to_string();
     // The full target, query included, taken whole rather than reassembled:
     // `HttpRequest` splits and parses it on demand, so a handler that ignores
     // the query never pays for it.
     let target = req
         .uri()
         .path_and_query()
-        .map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
+        .map_or_else(|| req.uri().path().to_owned(), |pq| pq.as_str().to_owned());
+
+    let mut armature_req = HttpRequest::new(method.clone(), target);
+
+    // Guards and routing each consume `armature_req` by value, so the target
+    // has to be kept separately for logging and guard-scope prefix matching.
+    // A `ByteStr` clone is a refcount bump, not a second copy of the target,
+    // and `path_only` trims the query off it without allocating.
+    let target_handle = armature_req.path.clone();
+    let path = target_handle
+        .split_once('?')
+        .map_or(target_handle.as_str(), |(p, _)| p);
 
     trace!(method = %method, path = %path, "Incoming request");
 
@@ -1545,8 +1562,6 @@ async fn handle_request(
         }
         return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
     }
-
-    let mut armature_req = HttpRequest::new(method.clone(), target);
 
     // Copy headers. One copy per value, because hyper's `HeaderValue` owns its
     // own buffer and cannot be projected into our `Bytes`; the name goes in as
@@ -1640,7 +1655,7 @@ async fn handle_request(
     // controllers, while guards added via `Application::with_guard` use an empty
     // prefix and match every path. Guards always run before routing.
     if !state.guards.is_empty() {
-        match evaluate_scoped_guards(&state.guards, &path, armature_req).await {
+        match evaluate_scoped_guards(&state.guards, path, armature_req).await {
             Ok(req) => armature_req = req,
             Err(GuardRejection::Reject) => {
                 warn!(method = %method, path = %path, "Request rejected by guard");

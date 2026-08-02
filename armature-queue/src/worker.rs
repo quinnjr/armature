@@ -28,16 +28,34 @@ pub struct WorkerConfig {
     /// Timeout for job execution
     pub job_timeout: Duration,
 
+    /// How long an in-flight claim may go unresolved before the reaper assumes
+    /// the worker holding it died and returns the job to its pending queue.
+    ///
+    /// `dequeue` records a claim in the queue's `processing` set; nothing else
+    /// resolves it if the worker crashes, is SIGKILLed, or its handler task
+    /// panics, so without a reaper such a job is stranded in no queue at all
+    /// and is never retried. [`Worker::start`] runs
+    /// [`Queue::reclaim_stale`](crate::Queue::reclaim_stale) with this timeout
+    /// in the background.
+    ///
+    /// Must comfortably exceed `job_timeout` (the default is twice it), or a
+    /// merely slow job is re-filed while still running and executes twice.
+    /// `None` disables reaping entirely — only appropriate when some other
+    /// process reaps the same queue.
+    pub visibility_timeout: Option<Duration>,
+
     /// Whether to log job execution
     pub log_execution: bool,
 }
 
 impl Default for WorkerConfig {
     fn default() -> Self {
+        let job_timeout = Duration::from_secs(300); // 5 minutes
         Self {
             concurrency: 10,
             poll_interval: Duration::from_secs(1),
-            job_timeout: Duration::from_secs(300), // 5 minutes
+            job_timeout,
+            visibility_timeout: Some(job_timeout * 2),
             log_execution: true,
         }
     }

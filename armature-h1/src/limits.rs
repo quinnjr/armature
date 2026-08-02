@@ -3,6 +3,12 @@
 //! These are the slowloris and resource-exhaustion defenses. Every field has a
 //! finite default; there is deliberately no "unlimited" setting for the head,
 //! because an unbounded head read is a trivial memory-exhaustion vector.
+//!
+//! There is no pipeline-depth cap, and none is needed: the connection loop stops
+//! reading the moment one complete head is buffered and does not read again
+//! until that request's response is written. Nothing is ever parsed ahead, so
+//! pipelining costs only whatever the peer managed to write into the socket
+//! buffer — which `max_head_bytes` and the read chunk size already bound.
 
 use std::time::Duration;
 
@@ -23,9 +29,6 @@ pub struct Limits {
     pub max_headers: usize,
     /// Maximum request body bytes. Exceeding this yields 413 and closes.
     pub max_body_bytes: u64,
-    /// Maximum requests parsed ahead of the one being served. Reaching this
-    /// stops reading (backpressure) rather than producing a response.
-    pub max_pipeline_depth: usize,
     /// Deadline for the complete head to arrive once the first byte does.
     pub header_timeout: Duration,
     /// Deadline for the complete body to arrive once the head is parsed.
@@ -42,7 +45,6 @@ impl Default for Limits {
             max_head_bytes: 16 * 1024,
             max_headers: 96,
             max_body_bytes: 2 * 1024 * 1024,
-            max_pipeline_depth: 8,
             header_timeout: Duration::from_secs(10),
             body_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(75),
@@ -61,7 +63,6 @@ mod tests {
         assert_eq!(l.max_head_bytes, 16 * 1024);
         assert_eq!(l.max_headers, 96);
         assert_eq!(l.max_body_bytes, 2 * 1024 * 1024);
-        assert_eq!(l.max_pipeline_depth, 8);
         assert_eq!(l.header_timeout, Duration::from_secs(10));
         assert_eq!(l.body_timeout, Duration::from_secs(30));
         assert_eq!(l.idle_timeout, Duration::from_secs(75));

@@ -1019,28 +1019,10 @@ pub(crate) async fn gzip_encode_offloaded(
 /// (`Compress` here and `CompressionMiddleware` in `middleware.rs`) so the
 /// body-storage handling below only has to be correct in one place.
 ///
-/// `HttpResponse` stores its body in one of two places: the legacy `pub
-/// body: Vec<u8>` field, or the zero-copy `body_bytes: Option<Bytes>`
-/// storage set by `with_bytes_body`/`with_static_body` (used by static-file
-/// serving, `FastResponse`, and `ResponseBuilder::build()`) — whichever is
-/// set, `body_ref()`/`body_len()` resolve through `body_bytes` first, and
-/// `with_body` clears `body_bytes` back to `None`. A naive
-/// `std::mem::take(&mut response.body)` therefore only ever sees the *legacy*
-/// field: for a `body_bytes`-backed response that field is already empty
-/// (`with_bytes_body`/`with_static_body` clear it), so the real content
-/// would never be read, gzip would happily encode zero bytes, and
-/// `with_body(compressed)` would then wipe out `body_bytes` and discard the
-/// actual content permanently. This reads through whichever storage is
-/// actually populated instead.
-///
-/// On the offload-failed path, a `body_bytes`-backed response needs no
-/// explicit restoration: `body_bytes()` only *clones* the `Arc`-backed
-/// `Bytes` handle (an O(1) refcount bump) to get an owned `Vec<u8>` for
-/// [`gzip_encode_offloaded`] (which needs ownership to move/share the
-/// buffer across the `spawn_blocking` boundary — this copy is unavoidable
-/// given that contract, but no worse than the copy encoding itself would
-/// perform), so `response`'s own `body_bytes` field is never touched and
-/// still holds the untouched original the whole time.
+/// The `to_vec` below is deliberate: [`gzip_encode_offloaded`] needs an owned
+/// buffer to move across the `spawn_blocking` boundary, and taking a copy
+/// leaves `response` holding the original, so the failure path has nothing to
+/// restore.
 pub(crate) async fn apply_gzip_offload(
     mut response: HttpResponse,
     level: CompressionLevel,
@@ -1225,8 +1207,10 @@ async fn handle_micro_request(
 ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
     use http_body_util::{BodyExt, Limited};
 
-    // Convert hyper request to our HttpRequest
-    let method = req.method().to_string();
+    // Convert hyper request to our HttpRequest. `Method::from` matches the
+    // token against the well-known set, so the common case is a unit variant
+    // rather than a per-request `String`.
+    let method = crate::Method::from(req.method().as_str());
     let path = req
         .uri()
         .path_and_query()

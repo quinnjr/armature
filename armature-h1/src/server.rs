@@ -3,11 +3,11 @@
 //! N pinned OS threads, each running a `current_thread` runtime. On Unix each
 //! thread owns its own `SO_REUSEPORT` listener, so the kernel load-balances
 //! accepts and a connection never migrates cores — which is what makes per-core
-//! buffer pools, date caches, and service state safe to keep non-atomic.
+//! date caches and service state safe to keep non-atomic.
 
 use crate::Limits;
 use crate::conn::{ConnConfig, Connection};
-use crate::service::{H1Service, Transport, Upgraded};
+use crate::service::{H1Service, Transport};
 use crate::tls::{H2Fallback, Preface, is_h2c_preface};
 use crate::write::DateCache;
 use bytes::{Bytes, BytesMut};
@@ -225,6 +225,10 @@ impl Server {
     /// Connections this crate will not serve — a negotiated `h2`, or an h2c
     /// preface — are closed. Use [`serve_with_fallback`](Self::serve_with_fallback)
     /// to route them somewhere instead.
+    ///
+    /// A connection a handler upgrades with status 101 is *also* closed: there
+    /// is no upgrade-consumer hook here. Drive [`Connection`] yourself and take
+    /// the `Upgraded` from [`Connection::serve`] if you need the raw socket.
     ///
     /// `make` runs once per worker thread to produce that worker's service. Note
     /// the bounds: the *factory* is `Send`, because it crosses thread boundaries
@@ -464,8 +468,15 @@ async fn serve_h1<IO, S>(
     let conn = Connection::with_buffered(io, RcService(service), conn_cfg, date, buffered);
     // A clean close and an I/O error are the same outcome here: the connection is
     // over and there is nobody left to tell.
+    //
+    // An upgraded transport is dropped, which closes the socket. `Server` has no
+    // upgrade consumer to hand it to — unlike the HTTP/2 fallback, which is
+    // pluggable — so a service that answers 101 must drive `Connection` itself
+    // and take the `Upgraded` from `Connection::serve`. Closing is the honest
+    // outcome for a handoff this server cannot complete; the alternative is to
+    // leave a socket open that nothing will ever read.
     if let Ok(Some(upgraded)) = conn.serve().await {
-        drop_upgraded(upgraded);
+        drop(upgraded);
     }
 }
 
@@ -484,14 +495,6 @@ impl H2Fallback for CloseH2 {
             drop(io);
         })
     }
-}
-
-/// An upgraded connection with nobody to hand it to.
-///
-/// Dropping closes the socket, which is the correct outcome: the service asked
-/// for an upgrade the server was not configured to complete.
-fn drop_upgraded(upgraded: Upgraded) {
-    drop(upgraded);
 }
 
 /// Shares one service across every connection on a worker.

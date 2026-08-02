@@ -3,7 +3,7 @@
 //! This module provides configurable, logical (business-rule) request body size
 //! limits: middleware that rejects requests whose body exceeds a configured
 //! threshold before they reach application handlers. It operates on an
-//! [`HttpRequest`] whose `body: Vec<u8>` has already been fully read into memory
+//! [`HttpRequest`] whose `body: Bytes` has already been fully read into memory
 //! by an earlier stage of the request pipeline, so the size check here runs
 //! *after* that buffering has occurred — it does not itself bound the memory
 //! consumed while the body is being read.

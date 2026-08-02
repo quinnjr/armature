@@ -438,11 +438,23 @@ impl Deref for Header {
 pub struct Headers(pub std::collections::HashMap<String, String>);
 
 impl Headers {
-    /// Get a header value by name
+    /// Get a header value by name, case-insensitively.
     pub fn get(&self, name: &str) -> Option<&String> {
+        // Hash lookup first: `HeaderMap` emits lowercase names, so a lowercase
+        // needle — including every name this map was built from — lands here.
+        if let Some(value) = self.0.get(name) {
+            return Some(value);
+        }
+        // Otherwise walk. A hash lookup for a differently-cased name would need
+        // a lowercased copy of the needle just to compute the hash, so the
+        // "fall back" branch used to allocate on essentially every
+        // conventionally-cased call (`Content-Type`, `X-Request-ID`). A map of
+        // request headers is a handful of entries; scanning it is cheaper than
+        // the allocation was.
         self.0
-            .get(name)
-            .or_else(|| self.0.get(&name.to_lowercase()))
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v)
     }
 
     /// Check if a header exists

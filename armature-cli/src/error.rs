@@ -40,6 +40,11 @@ pub enum CliError {
 
     /// Tool error (external tool execution)
     Tool(String),
+
+    /// Subcommand is declared but not implemented yet. Surfaced as a hard
+    /// failure so scripts and container start-commands never mistake a no-op
+    /// for a successful run.
+    Unimplemented(String),
 }
 
 impl fmt::Display for CliError {
@@ -59,6 +64,11 @@ impl fmt::Display for CliError {
             CliError::Build(msg) => write!(f, "Build error: {}", msg),
             CliError::Validation(msg) => write!(f, "Validation error: {}", msg),
             CliError::Tool(msg) => write!(f, "Tool error: {}", msg),
+            CliError::Unimplemented(cmd) => write!(
+                f,
+                "`armature {}` is not implemented yet and did nothing. Track progress at https://github.com/quinnjr/armature/issues",
+                cmd
+            ),
         }
     }
 }

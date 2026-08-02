@@ -538,6 +538,13 @@ impl std::fmt::Debug for ResponseBody {
 }
 
 /// An outgoing response.
+///
+/// A protocol upgrade is signalled by status 101 on a request that carried
+/// `Connection: upgrade`; the transport then leaves through
+/// [`Connection::serve`](crate::Connection::serve) as an [`Upgraded`]. There is
+/// deliberately no callback field here: the handoff happens after the response
+/// is on the wire, by which time the handler future is gone, so a callback
+/// stored on the response could only ever be dropped unrun.
 pub struct Response {
     /// The status code.
     pub status: u16,
@@ -546,8 +553,6 @@ pub struct Response {
     pub headers: HeaderVec,
     /// The response body.
     pub body: ResponseBody,
-    /// Set alongside status 101 to take over the connection.
-    pub upgrade: Option<Box<dyn FnOnce(Upgraded)>>,
 }
 
 impl std::fmt::Debug for Response {
@@ -555,7 +560,6 @@ impl std::fmt::Debug for Response {
         f.debug_struct("Response")
             .field("status", &self.status)
             .field("body", &self.body)
-            .field("upgrade", &self.upgrade.is_some())
             .finish()
     }
 }
@@ -567,7 +571,6 @@ impl Response {
             status,
             headers: HeaderVec::new(),
             body: ResponseBody::Empty,
-            upgrade: None,
         }
     }
 

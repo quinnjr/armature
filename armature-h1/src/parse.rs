@@ -89,23 +89,24 @@ pub fn prescan(head: &[u8]) -> Result<(), ParseError> {
     // CR positions and the LF positions separately lets memchr vectorize both
     // scans, and the two checks together are equivalent to "line endings are
     // exactly CRLF".
+    //
+    // The obs-fold check rides along in the CR loop rather than taking a third
+    // pass. A fold is a CRLF followed by SP or HTAB, and once the arm below has
+    // confirmed the LF at `i + 1`, every CRLF in the head is a CR position here
+    // — so a separate `\r\n` search would rescan exactly the ground this loop
+    // already covers. The final CRLF CRLF terminator cannot be mistaken for a
+    // fold, because the byte after the third CR is LF rather than SP or HTAB.
     for i in memchr::memchr_iter(b'\r', head) {
         if head.get(i + 1) != Some(&b'\n') {
             return Err(ParseError::BareCr);
+        }
+        if matches!(head.get(i + 2), Some(b' ') | Some(b'\t')) {
+            return Err(ParseError::ObsFold);
         }
     }
     for i in memchr::memchr_iter(b'\n', head) {
         if i == 0 || head[i - 1] != b'\r' {
             return Err(ParseError::BareLf);
-        }
-    }
-
-    // obs-fold: a CRLF followed by SP or HTAB continues the previous field. The
-    // final CRLF CRLF terminator cannot be mistaken for one, because the byte
-    // after the third CR is LF rather than SP or HTAB.
-    for i in memmem::find_iter(head, b"\r\n") {
-        if matches!(head.get(i + 2), Some(b' ') | Some(b'\t')) {
-            return Err(ParseError::ObsFold);
         }
     }
 
@@ -224,8 +225,14 @@ pub fn parse_head(buf: &Bytes, limits: &Limits) -> Result<Option<(Head, usize)>,
 /// a backslash that one hop reads as a path separator and another does not, a
 /// control byte that survives into a log line or a proxied request line. So the
 /// target is restricted to the RFC 3986 character set (unreserved, sub-delims,
-/// plus `:/?#[]@%`), which covers origin-, absolute-, authority-, and
+/// plus `:/?[]@%`), which covers origin-, absolute-, authority-, and
 /// asterisk-form alike.
+///
+/// `#` is excluded even though RFC 3986 admits it in a URI: the fragment is not
+/// part of the request target (RFC 9110 section 7.1) and no form in RFC 9112
+/// section 3.2 contains one. Accepting it would put a fragment in `Head::path`,
+/// where routing would match on bytes the client never meant the server to see
+/// and an upstream hop would have stripped.
 ///
 /// The differential fuzz target against hyper found this gap: hyper parses the
 /// target into a `http::Uri` and rejects what does not fit, while this crate was
@@ -244,7 +251,6 @@ fn validate_target(target: &[u8]) -> Result<(), ParseError> {
                     | b':'
                     | b'/'
                     | b'?'
-                    | b'#'
                     | b'['
                     | b']'
                     | b'@'
@@ -543,6 +549,11 @@ mod tests {
             &b"GET /a|b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"GET /a^b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"GET /a\"b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            // A fragment is not part of the request target (RFC 9110 section
+            // 7.1) and no RFC 9112 section 3.2 form admits one, so `#` would
+            // reach routing as path bytes an upstream hop would have stripped.
+            &b"GET /a#frag HTTP/1.1\r\nHost: a\r\n\r\n"[..],
+            &b"GET /a?q=1#frag HTTP/1.1\r\nHost: a\r\n\r\n"[..],
         ] {
             assert_eq!(
                 parse_head(&Bytes::copy_from_slice(raw), &Limits::default()),
@@ -605,7 +616,6 @@ mod tests {
             &b"GET /a%20b HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"GET /~user/a.b_c-d HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"GET /a?q=1;2,3!$&'()*+= HTTP/1.1\r\nHost: a\r\n\r\n"[..],
-            &b"GET /a#frag HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n"[..],
             &b"GET http://a.example:8080/x HTTP/1.1\r\nHost: a.example\r\n\r\n"[..],
             &b"GET http://[::1]:8080/x HTTP/1.1\r\nHost: a\r\n\r\n"[..],
