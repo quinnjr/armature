@@ -1119,6 +1119,13 @@ impl ErrorTransformer {
         error: &Error,
         context: &ErrorContext,
     ) -> HttpResponse {
+        // Populate the stack trace if enabled and not already set by a custom
+        // transformer.
+        let mut response = response;
+        if self.include_stack_trace && response.stack_trace.is_none() {
+            response = response.stack_trace(std::backtrace::Backtrace::force_capture().to_string());
+        }
+
         // Call loggers
         for logger in &self.loggers {
             logger(error, context, &response);

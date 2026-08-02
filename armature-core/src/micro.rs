@@ -777,13 +777,39 @@ impl Middleware for Cors {
         let allow_credentials = self.allow_credentials;
         let max_age = self.max_age;
 
+        // Resolve the `Access-Control-Allow-Origin` value (if any) for the
+        // request's actual `Origin` header, per the configured
+        // `allowed_origins` list. A literal `"*"` entry allows any origin; if
+        // `allow_credentials` is set, the actual origin is reflected instead
+        // of `*`, since the CORS spec forbids combining a wildcard origin
+        // with credentialed requests. Origins not in the list yield `None`,
+        // so no `Access-Control-Allow-Origin` header is emitted.
+        let allowed_origin_for = move |origin: &str| -> Option<String> {
+            if allowed_origins.iter().any(|o| o == "*") {
+                if allow_credentials {
+                    Some(origin.to_string())
+                } else {
+                    Some("*".to_string())
+                }
+            } else if allowed_origins.iter().any(|o| o == origin) {
+                Some(origin.to_string())
+            } else {
+                None
+            }
+        };
+
         Box::pin(async move {
+            let request_origin = req.headers.get("origin").map(str::to_owned);
+
             if is_preflight {
                 let mut response = HttpResponse::no_content();
-                response.headers.insert(
-                    "Access-Control-Allow-Origin".to_string(),
-                    allowed_origins.first().cloned().unwrap_or_default(),
-                );
+                if let Some(origin) = request_origin.as_deref()
+                    && let Some(allow_origin) = allowed_origin_for(origin)
+                {
+                    response
+                        .headers
+                        .insert("Access-Control-Allow-Origin".to_string(), allow_origin);
+                }
                 response
                     .headers
                     .insert("Access-Control-Allow-Methods".to_string(), allowed_methods);
@@ -803,10 +829,13 @@ impl Middleware for Cors {
             }
 
             let mut response = next(req).await?;
-            response.headers.insert(
-                "Access-Control-Allow-Origin".to_string(),
-                allowed_origins.first().cloned().unwrap_or_default(),
-            );
+            if let Some(origin) = request_origin.as_deref()
+                && let Some(allow_origin) = allowed_origin_for(origin)
+            {
+                response
+                    .headers
+                    .insert("Access-Control-Allow-Origin".to_string(), allow_origin);
+            }
             if allow_credentials {
                 response.headers.insert(
                     "Access-Control-Allow-Credentials".to_string(),

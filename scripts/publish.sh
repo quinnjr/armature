@@ -518,7 +518,16 @@ cd "$PROJECT_ROOT"
 
 # Get all workspace members
 get_workspace_members() {
-    grep -E '^\s+"armature-' Cargo.toml | sed 's/.*"\(armature-[^"]*\)".*/\1/' | sort -u
+    local crate
+    while IFS= read -r crate; do
+        # Skip crates explicitly marked `publish = false` (e.g. internal-only
+        # test-harness crates never meant to reach crates.io) -- attempting
+        # to publish them always fails with a hard cargo error.
+        if [[ -f "$crate/Cargo.toml" ]] && grep -qE '^publish\s*=\s*false' "$crate/Cargo.toml"; then
+            continue
+        fi
+        echo "$crate"
+    done < <(grep -E '^\s+"armature-' Cargo.toml | sed 's/.*"\(armature-[^"]*\)".*/\1/' | sort -u)
 }
 
 # Get workspace dependencies for a crate
@@ -530,10 +539,28 @@ get_workspace_deps() {
         return
     fi
 
-    # Extract path dependencies that are workspace members
-    grep -E 'path\s*=\s*"\.\./armature-' "$cargo_toml" 2>/dev/null | \
-        sed 's/.*path\s*=\s*"\.\.\/\(armature-[^"]*\)".*/\1/' | \
-        sort -u
+    # Extract path dependencies that are workspace members, EXCLUDING
+    # [dev-dependencies].
+    #
+    # Dev-dependency cycles are legal in cargo and this workspace has one:
+    # armature-graphql depends on armature-graphql-macros, and
+    # armature-graphql-macros dev-depends on armature-graphql to test the code
+    # its macro generates. Counting dev edges made the topological sort see a
+    # cycle, order only 60 of 62 members, and abort with "Circular dependency
+    # detected!" — so `publish.sh` could not compute a plan at all.
+    #
+    # Dev-dependencies also genuinely do not constrain publish order: cargo
+    # ignores them when resolving a published crate's dependencies.
+    awk '
+        /^[[:space:]]*\[/ {
+            in_dev = ($0 ~ /^[[:space:]]*\[(.*\.)?dev-dependencies(\.|\])/)
+            next
+        }
+        !in_dev
+    ' "$cargo_toml" 2>/dev/null \
+        | grep -E 'path\s*=\s*"\.\./armature-' \
+        | sed 's/.*path\s*=\s*"\.\.\/\(armature-[^"]*\)".*/\1/' \
+        | sort -u
 }
 
 # Build dependency graph and compute publish order using topological sort
@@ -559,7 +586,14 @@ compute_publish_order() {
 
         for dep in $crate_deps; do
             if [[ -n "${in_degree[$dep]+x}" ]]; then
-                ((in_degree[$crate]++))
+                # NOT `((in_degree[$crate]++))`: the post-increment form
+                # evaluates to the value *before* the increment, so the first
+                # edge for a crate makes the arithmetic command return 0, which
+                # bash reports as exit status 1 — and this script runs under
+                # `set -e`. That aborted compute_publish_order on its very first
+                # dependency edge, so `publish.sh` died after printing
+                # "Computing publish order..." with no plan and no error.
+                in_degree[$crate]=$(( in_degree[$crate] + 1 ))
             fi
         done
     done

@@ -774,10 +774,29 @@ static REQUEST_POOL: std::sync::OnceLock<ObjectPool<PooledRequest>> = std::sync:
 /// Global response pool.
 static RESPONSE_POOL: std::sync::OnceLock<ObjectPool<PooledResponse>> = std::sync::OnceLock::new();
 
-/// Initialize global pools.
-pub fn init_pools(config: PoolConfig) {
-    let _ = REQUEST_POOL.set(ObjectPool::new(config.clone()));
-    let _ = RESPONSE_POOL.set(ObjectPool::new(config));
+/// Initialize global pools with the given configuration.
+///
+/// Returns `true` if both pools were freshly initialized with `config`.
+/// Returns `false` if one or both pools were already initialized (e.g. via
+/// a prior call to [`init_pools`], or lazily via [`acquire_request`]/
+/// [`acquire_response`]) — in that case `config` was silently ignored for
+/// the pool(s) that were already set.
+pub fn init_pools(config: PoolConfig) -> bool {
+    let request_initialized = REQUEST_POOL.set(ObjectPool::new(config.clone())).is_ok();
+    if !request_initialized {
+        tracing::warn!(
+            "init_pools: REQUEST_POOL was already initialized; the provided PoolConfig was ignored"
+        );
+    }
+
+    let response_initialized = RESPONSE_POOL.set(ObjectPool::new(config)).is_ok();
+    if !response_initialized {
+        tracing::warn!(
+            "init_pools: RESPONSE_POOL was already initialized; the provided PoolConfig was ignored"
+        );
+    }
+
+    request_initialized && response_initialized
 }
 
 /// Acquire request from global pool.

@@ -1,17 +1,29 @@
 //! HTTP Request Batching
 //!
-//! This module provides efficient batch reading and parsing of HTTP requests
-//! from socket buffers. By reading multiple requests in a single syscall and
-//! parsing them together, we reduce overhead and improve throughput.
+//! This module provides `BatchReader`/`BatchParser`/`BatchBuffer`, standalone
+//! utilities for efficient batch reading and parsing of HTTP requests from
+//! socket buffers: read a large chunk from the socket into a buffer, parse
+//! multiple complete HTTP requests from it, then process and respond to them
+//! together.
 //!
-//! ## How Batching Works
+//! ## Status
+//!
+//! As of this writing, these types are correctly implemented and covered by
+//! tests in this module, but they are **not** wired into the framework's live
+//! connection-handling path (see `pipeline.rs`/`application.rs`), and no other
+//! code in this crate references them. Using them today requires integrating
+//! them explicitly into your own accept/read loop; they do not currently
+//! provide any automatic syscall or throughput benefit to a running Armature
+//! server.
+//!
+//! ## How Batching Works (when wired up)
 //!
 //! 1. Read a large chunk from the socket into a buffer
 //! 2. Parse multiple complete HTTP requests from the buffer
 //! 3. Process all requests (concurrently if configured)
 //! 4. Batch responses for efficient writing
 //!
-//! ## Performance Impact
+//! ## Potential Performance Impact (when wired up)
 //!
 //! - Reduces syscall overhead (fewer read() calls)
 //! - Improves cache efficiency (process related data together)
@@ -256,10 +268,9 @@ impl<'a> ParsedRequest<'a> {
     /// Get a header value by name (case-insensitive)
     #[inline]
     pub fn header(&self, name: &str) -> Option<&[u8]> {
-        let name_lower = name.to_ascii_lowercase();
         self.headers
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(&name_lower))
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| *v)
     }
 

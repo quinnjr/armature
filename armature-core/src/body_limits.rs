@@ -1,7 +1,17 @@
 //! Request body size limits configuration and middleware.
 //!
-//! This module provides configurable request body size limits to protect against
-//! denial-of-service attacks and resource exhaustion from oversized payloads.
+//! This module provides configurable, logical (business-rule) request body size
+//! limits: middleware that rejects requests whose body exceeds a configured
+//! threshold before they reach application handlers. It operates on an
+//! [`HttpRequest`] whose `body: Vec<u8>` has already been fully read into memory
+//! by an earlier stage of the request pipeline, so the size check here runs
+//! *after* that buffering has occurred — it does not itself bound the memory
+//! consumed while the body is being read.
+//!
+//! If you need enforcement that caps memory usage *during* the read (true
+//! streaming DoS/resource-exhaustion protection), use
+//! [`crate::body_parser::StreamingBody`] / `StreamingConfig::max_size`, which
+//! checks the byte count incrementally as each chunk arrives.
 //!
 //! ## Quick Start
 //!
@@ -215,6 +225,14 @@ impl BodyLimitConfig {
 
 /// Simple body limit middleware with a fixed size limit.
 ///
+/// This enforces a logical/business-rule limit on the request body: it checks
+/// `req.body.len()` against `max_size` *after* the body has already been fully
+/// read into memory by an earlier stage of the pipeline, and rejects the
+/// request before it reaches the application handler. It does not bound
+/// memory usage during the read itself — for that, use
+/// [`crate::body_parser::StreamingBody`] / `StreamingConfig::max_size`, which
+/// enforces the limit incrementally as bytes are read.
+///
 /// ## Example
 ///
 /// ```rust
@@ -279,6 +297,14 @@ impl crate::middleware::Middleware for BodyLimitMiddleware {
 }
 
 /// Configurable body limit middleware with per-route limits.
+///
+/// Like [`BodyLimitMiddleware`], this enforces a logical/business-rule limit
+/// on requests whose bodies have already been fully buffered into memory by an
+/// earlier stage of the pipeline — it rejects oversized requests before they
+/// reach application handlers, but the check happens after buffering, not
+/// during it. For enforcement that bounds memory usage while the body is
+/// being read, use [`crate::body_parser::StreamingBody`] /
+/// `StreamingConfig::max_size`.
 ///
 /// ## Example
 ///

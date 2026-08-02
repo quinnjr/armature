@@ -7,9 +7,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, 'release/**']
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, 'release/**']
   schedule:
     # Run nightly at 2 AM UTC
     - cron: '0 2 * * *'
@@ -19,6 +19,81 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ============================================================================
+  # CHANGE DETECTION (PR-only scoping for the per-crate test-members/
+  # test-payments-providers matrices)
+  #
+  # Only runs for pull_request events. Push (post-merge), schedule, and
+  # workflow_dispatch always get the full matrix — this job's outputs are
+  # never consulted in those cases (every consumer's `if:` short-circuits on
+  # `github.event_name != 'pull_request'` before touching `needs.*`).
+  #
+  # PRs targeting `main` or a `release/**` branch also always get the full
+  # matrix regardless of what changed — those are the pre-merge/pre-release
+  # gates, not a place to trade coverage for speed.
+  #
+  # Otherwise, diffs the PR against its merge-base and maps changed paths to
+  # `armature-*` crate directory names for `contains(fromJson(...), matrix.crate)`
+  # checks downstream. A change to anything most/all members depend on
+  # (workspace Cargo.toml/Cargo.lock, armature-core, armature-log) or to this
+  # workflow file itself forces the full matrix too, since a per-crate diff
+  # can't safely bound the blast radius of a shared-dependency change.
+  # ============================================================================
+
+  detect-changes:
+    name: Detect Changed Crates
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      full: ${{ steps.detect.outputs.full }}
+      crates: ${{ steps.detect.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BASE_REF" = "main" ] || [[ "$BASE_REF" == release/* ]]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "crates=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          changed=$(git diff --name-only "$merge_base"...HEAD)
+
+          if echo "$changed" | grep -qE '^(Cargo\.toml|Cargo\.lock|armature-core/|armature-log/|\.github/workflows/ci\.yml)'; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "crates=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # `grep` exits 1 when it matches nothing, and this job runs under
+          # `set -euo pipefail`, so a PR that touches no `armature-*/` crate
+          # used to fail the job outright instead of reporting "no crates
+          # changed". Two real cases hit it: a docs/CI-only PR, and a merge
+          # whose conflicts were all resolved toward the base branch — that
+          # produces an empty diff, which is legitimate for an ancestry-only
+          # merge. `|| true` keeps the pipeline alive; the emptiness check
+          # below is still needed because `echo "" | jq -R .` yields `[""]`,
+          # not `[]`.
+          matched=$(echo "$changed" \
+            | grep -oE '^armature-[a-z0-9-]+/' \
+            | sed 's#/$##' \
+            | sort -u || true)
+          if [ -z "$matched" ]; then
+            crates='[]'
+          else
+            crates=$(printf '%s\n' "$matched" | jq -R . | jq -sc .)
+          fi
+          echo "full=false" >> "$GITHUB_OUTPUT"
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+
   # ============================================================================
   # LINT
   # ============================================================================
@@ -153,6 +228,7 @@ jobs:
 
   test-members:
     name: Test member crates (${{ matrix.crate }})
+    needs: detect-changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -262,15 +338,25 @@ jobs:
             minimal: ""
           - crate: armature-toon
             minimal: ""
+    # `matrix` is not available in a job-level `if:` (GitHub Actions only
+    # resolves it in `steps.*.if`), so the changed-crate check below is
+    # applied per-step instead of gating the whole job. An out-of-scope
+    # crate's job still spins up and immediately no-ops through every step
+    # below (a few seconds of runner time for "Set up job"/checkout), rather
+    # than being skipped outright — the expensive part (toolchain install,
+    # dependency compilation, the actual test run) is what gets skipped.
     steps:
       - uses: actions/checkout@v6
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Install system dependencies
-        if: matrix.apt != ''
+        if: ${{ matrix.apt != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt }}
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Run tests
         # Docker is present on ubuntu-latest, so container-gated suites must
         # actually run here rather than self-skipping into a green pass.
@@ -278,10 +364,12 @@ jobs:
         # when this is set to "1" and no daemon is reachable. Every
         # container-gated suite in the crates above routes through that macro;
         # a hand-rolled `if !docker_available() { return; }` would bypass it.
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
         run: cargo test -p ${{ matrix.crate }} --all-features --verbose ${{ matrix.extra }}
       - name: Run doc tests
+        if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
         run: cargo test -p ${{ matrix.crate }} --all-features --doc
       # Separate step so a minimal-feature failure is attributable rather than
       # buried in the --all-features run. Skipped for feature-less crates,
@@ -292,7 +380,7 @@ jobs:
       # needs an extra flag applied to this step too, give it its own matrix
       # key rather than reusing `extra`.
       - name: Run tests (minimal features)
-        if: matrix.minimal != ''
+        if: ${{ matrix.minimal != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
         env:
           ARMATURE_REQUIRE_DOCKER: "1"
         run: cargo test -p ${{ matrix.crate }} ${{ matrix.minimal }} --verbose
@@ -310,6 +398,8 @@ jobs:
 
   test-payments-providers:
     name: Test armature-payments (${{ matrix.provider }} only)
+    needs: detect-changes
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), 'armature-payments') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

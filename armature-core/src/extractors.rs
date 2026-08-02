@@ -827,6 +827,39 @@ mod tests {
     }
 
     #[test]
+    fn test_query_extraction_with_ampersand_and_equals_in_value() {
+        // Regression test: a value containing a literal `&` or `=` arrives
+        // percent-encoded on the wire and must survive deserialization intact.
+        let request = HttpRequest::new("GET", "/items?note=1%26b%3D2&name=a%3Db%26c");
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Filters {
+            note: String,
+            name: String,
+        }
+
+        let query: Query<Filters> = Query::from_request(&request).unwrap();
+        assert_eq!(query.note, "1&b=2");
+        assert_eq!(query.name, "a=b&c");
+    }
+
+    #[test]
+    fn test_path_params_extraction_with_ampersand_and_equals_in_value() {
+        // Regression test: same corruption risk as query params, but for
+        // path params extracted via `PathParams<T>`.
+        let mut request = HttpRequest::new("GET", "/items/x");
+        request.push_param("slug", Bytes::from_static(b"a&b=c"));
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Params {
+            slug: String,
+        }
+
+        let params: PathParams<Params> = PathParams::from_request(&request).unwrap();
+        assert_eq!(params.slug, "a&b=c");
+    }
+
+    #[test]
     fn test_body_extraction() {
         let mut request = create_request();
         request.body = Bytes::from(

@@ -8,7 +8,10 @@ pub mod schema_builder;
 pub mod schema_docs;
 #[cfg(feature = "sdl-export")]
 pub mod sdl_static;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
+pub use armature_graphql_macros::resolver;
 pub use async_graphql;
 pub use async_graphql::{
     Context, EmptyMutation, EmptySubscription, Enum, Error, ID, InputObject, MergedObject,
@@ -20,6 +23,8 @@ pub use decorators::*;
 pub use resolver::*;
 pub use schema_builder::*;
 pub use schema_docs::*;
+#[cfg(feature = "websocket")]
+pub use websocket::{ALL_WEBSOCKET_PROTOCOLS, Protocols, select_protocol, serve_graphql_websocket};
 
 use armature_core::Error as ArmatureError;
 use armature_log::info;
@@ -55,9 +60,6 @@ impl<Query, Mutation, Subscription> Clone for GraphQLSchema<Query, Mutation, Sub
         }
     }
 }
-
-// Provider is automatically implemented via blanket impl
-// when Query, Mutation, Subscription all satisfy Send + Sync + 'static
 
 /// GraphQL request handling
 pub struct GraphQLRequest {
@@ -326,5 +328,18 @@ mod tests {
         let json = response.to_json().unwrap();
         assert!(json.contains("hello"));
         assert!(json.contains("world"));
+    }
+
+    #[test]
+    fn test_graphql_response_error_serialization() {
+        let response = GraphQLResponse::error("something went wrong".to_string());
+
+        let json = response.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["data"].is_null());
+        assert!(json.contains("\"data\":null"));
+        assert!(value["errors"].is_array());
+        assert_eq!(value["errors"][0], "something went wrong");
     }
 }

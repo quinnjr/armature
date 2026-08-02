@@ -285,40 +285,59 @@ pub fn pool_stats() -> &'static PoolStats {
 // Thread-Local Buffer Pool
 // ============================================================================
 
-/// A single size category pool
+/// A single size category pool.
+///
+/// Each pooled buffer is stored alongside an `age` counter tracking how
+/// many times it has been acquired from the pool; buffers whose age
+/// reaches `PoolConfig::max_age` are discarded on release instead of
+/// being kept for reuse.
 struct SizePool {
-    buffers: Vec<BytesMut>,
+    buffers: Vec<(BytesMut, u32)>,
     max_size: usize,
     capacity: usize,
 }
 
 impl SizePool {
-    fn new(capacity: usize, max_size: usize) -> Self {
+    fn new(capacity: usize, max_size: usize, preallocate: usize) -> Self {
+        let preallocate = preallocate.min(max_size);
+        let mut buffers = Vec::with_capacity(max_size);
+        for _ in 0..preallocate {
+            buffers.push((BytesMut::with_capacity(capacity), 0));
+        }
         Self {
-            buffers: Vec::with_capacity(max_size),
+            buffers,
             max_size,
             capacity,
         }
     }
 
     #[inline]
-    fn acquire(&mut self) -> Option<BytesMut> {
-        self.buffers.pop().map(|mut buf| {
+    fn acquire(&mut self, collect_stats: bool) -> Option<(BytesMut, u32)> {
+        self.buffers.pop().map(|(mut buf, age)| {
             buf.clear();
-            POOL_STATS.record_hit();
-            POOL_STATS.record_taken();
-            buf
+            if collect_stats {
+                POOL_STATS.record_hit();
+                POOL_STATS.record_taken();
+            }
+            (buf, age)
         })
     }
 
     #[inline]
-    fn release(&mut self, mut buf: BytesMut) {
-        // Only keep if pool isn't full and buffer isn't oversized
-        if self.buffers.len() < self.max_size && buf.capacity() <= self.capacity * 2 {
+    fn release(&mut self, mut buf: BytesMut, age: u32, max_age: u32, collect_stats: bool) {
+        let age = age.saturating_add(1);
+        // Discard buffers that have aged past the configured limit; otherwise
+        // keep them if the pool isn't full and the buffer isn't oversized.
+        if age < max_age
+            && self.buffers.len() < self.max_size
+            && buf.capacity() <= self.capacity * 2
+        {
             buf.clear();
-            self.buffers.push(buf);
-            POOL_STATS.record_return();
-        } else {
+            self.buffers.push((buf, age));
+            if collect_stats {
+                POOL_STATS.record_return();
+            }
+        } else if collect_stats {
             POOL_STATS.record_discard();
         }
     }
@@ -334,7 +353,6 @@ impl SizePool {
 struct ThreadLocalPool {
     /// Pools for each size category [Tiny, Small, Medium, Large, Huge, Custom]
     pools: [SizePool; 6],
-    #[allow(dead_code)]
     config: PoolConfig,
 }
 
@@ -342,40 +360,64 @@ impl ThreadLocalPool {
     fn new(config: PoolConfig) -> Self {
         Self {
             pools: [
-                SizePool::new(BufferSize::Tiny.capacity(), config.max_per_size),
-                SizePool::new(BufferSize::Small.capacity(), config.max_per_size),
-                SizePool::new(BufferSize::Medium.capacity(), config.max_per_size),
-                SizePool::new(BufferSize::Large.capacity(), config.max_per_size),
-                SizePool::new(BufferSize::Huge.capacity(), config.max_per_size),
+                SizePool::new(
+                    BufferSize::Tiny.capacity(),
+                    config.max_per_size,
+                    config.preallocate,
+                ),
+                SizePool::new(
+                    BufferSize::Small.capacity(),
+                    config.max_per_size,
+                    config.preallocate,
+                ),
+                SizePool::new(
+                    BufferSize::Medium.capacity(),
+                    config.max_per_size,
+                    config.preallocate,
+                ),
+                SizePool::new(
+                    BufferSize::Large.capacity(),
+                    config.max_per_size,
+                    config.preallocate,
+                ),
+                SizePool::new(
+                    BufferSize::Huge.capacity(),
+                    config.max_per_size,
+                    config.preallocate,
+                ),
                 SizePool::new(
                     BufferSize::Custom(1024 * 1024).capacity(),
                     config.max_per_size / 4,
-                ), // Fewer custom buffers
+                    0, // Custom-size buffers are never pre-allocated
+                ),
             ],
             config,
         }
     }
 
     #[inline]
-    fn acquire(&mut self, size: BufferSize) -> BytesMut {
+    fn acquire(&mut self, size: BufferSize) -> (BytesMut, u32) {
         let idx = size.pool_index();
         let pool = &mut self.pools[idx];
+        let collect_stats = self.config.collect_stats;
 
-        pool.acquire().unwrap_or_else(|| {
+        pool.acquire(collect_stats).unwrap_or_else(|| {
             let capacity = if matches!(size, BufferSize::Custom(n) if n > 0) {
                 size.capacity()
             } else {
                 pool.capacity
             };
-            POOL_STATS.record_miss(capacity);
-            BytesMut::with_capacity(capacity)
+            if collect_stats {
+                POOL_STATS.record_miss(capacity);
+            }
+            (BytesMut::with_capacity(capacity), 0)
         })
     }
 
     #[inline]
-    fn release(&mut self, buf: BytesMut, size: BufferSize) {
+    fn release(&mut self, buf: BytesMut, age: u32, size: BufferSize) {
         let idx = size.pool_index();
-        self.pools[idx].release(buf);
+        self.pools[idx].release(buf, age, self.config.max_age, self.config.collect_stats);
     }
 }
 
@@ -405,14 +447,18 @@ thread_local! {
 pub struct PooledBuffer {
     inner: Option<BytesMut>,
     size: BufferSize,
+    /// Number of times this buffer has been acquired from the pool.
+    /// Used to discard buffers older than `PoolConfig::max_age` on release.
+    age: u32,
 }
 
 impl PooledBuffer {
     /// Create a new pooled buffer
-    fn new(buf: BytesMut, size: BufferSize) -> Self {
+    fn new(buf: BytesMut, size: BufferSize, age: u32) -> Self {
         Self {
             inner: Some(buf),
             size,
+            age,
         }
     }
 
@@ -464,7 +510,7 @@ impl Drop for PooledBuffer {
     fn drop(&mut self) {
         if let Some(buf) = self.inner.take() {
             BUFFER_POOL.with(|pool| {
-                pool.borrow_mut().release(buf, self.size);
+                pool.borrow_mut().release(buf, self.age, self.size);
             });
         }
     }
@@ -501,8 +547,8 @@ impl std::fmt::Debug for PooledBuffer {
 #[inline]
 pub fn acquire_buffer(size: BufferSize) -> PooledBuffer {
     BUFFER_POOL.with(|pool| {
-        let buf = pool.borrow_mut().acquire(size);
-        PooledBuffer::new(buf, size)
+        let (buf, age) = pool.borrow_mut().acquire(size);
+        PooledBuffer::new(buf, size, age)
     })
 }
 

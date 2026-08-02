@@ -4,11 +4,11 @@ Core framework for the Armature web framework.
 
 ## Features
 
-- **High-Performance Routing** - O(log n) routing with `matchit`, LRU caching, and static route fast path
-- **Zero-Copy HTTP** - SIMD-accelerated parsing, arena allocation, and `Bytes` for efficient body handling
+- **High-Performance Routing** - LRU route caching with a static-route fast path over a linear pattern matcher
+- **Zero-Copy HTTP** - SIMD-accelerated parsing and `Bytes` for efficient body handling
 - **Optimized Handlers** - Monomorphized handler dispatch with inline optimization
 - **Connection Management** - HTTP/1.1 pipelining, keep-alive, adaptive buffering
-- **Memory Efficiency** - SmallVec headers, CompactString paths, object pooling
+- **Memory Efficiency** - SmallVec headers, CompactString paths, and opt-in object-pooling/arena-allocation primitives available for advanced use
 - **Tower Compatible** - Native integration with Tower middleware ecosystem
 
 ## Installation

@@ -171,15 +171,26 @@ fn random_hex_id(hex_len: usize) -> String {
     s
 }
 
+/// Global counter mixed into every `rand_bytes` seed so that two calls can
+/// never derive the same PRNG state, even when they land on the same
+/// timestamp reading (e.g. concurrent calls from different threads, or a
+/// tight same-thread loop where clock resolution is coarser than call
+/// latency).
+static RAND_BYTES_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    // Use simple PRNG based on timestamp and address
+    // Simple PRNG seeded from timestamp XORed with a constant, additionally
+    // mixed with a monotonically increasing atomic counter. The counter
+    // guarantees uniqueness of the seed (and therefore the output) across
+    // calls regardless of clock resolution or thread interleaving.
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
+    let counter = RAND_BYTES_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let mut state = seed ^ 0xDEADBEEF;
+    let mut state = seed ^ 0xDEADBEEF ^ counter.wrapping_mul(0x9E3779B97F4A7C15);
     for b in bytes.iter_mut() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = (state >> 33) as u8;
@@ -770,7 +781,9 @@ impl ErrorRegistry {
         // Check size limit
         let mut errors = self.errors.write().await;
         let evicted = if errors.len() >= self.max_size {
-            // Remove oldest error (simple LRU would be better)
+            // Remove an arbitrary error to enforce the size bound. `HashMap`
+            // iteration order is unspecified, so this is NOT oldest-first
+            // (LRU) eviction — no insertion/access order is tracked.
             errors
                 .keys()
                 .next()
