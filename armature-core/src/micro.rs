@@ -303,7 +303,7 @@ impl BuiltApp {
                 match router.route(req).await {
                     Ok(response) => Ok(response),
                     Err(Error::RouteNotFound(_)) if default_service.is_some() => {
-                        let req = HttpRequest::new("GET".to_string(), "/404".to_string());
+                        let req = HttpRequest::new("GET", "/404".to_string());
                         default_service.unwrap().call(req).await
                     }
                     Err(e) => Err(e),
@@ -1363,7 +1363,7 @@ mod tests {
     async fn test_built_app_handle() {
         let app = App::new().route("/test", get(test_handler)).build();
 
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -1399,13 +1399,13 @@ mod tests {
             .build();
 
         // Scoped route triggers the scope middleware
-        let req = HttpRequest::new("GET".to_string(), "/admin/users".to_string());
+        let req = HttpRequest::new("GET", "/admin/users".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Routes outside the scope do not
-        let req = HttpRequest::new("GET".to_string(), "/public".to_string());
+        let req = HttpRequest::new("GET", "/public".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1432,7 +1432,7 @@ mod tests {
             )
             .build();
 
-        let req = HttpRequest::new("GET".to_string(), "/api/v1/users".to_string());
+        let req = HttpRequest::new("GET", "/api/v1/users".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(parent_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1448,7 +1448,7 @@ mod tests {
 
         // The optimized serve-path router resolves catch-all params.
         let app = App::new().route("/files/*path", get(files)).build();
-        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let req = HttpRequest::new("GET", "/files/docs/readme.md".to_string());
         let resp = app.handle(req).await.unwrap();
         assert_eq!(resp.body, b"docs/readme.md");
     }
@@ -1462,14 +1462,14 @@ mod tests {
         let app = App::new().route("/search", query(echo)).build();
 
         // QUERY carries its query in the body and routes on method+path.
-        let mut req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut req = HttpRequest::new("QUERY", "/search".to_string());
         req.body = b"name=john".to_vec();
         let resp = app.handle(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
         // Unknown method must not fall through to a GET handler.
         let app2 = App::new().route("/search", get(echo)).build();
-        let req = HttpRequest::new("PROPFIND".to_string(), "/search".to_string());
+        let req = HttpRequest::new("PROPFIND", "/search".to_string());
         let err = app2.handle(req).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
@@ -1539,7 +1539,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_gzips_when_accepted() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/".into());
         req.headers.insert("accept-encoding", "gzip, deflate, br");
 
         let original = vec![b'a'; 8192];
@@ -1563,7 +1563,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_skips_without_accept_encoding() {
         let mw = Compress::default();
-        let req = HttpRequest::new("GET".into(), "/".into());
+        let req = HttpRequest::new("GET", "/".into());
 
         let original = vec![b'b'; 8192];
         let resp = mw.call(req, body_next(original.clone())).await.unwrap();
@@ -1587,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_merges_vary_with_existing_value() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/".into());
         req.headers.insert("accept-encoding", "gzip");
 
         let original = vec![b'c'; 8192];
@@ -1623,7 +1623,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_offloads_large_body_and_round_trips() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/".into());
         req.headers.insert("accept-encoding", "gzip");
 
         // Well above the offload threshold; non-repeating so it does not trivially
@@ -1656,7 +1656,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_handles_bytes_backed_body_above_offload_threshold() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/".into());
         req.headers.insert("accept-encoding", "gzip");
 
         let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))

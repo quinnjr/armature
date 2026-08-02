@@ -365,7 +365,7 @@ impl armature_core::Middleware for RateLimitMiddleware {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
 
-        let info = Self::extract_request_info(ip, &req.path, &req.method, user_id, &headers);
+        let info = Self::extract_request_info(ip, &req.path, req.method_str(), user_id, &headers);
 
         // Check rate limit
         match self.check(&info).await {
@@ -606,8 +606,7 @@ mod tests {
         let middleware = RateLimitMiddleware::new(limiter).with_trusted_proxy_depth(3);
 
         let make_req = || {
-            let mut req =
-                armature_core::HttpRequest::new("GET".to_string(), "/api/test".to_string());
+            let mut req = armature_core::HttpRequest::new("GET", "/api/test".to_string());
             req.headers.insert(
                 "x-forwarded-for",
                 "203.0.113.5, 70.41.3.18, 150.172.238.178",
@@ -659,8 +658,7 @@ mod tests {
         let middleware = RateLimitMiddleware::new(limiter).with_trusted_proxy_depth(1);
 
         let make_req = |xff: &'static str| {
-            let mut req =
-                armature_core::HttpRequest::new("GET".to_string(), "/api/test".to_string());
+            let mut req = armature_core::HttpRequest::new("GET", "/api/test".to_string());
             req.headers.insert("x-forwarded-for", xff);
             req
         };

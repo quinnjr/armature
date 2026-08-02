@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn extract_user_returns_user_context_from_extension() {
         let guard = AuthGuard::new();
-        let mut request = HttpRequest::new("GET".to_string(), "/me".to_string());
+        let mut request = HttpRequest::new("GET", "/me".to_string());
         request
             .extensions
             .insert(UserContext::new("user123".to_string()).with_roles(vec!["admin".to_string()]));
@@ -285,14 +285,14 @@ mod tests {
     #[test]
     fn extract_user_errors_without_extension() {
         let guard = AuthGuard::new();
-        let request = HttpRequest::new("GET".to_string(), "/me".to_string());
+        let request = HttpRequest::new("GET", "/me".to_string());
 
         let result = guard.extract_user::<UserContext>(&request);
         assert!(matches!(result, Err(AuthError::Unauthorized)));
     }
 
     fn authenticated_request() -> HttpRequest {
-        let mut request = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        let mut request = HttpRequest::new("GET", "/admin".to_string());
         request
             .headers
             .insert("authorization", "Bearer token123".to_string());
@@ -372,7 +372,7 @@ mod tests {
     async fn test_role_guard_unauthenticated_denied() {
         let guard = RoleGuard::any(vec!["admin".to_string()]);
 
-        let request = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        let request = HttpRequest::new("GET", "/admin".to_string());
         assert!(guard.can_activate(&request).await.is_err());
     }
 

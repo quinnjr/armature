@@ -607,7 +607,7 @@ mod tests {
         use crate::middleware::Middleware;
 
         let middleware = BodyLimitMiddleware::kilobytes(10);
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         req.body = vec![0; 5 * sizes::KB]; // 5KB, within limit
 
         let result = middleware
@@ -625,7 +625,7 @@ mod tests {
         use crate::middleware::Middleware;
 
         let middleware = BodyLimitMiddleware::kilobytes(1);
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         req.body = vec![0; 5 * sizes::KB]; // 5KB, exceeds 1KB limit
 
         let result = middleware
@@ -649,7 +649,7 @@ mod tests {
         let middleware = ConfigurableBodyLimitMiddleware::new(config);
 
         // Small body on upload route should pass
-        let mut req = HttpRequest::new("POST".to_string(), "/api/upload".to_string());
+        let mut req = HttpRequest::new("POST", "/api/upload".to_string());
         req.body = vec![0; 5 * sizes::MB]; // 5MB
 
         let result = middleware
@@ -662,7 +662,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Same body on regular route should fail
-        let mut req = HttpRequest::new("POST".to_string(), "/api/other".to_string());
+        let mut req = HttpRequest::new("POST", "/api/other".to_string());
         req.body = vec![0; 5 * sizes::KB]; // 5KB, exceeds 1KB default
 
         let result = middleware

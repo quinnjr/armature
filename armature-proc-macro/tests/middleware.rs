@@ -22,7 +22,7 @@ impl Middleware for StampMiddleware {
 
 fn request() -> HttpRequest {
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         "/users".to_string(),
         HashMap::new(),
         vec![],

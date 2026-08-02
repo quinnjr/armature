@@ -664,7 +664,7 @@ impl MethodExtractor {
 
 impl FromRequest for MethodExtractor {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        Ok(MethodExtractor(crate::Method::from(request.method.clone())))
+        Ok(MethodExtractor(request.method.clone()))
     }
 }
 
@@ -762,7 +762,7 @@ mod tests {
     use serde::Deserialize;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/users/123".to_string());
         req.path_params.insert("id".to_string(), "123".to_string());
         req.query_params.insert("page".to_string(), "1".to_string());
         req.query_params

@@ -259,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn test_fn_handler() {
         let handler = FnHandler::new(test_handler);
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = handler.call(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_into_handler() {
         let handler = test_handler.into_handler();
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = handler.call(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -275,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn test_boxed_handler() {
         let boxed = BoxedHandler::new(test_handler.into_handler());
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = boxed.call(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -283,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_handler_fn() {
         let h = handler(test_handler);
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = h.call(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -293,8 +293,8 @@ mod tests {
         let h1 = handler(test_handler);
         let h2 = h1.clone();
 
-        let req1 = HttpRequest::new("GET".to_string(), "/test".to_string());
-        let req2 = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req1 = HttpRequest::new("GET", "/test".to_string());
+        let req2 = HttpRequest::new("GET", "/test".to_string());
 
         let r1 = h1.call(req1).await.unwrap();
         let r2 = h2.call(req2).await.unwrap();

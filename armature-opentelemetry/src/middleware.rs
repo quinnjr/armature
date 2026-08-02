@@ -100,7 +100,7 @@ impl Middleware for TelemetryMiddleware {
         let start_time = Instant::now();
 
         // Capture the real request dimensions before `req` is consumed by `next`.
-        let method = req.method.clone();
+        let method = req.method_str().to_owned();
         let route = req.path.clone();
 
         // Increment active requests
@@ -317,7 +317,7 @@ mod tests {
 
         // A `Next` that returns HTTP 201, so we also confirm the real status is
         // propagated alongside the real method/route.
-        let req = HttpRequest::new("GET".to_string(), "/users/42".to_string());
+        let req = HttpRequest::new("GET", "/users/42".to_string());
         let next: Next = Box::new(|_req| Box::pin(async { Ok(HttpResponse::new(201)) }));
         let res = middleware.handle(req, next).await.unwrap();
         assert_eq!(res.status, 201);
@@ -399,7 +399,7 @@ mod tests {
         // to this test's in-memory provider.
         let middleware = TelemetryMiddleware::new("test-service");
 
-        let req = HttpRequest::new("GET".to_string(), "/orders".to_string());
+        let req = HttpRequest::new("GET", "/orders".to_string());
         let next: Next = Box::new(|_req| {
             Box::pin(async {
                 // Simulates application handler code — it has no access to

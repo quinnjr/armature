@@ -223,7 +223,7 @@ mod tests {
 
     fn get_request(path: &str, headers: HashMap<String, String>) -> HttpRequest {
         HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             path.to_string(),
             headers,
             Vec::new(),

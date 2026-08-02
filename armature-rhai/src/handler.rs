@@ -310,7 +310,7 @@ mod tests {
     use super::*;
 
     fn _create_test_request() -> HttpRequest {
-        HttpRequest::new("GET".to_string(), "/".to_string())
+        HttpRequest::new("GET", "/".to_string())
     }
 
     #[tokio::test]
@@ -334,7 +334,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let middleware = ScriptMiddleware::after(engine, "after.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let mut real_response = HttpResponse::new(201);
         real_response
             .headers
@@ -377,7 +377,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let middleware = ScriptMiddleware::after(engine, "after.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let real_response = HttpResponse::new(200).cookie("session", "abc123; HttpOnly");
 
         let amended = middleware
@@ -409,7 +409,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let middleware = ScriptMiddleware::after(engine, "after.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let real_response = HttpResponse::new(200).with_body(b"unchanged".to_vec());
 
         let amended = middleware
@@ -450,7 +450,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let middleware = ScriptMiddleware::after(engine, "after.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let binary_body: Vec<u8> = vec![0x00, 0xFF, 0x01, 0xFE, 0x80, 0x7F, 0x00, 0x00, 0xDE, 0xAD];
         let real_response = HttpResponse::new(200).with_body(binary_body.clone());
 
@@ -483,7 +483,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let middleware = ScriptMiddleware::after(engine, "after.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let mut real_response = HttpResponse::new(201);
         real_response
             .headers
@@ -512,7 +512,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let handler = script_handler(engine, "handler.rhai");
 
-        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+        let response = handler(HttpRequest::new("GET", "/".to_string()))
             .expect("script_handler must not panic without a Tokio runtime");
         assert_eq!(response.status, 200);
     }
@@ -526,7 +526,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let handler = script_handler(engine, "handler.rhai");
 
-        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+        let response = handler(HttpRequest::new("GET", "/".to_string()))
             .expect("script_handler must not panic inside a current-thread runtime");
         assert_eq!(response.status, 200);
     }
@@ -539,7 +539,7 @@ mod tests {
         let engine = Arc::new(RhaiEngine::new().scripts_dir(temp.path()).build().unwrap());
         let handler = script_handler(engine, "handler.rhai");
 
-        let response = handler(HttpRequest::new("GET".to_string(), "/".to_string()))
+        let response = handler(HttpRequest::new("GET", "/".to_string()))
             .expect("script_handler must not panic inside a multi-thread runtime");
         assert_eq!(response.status, 200);
     }

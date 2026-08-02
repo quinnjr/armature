@@ -358,7 +358,7 @@ async fn test_route_with_constraints_valid() {
         constraints: Some(constraints),
     });
 
-    let request = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+    let request = HttpRequest::new("GET", "/users/123".to_string());
     let response = router.route(request).await.unwrap();
 
     assert_eq!(response.status, 200);
@@ -381,7 +381,7 @@ async fn test_route_with_constraints_invalid() {
         constraints: Some(constraints),
     });
 
-    let request = HttpRequest::new("GET".to_string(), "/users/abc".to_string());
+    let request = HttpRequest::new("GET", "/users/abc".to_string());
     let result = router.route(request).await;
 
     assert!(result.is_err());
@@ -408,15 +408,15 @@ async fn test_route_with_multiple_constraints() {
     });
 
     // Valid request
-    let request = HttpRequest::new("GET".to_string(), "/users/123/posts/456".to_string());
+    let request = HttpRequest::new("GET", "/users/123/posts/456".to_string());
     let response = router.route(request).await.unwrap();
     assert_eq!(response.status, 200);
 
     // Invalid user_id
-    let request2 = HttpRequest::new("GET".to_string(), "/users/abc/posts/456".to_string());
+    let request2 = HttpRequest::new("GET", "/users/abc/posts/456".to_string());
     assert!(router.route(request2).await.is_err());
 
     // Invalid post_id
-    let request3 = HttpRequest::new("GET".to_string(), "/users/123/posts/abc".to_string());
+    let request3 = HttpRequest::new("GET", "/users/123/posts/abc".to_string());
     assert!(router.route(request3).await.is_err());
 }

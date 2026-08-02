@@ -93,7 +93,7 @@ pub struct ExceptionContext {
     /// The path that was being accessed
     pub path: String,
     /// The HTTP method
-    pub method: String,
+    pub method: crate::Method,
     /// Additional context data
     pub data: HashMap<String, serde_json::Value>,
     /// Whether we're in production mode
@@ -862,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exception_context() {
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let ctx = ExceptionContext::from_request(request)
             .with_user_id("user-123")
             .with_production_mode(false);
@@ -877,7 +877,7 @@ mod tests {
     async fn test_http_exception_filter() {
         let filter = HttpExceptionFilter::new();
         let error = Error::BadRequest("Invalid input".to_string());
-        let request = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("POST", "/api/users".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -891,7 +891,7 @@ mod tests {
     async fn test_validation_exception_filter() {
         let filter = ValidationExceptionFilter::new();
         let error = Error::Validation("Email is required".to_string());
-        let request = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("POST", "/api/users".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -905,7 +905,7 @@ mod tests {
     async fn test_not_found_filter() {
         let filter = NotFoundExceptionFilter::new().with_message("Resource not found");
         let error = Error::NotFound("User not found".to_string());
-        let request = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+        let request = HttpRequest::new("GET", "/api/users/123".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -924,7 +924,7 @@ mod tests {
 
         // Test validation error
         let error = Error::Validation("Invalid".to_string());
-        let request = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let request = HttpRequest::new("POST", "/api".to_string());
         let response = chain.handle(&error, &request).await;
         assert_eq!(response.status, 422);
 
@@ -957,7 +957,7 @@ mod tests {
         .with_name("CustomFilter");
 
         let error = Error::BadRequest("Bad".to_string());
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -970,7 +970,7 @@ mod tests {
     async fn test_unauthorized_filter_with_realm() {
         let filter = UnauthorizedExceptionFilter::new().with_realm("api");
         let error = Error::Unauthorized("Invalid token".to_string());
-        let request = HttpRequest::new("GET".to_string(), "/api/protected".to_string());
+        let request = HttpRequest::new("GET", "/api/protected".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -985,7 +985,7 @@ mod tests {
     async fn test_rate_limit_filter_with_retry_after() {
         let filter = RateLimitExceptionFilter::new().with_retry_after(60);
         let error = Error::TooManyRequests("Rate limited".to_string());
-        let request = HttpRequest::new("GET".to_string(), "/api".to_string());
+        let request = HttpRequest::new("GET", "/api".to_string());
         let ctx = ExceptionContext::from_request(request);
 
         let response = filter.catch(&error, &ctx).await;
@@ -1003,7 +1003,7 @@ mod tests {
         let api_chain = ExceptionFilterChain::api();
 
         let error = Error::NotFound("Not found".to_string());
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
 
         // All chains should handle the error
         let response = dev_chain.handle(&error, &request).await;

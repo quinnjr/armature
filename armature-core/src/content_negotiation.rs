@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn test_http_request_accept() {
-        let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut request = HttpRequest::new("GET", "/".to_string());
         request
             .headers
             .insert("Accept", "application/json".to_string());
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn test_http_request_prefers_json() {
-        let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut request = HttpRequest::new("GET", "/".to_string());
         request
             .headers
             .insert("Accept", "application/json, text/html;q=0.9".to_string());

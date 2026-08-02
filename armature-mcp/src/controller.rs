@@ -285,7 +285,7 @@ mod tests {
     }
 
     fn get_request(path: &str) -> HttpRequest {
-        HttpRequest::new("GET".to_string(), path.to_string())
+        HttpRequest::new("GET", path.to_string())
     }
 
     fn get_request_with_auth(path: &str, header_value: &str) -> HttpRequest {

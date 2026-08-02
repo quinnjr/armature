@@ -292,7 +292,7 @@ fn bench_http_json(c: &mut Criterion) {
 
     group.bench_function("request_parse", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+            let mut req = HttpRequest::new("POST", "/api/users".to_string());
             req.body = body_bytes.clone();
             let _: MediumPayload = req.json().unwrap();
         })
@@ -310,7 +310,7 @@ fn bench_http_json(c: &mut Criterion) {
     group.bench_function("full_cycle", |b| {
         b.iter(|| {
             // Parse request
-            let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+            let mut req = HttpRequest::new("POST", "/api/users".to_string());
             req.body = body_bytes.clone();
             let _user: MediumPayload = req.json().unwrap();
 

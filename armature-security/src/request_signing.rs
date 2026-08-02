@@ -237,7 +237,7 @@ impl RequestVerifier {
         let body_str = String::from_utf8_lossy(request.body_ref());
 
         self.verify(
-            &request.method,
+            request.method_str(),
             &request.path,
             &body_str,
             timestamp,
@@ -417,7 +417,7 @@ mod tests {
         let body = "{\"test\":\"data\"}";
         let signature = signer.sign("POST", "/api/secure", body, timestamp);
 
-        let mut request = HttpRequest::new("POST".to_string(), "/api/secure".to_string());
+        let mut request = HttpRequest::new("POST", "/api/secure".to_string());
         request.headers.insert("X-Signature", signature);
         request.headers.insert("X-Timestamp", timestamp.to_string());
         // Simulate the real server path: body arrives as zero-copy Bytes,

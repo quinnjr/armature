@@ -217,7 +217,7 @@ fn test_error_help_messages() {
 
 #[test]
 fn test_http_request_helpers() {
-    let mut request = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+    let mut request = HttpRequest::new("GET", "/api/users/123".to_string());
     request
         .path_params
         .insert("id".to_string(), "123".to_string());

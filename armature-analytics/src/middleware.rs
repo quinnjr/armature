@@ -115,7 +115,7 @@ impl Middleware for AnalyticsMiddleware {
             return next(req).await;
         }
 
-        let method = req.method.clone();
+        let method = req.method_str().to_owned();
         let raw_path = req.path.clone();
 
         // Exclusion and sampling gate what we record, but never what we return.
@@ -271,7 +271,7 @@ mod tests {
         let analytics = Analytics::new(AnalyticsConfig::default());
         let mw = AnalyticsMiddleware::new(analytics.clone());
 
-        let req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+        let req = HttpRequest::new("GET", "/api/users/123".to_string());
         let next: Next = Box::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok().with_body(b"hello".to_vec())) })
                 as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
@@ -301,7 +301,7 @@ mod tests {
         // Disabled: nothing recorded, response still flows.
         let analytics = Analytics::new(AnalyticsConfig::builder().enabled(false).build());
         let mw = AnalyticsMiddleware::new(analytics.clone());
-        let req = HttpRequest::new("GET".to_string(), "/api/x".to_string());
+        let req = HttpRequest::new("GET", "/api/x".to_string());
         let next: Next = Box::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok()) })
                 as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
@@ -313,7 +313,7 @@ mod tests {
         // Excluded path: not recorded.
         let analytics = Analytics::new(AnalyticsConfig::default());
         let mw = AnalyticsMiddleware::new(analytics.clone());
-        let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+        let req = HttpRequest::new("GET", "/health".to_string());
         let next: Next = Box::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok()) })
                 as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>

@@ -195,7 +195,7 @@ impl ScriptRouter {
     /// values, so the caller can insert them into `request.path_params`
     /// before dispatching to the handler.
     fn find_route(&self, request: &HttpRequest) -> Option<(&Route, HashMap<String, String>)> {
-        let method_str = &request.method;
+        let method_str = request.method_str();
         let path = &request.path;
 
         for route in &self.routes {
@@ -477,7 +477,7 @@ mod tests {
         let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
         let router = ScriptRouter::new(engine).get("/users/:id", "user.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/users/42".to_string());
+        let request = HttpRequest::new("GET", "/users/42".to_string());
         let response = router.handle(request).await;
 
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
         let router = ScriptRouter::new(engine).get("/api/*", "api.rhai");
 
         let response = router
-            .handle(HttpRequest::new("GET".to_string(), "/apix".to_string()))
+            .handle(HttpRequest::new("GET", "/apix".to_string()))
             .await;
 
         assert_eq!(

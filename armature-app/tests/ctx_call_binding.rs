@@ -50,7 +50,7 @@ const SCRIPT: &str = r#"
 async fn ctx_invoke_resolves_and_invokes_the_service_method() {
     let router = support::build_router_from_script(SCRIPT);
 
-    let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+    let request = HttpRequest::new("GET", "/api/users".to_string());
     let response = router.route(request).await.unwrap_or_else(|e| {
         panic!(
             "ctx.invoke(\"UserService\", \"get_users\") should resolve to a matched route, got \
@@ -89,7 +89,7 @@ async fn ctx_invoke_with_an_argument_resolves() {
     "#;
     let router = support::build_router_from_script(script);
 
-    let request = HttpRequest::new("GET".to_string(), "/greet".to_string());
+    let request = HttpRequest::new("GET", "/greet".to_string());
     let response = router.route(request).await.expect("route should dispatch");
 
     assert_eq!(response.status, 200);
@@ -110,7 +110,7 @@ async fn ctx_call_cannot_be_made_to_work_it_is_a_reserved_rhai_keyword() {
     let script = SCRIPT.replace("ctx.invoke(", "ctx.call(");
     let router = support::build_router_from_script(&script);
 
-    let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+    let request = HttpRequest::new("GET", "/api/users".to_string());
     let response = router
         .route(request)
         .await

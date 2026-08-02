@@ -22,7 +22,7 @@ fn request_with_query(pairs: &[(&str, &str)]) -> HttpRequest {
         query.insert(k.to_string(), v.to_string());
     }
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         "/search".to_string(),
         HashMap::new(),
         vec![],

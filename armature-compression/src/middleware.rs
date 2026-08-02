@@ -364,7 +364,7 @@ mod tests {
             CompressionConfig::builder().gzip().min_size(10).build(),
         );
 
-        let mut req = HttpRequest::new("GET".to_string(), "/data".to_string());
+        let mut req = HttpRequest::new("GET", "/data".to_string());
         req.headers.insert("Accept-Encoding", "gzip");
 
         let body = "Hello, World! ".repeat(100);
@@ -402,7 +402,7 @@ mod tests {
         let middleware =
             CompressionMiddleware::with_config(CompressionConfig::builder().min_size(10).build());
 
-        let req = HttpRequest::new("GET".to_string(), "/data".to_string());
+        let req = HttpRequest::new("GET", "/data".to_string());
         let body = "Hello, World! ".repeat(100);
         let next = next_returning(create_response(&body, "text/plain"));
 

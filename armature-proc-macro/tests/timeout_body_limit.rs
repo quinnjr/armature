@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 fn request_with_body(body: Vec<u8>) -> HttpRequest {
     HttpRequest::from_parts(
-        "POST".to_string(),
+        "POST",
         "/".to_string(),
         HashMap::new(),
         body,

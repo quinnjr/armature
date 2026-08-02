@@ -1,5 +1,6 @@
 // HTTP request and response types
 
+use crate::Method;
 use crate::body::RequestBody;
 use crate::extensions::Extensions;
 use crate::headers::HeaderMap;
@@ -14,7 +15,11 @@ use std::sync::Arc;
 /// For zero-copy body handling, use `body_bytes()` or `set_body_bytes()`.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
-    pub method: String,
+    /// The request method.
+    ///
+    /// Was a `String`. An unrecognized token is carried as `Method::Other`
+    /// rather than rejected here; routing answers it with 405.
+    pub method: Method,
     pub path: String,
     /// Request headers stored in a SmallVec-backed `HeaderMap`.
     ///
@@ -41,9 +46,14 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
-    pub fn new(method: String, path: String) -> Self {
+    /// Create a request.
+    ///
+    /// Generic in the method so every existing `HttpRequest::new("GET", …)`
+    /// call site compiles unchanged.
+    #[inline]
+    pub fn new(method: impl Into<Method>, path: String) -> Self {
         Self {
-            method,
+            method: method.into(),
             path,
             headers: HeaderMap::new(),
             body: Vec::new(),
@@ -56,9 +66,13 @@ impl HttpRequest {
 
     /// Create a new request with pre-allocated extensions capacity.
     #[inline]
-    pub fn with_extensions_capacity(method: String, path: String, capacity: usize) -> Self {
+    pub fn with_extensions_capacity(
+        method: impl Into<Method>,
+        path: String,
+        capacity: usize,
+    ) -> Self {
         Self {
-            method,
+            method: method.into(),
             path,
             headers: HeaderMap::new(),
             body: Vec::new(),
@@ -74,9 +88,9 @@ impl HttpRequest {
     /// This is the most efficient way to create a request from Hyper's body,
     /// as it avoids copying the body data.
     #[inline]
-    pub fn with_bytes_body(method: String, path: String, body: Bytes) -> Self {
+    pub fn with_bytes_body(method: impl Into<Method>, path: String, body: Bytes) -> Self {
         Self {
-            method,
+            method: method.into(),
             path,
             headers: HeaderMap::new(),
             body: Vec::new(), // Not used when body_bytes is set
@@ -134,6 +148,12 @@ impl HttpRequest {
         self.body_bytes.is_some()
     }
 
+    /// The method as a string, for logging and for code that compares tokens.
+    #[inline]
+    pub fn method_str(&self) -> &str {
+        self.method.as_str()
+    }
+
     /// Set the body from a Vec<u8>.
     #[inline]
     pub fn set_body(&mut self, body: Vec<u8>) {
@@ -144,7 +164,7 @@ impl HttpRequest {
     /// Create a request from all parts (for compatibility in tests).
     #[inline]
     pub fn from_parts(
-        method: String,
+        method: impl Into<Method>,
         path: String,
         headers: HashMap<String, String>,
         body: Vec<u8>,
@@ -152,7 +172,7 @@ impl HttpRequest {
         query_params: HashMap<String, String>,
     ) -> Self {
         Self {
-            method,
+            method: method.into(),
             path,
             headers: headers.into(),
             body,
@@ -170,7 +190,7 @@ impl HttpRequest {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let mut request = HttpRequest::new("GET".into(), "/".into());
+    /// let mut request = HttpRequest::new("GET", "/".into());
     /// request.insert_extension(app_state);
     /// ```
     #[inline]
@@ -891,8 +911,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_accepts_str_and_string_and_method() {
+        // All three forms must compile: existing call sites pass a String, and
+        // new code should be able to pass a Method directly.
+        let a = HttpRequest::new("GET", "/a".to_string());
+        let b = HttpRequest::new("POST", "/b".to_string());
+        let c = HttpRequest::new(Method::Put, "/c".to_string());
+        assert_eq!(a.method, Method::Get);
+        assert_eq!(b.method, Method::Post);
+        assert_eq!(c.method, Method::Put);
+    }
+
+    #[test]
+    fn method_compares_against_str_and_reports_itself_as_str() {
+        let req = HttpRequest::new("DELETE", "/x".to_string());
+        assert!(req.method == "DELETE");
+        assert!(req.method != "GET");
+        assert_eq!(req.method_str(), "DELETE");
+
+        // An unknown token survives intact rather than being coerced.
+        let odd = HttpRequest::new("PURGE", "/x".to_string());
+        assert_eq!(odd.method_str(), "PURGE");
+        assert!(odd.method == "PURGE");
+    }
+
+    #[test]
     fn test_http_request_new() {
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         assert_eq!(req.method, "GET");
         assert_eq!(req.path, "/test");
         assert!(req.headers.is_empty());
@@ -901,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_http_request_with_body() {
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         req.body = vec![1, 2, 3, 4];
         assert_eq!(req.body.len(), 4);
     }
@@ -914,7 +959,7 @@ mod tests {
             age: u32,
         }
 
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         req.body = serde_json::to_vec(&serde_json::json!({
             "name": "John",
             "age": 30
@@ -928,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_http_request_param() {
-        let mut req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/users/123".to_string());
         req.path_params.insert("id".to_string(), "123".to_string());
 
         assert_eq!(req.param("id"), Some(&"123".to_string()));
@@ -937,7 +982,7 @@ mod tests {
 
     #[test]
     fn test_http_request_query() {
-        let mut req = HttpRequest::new("GET".to_string(), "/users".to_string());
+        let mut req = HttpRequest::new("GET", "/users".to_string());
         req.query_params
             .insert("sort".to_string(), "asc".to_string());
 
@@ -947,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_http_request_clone() {
-        let req1 = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req1 = HttpRequest::new("GET", "/test".to_string());
         let req2 = req1.clone();
 
         assert_eq!(req1.method, req2.method);
@@ -1048,7 +1093,7 @@ mod tests {
 
     #[test]
     fn test_http_request_with_headers() {
-        let mut req = HttpRequest::new("GET".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("GET", "/api".to_string());
         req.headers
             .insert("Authorization", "Bearer token".to_string());
         req.headers
@@ -1066,7 +1111,7 @@ mod tests {
         headers.insert("X-Custom".to_string(), "abc".to_string());
 
         let req = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/api".to_string(),
             headers,
             Vec::new(),
@@ -1089,7 +1134,7 @@ mod tests {
             name: String,
         }
 
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         req.body = b"invalid json".to_vec();
 
         let result: Result<TestData, crate::Error> = req.json();

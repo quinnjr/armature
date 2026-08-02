@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn test_correlation_context_from_request() {
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers
             .insert(headers::CORRELATION_ID, "corr-123".to_string());
         req.headers
@@ -1281,7 +1281,7 @@ mod tests {
 
     #[test]
     fn test_correlated_request_extension() {
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers
             .insert(headers::CORRELATION_ID, "corr-123".to_string());
         req.headers
@@ -1314,7 +1314,7 @@ mod tests {
             .span_id("span-789")
             .with_session("session-abc");
 
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         ctx.inject_into_request(&mut req);
 
         assert_eq!(req.headers.get(headers::CORRELATION_ID), Some("corr-123"));

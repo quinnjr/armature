@@ -119,7 +119,7 @@ fn bench_http_request_body(c: &mut Criterion) {
     // Old way: set body via Vec<u8> assignment
     group.bench_function("legacy_vec_assignment", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+            let mut req = HttpRequest::new("POST", "/api".to_string());
             req.body = black_box(vec![0u8; 1024]);
             black_box(req.body.len())
         })
@@ -129,7 +129,7 @@ fn bench_http_request_body(c: &mut Criterion) {
     let bytes = Bytes::from(vec![0u8; 1024]);
     group.bench_function("bytes_assignment", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+            let mut req = HttpRequest::new("POST", "/api".to_string());
             req.set_body_bytes(black_box(bytes.clone()));
             black_box(req.body_ref().len())
         })
@@ -138,11 +138,8 @@ fn bench_http_request_body(c: &mut Criterion) {
     // New way: constructor with Bytes
     group.bench_function("constructor_with_bytes", |b| {
         b.iter(|| {
-            let req = HttpRequest::with_bytes_body(
-                "POST".to_string(),
-                "/api".to_string(),
-                black_box(bytes.clone()),
-            );
+            let req =
+                HttpRequest::with_bytes_body("POST", "/api".to_string(), black_box(bytes.clone()));
             black_box(req.body_ref().len())
         })
     });

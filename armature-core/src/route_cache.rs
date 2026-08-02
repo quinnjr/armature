@@ -73,7 +73,7 @@ impl RouteKey {
             .unwrap_or(&req.path);
 
         Some(Self {
-            method: HttpMethod::from_str(&req.method)?,
+            method: HttpMethod::try_from(&req.method).ok()?,
             path: path.to_string(),
         })
     }
@@ -618,7 +618,7 @@ impl OptimizedRouter {
         }
 
         // Unknown HTTP methods must not fall back to GET handlers.
-        let Some(method) = HttpMethod::from_str(&request.method) else {
+        let Ok(method) = HttpMethod::try_from(&request.method) else {
             return Err(Error::RouteNotFound(format!("{} {}", request.method, path)));
         };
 
@@ -860,10 +860,10 @@ mod tests {
 
     #[test]
     fn test_route_key_from_request_unknown_method() {
-        let req = HttpRequest::new("PROPFIND".to_string(), "/health".to_string());
+        let req = HttpRequest::new("PROPFIND", "/health".to_string());
         assert!(RouteKey::from_request(&req).is_none());
 
-        let req = HttpRequest::new("GET".to_string(), "/health?x=1".to_string());
+        let req = HttpRequest::new("GET", "/health?x=1".to_string());
         let key = RouteKey::from_request(&req).unwrap();
         assert_eq!(key, RouteKey::new(HttpMethod::GET, "/health"));
     }
@@ -894,16 +894,13 @@ mod tests {
 
         // Known method hits the static fast path.
         let ok = router
-            .route(HttpRequest::new("GET".to_string(), "/health".to_string()))
+            .route(HttpRequest::new("GET", "/health".to_string()))
             .await;
         assert!(ok.is_ok());
 
         // Unknown method must not fall back to the GET handler.
         let err = router
-            .route(HttpRequest::new(
-                "PROPFIND".to_string(),
-                "/health".to_string(),
-            ))
+            .route(HttpRequest::new("PROPFIND", "/health".to_string()))
             .await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
@@ -924,20 +921,14 @@ mod tests {
 
         // First request: pattern match populates the cache.
         let first = router
-            .route(HttpRequest::new(
-                "GET".to_string(),
-                "/files/docs/readme.md".to_string(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
         assert_eq!(first.body, b"docs/readme.md");
 
         // Second request: served from the cache, must yield the same params.
         let second = router
-            .route(HttpRequest::new(
-                "GET".to_string(),
-                "/files/docs/readme.md".to_string(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
         assert_eq!(second.body, b"docs/readme.md");
@@ -960,7 +951,7 @@ mod tests {
 
         let response = router
             .route(HttpRequest::new(
-                "GET".to_string(),
+                "GET",
                 "/search?q=hello%20world".to_string(),
             ))
             .await
@@ -1106,7 +1097,7 @@ mod tests {
 
         // Static route → O(1) static fast path.
         let resp = opt
-            .route(HttpRequest::new("GET".into(), "/health".into()))
+            .route(HttpRequest::new("GET", "/health".into()))
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
@@ -1114,7 +1105,7 @@ mod tests {
 
         // Param route → pattern match, params extracted onto the request.
         let resp = opt
-            .route(HttpRequest::new("GET".into(), "/users/42".into()))
+            .route(HttpRequest::new("GET", "/users/42".into()))
             .await
             .unwrap();
         assert_eq!(resp.body, b"42");
@@ -1138,10 +1129,7 @@ mod tests {
 
         // Catch-all returns the full joined remainder, not a single segment.
         let resp = opt
-            .route(HttpRequest::new(
-                "GET".into(),
-                "/files/docs/readme.md".into(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md".into()))
             .await
             .unwrap();
         assert_eq!(resp.body, b"docs/readme.md");
@@ -1163,19 +1151,19 @@ mod tests {
 
         // Valid param passes.
         let ok = opt
-            .route(HttpRequest::new("GET".into(), "/users/123".into()))
+            .route(HttpRequest::new("GET", "/users/123".into()))
             .await;
         assert!(ok.is_ok());
 
         // Invalid param → same BadRequest as the linear router.
         let err = opt
-            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
+            .route(HttpRequest::new("GET", "/users/abc".into()))
             .await;
         assert!(matches!(err, Err(Error::BadRequest(_))));
 
         // Cached path must re-validate constraints identically.
         let err_again = opt
-            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
+            .route(HttpRequest::new("GET", "/users/abc".into()))
             .await;
         assert!(matches!(err_again, Err(Error::BadRequest(_))));
     }
@@ -1191,7 +1179,7 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         let err = opt
-            .route(HttpRequest::new("PROPFIND".into(), "/health".into()))
+            .route(HttpRequest::new("PROPFIND", "/health".into()))
             .await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
@@ -1207,15 +1195,13 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         // QUERY carries its query in the body; routing matches on method+path.
-        let mut req = HttpRequest::new("QUERY".into(), "/search".into());
+        let mut req = HttpRequest::new("QUERY", "/search".into());
         req.body = b"name=john".to_vec();
         let resp = opt.route(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
         // GET to the same path must NOT reach the QUERY handler.
-        let err = opt
-            .route(HttpRequest::new("GET".into(), "/search".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("GET", "/search".into())).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
 
@@ -1244,13 +1230,13 @@ mod tests {
         // Reference: what the linear router does for /users/me.
         let linear = router
             .clone()
-            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me".into()))
             .await
             .unwrap();
 
         let opt = OptimizedRouter::from_router(&router);
         let optimized = opt
-            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me".into()))
             .await
             .unwrap();
 
@@ -1273,10 +1259,7 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         let resp = opt
-            .route(HttpRequest::new(
-                "GET".into(),
-                "/search?q=hello%20world".into(),
-            ))
+            .route(HttpRequest::new("GET", "/search?q=hello%20world".into()))
             .await
             .unwrap();
         assert_eq!(resp.body, b"hello world");

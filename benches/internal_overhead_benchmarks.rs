@@ -583,7 +583,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
         b.iter(|| {
             let h = handler.clone();
             runtime.block_on(async move {
-                let req = HttpRequest::new("GET".to_string(), "/".to_string());
+                let req = HttpRequest::new("GET", "/".to_string());
                 let _ = h.call(black_box(req)).await;
             })
         })
@@ -594,7 +594,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
         b.iter(|| {
             let h = handler.clone();
             runtime.block_on(async move {
-                let req = HttpRequest::new("GET".to_string(), "/".to_string());
+                let req = HttpRequest::new("GET", "/".to_string());
                 let _ = h.call(black_box(req)).await;
             })
         })
@@ -605,7 +605,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
         b.iter(|| {
             let h = handler.clone();
             runtime.block_on(async move {
-                let mut req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+                let mut req = HttpRequest::new("GET", "/users/123".to_string());
                 req.path_params.insert("id".to_string(), "123".to_string());
                 let _ = h.call(black_box(req)).await;
             })
@@ -620,7 +620,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
             let h = handler.clone();
             let b = body.clone();
             runtime.block_on(async move {
-                let mut req = HttpRequest::new("POST".to_string(), "/api/data".to_string());
+                let mut req = HttpRequest::new("POST", "/api/data".to_string());
                 req.body = b;
                 let _ = h.call(black_box(req)).await;
             })
@@ -677,7 +677,7 @@ fn bench_full_cycle(c: &mut Criterion) {
     group.bench_function("health_check", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+                let req = HttpRequest::new("GET", "/health".to_string());
                 let _ = router.route(black_box(req)).await;
             })
         })
@@ -687,7 +687,7 @@ fn bench_full_cycle(c: &mut Criterion) {
     group.bench_function("get_with_param", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+                let req = HttpRequest::new("GET", "/api/users/123".to_string());
                 let _ = router.route(black_box(req)).await;
             })
         })
@@ -700,7 +700,7 @@ fn bench_full_cycle(c: &mut Criterion) {
         b.iter(|| {
             let b = body.clone();
             runtime.block_on(async {
-                let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+                let mut req = HttpRequest::new("POST", "/api/users".to_string());
                 req.headers
                     .insert("Content-Type", "application/json".to_string());
                 req.body = b;

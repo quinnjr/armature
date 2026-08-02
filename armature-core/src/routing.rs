@@ -266,7 +266,7 @@ impl Router {
 
             let mut found = None;
             for (idx, route) in self.routes.iter().enumerate() {
-                if route.method.as_str() != request.method {
+                if route.method.as_str() != request.method_str() {
                     continue;
                 }
 
@@ -473,14 +473,14 @@ mod tests {
         let mut router = Router::new();
         router.query("/search", echo_body);
 
-        let mut request = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut request = HttpRequest::new("QUERY", "/search".to_string());
         request.body = b"name=john".to_vec();
         let response = router.route(request).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.into_body_bytes().as_ref(), b"name=john");
 
         // A GET to the same path must not hit the QUERY handler
-        let request = HttpRequest::new("GET".to_string(), "/search".to_string());
+        let request = HttpRequest::new("GET", "/search".to_string());
         assert!(router.route(request).await.is_err());
     }
 
@@ -604,7 +604,7 @@ mod tests {
         let mut router = Router::new();
         router.get("/files/*path", echo_path);
 
-        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let req = HttpRequest::new("GET", "/files/docs/readme.md".to_string());
         let response = router.route(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.into_body_bytes().as_ref(), b"docs/readme.md");
@@ -722,7 +722,7 @@ mod tests {
         let mut router = Router::new();
         router.get("/test", test_handler);
 
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = router.route(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -737,7 +737,7 @@ mod tests {
         let mut router = Router::new();
         router.get("/users/:id", param_handler);
 
-        let req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+        let req = HttpRequest::new("GET", "/users/123".to_string());
         let response = router.route(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(String::from_utf8(response.body).unwrap(), "123");
@@ -746,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn test_router_404() {
         let router = Router::new();
-        let req = HttpRequest::new("GET".to_string(), "/nonexistent".to_string());
+        let req = HttpRequest::new("GET", "/nonexistent".to_string());
         let result = router.route(req).await;
         assert!(matches!(result, Err(Error::RouteNotFound(_))));
     }

@@ -4,7 +4,7 @@ use armature_core::*;
 
 #[test]
 fn test_http_request_creation() {
-    let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+    let req = HttpRequest::new("GET", "/test".to_string());
     assert_eq!(req.method, "GET");
     assert_eq!(req.path, "/test");
     assert!(req.headers.is_empty());

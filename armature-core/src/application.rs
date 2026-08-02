@@ -2043,21 +2043,21 @@ mod tests {
         }];
 
         // Matches /admin/x → guard runs.
-        let req = HttpRequest::new("GET".to_string(), "/admin/x".to_string());
+        let req = HttpRequest::new("GET", "/admin/x".to_string());
         let decision = evaluate_scoped_guards(&guards, "/admin/x", req).await;
         assert!(decision.is_ok());
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
         // Does NOT match /public/y → guard is not evaluated.
         ran.store(false, std::sync::atomic::Ordering::SeqCst);
-        let req = HttpRequest::new("GET".to_string(), "/public/y".to_string());
+        let req = HttpRequest::new("GET", "/public/y".to_string());
         let decision = evaluate_scoped_guards(&guards, "/public/y", req).await;
         assert!(decision.is_ok());
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
 
         // /administrators must NOT match /admin → guard not evaluated.
         ran.store(false, std::sync::atomic::Ordering::SeqCst);
-        let req = HttpRequest::new("GET".to_string(), "/administrators".to_string());
+        let req = HttpRequest::new("GET", "/administrators".to_string());
         let _ = evaluate_scoped_guards(&guards, "/administrators", req).await;
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -2965,7 +2965,7 @@ mod tests {
         let chain = Arc::new(
             crate::exception_filter::ExceptionFilterChain::new().add_filter(PanickingFilter),
         );
-        let req = HttpRequest::new("GET".to_string(), "/panics".to_string());
+        let req = HttpRequest::new("GET", "/panics".to_string());
         let err = Error::Internal("boom".to_string());
 
         // Must fall back to exactly what `error_response(&err)` (i.e. no
@@ -2994,7 +2994,7 @@ mod tests {
         let chain = Arc::new(
             crate::exception_filter::ExceptionFilterChain::new().add_filter(HangingFilter),
         );
-        let req = HttpRequest::new("GET".to_string(), "/hangs".to_string());
+        let req = HttpRequest::new("GET", "/hangs".to_string());
         let err = Error::Internal("boom".to_string());
 
         // A short timeout (rather than the 5s production default) keeps this

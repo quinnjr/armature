@@ -38,7 +38,7 @@ impl RequestBinding {
         }
 
         Self {
-            method: req.method.clone(),
+            method: req.method_str().to_owned(),
             path: req.path.clone(),
             headers,
             query,

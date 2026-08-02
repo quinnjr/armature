@@ -26,13 +26,13 @@
 //! use armature_core::HttpRequest;
 //!
 //! // Create an HTTP request
-//! let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+//! let request = HttpRequest::new("GET", "/api/users".to_string());
 //!
 //! assert_eq!(request.method, "GET");
 //! assert_eq!(request.path, "/api/users");
 //!
 //! // Access path and query parameters
-//! let mut post = HttpRequest::new("POST".to_string(), "/api/users/123".to_string());
+//! let mut post = HttpRequest::new("POST", "/api/users/123".to_string());
 //! post.path_params.insert("id".to_string(), "123".to_string());
 //! post.query_params.insert("format".to_string(), "json".to_string());
 //! post.body = b"{\"name\":\"John\"}".to_vec();

@@ -149,7 +149,7 @@ fn bench_request_creation(c: &mut Criterion) {
     // Standard HttpRequest with typical data
     group.bench_function("http_request/typical", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST".to_string(), "/api/v1/users/123".to_string());
+            let mut req = HttpRequest::new("POST", "/api/v1/users/123".to_string());
             req.headers
                 .insert("Content-Type", "application/json".to_string());
             req.headers
@@ -187,7 +187,7 @@ fn bench_request_creation(c: &mut Criterion) {
     // HttpRequest with many headers
     group.bench_function("http_request/many_headers", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+            let mut req = HttpRequest::new("GET", "/api/data".to_string());
             for i in 0..20 {
                 req.headers.insert(
                     format!("X-Custom-Header-{}", i),
@@ -231,7 +231,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.bench_function("heap/full_cycle", |b| {
         b.iter(|| {
             // Create request
-            let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+            let mut req = HttpRequest::new("POST", "/api/users".to_string());
             req.headers
                 .insert("Content-Type", "application/json".to_string());
             req.headers
@@ -277,7 +277,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.bench_function("heap/100_requests", |b| {
         b.iter(|| {
             for i in 0..100 {
-                let mut req = HttpRequest::new("GET".to_string(), format!("/api/item/{}", i));
+                let mut req = HttpRequest::new("GET", format!("/api/item/{}", i));
                 req.headers.insert("Accept", "application/json".to_string());
                 req.query_params.insert("v".to_string(), "1".to_string());
                 black_box(&req);

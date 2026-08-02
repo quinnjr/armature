@@ -527,8 +527,9 @@ impl ConditionalRequest for HttpRequest {
             return Some(412);
         }
 
-        let method = self.method.to_uppercase();
-        let is_safe = method == "GET" || method == "HEAD";
+        // Only GET and HEAD get conditional-GET treatment; the other safe
+        // methods (OPTIONS/TRACE/QUERY) have no 304 semantics.
+        let is_safe = matches!(self.method, crate::Method::Get | crate::Method::Head);
 
         if is_safe {
             // Check not modified (304) - only for safe methods
@@ -849,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_if_match_wildcard_with_weak_etag_succeeds() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request.headers.insert("If-Match", "*".to_string());
 
         let weak = ETag::weak("abc123");
@@ -877,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_if_none_match_unsafe_method_no_match_proceeds() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request
             .headers
             .insert("If-None-Match", "\"abc123\"".to_string());
@@ -888,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_conditional_headers_if_none_match() {
-        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("GET", "/resource".to_string());
         request
             .headers
             .insert("If-None-Match", "\"abc123\"".to_string());
@@ -902,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_conditional_headers_if_match() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request.headers.insert("If-Match", "\"abc123\"".to_string());
 
         let headers = ConditionalHeaders::from_request(&request);
@@ -917,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_request_if_none_match_matches() {
-        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("GET", "/resource".to_string());
         request
             .headers
             .insert("If-None-Match", "\"abc123\"".to_string());
@@ -931,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_request_if_match_matches() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request.headers.insert("If-Match", "\"abc123\"".to_string());
 
         let matching = ETag::strong("abc123");
@@ -943,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_request_evaluate_conditionals_304() {
-        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("GET", "/resource".to_string());
         request
             .headers
             .insert("If-None-Match", "\"abc123\"".to_string());
@@ -954,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_request_evaluate_conditionals_412() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request.headers.insert("If-Match", "\"abc123\"".to_string());
 
         let etag = ETag::strong("xyz789");
@@ -963,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_request_evaluate_conditionals_proceed() {
-        let request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let request = HttpRequest::new("GET", "/resource".to_string());
         let etag = ETag::strong("abc123");
 
         // No conditional headers - should proceed
@@ -995,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_check_conditionals_returns_304() {
-        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("GET", "/resource".to_string());
         request
             .headers
             .insert("If-None-Match", "\"abc123\"".to_string());
@@ -1009,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_check_conditionals_returns_412() {
-        let mut request = HttpRequest::new("PUT".to_string(), "/resource".to_string());
+        let mut request = HttpRequest::new("PUT", "/resource".to_string());
         request.headers.insert("If-Match", "\"abc123\"".to_string());
 
         let etag = ETag::strong("different");
@@ -1021,7 +1022,7 @@ mod tests {
 
     #[test]
     fn test_check_conditionals_returns_none() {
-        let request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        let request = HttpRequest::new("GET", "/resource".to_string());
         let etag = ETag::strong("abc123");
 
         let response = check_conditionals(&request, Some(&etag), None);

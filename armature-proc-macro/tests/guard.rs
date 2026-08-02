@@ -50,7 +50,7 @@ impl Guard for FlagGuard {
 
 fn request() -> HttpRequest {
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         "/protected".to_string(),
         HashMap::new(),
         vec![],

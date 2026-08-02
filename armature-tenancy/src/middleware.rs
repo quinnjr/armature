@@ -175,7 +175,7 @@ mod tests {
     }
 
     fn create_request() -> HttpRequest {
-        HttpRequest::new("GET".to_string(), "/api/users".to_string())
+        HttpRequest::new("GET", "/api/users".to_string())
     }
 
     #[tokio::test]

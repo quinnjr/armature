@@ -22,7 +22,7 @@ pub fn build_router<M: Module + Default>() -> Router {
 /// A bare `GET` request for `path`.
 pub fn get_request(path: &str) -> HttpRequest {
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         path.to_string(),
         HashMap::new(),
         vec![],

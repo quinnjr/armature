@@ -495,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_guard_denies_unauthorized() {
         let guard = {{name_pascal}}Guard::new();
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let context = GuardContext::new(req);
 
         let result = guard.can_activate(&context).await;
@@ -505,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn test_guard_allows_authorized() {
         let guard = {{name_pascal}}Guard::new();
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("authorization".to_string(), "Bearer token".to_string());
         let context = GuardContext::new(req);
 

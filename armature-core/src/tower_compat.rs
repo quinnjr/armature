@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_request() {
-        let original = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let original = HttpRequest::new("GET", "/test".to_string());
 
         let http_req = original.clone().into_http_request();
         let back = <HttpRequest as FromHttpRequest>::from_http_request(http_req);

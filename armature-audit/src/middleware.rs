@@ -217,7 +217,7 @@ impl AuditMiddleware {
     /// let middleware = AuditMiddleware::new(logger);
     /// assert_eq!(middleware.write_failure_count(), 0);
     ///
-    /// let request = HttpRequest::new("GET".to_string(), "/".to_string());
+    /// let request = HttpRequest::new("GET", "/".to_string());
     /// let result = middleware
     ///     .handle(
     ///         request,
@@ -355,7 +355,7 @@ impl Middleware for AuditMiddleware {
         let start = Instant::now();
 
         // Extract request information
-        let method = request.method.clone();
+        let method = request.method_str().to_owned();
         let path = request.path.clone();
         let user_id = self.extract_user_id(&request);
         let ip_address = self.extract_ip(&request);
@@ -545,7 +545,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"alice-42","role":"admin"}"#);
         let token = format!("{header}.{payload}.signature");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {token}"));
 
@@ -575,7 +575,7 @@ mod tests {
         let payload = engine.encode(br#"{"user_id":"bob-7"}"#);
         let token = format!("{header}.{payload}.sig");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {token}"));
 
@@ -587,7 +587,7 @@ mod tests {
         let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
         let middleware = AuditMiddleware::new(logger);
 
-        let req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let req = HttpRequest::new("GET", "/".to_string());
         assert_eq!(middleware.extract_user_id(&req), None);
     }
 
@@ -606,7 +606,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"victim"}"#);
         let forged = format!("{header}.{payload}.not-a-real-signature");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {forged}"));
 
@@ -632,7 +632,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"victim"}"#);
         let forged = format!("{header}.{payload}.sig");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {forged}"));
         // Real auth middleware attached a verified principal.
@@ -653,7 +653,7 @@ mod tests {
         let ctx = UserContext::new("sub-value".to_string())
             .with_metadata(serde_json::json!({ "account_id": "acct-9" }));
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.insert_extension(ctx);
 
         // Custom claim is read from the verified claim set (metadata).
@@ -683,7 +683,7 @@ mod tests {
 
         assert_eq!(middleware.write_failure_count(), 0);
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let result = middleware
             .handle(
                 request,
@@ -708,7 +708,7 @@ mod tests {
         let logger = Arc::new(AuditLogger::builder().backend(FailingBackend).build());
         let middleware = AuditMiddleware::new(logger).fail_on_error(true);
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let result = middleware
             .handle(
                 request,

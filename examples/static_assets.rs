@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Box::pin(async move {
                 let path = req.path.trim_start_matches("/static");
                 server
-                    .serve(&HttpRequest::new("GET".to_string(), path.to_string()))
+                    .serve(&HttpRequest::new("GET", path.to_string()))
                     .await
             })
         })),
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = spa_server.clone();
             Box::pin(async move {
                 let path = req.path.trim_start_matches("/app");
-                let mut spa_req = HttpRequest::new("GET".to_string(), path.to_string());
+                let mut spa_req = HttpRequest::new("GET", path.to_string());
                 // Copy headers for conditional requests
                 spa_req.headers = req.headers.clone();
                 server.serve(&spa_req).await
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cdn_server.clone();
             Box::pin(async move {
                 let path = req.path.trim_start_matches("/cdn");
-                let mut cdn_req = HttpRequest::new("GET".to_string(), path.to_string());
+                let mut cdn_req = HttpRequest::new("GET", path.to_string());
                 cdn_req.headers = req.headers.clone();
                 server.serve(&cdn_req).await
             })
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Box::pin(async move {
                 let path = req.path.trim_start_matches("/dev");
                 server
-                    .serve(&HttpRequest::new("GET".to_string(), path.to_string()))
+                    .serve(&HttpRequest::new("GET", path.to_string()))
                     .await
             })
         })),
@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = custom_server.clone();
             Box::pin(async move {
                 let path = req.path.trim_start_matches("/custom");
-                let mut custom_req = HttpRequest::new("GET".to_string(), path.to_string());
+                let mut custom_req = HttpRequest::new("GET", path.to_string());
                 custom_req.headers = req.headers.clone();
                 server.serve(&custom_req).await
             })

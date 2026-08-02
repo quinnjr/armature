@@ -80,7 +80,7 @@ fn demonstrate_body_extraction() {
     println!("-------------------");
 
     // Simulate a POST request with JSON body
-    let mut request = HttpRequest::new("POST".to_string(), "/users".to_string());
+    let mut request = HttpRequest::new("POST", "/users".to_string());
     request.body = serde_json::to_vec(&serde_json::json!({
         "name": "Alice Smith",
         "email": "alice@example.com",
@@ -107,7 +107,7 @@ fn demonstrate_query_extraction() {
     println!("-------------------------------");
 
     // Simulate a GET request with query parameters
-    let mut request = HttpRequest::new("GET".to_string(), "/users".to_string());
+    let mut request = HttpRequest::new("GET", "/users".to_string());
     request
         .query_params
         .insert("page".to_string(), "2".to_string());
@@ -145,7 +145,7 @@ fn demonstrate_path_extraction() {
     println!("------------------------------");
 
     // Simulate a GET request with path parameters
-    let mut request = HttpRequest::new("GET".to_string(), "/users/123/posts/456".to_string());
+    let mut request = HttpRequest::new("GET", "/users/123/posts/456".to_string());
     request
         .path_params
         .insert("user_id".to_string(), "123".to_string());
@@ -179,7 +179,7 @@ fn demonstrate_header_extraction() {
     println!("4️⃣  Header Extraction");
     println!("---------------------");
 
-    let mut request = HttpRequest::new("GET".to_string(), "/api/protected".to_string());
+    let mut request = HttpRequest::new("GET", "/api/protected".to_string());
     request.headers.insert(
         "Authorization",
         "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9".to_string(),
@@ -226,7 +226,7 @@ fn demonstrate_combined_extraction() {
     println!("--------------------------------");
     println!("   Simulating a PUT /users/:id request with body and query...");
 
-    let mut request = HttpRequest::new("PUT".to_string(), "/users/42".to_string());
+    let mut request = HttpRequest::new("PUT", "/users/42".to_string());
 
     // Set path parameter
     request

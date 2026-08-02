@@ -20,7 +20,7 @@ fn request_with(
     query_params: &[(&str, &str)],
     headers: &[(&str, &str)],
 ) -> HttpRequest {
-    let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+    let mut req = HttpRequest::new("GET", "/".to_string());
     for (k, v) in path_params {
         req.path_params.insert((*k).to_string(), (*v).to_string());
     }

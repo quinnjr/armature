@@ -350,7 +350,7 @@ impl Authorization {
 
 /// Extract the HTTP method.
 #[derive(Debug, Clone)]
-pub struct Method(pub String);
+pub struct Method(pub crate::Method);
 
 impl Extract for Method {
     #[inline]
@@ -364,7 +364,7 @@ impl std::ops::Deref for Method {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -932,7 +932,7 @@ mod tests {
     use super::*;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/api/users/123".to_string());
         req.headers
             .insert("content-type", "application/json".to_string());
         req.headers
@@ -998,7 +998,7 @@ mod tests {
             plus: String,
         }
 
-        let mut req = HttpRequest::new("GET".to_string(), "/search".to_string());
+        let mut req = HttpRequest::new("GET", "/search".to_string());
         req.query_params
             .insert("q".to_string(), "a&b=c%d".to_string());
         req.query_params

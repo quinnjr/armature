@@ -112,28 +112,28 @@ fn bench_routing(c: &mut Criterion) {
 
     group.bench_function("direct_router_static", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+            let req = HttpRequest::new("GET", "/health".to_string());
             black_box(direct_router.route(req).await.unwrap())
         })
     });
 
     group.bench_function("micro_app_static", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+            let req = HttpRequest::new("GET", "/health".to_string());
             black_box(micro_app.handle(req).await.unwrap())
         })
     });
 
     group.bench_function("direct_router_param", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+            let req = HttpRequest::new("GET", "/users/123".to_string());
             black_box(direct_router.route(req).await.unwrap())
         })
     });
 
     group.bench_function("micro_app_param", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+            let req = HttpRequest::new("GET", "/users/123".to_string());
             black_box(micro_app.handle(req).await.unwrap())
         })
     });
@@ -165,21 +165,21 @@ fn bench_middleware_overhead(c: &mut Criterion) {
 
     group.bench_function("no_middleware", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/".to_string());
+            let req = HttpRequest::new("GET", "/".to_string());
             black_box(app_no_mw.handle(req).await.unwrap())
         })
     });
 
     group.bench_function("1_middleware", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/".to_string());
+            let req = HttpRequest::new("GET", "/".to_string());
             black_box(app_1_mw.handle(req).await.unwrap())
         })
     });
 
     group.bench_function("3_middleware", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/".to_string());
+            let req = HttpRequest::new("GET", "/".to_string());
             black_box(app_3_mw.handle(req).await.unwrap())
         })
     });
@@ -287,7 +287,7 @@ fn bench_json_response(c: &mut Criterion) {
 
     group.bench_function("json_handler", |b| {
         b.to_async(&rt).iter(|| async {
-            let req = HttpRequest::new("GET".to_string(), "/json".to_string());
+            let req = HttpRequest::new("GET", "/json".to_string());
             black_box(app.handle(req).await.unwrap())
         })
     });

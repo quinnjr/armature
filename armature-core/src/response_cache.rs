@@ -401,7 +401,7 @@ impl fmt::Display for CacheControl {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     /// HTTP method
-    pub method: String,
+    pub method: crate::Method,
     /// Request path
     pub path: String,
     /// Query string (sorted for consistency)
@@ -445,7 +445,7 @@ impl CacheKey {
             .collect();
         vary_values.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let method = request.method.to_uppercase();
+        let method = request.method.clone();
 
         // For QUERY the request body *is* the query, so two requests with
         // different bodies are different cache entries.
@@ -1015,7 +1015,8 @@ impl ResponseCache {
         if !self
             .config
             .cacheable_methods
-            .contains(&request.method.to_uppercase())
+            .iter()
+            .any(|m| m == request.method_str())
         {
             return false;
         }
@@ -1416,7 +1417,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_from_request() {
-        let mut request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let mut request = HttpRequest::new("GET", "/api/users".to_string());
         request
             .query_params
             .insert("page".to_string(), "1".to_string());
@@ -1434,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_with_vary() {
-        let mut request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let mut request = HttpRequest::new("GET", "/api/users".to_string());
         request
             .headers
             .insert("Accept", "application/json".to_string());
@@ -1463,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_store_and_get() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let mut response = HttpResponse::ok();
         response.body = b"cached content".to_vec();
 
@@ -1478,7 +1479,7 @@ mod tests {
     async fn test_query_method_cached_with_body_in_key() {
         let cache = ResponseCache::new();
 
-        let mut search_a = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut search_a = HttpRequest::new("QUERY", "/search".to_string());
         search_a.body = b"name=alice".to_vec();
         let mut response_a = HttpResponse::ok();
         response_a.body = b"results for alice".to_vec();
@@ -1491,7 +1492,7 @@ mod tests {
         assert_eq!(cached.unwrap().body, b"results for alice");
 
         // Same path, different body: distinct entry, must miss
-        let mut search_b = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut search_b = HttpRequest::new("QUERY", "/search".to_string());
         search_b.body = b"name=bob".to_vec();
         assert!(cache.get(&search_b).await.is_none());
 
@@ -1508,9 +1509,9 @@ mod tests {
 
     #[test]
     fn test_query_cache_key_includes_body_hash() {
-        let mut req_a = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut req_a = HttpRequest::new("QUERY", "/search".to_string());
         req_a.body = b"a".to_vec();
-        let mut req_b = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut req_b = HttpRequest::new("QUERY", "/search".to_string());
         req_b.body = b"b".to_vec();
 
         let key_a = CacheKey::from_request(&req_a);
@@ -1520,7 +1521,7 @@ mod tests {
         assert_ne!(key_a.to_string_key(), key_b.to_string_key());
 
         // GET keys are unaffected by the body
-        let mut get_req = HttpRequest::new("GET".to_string(), "/search".to_string());
+        let mut get_req = HttpRequest::new("GET", "/search".to_string());
         get_req.body = b"ignored".to_vec();
         assert!(CacheKey::from_request(&get_req).body_hash.is_none());
     }
@@ -1528,7 +1529,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_invalidate() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let response = HttpResponse::ok();
 
         cache.store(&request, &response).await;
@@ -1541,7 +1542,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_respects_no_store() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let response = HttpResponse::ok().no_cache();
 
         cache.store(&request, &response).await;
@@ -1553,7 +1554,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_respects_private() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let response = HttpResponse::ok().cache_private(Duration::from_secs(300));
 
         cache.store(&request, &response).await;
@@ -1565,7 +1566,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_respects_no_cache_directive() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         let response = HttpResponse::ok().with_cache_control(CacheControl::new().no_cache());
 
         cache.store(&request, &response).await;
@@ -1576,7 +1577,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_authorization_not_stored() {
         let cache = ResponseCache::new();
-        let mut request = HttpRequest::new("GET".to_string(), "/api/me".to_string());
+        let mut request = HttpRequest::new("GET", "/api/me".to_string());
         request
             .headers
             .insert("Authorization", "Bearer user-a".to_string());
@@ -1592,7 +1593,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_authorization_stored_when_public() {
         let cache = ResponseCache::new();
-        let mut request = HttpRequest::new("GET".to_string(), "/api/assets".to_string());
+        let mut request = HttpRequest::new("GET", "/api/assets".to_string());
         request
             .headers
             .insert("Authorization", "Bearer user-a".to_string());
@@ -1606,7 +1607,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_ttl_from_max_age() {
         let cache = ResponseCache::new();
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         // max-age=0 must override the 5-minute default TTL.
         let response = HttpResponse::ok().cache_public(Duration::from_secs(0));
 
@@ -1618,7 +1619,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_vary_two_phase_lookup() {
         let cache = ResponseCache::new();
-        let mut request = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let mut request = HttpRequest::new("GET", "/api/data".to_string());
         request
             .headers
             .insert("Accept", "application/json".to_string());
@@ -1634,7 +1635,7 @@ mod tests {
         assert_eq!(hit.unwrap().body, b"json");
 
         // A request with a different Accept value is a different variant.
-        let mut other = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let mut other = HttpRequest::new("GET", "/api/data".to_string());
         other.headers.insert("Accept", "text/xml".to_string());
         assert!(cache.get(&other).await.is_none());
     }
@@ -1642,7 +1643,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_cache_invalidate_removes_vary_variants() {
         let cache = ResponseCache::new();
-        let mut request = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let mut request = HttpRequest::new("GET", "/api/data".to_string());
         request
             .headers
             .insert("Accept", "application/json".to_string());
@@ -1652,7 +1653,7 @@ mod tests {
         assert!(cache.get(&request).await.is_some());
 
         // Invalidating with a plain request must remove all variants.
-        let plain = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let plain = HttpRequest::new("GET", "/api/data".to_string());
         cache.invalidate(&plain).await;
         assert!(cache.get(&request).await.is_none());
     }
@@ -1678,10 +1679,10 @@ mod tests {
 
     #[test]
     fn test_request_allows_cached() {
-        let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let request = HttpRequest::new("GET", "/api/users".to_string());
         assert!(request.allows_cached());
 
-        let mut request_no_cache = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+        let mut request_no_cache = HttpRequest::new("GET", "/api/users".to_string());
         request_no_cache
             .headers
             .insert("Cache-Control", "no-cache".to_string());
@@ -1698,7 +1699,7 @@ mod tests {
         let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(8));
 
         for i in 0..100 {
-            let mut req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+            let mut req = HttpRequest::new("QUERY", "/search".to_string());
             req.body = format!("q={}", i).into_bytes();
             let mut resp = HttpResponse::ok();
             resp.body = format!("result {}", i).into_bytes();
@@ -1729,25 +1730,25 @@ mod tests {
         let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(3));
 
         for i in 0..3 {
-            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            let req = HttpRequest::new("GET", format!("/p{}", i));
             cache.store(&req, &HttpResponse::ok()).await;
         }
         for i in 0..3 {
-            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            let req = HttpRequest::new("GET", format!("/p{}", i));
             assert!(cache.get(&req).await.is_some(), "/p{} should be cached", i);
         }
 
         // A fourth insert must evict the oldest (/p0), not any newer entry.
-        let req = HttpRequest::new("GET".to_string(), "/p3".to_string());
+        let req = HttpRequest::new("GET", "/p3".to_string());
         cache.store(&req, &HttpResponse::ok()).await;
 
-        let p0 = HttpRequest::new("GET".to_string(), "/p0".to_string());
+        let p0 = HttpRequest::new("GET", "/p0".to_string());
         assert!(
             cache.get(&p0).await.is_none(),
             "oldest entry (/p0) must be evicted first"
         );
         for i in 1..4 {
-            let req = HttpRequest::new("GET".to_string(), format!("/p{}", i));
+            let req = HttpRequest::new("GET", format!("/p{}", i));
             assert!(cache.get(&req).await.is_some(), "/p{} must remain", i);
         }
 
@@ -1768,14 +1769,14 @@ mod tests {
     #[tokio::test]
     async fn test_eviction_refresh_resets_recency() {
         async fn store(cache: &ResponseCache, path: &str, body: &[u8]) {
-            let req = HttpRequest::new("GET".to_string(), path.to_string());
+            let req = HttpRequest::new("GET", path.to_string());
             let mut resp = HttpResponse::ok();
             resp.body = body.to_vec();
             cache.store(&req, &resp).await;
         }
         async fn present(cache: &ResponseCache, path: &str) -> bool {
             cache
-                .get(&HttpRequest::new("GET".to_string(), path.to_string()))
+                .get(&HttpRequest::new("GET", path.to_string()))
                 .await
                 .is_some()
         }
@@ -1806,9 +1807,9 @@ mod tests {
     async fn test_purge_stale_shrinks_vary_index() {
         let cache = ResponseCache::new();
 
-        let mut stale_req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut stale_req = HttpRequest::new("QUERY", "/search".to_string());
         stale_req.body = b"q=stale".to_vec();
-        let mut fresh_req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
+        let mut fresh_req = HttpRequest::new("QUERY", "/search".to_string());
         fresh_req.body = b"q=fresh".to_vec();
         let resp = HttpResponse::ok();
 
@@ -1846,7 +1847,7 @@ mod tests {
         let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(10_000));
 
         for i in 0..2000 {
-            let req = HttpRequest::new("GET".to_string(), format!("/churn/{}", i % 5));
+            let req = HttpRequest::new("GET", format!("/churn/{}", i % 5));
             cache.store(&req, &HttpResponse::ok()).await;
             cache.invalidate(&req).await;
         }
@@ -1869,7 +1870,7 @@ mod tests {
     #[tokio::test]
     async fn test_eviction_order_bounded_under_repeated_restore() {
         let cache = ResponseCache::with_config(ResponseCacheConfig::new().max_entries(10_000));
-        let req = HttpRequest::new("GET".to_string(), "/hot".to_string());
+        let req = HttpRequest::new("GET", "/hot".to_string());
 
         for i in 0..2000 {
             let mut resp = HttpResponse::ok();
@@ -1903,7 +1904,7 @@ mod tests {
         let cache = ResponseCache::new();
 
         // Variant 1: keyed on Accept.
-        let mut req_accept = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let mut req_accept = HttpRequest::new("GET", "/api/data".to_string());
         req_accept
             .headers
             .insert("Accept", "application/json".to_string());
@@ -1912,7 +1913,7 @@ mod tests {
         cache.store(&req_accept, &resp_accept).await;
 
         // Variant 2: same path, keyed on Accept-Encoding.
-        let mut req_enc = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+        let mut req_enc = HttpRequest::new("GET", "/api/data".to_string());
         req_enc
             .headers
             .insert("Accept-Encoding", "gzip".to_string());

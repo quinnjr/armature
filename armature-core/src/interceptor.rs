@@ -309,7 +309,7 @@ impl Interceptor for CacheInterceptor {
         // case of a non-GET/HEAD request, this skips the allocation and
         // length-prefixing work entirely.
         let cache_key =
-            is_cacheable_method(&context.request.method).then(|| cache_key(&context.request));
+            is_cacheable_method(context.request.method_str()).then(|| cache_key(&context.request));
 
         // Lookup: serve a fresh hit without touching the handler.
         if let Some(key) = cache_key.as_deref() {
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_execution_context_creation() {
-        let request = crate::HttpRequest::new("GET".to_string(), "/test".to_string());
+        let request = crate::HttpRequest::new("GET", "/test".to_string());
 
         let context = ExecutionContext::new(request.clone());
         assert_eq!(context.request.method, "GET");
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_execution_context_with_metadata() {
-        let mut request = crate::HttpRequest::new("POST".to_string(), "/api/users".to_string());
+        let mut request = crate::HttpRequest::new("POST", "/api/users".to_string());
         request.body = vec![1, 2, 3];
 
         let context = ExecutionContext::new(request.clone());
@@ -430,14 +430,14 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/cached".into()));
+        let ctx = ExecutionContext::new(HttpRequest::new("GET", "/cached".into()));
         let first = interceptor
             .intercept(ctx, counting_next(calls.clone(), 200, b"payload"))
             .await
             .unwrap();
         assert_eq!(first.body_ref(), b"payload");
 
-        let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/cached".into()));
+        let ctx = ExecutionContext::new(HttpRequest::new("GET", "/cached".into()));
         let second = interceptor
             .intercept(ctx, counting_next(calls.clone(), 200, b"payload"))
             .await
@@ -458,7 +458,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..3 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/x".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/x".into()));
             interceptor
                 .intercept(ctx, counting_next(calls.clone(), 200, b"body"))
                 .await
@@ -475,12 +475,12 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/a".into()));
+        let ctx = ExecutionContext::new(HttpRequest::new("GET", "/a".into()));
         interceptor
             .intercept(ctx, counting_next(calls.clone(), 200, b"a"))
             .await
             .unwrap();
-        let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/b".into()));
+        let ctx = ExecutionContext::new(HttpRequest::new("GET", "/b".into()));
         interceptor
             .intercept(ctx, counting_next(calls.clone(), 200, b"b"))
             .await
@@ -498,7 +498,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/err".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/err".into()));
             interceptor
                 .intercept(ctx, counting_next(calls.clone(), 500, b"boom"))
                 .await
@@ -518,7 +518,7 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let mut req_cats = HttpRequest::new("GET".into(), "/search".into());
+        let mut req_cats = HttpRequest::new("GET", "/search".into());
         req_cats.query_params.insert("q".into(), "cats".into());
         let first = interceptor
             .intercept(
@@ -529,7 +529,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"cats-result");
 
-        let mut req_dogs = HttpRequest::new("GET".into(), "/search".into());
+        let mut req_dogs = HttpRequest::new("GET", "/search".into());
         req_dogs.query_params.insert("q".into(), "dogs".into());
         let second = interceptor
             .intercept(
@@ -565,7 +565,7 @@ mod tests {
 
         let first = interceptor
             .intercept(
-                ExecutionContext::new(HttpRequest::new("GET".into(), "/me".into())),
+                ExecutionContext::new(HttpRequest::new("GET", "/me".into())),
                 cookie_next(calls.clone()),
             )
             .await
@@ -579,7 +579,7 @@ mod tests {
         // Second request must NOT be served user-0's body or cookie from cache.
         let second = interceptor
             .intercept(
-                ExecutionContext::new(HttpRequest::new("GET".into(), "/me".into())),
+                ExecutionContext::new(HttpRequest::new("GET", "/me".into())),
                 cookie_next(calls.clone()),
             )
             .await
@@ -605,7 +605,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("POST".into(), "/submit".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("POST", "/submit".into()));
             interceptor
                 .intercept(ctx, counting_next(calls.clone(), 200, b"ok"))
                 .await
@@ -643,7 +643,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/private".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/private".into()));
             interceptor
                 .intercept(ctx, header_next(calls.clone(), "cache-control", "private"))
                 .await
@@ -666,7 +666,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/no-store".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/no-store".into()));
             interceptor
                 .intercept(
                     ctx,
@@ -692,7 +692,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/lc-cookie".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/lc-cookie".into()));
             interceptor
                 .intercept(
                     ctx,
@@ -721,7 +721,7 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let mut req_encoded = HttpRequest::new("GET".into(), "/inject".into());
+        let mut req_encoded = HttpRequest::new("GET", "/inject".into());
         req_encoded.query_params.insert("a".into(), "1&b=2".into());
         let first = interceptor
             .intercept(
@@ -732,7 +732,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"encoded-result");
 
-        let mut req_plain = HttpRequest::new("GET".into(), "/inject".into());
+        let mut req_plain = HttpRequest::new("GET", "/inject".into());
         req_plain.query_params.insert("a".into(), "1".into());
         req_plain.query_params.insert("b".into(), "2".into());
         let second = interceptor
@@ -764,7 +764,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/gz".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/gz".into()));
             interceptor
                 .intercept(ctx, header_next(calls.clone(), "Content-Encoding", "gzip"))
                 .await
@@ -787,7 +787,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
-            let ctx = ExecutionContext::new(HttpRequest::new("GET".into(), "/vary".into()));
+            let ctx = ExecutionContext::new(HttpRequest::new("GET", "/vary".into()));
             interceptor
                 .intercept(ctx, header_next(calls.clone(), "Vary", "Accept-Encoding"))
                 .await
@@ -815,7 +815,7 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let req_literal_path = HttpRequest::new("GET".into(), "/a?1:b=1:c&".into());
+        let req_literal_path = HttpRequest::new("GET", "/a?1:b=1:c&".into());
         let first = interceptor
             .intercept(
                 ExecutionContext::new(req_literal_path),
@@ -825,7 +825,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"path-result");
 
-        let mut req_path_plus_query = HttpRequest::new("GET".into(), "/a".into());
+        let mut req_path_plus_query = HttpRequest::new("GET", "/a".into());
         req_path_plus_query
             .query_params
             .insert("b".into(), "c".into());
