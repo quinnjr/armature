@@ -49,7 +49,7 @@ impl TelemetryMiddleware {
     fn extract_attributes(&self, req: &HttpRequest) -> Vec<KeyValue> {
         let mut attributes = vec![
             KeyValue::new("http.method", req.method.to_string()),
-            KeyValue::new("http.target", req.path.clone()),
+            KeyValue::new("http.target", req.path_str().to_owned()),
             KeyValue::new("http.scheme", "http"),
         ];
 

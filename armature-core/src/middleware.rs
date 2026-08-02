@@ -583,6 +583,7 @@ impl Middleware for LoggingMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_middleware_chain() {
@@ -615,7 +616,7 @@ mod tests {
 
         let response = chain.apply(req, handler).await.unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, b"direct");
+        assert_eq!(response.body, Bytes::from_static(b"direct"));
     }
 
     #[tokio::test]
@@ -642,7 +643,7 @@ mod tests {
     async fn test_body_size_limit() {
         let middleware = BodySizeLimitMiddleware::new(10);
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = vec![0; 20]; // 20 bytes, exceeds limit
+        req.body = Bytes::from(vec![0; 20]); // 20 bytes, exceeds limit
 
         let result = middleware
             .handle(
@@ -1017,7 +1018,7 @@ mod tests {
     async fn test_body_size_within_limit() {
         let middleware = BodySizeLimitMiddleware::new(100);
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = vec![0; 50]; // 50 bytes, within limit
+        req.body = Bytes::from(vec![0; 50]); // 50 bytes, within limit
 
         let result = middleware
             .handle(

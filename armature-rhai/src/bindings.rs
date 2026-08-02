@@ -39,7 +39,7 @@ impl RequestBinding {
 
         Self {
             method: req.method_str().to_owned(),
-            path: req.path.clone(),
+            path: req.path_str().to_owned(),
             headers,
             query,
             params,
@@ -127,7 +127,7 @@ impl RequestBinding {
 
     /// Get body as string.
     pub fn body_text(&mut self) -> Result<String, Box<EvalAltResult>> {
-        String::from_utf8(self.body.clone())
+        String::from_utf8(self.body.to_vec())
             .map_err(|e| Box::new(EvalAltResult::from(e.to_string())))
     }
 

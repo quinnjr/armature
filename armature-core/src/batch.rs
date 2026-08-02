@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(result.requests[0].path, "/");
         assert_eq!(result.requests[1].method, "POST");
         assert_eq!(result.requests[1].path, "/api");
-        assert_eq!(result.requests[1].body, b"test");
+        assert_eq!(result.requests[1].body, Bytes::from_static(b"test"));
     }
 
     #[test]

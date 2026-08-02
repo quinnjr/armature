@@ -49,6 +49,7 @@
 use crate::handler::{BoxedHandler, IntoHandler};
 use crate::route_cache::OptimizedRouter;
 use crate::{DEFAULT_MAX_BODY_SIZE, Error, HttpMethod, HttpRequest, HttpResponse, Router};
+use bytes::Bytes;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -1016,12 +1017,9 @@ pub(crate) async fn apply_gzip_offload(
     level: CompressionLevel,
 ) -> HttpResponse {
     let had_content_length = response.headers.contains_key("Content-Length");
-    let was_bytes_backed = response.has_bytes_body();
-    let original: Vec<u8> = if was_bytes_backed {
-        response.body_bytes().to_vec()
-    } else {
-        std::mem::take(&mut response.body)
-    };
+    // A copy, so `response` still holds the original body: nothing to restore
+    // if the encode fails.
+    let original: Vec<u8> = response.body.to_vec();
 
     match gzip_encode_offloaded(original, level).await {
         Ok(compressed) => {
@@ -1036,15 +1034,10 @@ pub(crate) async fn apply_gzip_offload(
                 );
             }
         }
-        Err(original) => {
-            // Encoding failed, or the offload task did not complete
-            // normally. If the body was legacy-`Vec`-backed we took it out
-            // via `mem::take` above, so it must be restored explicitly; if
-            // it was `body_bytes`-backed, `response` was never mutated
-            // (see doc comment) and already holds the original untouched.
-            if !was_bytes_backed {
-                response.body = original;
-            }
+        Err(_original) => {
+            // Encoding failed, or the offload task did not complete normally.
+            // `response` was never mutated, so it already holds the original
+            // body; the copy handed to the encoder is simply dropped.
         }
     }
 
@@ -1268,7 +1261,7 @@ async fn handle_micro_request(
             return Ok(to_hyper_response(HttpResponse::new(400)));
         }
     };
-    http_req.body = body_bytes;
+    http_req.body = Bytes::from(body_bytes);
 
     // Handle request
     let response = app.handle(http_req).await;
@@ -1450,20 +1443,20 @@ mod tests {
         let app = App::new().route("/files/*path", get(files)).build();
         let req = HttpRequest::new("GET", "/files/docs/readme.md".to_string());
         let resp = app.handle(req).await.unwrap();
-        assert_eq!(resp.body, b"docs/readme.md");
+        assert_eq!(resp.body, Bytes::from_static(b"docs/readme.md"));
     }
 
     #[tokio::test]
     async fn test_built_app_query_method_and_unknown_method() {
         async fn echo(req: HttpRequest) -> Result<HttpResponse, Error> {
-            Ok(HttpResponse::ok().with_body(req.body.clone()))
+            Ok(HttpResponse::ok().with_bytes_body(req.body.clone()))
         }
 
         let app = App::new().route("/search", query(echo)).build();
 
         // QUERY carries its query in the body and routes on method+path.
         let mut req = HttpRequest::new("QUERY", "/search".to_string());
-        req.body = b"name=john".to_vec();
+        req.body = Bytes::from_static(b"name=john");
         let resp = app.handle(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
@@ -1519,7 +1512,7 @@ mod tests {
         Box::new(move |_req: HttpRequest| {
             Box::pin(async move {
                 let mut resp = HttpResponse::ok();
-                resp.body = body;
+                resp.body = Bytes::from(body);
                 Ok(resp)
             })
         })
@@ -1539,7 +1532,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_gzips_when_accepted() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET", "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip, deflate, br");
 
         let original = vec![b'a'; 8192];
@@ -1563,7 +1556,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_skips_without_accept_encoding() {
         let mw = Compress::default();
-        let req = HttpRequest::new("GET", "/".into());
+        let req = HttpRequest::new("GET", "/");
 
         let original = vec![b'b'; 8192];
         let resp = mw.call(req, body_next(original.clone())).await.unwrap();
@@ -1587,14 +1580,14 @@ mod tests {
     #[tokio::test]
     async fn test_compress_merges_vary_with_existing_value() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET", "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         let original = vec![b'c'; 8192];
         let next: Next = Box::new(move |_req: HttpRequest| {
             Box::pin(async move {
                 let mut resp = HttpResponse::ok();
-                resp.body = original;
+                resp.body = Bytes::from(original);
                 resp.headers
                     .insert("Vary".to_string(), "Origin".to_string());
                 Ok(resp)
@@ -1623,7 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_offloads_large_body_and_round_trips() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET", "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         // Well above the offload threshold; non-repeating so it does not trivially
@@ -1656,7 +1649,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_handles_bytes_backed_body_above_offload_threshold() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET", "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))

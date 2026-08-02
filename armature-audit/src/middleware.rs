@@ -356,7 +356,7 @@ impl Middleware for AuditMiddleware {
 
         // Extract request information
         let method = request.method_str().to_owned();
-        let path = request.path.clone();
+        let path = request.path_str().to_owned();
         let user_id = self.extract_user_id(&request);
         let ip_address = self.extract_ip(&request);
         let user_agent = self.extract_user_agent(&request);

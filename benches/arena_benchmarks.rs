@@ -9,6 +9,7 @@ use armature_core::HttpRequest;
 use armature_core::arena::{
     ArenaMap, ArenaRequest, ArenaStr, ArenaVec, RequestScope, reset_arena, with_arena,
 };
+use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -237,7 +238,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
             req.headers
                 .insert("Authorization", "Bearer xyz".to_string());
             req.query_params.insert("page".to_string(), "1".to_string());
-            req.body = b"{\"name\":\"John\"}".to_vec();
+            req.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
             // "Process" request
             let _method = req.method.clone();

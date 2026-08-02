@@ -46,6 +46,7 @@
 //! ```
 
 use bumpalo::Bump;
+use bytes::Bytes;
 use std::cell::RefCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -524,7 +525,7 @@ impl<'a> ArenaRequest<'a> {
             req.query_params.insert(k.to_string(), v.to_string());
         }
 
-        req.body = self.body.to_vec();
+        req.body = Bytes::copy_from_slice(self.body);
         req
     }
 }

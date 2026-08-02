@@ -772,7 +772,7 @@ mod tests {
             .route(req("GET", "/admin/user"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(
             body.contains("Alice"),
             "list body should contain seeded rows"
@@ -805,7 +805,7 @@ mod tests {
             .route(req("GET", "/admin/user?per_page=3"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let row_count = body.matches("<tr>").count() - 1; // minus header row
         assert_eq!(row_count, 3, "per_page=3 must return 3 rows");
 
@@ -814,7 +814,7 @@ mod tests {
             .route(req("GET", "/admin/user?per_page=1000"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let row_count = body.matches("<tr>").count() - 1;
         assert_eq!(
             row_count, 5,
@@ -894,7 +894,7 @@ mod tests {
         // Render the list page and pull the search input's `name` straight out of
         // the emitted HTML, exactly as a browser would submit it.
         let resp = router.route(req("GET", "/admin/user")).await.unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let form = body
             .split("admin-search")
             .nth(1)
@@ -912,7 +912,7 @@ mod tests {
         // Submit that param and assert real filtering occurs.
         let path = format!("/admin/user?{param}=Alice");
         let resp = router.route(req("GET", &path)).await.unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"), "search must keep the matching row");
         assert!(
             !body.contains("Bob"),
@@ -946,7 +946,7 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(ct.contains("text/csv"), "export must be served as CSV");
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(
             !body.contains("<table"),
             "CSV export must not re-render HTML"
@@ -961,7 +961,7 @@ mod tests {
             .route(req("GET", "/admin/user?export=csv&search=Alice"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"));
         assert!(
             !body.contains("Bob"),
@@ -987,7 +987,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"), "edit form should prefill values");
         assert!(body.contains("<form"), "edit form should render a form");
     }

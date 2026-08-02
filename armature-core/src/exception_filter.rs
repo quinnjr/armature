@@ -91,7 +91,7 @@ pub struct ExceptionContext {
     /// User ID (if authenticated)
     pub user_id: Option<String>,
     /// The path that was being accessed
-    pub path: String,
+    pub path: crate::ByteStr,
     /// The HTTP method
     pub method: crate::Method,
     /// Additional context data
@@ -404,7 +404,7 @@ impl ExceptionFilter for HttpExceptionFilter {
 
         let mut response = ErrorResponse::new(status)
             .error_type(error_type)
-            .path(&ctx.path);
+            .path(ctx.path.as_str());
 
         // Add message
         if self.production_mode && error.is_server_error() {
@@ -474,7 +474,7 @@ impl ExceptionFilter for ValidationExceptionFilter {
                 .message("Validation failed")
                 .error_type("VALIDATION_ERROR")
                 .details(msg)
-                .path(&ctx.path);
+                .path(ctx.path.as_str());
 
             return Some(response.into_http_response(self.format));
         }
@@ -542,7 +542,7 @@ impl ExceptionFilter for NotFoundExceptionFilter {
             let response = ErrorResponse::new(404)
                 .message(message)
                 .error_type("NOT_FOUND")
-                .path(&ctx.path);
+                .path(ctx.path.as_str());
 
             return Some(response.into_http_response(self.format));
         }
@@ -597,7 +597,7 @@ impl ExceptionFilter for UnauthorizedExceptionFilter {
             let response = ErrorResponse::new(401)
                 .message(msg)
                 .error_type("UNAUTHORIZED")
-                .path(&ctx.path);
+                .path(ctx.path.as_str());
 
             let mut http_response = response.into_http_response(self.format);
 
@@ -662,7 +662,7 @@ impl ExceptionFilter for RateLimitExceptionFilter {
             let response = ErrorResponse::new(429)
                 .message(msg)
                 .error_type("RATE_LIMITED")
-                .path(&ctx.path);
+                .path(ctx.path.as_str());
 
             let mut http_response = response.into_http_response(self.format);
 

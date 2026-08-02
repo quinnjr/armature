@@ -225,7 +225,7 @@ mod tests {
 
         // Empty body should not compress
         let mut response = create_response("", "application/json");
-        response.body = Vec::new();
+        response.body = armature_core::Bytes::new();
         assert!(!middleware.should_compress(&response));
     }
 
@@ -311,9 +311,9 @@ mod tests {
     #[cfg(feature = "gzip")]
     #[test]
     fn test_compress_json_body_bytes() {
-        // Responses built with `with_json` store their payload in `body_bytes`
-        // (the legacy `body` Vec is cleared). Verify such responses are actually
-        // compressed rather than silently skipped.
+        // Responses built with `with_json` set the body from a serialized
+        // buffer. Verify such responses are actually compressed rather than
+        // silently skipped.
         let middleware = CompressionMiddleware::with_config(
             CompressionConfig::builder().gzip().min_size(10).build(),
         );
@@ -323,9 +323,8 @@ mod tests {
         let payload: Vec<String> = vec!["armature".to_string(); 100];
         let response = HttpResponse::new(200).with_json(&payload).unwrap();
 
-        // Sanity: payload lives in body_bytes, not the legacy Vec, and exceeds min_size.
+        // Sanity: the payload landed in the body and exceeds min_size.
         assert!(response.has_bytes_body());
-        assert!(response.body.is_empty());
         assert!(response.body_len() > 10);
 
         let original_len = response.body_len();

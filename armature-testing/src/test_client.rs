@@ -1,5 +1,6 @@
 // Test HTTP Client
 
+use armature_core::Bytes;
 use armature_core::{Error, HttpMethod, HttpRequest, HttpResponse, Router};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,7 +55,7 @@ impl TestClient {
         body: Option<Vec<u8>>,
     ) -> TestResponse {
         let mut req = HttpRequest::new(method.as_str().to_string(), path.to_string());
-        req.body = body.unwrap_or_default();
+        req.body = Bytes::from(body.unwrap_or_default());
 
         // Route the request
         match self.router.route(req).await {
@@ -182,7 +183,7 @@ impl TestResponse {
     /// Get the response body as string
     pub fn body_string(&self) -> Option<String> {
         match self {
-            TestResponse::Success(response) => String::from_utf8(response.body.clone()).ok(),
+            TestResponse::Success(response) => String::from_utf8(response.body.to_vec()).ok(),
             TestResponse::Error(_) => None,
         }
     }

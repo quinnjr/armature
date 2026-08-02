@@ -401,6 +401,7 @@ fn parse_query_string(query: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     // Test helper handler
     async fn test_handler(_req: HttpRequest) -> Result<HttpResponse, Error> {
@@ -467,14 +468,14 @@ mod tests {
     #[tokio::test]
     async fn test_query_route_dispatch() {
         async fn echo_body(req: HttpRequest) -> Result<HttpResponse, Error> {
-            Ok(HttpResponse::ok().with_body(req.body.clone()))
+            Ok(HttpResponse::ok().with_bytes_body(req.body.clone()))
         }
 
         let mut router = Router::new();
         router.query("/search", echo_body);
 
         let mut request = HttpRequest::new("QUERY", "/search".to_string());
-        request.body = b"name=john".to_vec();
+        request.body = Bytes::from_static(b"name=john");
         let response = router.route(request).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.into_body_bytes().as_ref(), b"name=john");
@@ -740,7 +741,7 @@ mod tests {
         let req = HttpRequest::new("GET", "/users/123".to_string());
         let response = router.route(req).await.unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(String::from_utf8(response.body).unwrap(), "123");
+        assert_eq!(String::from_utf8(response.body.to_vec()).unwrap(), "123");
     }
 
     #[tokio::test]

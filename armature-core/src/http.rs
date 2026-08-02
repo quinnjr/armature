@@ -1,9 +1,9 @@
 // HTTP request and response types
 
-use crate::Method;
 use crate::body::RequestBody;
 use crate::extensions::Extensions;
 use crate::headers::HeaderMap;
+use crate::{ByteStr, Method};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 /// HTTP request wrapper
 ///
-/// The body is stored as `Vec<u8>` for backwards compatibility.
-/// For zero-copy body handling, use `body_bytes()` or `set_body_bytes()`.
+/// The path and body are `Bytes`-backed, so cloning a request is a handful of
+/// refcount bumps rather than a deep copy of the target and payload.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
     /// The request method.
@@ -20,7 +20,12 @@ pub struct HttpRequest {
     /// Was a `String`. An unrecognized token is carried as `Method::Other`
     /// rather than rejected here; routing answers it with 405.
     pub method: Method,
-    pub path: String,
+    /// The raw request target, query string included.
+    ///
+    /// Was a `String`. A `ByteStr` so it can be a slice of the connection read
+    /// buffer once the serve path moves onto `armature-h1`; `Deref<Target = str>`
+    /// keeps `&req.path` working wherever a `&str` is wanted.
+    pub path: ByteStr,
     /// Request headers stored in a SmallVec-backed `HeaderMap`.
     ///
     /// For typical requests (<12 headers) this is stored inline on the stack,
@@ -28,11 +33,11 @@ pub struct HttpRequest {
     /// The API is HashMap-compatible (`get`/`insert`/`iter`/`contains_key`/...),
     /// with case-insensitive header name lookup.
     pub headers: HeaderMap,
-    /// Request body as raw bytes.
+    /// The request body.
     ///
-    /// For zero-copy access, use `body_bytes()` to get a `Bytes` view,
-    /// or use `RequestBody` for efficient body handling.
-    pub body: Vec<u8>,
+    /// Was a `Vec<u8>` shadowed by an optional `Bytes` that could disagree with
+    /// it. One field, always authoritative.
+    pub body: Bytes,
     pub path_params: HashMap<String, String>,
     pub query_params: HashMap<String, String>,
     /// Type-safe extensions for storing application state.
@@ -40,9 +45,6 @@ pub struct HttpRequest {
     /// Use this to pass typed data to handlers without DI container lookups.
     /// Access via the `State<T>` extractor for zero-cost state retrieval.
     pub extensions: Extensions,
-    /// Optional zero-copy body storage using Bytes.
-    /// When set, this takes precedence over `body` for read operations.
-    body_bytes: Option<Bytes>,
 }
 
 impl HttpRequest {
@@ -51,16 +53,15 @@ impl HttpRequest {
     /// Generic in the method so every existing `HttpRequest::new("GET", …)`
     /// call site compiles unchanged.
     #[inline]
-    pub fn new(method: impl Into<Method>, path: String) -> Self {
+    pub fn new(method: impl Into<Method>, path: impl Into<ByteStr>) -> Self {
         Self {
             method: method.into(),
-            path,
+            path: path.into(),
             headers: HeaderMap::new(),
-            body: Vec::new(),
+            body: Bytes::new(),
             path_params: HashMap::new(),
             query_params: HashMap::new(),
             extensions: Extensions::new(),
-            body_bytes: None,
         }
     }
 
@@ -68,18 +69,17 @@ impl HttpRequest {
     #[inline]
     pub fn with_extensions_capacity(
         method: impl Into<Method>,
-        path: String,
+        path: impl Into<ByteStr>,
         capacity: usize,
     ) -> Self {
         Self {
             method: method.into(),
-            path,
+            path: path.into(),
             headers: HeaderMap::new(),
-            body: Vec::new(),
+            body: Bytes::new(),
             path_params: HashMap::new(),
             query_params: HashMap::new(),
             extensions: Extensions::with_capacity(capacity),
-            body_bytes: None,
         }
     }
 
@@ -88,52 +88,50 @@ impl HttpRequest {
     /// This is the most efficient way to create a request from Hyper's body,
     /// as it avoids copying the body data.
     #[inline]
-    pub fn with_bytes_body(method: impl Into<Method>, path: String, body: Bytes) -> Self {
+    pub fn with_bytes_body(
+        method: impl Into<Method>,
+        path: impl Into<ByteStr>,
+        body: Bytes,
+    ) -> Self {
         Self {
             method: method.into(),
-            path,
+            path: path.into(),
             headers: HeaderMap::new(),
-            body: Vec::new(), // Not used when body_bytes is set
+            body,
             path_params: HashMap::new(),
             query_params: HashMap::new(),
             extensions: Extensions::new(),
-            body_bytes: Some(body),
         }
     }
 
-    /// Set the body using Bytes (zero-copy).
-    ///
-    /// This avoids copying the body data from Hyper.
+    /// Set the body (zero-copy).
     #[inline]
     pub fn set_body_bytes(&mut self, bytes: Bytes) {
-        self.body_bytes = Some(bytes);
-        self.body.clear(); // Clear legacy body to save memory
+        self.body = bytes;
     }
 
-    /// Get the body as Bytes (zero-copy if stored as Bytes).
-    ///
-    /// If the body was set via `set_body_bytes()` or `with_bytes_body()`,
-    /// this returns a clone of the Bytes (O(1) reference count increment).
-    /// Otherwise, it creates Bytes from the Vec<u8>.
+    /// The body as `Bytes`. A refcount bump, not a copy.
     #[inline]
     pub fn body_bytes(&self) -> Bytes {
-        if let Some(ref bytes) = self.body_bytes {
-            bytes.clone() // O(1) - just increments ref count
-        } else {
-            Bytes::copy_from_slice(&self.body)
-        }
+        self.body.clone()
     }
 
-    /// Get a reference to the body bytes.
-    ///
-    /// Returns a reference to the body data without copying.
+    /// The body as a byte slice.
+    #[inline]
+    pub fn body_slice(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The body as a byte slice.
     #[inline]
     pub fn body_ref(&self) -> &[u8] {
-        if let Some(ref bytes) = self.body_bytes {
-            bytes.as_ref()
-        } else {
-            &self.body
-        }
+        &self.body
+    }
+
+    /// The request target as a string.
+    #[inline]
+    pub fn path_str(&self) -> &str {
+        self.path.as_str()
     }
 
     /// Get the body as a RequestBody (zero-copy wrapper).
@@ -142,10 +140,13 @@ impl HttpRequest {
         RequestBody::from_bytes(self.body_bytes())
     }
 
-    /// Check if the body is using zero-copy Bytes storage.
+    /// Whether the body holds anything.
+    ///
+    /// Kept for call-site compatibility from when the body could live in either
+    /// of two fields; it is always `Bytes` now.
     #[inline]
     pub fn has_bytes_body(&self) -> bool {
-        self.body_bytes.is_some()
+        !self.body.is_empty()
     }
 
     /// The method as a string, for logging and for code that compares tokens.
@@ -154,18 +155,17 @@ impl HttpRequest {
         self.method.as_str()
     }
 
-    /// Set the body from a Vec<u8>.
+    /// Set the body from a `Vec<u8>`, taking over its allocation.
     #[inline]
     pub fn set_body(&mut self, body: Vec<u8>) {
-        self.body = body;
-        self.body_bytes = None;
+        self.body = Bytes::from(body);
     }
 
     /// Create a request from all parts (for compatibility in tests).
     #[inline]
     pub fn from_parts(
         method: impl Into<Method>,
-        path: String,
+        path: impl Into<ByteStr>,
         headers: HashMap<String, String>,
         body: Vec<u8>,
         path_params: HashMap<String, String>,
@@ -173,13 +173,12 @@ impl HttpRequest {
     ) -> Self {
         Self {
             method: method.into(),
-            path,
+            path: path.into(),
             headers: headers.into(),
-            body,
+            body: Bytes::from(body),
             path_params,
             query_params,
             extensions: Extensions::new(),
-            body_bytes: None,
         }
     }
 
@@ -190,7 +189,7 @@ impl HttpRequest {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let mut request = HttpRequest::new("GET", "/".into());
+    /// let mut request = HttpRequest::new("GET", "/");
     /// request.insert_extension(app_state);
     /// ```
     #[inline]
@@ -413,11 +412,11 @@ pub struct HttpResponse {
     pub headers: LazyHeaders,
     /// Set-Cookie headers (supports multiple cookies per response).
     pub cookies: Vec<String>,
-    /// Response body as raw bytes (legacy field for compatibility).
-    pub body: Vec<u8>,
-    /// Optional zero-copy body storage using Bytes.
-    /// When set, this takes precedence over `body`.
-    body_bytes: Option<Bytes>,
+    /// The response body.
+    ///
+    /// Was a `Vec<u8>` shadowed by an optional `Bytes`. One field, always
+    /// authoritative.
+    pub body: Bytes,
 }
 
 /// Default pre-allocated response buffer size (512 bytes).
@@ -435,30 +434,28 @@ impl HttpResponse {
             status,
             headers: LazyHeaders::new(),
             cookies: Vec::new(),
-            body: Vec::new(),
-            body_bytes: None,
+            body: Bytes::new(),
         }
     }
 
-    /// Create a new response with pre-allocated body buffer.
+    /// Create a new response with pre-allocated header capacity.
     ///
-    /// This is more efficient than `new()` when you know you'll be
-    /// writing to the body, as it avoids reallocation.
+    /// The `capacity` argument is retained for source compatibility but no
+    /// longer reserves body space: `Bytes` is handed a finished buffer rather
+    /// than grown in place.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Pre-allocate for typical JSON responses
     /// let response = HttpResponse::with_capacity(200, 512);
     /// ```
     #[inline]
-    pub fn with_capacity(status: u16, capacity: usize) -> Self {
+    pub fn with_capacity(status: u16, _capacity: usize) -> Self {
         Self {
             status,
             headers: LazyHeaders::with_capacity(8),
             cookies: Vec::new(),
-            body: Vec::with_capacity(capacity),
-            body_bytes: None,
+            body: Bytes::new(),
         }
     }
 
@@ -504,9 +501,9 @@ impl HttpResponse {
         Self::new(500)
     }
 
+    /// Set the body from a `Vec<u8>`, taking over its allocation.
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
-        self.body = body;
-        self.body_bytes = None;
+        self.body = Bytes::from(body);
         self
     }
 
@@ -516,70 +513,54 @@ impl HttpResponse {
     /// as it can be passed directly to Hyper without copying.
     #[inline]
     pub fn with_bytes_body(mut self, bytes: Bytes) -> Self {
-        self.body_bytes = Some(bytes);
-        self.body.clear();
+        self.body = bytes;
         self
     }
 
     /// Set the body from a static byte slice (zero-copy).
     #[inline]
     pub fn with_static_body(mut self, body: &'static [u8]) -> Self {
-        self.body_bytes = Some(Bytes::from_static(body));
-        self.body.clear();
+        self.body = Bytes::from_static(body);
         self
     }
 
-    /// Get the body as Bytes (zero-copy if stored as Bytes).
-    ///
-    /// This is the key method for zero-copy Hyper body passthrough.
-    /// If body was set via `with_bytes_body()`, returns the Bytes directly (O(1)).
-    /// Otherwise, converts from Vec<u8>.
+    /// The body as `Bytes`. A refcount bump, not a copy.
     #[inline]
     pub fn body_bytes(&self) -> Bytes {
-        if let Some(ref bytes) = self.body_bytes {
-            bytes.clone() // O(1) - just increments ref count
-        } else {
-            Bytes::copy_from_slice(&self.body)
-        }
+        self.body.clone()
     }
 
-    /// Consume the response and return body as Bytes (zero-copy).
-    ///
-    /// This is the most efficient way to get the body for Hyper,
-    /// as it avoids cloning when body_bytes is set.
+    /// Consume the response and return the body.
     #[inline]
     pub fn into_body_bytes(self) -> Bytes {
-        if let Some(bytes) = self.body_bytes {
-            bytes
-        } else {
-            Bytes::from(self.body)
-        }
+        self.body
     }
 
-    /// Get a reference to the body bytes.
+    /// The body as a byte slice.
+    #[inline]
+    pub fn body_slice(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The body as a byte slice.
     #[inline]
     pub fn body_ref(&self) -> &[u8] {
-        if let Some(ref bytes) = self.body_bytes {
-            bytes.as_ref()
-        } else {
-            &self.body
-        }
+        &self.body
     }
 
-    /// Get the body length.
+    /// The body length in bytes.
     #[inline]
     pub fn body_len(&self) -> usize {
-        if let Some(ref bytes) = self.body_bytes {
-            bytes.len()
-        } else {
-            self.body.len()
-        }
+        self.body.len()
     }
 
-    /// Check if using zero-copy Bytes storage.
+    /// Whether the body holds anything.
+    ///
+    /// Kept for call-site compatibility from when the body could live in either
+    /// of two fields; it is always `Bytes` now.
     #[inline]
     pub fn has_bytes_body(&self) -> bool {
-        self.body_bytes.is_some()
+        !self.body.is_empty()
     }
 
     /// Serialize a value as JSON and set it as the response body.
@@ -598,8 +579,7 @@ impl HttpResponse {
     pub fn with_json<T: Serialize>(mut self, value: &T) -> Result<Self, crate::Error> {
         let vec =
             crate::json::to_vec(value).map_err(|e| crate::Error::Serialization(e.to_string()))?;
-        self.body_bytes = Some(Bytes::from(vec));
-        self.body.clear();
+        self.body = Bytes::from(vec);
         self.headers
             .insert("Content-Type".to_string(), "application/json".to_string());
         Ok(self)
@@ -624,8 +604,7 @@ impl HttpResponse {
             status,
             headers: LazyHeaders::from(headers),
             cookies: Vec::new(),
-            body: Vec::new(),
-            body_bytes: None,
+            body: Bytes::new(),
         }
     }
 
@@ -638,8 +617,7 @@ impl HttpResponse {
             status,
             headers: LazyHeaders::from(headers),
             cookies: Vec::new(),
-            body,
-            body_bytes: None,
+            body: Bytes::from(body),
         }
     }
 
@@ -923,6 +901,49 @@ mod tests {
     }
 
     #[test]
+    fn path_is_a_bytestr_and_still_compares_and_prints_as_a_str() {
+        let req = HttpRequest::new("GET", "/users/42?a=1");
+        assert_eq!(req.path_str(), "/users/42?a=1");
+        assert!(req.path == "/users/42?a=1");
+        assert_eq!(format!("{}", req.path), "/users/42?a=1");
+        // Deref<Target = str> keeps the `&str` surface intact.
+        assert!(req.path.starts_with("/users"));
+    }
+
+    #[test]
+    fn request_body_is_bytes_and_the_shadow_field_is_gone() {
+        let mut req = HttpRequest::new("POST", "/x");
+        req.set_body(b"hello".to_vec());
+        assert_eq!(req.body_slice(), b"hello");
+        // The old two-field arrangement could disagree with itself; one field
+        // cannot.
+        assert_eq!(req.body_bytes(), Bytes::from_static(b"hello"));
+        assert!(req.has_bytes_body());
+
+        req.set_body_bytes(Bytes::from_static(b"world"));
+        assert_eq!(req.body_slice(), b"world");
+        assert_eq!(req.body_ref(), b"world");
+    }
+
+    #[test]
+    fn cloning_a_body_does_not_copy_it() {
+        let big = Bytes::from(vec![7u8; 64 * 1024]);
+        let mut req = HttpRequest::new("POST", "/x");
+        req.set_body_bytes(big.clone());
+        let copy = req.clone();
+        // Same allocation, reached from two requests: the whole point of Bytes.
+        assert_eq!(copy.body.as_ptr(), req.body.as_ptr());
+    }
+
+    #[test]
+    fn response_body_is_bytes() {
+        let mut resp = HttpResponse::new(200);
+        resp.body = Bytes::from_static(b"{}");
+        assert_eq!(resp.body_slice(), b"{}");
+        assert_eq!(resp.body_len(), 2);
+    }
+
+    #[test]
     fn method_compares_against_str_and_reports_itself_as_str() {
         let req = HttpRequest::new("DELETE", "/x".to_string());
         assert!(req.method == "DELETE");
@@ -947,7 +968,7 @@ mod tests {
     #[test]
     fn test_http_request_with_body() {
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = vec![1, 2, 3, 4];
+        req.body = Bytes::from(vec![1, 2, 3, 4]);
         assert_eq!(req.body.len(), 4);
     }
 
@@ -960,11 +981,13 @@ mod tests {
         }
 
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = serde_json::to_vec(&serde_json::json!({
-            "name": "John",
-            "age": 30
-        }))
-        .unwrap();
+        req.body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "name": "John",
+                "age": 30
+            }))
+            .unwrap(),
+        );
 
         let data: TestData = req.json().unwrap();
         assert_eq!(data.name, "John");
@@ -1135,7 +1158,7 @@ mod tests {
         }
 
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = b"invalid json".to_vec();
+        req.body = Bytes::from_static(b"invalid json");
 
         let result: Result<TestData, crate::Error> = req.json();
         assert!(result.is_err());

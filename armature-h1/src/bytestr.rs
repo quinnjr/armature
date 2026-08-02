@@ -13,7 +13,7 @@ use std::str::Utf8Error;
 ///
 /// Cloning is a refcount increment. Slicing a `ByteStr` out of a larger
 /// buffer does not copy.
-#[derive(Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ByteStr(Bytes);
 
 impl ByteStr {
@@ -137,6 +137,56 @@ impl PartialEq<&str> for ByteStr {
     }
 }
 
+impl PartialEq<String> for ByteStr {
+    #[inline]
+    fn eq(&self, other: &String) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl std::hash::Hash for ByteStr {
+    /// Hashes as the `str` it is, not as the `Bytes` it holds.
+    ///
+    /// `<[u8]>::hash` writes a length prefix and `str::hash` writes a 0xff
+    /// terminator, so the two disagree. Delegating to `str` is what makes the
+    /// `Borrow<str>` impl below sound: a `&str` lookup must hash identically to
+    /// the owned `ByteStr` key.
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl PartialOrd for ByteStr {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByteStr {
+    /// Ordered by string content, not by buffer address.
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl AsRef<str> for ByteStr {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for ByteStr {
+    /// Lets a `ByteStr`-keyed map be looked up with a plain `&str`.
+    #[inline]
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +225,24 @@ mod tests {
         let s = ByteStr::from_static("/a/b?x=1");
         assert!(s.starts_with("/a"));
         assert_eq!(s.split('?').next(), Some("/a/b"));
+    }
+
+    /// `Borrow<str>` is only sound if a `&str` lookup hashes to the same slot
+    /// as the owned key. The derived `Hash` (over `Bytes`) did not.
+    #[test]
+    fn hashes_like_the_str_it_borrows_as() {
+        use std::collections::HashMap;
+        let mut map: HashMap<ByteStr, u32> = HashMap::new();
+        map.insert(ByteStr::from_static("content-type"), 7);
+        assert_eq!(map.get("content-type"), Some(&7));
+    }
+
+    #[test]
+    fn orders_and_compares_by_content() {
+        let mut v = [ByteStr::from_static("b"), ByteStr::from_static("a")];
+        v.sort();
+        assert_eq!(v[0], "a");
+        assert_eq!(ByteStr::from_static("x"), "x".to_string());
     }
 
     #[test]

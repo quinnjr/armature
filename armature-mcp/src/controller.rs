@@ -58,7 +58,7 @@ impl McpController {
 
     /// Handle POST /mcp - JSON-RPC endpoint
     pub async fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let body = String::from_utf8(req.body.clone())
+        let body = String::from_utf8(req.body.to_vec())
             .map_err(|e| Error::BadRequest(format!("Invalid UTF-8: {}", e)))?;
 
         // The MCP auth chain is HashMap-typed throughout; convert the request's

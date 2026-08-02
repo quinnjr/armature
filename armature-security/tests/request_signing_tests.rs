@@ -152,7 +152,7 @@ fn test_verify_http_request() {
     let signature = signer.sign("POST", "/api/test", body, timestamp);
 
     let mut request = HttpRequest::new("POST", "/api/test".to_string());
-    request.body = body.as_bytes().to_vec();
+    request.body = armature_core::Bytes::copy_from_slice(body.as_bytes());
     request.headers.insert("X-Signature", signature);
     request.headers.insert("X-Timestamp", timestamp.to_string());
 

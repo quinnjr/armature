@@ -17,6 +17,7 @@
 //! cargo run --release --manifest-path benches/comparison_servers/hyper_h1_server/Cargo.toml
 //! ```
 
+use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header::{HeaderValue, SERVER};

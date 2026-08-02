@@ -6,6 +6,7 @@
 #![allow(clippy::unnecessary_get_then_check)]
 
 use armature_core::*;
+use bytes::Bytes;
 
 // =============================================================================
 // HTTP Response Tests
@@ -28,7 +29,7 @@ fn test_http_response_convenience_methods() {
         response.headers.get("Content-Type"),
         Some(&"text/html; charset=utf-8".to_string())
     );
-    assert_eq!(response.body, b"<h1>Hello</h1>".to_vec());
+    assert_eq!(response.body, Bytes::from_static(b"<h1>Hello</h1>"));
 
     // Test text response
     let response = HttpResponse::text("Hello, World!");
@@ -227,7 +228,7 @@ fn test_http_request_helpers() {
     request
         .headers
         .insert("Content-Type", "application/json".to_string());
-    request.body = b"{\"name\":\"John\"}".to_vec();
+    request.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
     // Test param helper
     assert_eq!(request.param("id"), Some(&"123".to_string()));

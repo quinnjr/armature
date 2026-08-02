@@ -91,7 +91,7 @@ pub fn html_impl(input: TokenStream) -> TokenStream {
         {
             use armature_core::HttpResponse;
             let mut response = HttpResponse::new(#status);
-            response.body = (#value).to_string().into_bytes();
+            response.body = armature_core::Bytes::from((#value).to_string().into_bytes());
             response.headers.insert(
                 "Content-Type".to_string(),
                 "text/html; charset=utf-8".to_string()
@@ -115,7 +115,7 @@ pub fn text_impl(input: TokenStream) -> TokenStream {
         {
             use armature_core::HttpResponse;
             let mut response = HttpResponse::new(#status);
-            response.body = (#value).to_string().into_bytes();
+            response.body = armature_core::Bytes::from((#value).to_string().into_bytes());
             response.headers.insert(
                 "Content-Type".to_string(),
                 "text/plain; charset=utf-8".to_string()

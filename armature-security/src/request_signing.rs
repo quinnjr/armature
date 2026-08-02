@@ -420,10 +420,9 @@ mod tests {
         let mut request = HttpRequest::new("POST", "/api/secure".to_string());
         request.headers.insert("X-Signature", signature);
         request.headers.insert("X-Timestamp", timestamp.to_string());
-        // Simulate the real server path: body arrives as zero-copy Bytes,
-        // which empties the legacy `body` field.
+        // Simulate the real server path: the body arrives as zero-copy Bytes.
         request.set_body_bytes(bytes::Bytes::from_static(body.as_bytes()));
-        assert!(request.body.is_empty());
+        assert_eq!(request.body_slice(), body.as_bytes());
 
         assert!(verifier.verify_request(&request).unwrap());
     }

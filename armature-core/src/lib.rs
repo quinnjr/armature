@@ -23,19 +23,19 @@
 //! ### HTTP Request Handling
 //!
 //! ```
-//! use armature_core::HttpRequest;
+//! use armature_core::{Bytes, HttpRequest};
 //!
 //! // Create an HTTP request
-//! let request = HttpRequest::new("GET", "/api/users".to_string());
+//! let request = HttpRequest::new("GET", "/api/users");
 //!
 //! assert_eq!(request.method, "GET");
 //! assert_eq!(request.path, "/api/users");
 //!
 //! // Access path and query parameters
-//! let mut post = HttpRequest::new("POST", "/api/users/123".to_string());
+//! let mut post = HttpRequest::new("POST", "/api/users/123");
 //! post.path_params.insert("id".to_string(), "123".to_string());
 //! post.query_params.insert("format".to_string(), "json".to_string());
-//! post.body = b"{\"name\":\"John\"}".to_vec();
+//! post.body = Bytes::from_static(b"{\"name\":\"John\"}");
 //!
 //! assert_eq!(post.param("id"), Some(&"123".to_string()));
 //! assert_eq!(post.query("format"), Some(&"json".to_string()));
@@ -213,7 +213,11 @@ pub use application::*;
 /// `armature-h1` so downstream crates need not depend on it directly.
 pub use armature_h1::header as header_id;
 pub use armature_h1::{ByteStr, HeaderId, Method};
+// Re-exported because `HttpRequest.body`/`HttpResponse.body` are `Bytes`:
+// downstream crates need to name the type without taking their own `bytes`
+// dependency, and a version skew between theirs and ours would not compile.
 pub use body_limits::*;
+pub use bytes::Bytes;
 pub use connection::{
     Connection, ConnectionConfig, ConnectionEvent, ConnectionPool, ConnectionRecycler,
     ConnectionState, ConnectionStats, PoolHandle, Recyclable, RecyclableConnection, RecyclePool,

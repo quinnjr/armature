@@ -370,7 +370,7 @@ impl std::ops::Deref for Method {
 
 /// Extract the request path.
 #[derive(Debug, Clone)]
-pub struct RequestPath(pub String);
+pub struct RequestPath(pub crate::ByteStr);
 
 impl Extract for RequestPath {
     #[inline]
@@ -384,7 +384,7 @@ impl std::ops::Deref for RequestPath {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -930,6 +930,7 @@ pub fn middleware_stats() -> &'static ZeroCostStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn create_request() -> HttpRequest {
         let mut req = HttpRequest::new("GET", "/api/users/123".to_string());
@@ -937,7 +938,7 @@ mod tests {
             .insert("content-type", "application/json".to_string());
         req.headers
             .insert("authorization", "Bearer token123".to_string());
-        req.body = br#"{"name":"test"}"#.to_vec();
+        req.body = Bytes::from_static(br#"{"name":"test"}"#);
         req.path_params.insert("id".to_string(), "123".to_string());
         req.query_params.insert("page".to_string(), "1".to_string());
         req.query_params

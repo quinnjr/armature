@@ -403,7 +403,7 @@ pub struct CacheKey {
     /// HTTP method
     pub method: crate::Method,
     /// Request path
-    pub path: String,
+    pub path: crate::ByteStr,
     /// Query string (sorted for consistency)
     pub query: String,
     /// Vary header values that affect caching
@@ -549,7 +549,7 @@ pub struct CachedResponseData {
     /// Response headers
     pub headers: HashMap<String, String>,
     /// Response body
-    pub body: Vec<u8>,
+    pub body: bytes::Bytes,
 }
 
 impl CachedResponse {
@@ -611,11 +611,14 @@ impl CachedResponse {
 
     /// Convert to an HttpResponse.
     pub fn to_response(&self) -> HttpResponse {
+        // `with_bytes_body` rather than `from_parts`, so serving a cache hit is
+        // a refcount bump on the stored body rather than a copy of it.
         let mut response = HttpResponse::from_parts(
             self.response.status,
             self.response.headers.clone(),
-            self.response.body.clone(),
-        );
+            Vec::new(),
+        )
+        .with_bytes_body(self.response.body.clone());
 
         // Add Age header
         response
@@ -1352,6 +1355,7 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_cache_directive_parse() {
@@ -1451,7 +1455,7 @@ mod tests {
     #[test]
     fn test_cached_response() {
         let mut response = HttpResponse::ok();
-        response.body = b"Hello, World!".to_vec();
+        response.body = Bytes::from_static(b"Hello, World!");
         response
             .headers
             .insert("ETag".to_string(), "\"abc123\"".to_string());
@@ -1466,13 +1470,13 @@ mod tests {
         let cache = ResponseCache::new();
         let request = HttpRequest::new("GET", "/api/users".to_string());
         let mut response = HttpResponse::ok();
-        response.body = b"cached content".to_vec();
+        response.body = Bytes::from_static(b"cached content");
 
         cache.store(&request, &response).await;
 
         let cached = cache.get(&request).await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().body, b"cached content");
+        assert_eq!(cached.unwrap().body, Bytes::from_static(b"cached content"));
     }
 
     #[tokio::test]
@@ -1480,39 +1484,45 @@ mod tests {
         let cache = ResponseCache::new();
 
         let mut search_a = HttpRequest::new("QUERY", "/search".to_string());
-        search_a.body = b"name=alice".to_vec();
+        search_a.body = Bytes::from_static(b"name=alice");
         let mut response_a = HttpResponse::ok();
-        response_a.body = b"results for alice".to_vec();
+        response_a.body = Bytes::from_static(b"results for alice");
 
         cache.store(&search_a, &response_a).await;
 
         // Same path + same body: hit
         let cached = cache.get(&search_a).await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().body, b"results for alice");
+        assert_eq!(
+            cached.unwrap().body,
+            Bytes::from_static(b"results for alice")
+        );
 
         // Same path, different body: distinct entry, must miss
         let mut search_b = HttpRequest::new("QUERY", "/search".to_string());
-        search_b.body = b"name=bob".to_vec();
+        search_b.body = Bytes::from_static(b"name=bob");
         assert!(cache.get(&search_b).await.is_none());
 
         // The two bodies produce different keys, so both can coexist
         let mut response_b = HttpResponse::ok();
-        response_b.body = b"results for bob".to_vec();
+        response_b.body = Bytes::from_static(b"results for bob");
         cache.store(&search_b, &response_b).await;
         assert_eq!(
             cache.get(&search_a).await.unwrap().body,
-            b"results for alice"
+            Bytes::from_static(b"results for alice")
         );
-        assert_eq!(cache.get(&search_b).await.unwrap().body, b"results for bob");
+        assert_eq!(
+            cache.get(&search_b).await.unwrap().body,
+            Bytes::from_static(b"results for bob")
+        );
     }
 
     #[test]
     fn test_query_cache_key_includes_body_hash() {
         let mut req_a = HttpRequest::new("QUERY", "/search".to_string());
-        req_a.body = b"a".to_vec();
+        req_a.body = Bytes::from_static(b"a");
         let mut req_b = HttpRequest::new("QUERY", "/search".to_string());
-        req_b.body = b"b".to_vec();
+        req_b.body = Bytes::from_static(b"b");
 
         let key_a = CacheKey::from_request(&req_a);
         let key_b = CacheKey::from_request(&req_b);
@@ -1522,7 +1532,7 @@ mod tests {
 
         // GET keys are unaffected by the body
         let mut get_req = HttpRequest::new("GET", "/search".to_string());
-        get_req.body = b"ignored".to_vec();
+        get_req.body = Bytes::from_static(b"ignored");
         assert!(CacheKey::from_request(&get_req).body_hash.is_none());
     }
 
@@ -1625,14 +1635,14 @@ mod tests {
             .insert("Accept", "application/json".to_string());
 
         let mut response = HttpResponse::ok().with_vary(&["Accept"]);
-        response.body = b"json".to_vec();
+        response.body = Bytes::from_static(b"json");
 
         cache.store(&request, &response).await;
 
         // A plain get (no explicit vary list) must find the varied entry.
         let hit = cache.get(&request).await;
         assert!(hit.is_some());
-        assert_eq!(hit.unwrap().body, b"json");
+        assert_eq!(hit.unwrap().body, Bytes::from_static(b"json"));
 
         // A request with a different Accept value is a different variant.
         let mut other = HttpRequest::new("GET", "/api/data".to_string());
@@ -1700,9 +1710,9 @@ mod tests {
 
         for i in 0..100 {
             let mut req = HttpRequest::new("QUERY", "/search".to_string());
-            req.body = format!("q={}", i).into_bytes();
+            req.body = Bytes::from(format!("q={}", i).into_bytes());
             let mut resp = HttpResponse::ok();
-            resp.body = format!("result {}", i).into_bytes();
+            resp.body = Bytes::from(format!("result {}", i).into_bytes());
             cache.store(&req, &resp).await;
         }
 
@@ -1771,7 +1781,7 @@ mod tests {
         async fn store(cache: &ResponseCache, path: &str, body: &[u8]) {
             let req = HttpRequest::new("GET", path.to_string());
             let mut resp = HttpResponse::ok();
-            resp.body = body.to_vec();
+            resp.body = Bytes::copy_from_slice(body);
             cache.store(&req, &resp).await;
         }
         async fn present(cache: &ResponseCache, path: &str) -> bool {
@@ -1808,9 +1818,9 @@ mod tests {
         let cache = ResponseCache::new();
 
         let mut stale_req = HttpRequest::new("QUERY", "/search".to_string());
-        stale_req.body = b"q=stale".to_vec();
+        stale_req.body = Bytes::from_static(b"q=stale");
         let mut fresh_req = HttpRequest::new("QUERY", "/search".to_string());
-        fresh_req.body = b"q=fresh".to_vec();
+        fresh_req.body = Bytes::from_static(b"q=fresh");
         let resp = HttpResponse::ok();
 
         cache
@@ -1874,7 +1884,7 @@ mod tests {
 
         for i in 0..2000 {
             let mut resp = HttpResponse::ok();
-            resp.body = format!("v{}", i).into_bytes();
+            resp.body = Bytes::from(format!("v{}", i).into_bytes());
             cache.store(&req, &resp).await;
         }
 
@@ -1892,7 +1902,7 @@ mod tests {
         // The live value must be the most recent store, not a stale one.
         let cached = cache.get(&req).await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().body, b"v1999");
+        assert_eq!(cached.unwrap().body, Bytes::from_static(b"v1999"));
     }
 
     /// Regression: two responses stored at the same path with *different* Vary
@@ -1909,7 +1919,7 @@ mod tests {
             .headers
             .insert("Accept", "application/json".to_string());
         let mut resp_accept = HttpResponse::ok().with_vary(&["Accept"]);
-        resp_accept.body = b"json-body".to_vec();
+        resp_accept.body = Bytes::from_static(b"json-body");
         cache.store(&req_accept, &resp_accept).await;
 
         // Variant 2: same path, keyed on Accept-Encoding.
@@ -1918,7 +1928,7 @@ mod tests {
             .headers
             .insert("Accept-Encoding", "gzip".to_string());
         let mut resp_enc = HttpResponse::ok().with_vary(&["Accept-Encoding"]);
-        resp_enc.body = b"gzip-body".to_vec();
+        resp_enc.body = Bytes::from_static(b"gzip-body");
         cache.store(&req_enc, &resp_enc).await;
 
         // Both variants must survive the second store's `vary_index` update.
@@ -1927,13 +1937,13 @@ mod tests {
             hit_accept.is_some(),
             "Accept variant lost after second store"
         );
-        assert_eq!(hit_accept.unwrap().body, b"json-body");
+        assert_eq!(hit_accept.unwrap().body, Bytes::from_static(b"json-body"));
 
         let hit_enc = cache.get(&req_enc).await;
         assert!(
             hit_enc.is_some(),
             "Accept-Encoding variant lost after second store",
         );
-        assert_eq!(hit_enc.unwrap().body, b"gzip-body");
+        assert_eq!(hit_enc.unwrap().body, Bytes::from_static(b"gzip-body"));
     }
 }

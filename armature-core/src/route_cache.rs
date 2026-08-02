@@ -829,6 +829,7 @@ impl RouterStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_route_key_equality() {
@@ -914,7 +915,7 @@ mod tests {
             crate::handler::handler(|req: HttpRequest| async move {
                 let path = req.path_params.get("path").cloned().unwrap_or_default();
                 let mut response = HttpResponse::ok();
-                response.body = path.into_bytes();
+                response.body = Bytes::from(path.into_bytes());
                 Ok::<_, Error>(response)
             }),
         );
@@ -924,14 +925,14 @@ mod tests {
             .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
-        assert_eq!(first.body, b"docs/readme.md");
+        assert_eq!(first.body, Bytes::from_static(b"docs/readme.md"));
 
         // Second request: served from the cache, must yield the same params.
         let second = router
             .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
-        assert_eq!(second.body, b"docs/readme.md");
+        assert_eq!(second.body, Bytes::from_static(b"docs/readme.md"));
         assert!(router.stats().cache_hits() > 0);
     }
 
@@ -944,7 +945,7 @@ mod tests {
             crate::handler::handler(|req: HttpRequest| async move {
                 let q = req.query_params.get("q").cloned().unwrap_or_default();
                 let mut response = HttpResponse::ok();
-                response.body = q.into_bytes();
+                response.body = Bytes::from(q.into_bytes());
                 Ok::<_, Error>(response)
             }),
         );
@@ -956,7 +957,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.body, b"hello world");
+        assert_eq!(response.body, Bytes::from_static(b"hello world"));
     }
 
     #[test]
@@ -1088,7 +1089,7 @@ mod tests {
             |req: HttpRequest| async move {
                 let id = req.path_params.get("id").cloned().unwrap_or_default();
                 let mut r = HttpResponse::ok();
-                r.body = id.into_bytes();
+                r.body = Bytes::from(id.into_bytes());
                 Ok::<_, Error>(r)
             },
         ));
@@ -1096,19 +1097,16 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         // Static route → O(1) static fast path.
-        let resp = opt
-            .route(HttpRequest::new("GET", "/health".into()))
-            .await
-            .unwrap();
+        let resp = opt.route(HttpRequest::new("GET", "/health")).await.unwrap();
         assert_eq!(resp.status, 200);
         assert!(opt.stats().static_hits() >= 1);
 
         // Param route → pattern match, params extracted onto the request.
         let resp = opt
-            .route(HttpRequest::new("GET", "/users/42".into()))
+            .route(HttpRequest::new("GET", "/users/42"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"42");
+        assert_eq!(resp.body, Bytes::from_static(b"42"));
     }
 
     #[tokio::test]
@@ -1120,7 +1118,7 @@ mod tests {
             |req: HttpRequest| async move {
                 let p = req.path_params.get("path").cloned().unwrap_or_default();
                 let mut r = HttpResponse::ok();
-                r.body = p.into_bytes();
+                r.body = Bytes::from(p.into_bytes());
                 Ok::<_, Error>(r)
             },
         ));
@@ -1129,10 +1127,10 @@ mod tests {
 
         // Catch-all returns the full joined remainder, not a single segment.
         let resp = opt
-            .route(HttpRequest::new("GET", "/files/docs/readme.md".into()))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"docs/readme.md");
+        assert_eq!(resp.body, Bytes::from_static(b"docs/readme.md"));
     }
 
     #[tokio::test]
@@ -1150,21 +1148,15 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         // Valid param passes.
-        let ok = opt
-            .route(HttpRequest::new("GET", "/users/123".into()))
-            .await;
+        let ok = opt.route(HttpRequest::new("GET", "/users/123")).await;
         assert!(ok.is_ok());
 
         // Invalid param → same BadRequest as the linear router.
-        let err = opt
-            .route(HttpRequest::new("GET", "/users/abc".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("GET", "/users/abc")).await;
         assert!(matches!(err, Err(Error::BadRequest(_))));
 
         // Cached path must re-validate constraints identically.
-        let err_again = opt
-            .route(HttpRequest::new("GET", "/users/abc".into()))
-            .await;
+        let err_again = opt.route(HttpRequest::new("GET", "/users/abc")).await;
         assert!(matches!(err_again, Err(Error::BadRequest(_))));
     }
 
@@ -1178,9 +1170,7 @@ mod tests {
         ));
         let opt = OptimizedRouter::from_router(&router);
 
-        let err = opt
-            .route(HttpRequest::new("PROPFIND", "/health".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("PROPFIND", "/health")).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
 
@@ -1190,18 +1180,20 @@ mod tests {
         router.add_route(crate::routing::Route::new(
             HttpMethod::QUERY,
             "/search",
-            |req: HttpRequest| async move { Ok::<_, Error>(HttpResponse::ok().with_body(req.body)) },
+            |req: HttpRequest| async move {
+                Ok::<_, Error>(HttpResponse::ok().with_bytes_body(req.body))
+            },
         ));
         let opt = OptimizedRouter::from_router(&router);
 
         // QUERY carries its query in the body; routing matches on method+path.
-        let mut req = HttpRequest::new("QUERY", "/search".into());
-        req.body = b"name=john".to_vec();
+        let mut req = HttpRequest::new("QUERY", "/search");
+        req.body = Bytes::from_static(b"name=john");
         let resp = opt.route(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
         // GET to the same path must NOT reach the QUERY handler.
-        let err = opt.route(HttpRequest::new("GET", "/search".into())).await;
+        let err = opt.route(HttpRequest::new("GET", "/search")).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
 
@@ -1230,19 +1222,19 @@ mod tests {
         // Reference: what the linear router does for /users/me.
         let linear = router
             .clone()
-            .route(HttpRequest::new("GET", "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me"))
             .await
             .unwrap();
 
         let opt = OptimizedRouter::from_router(&router);
         let optimized = opt
-            .route(HttpRequest::new("GET", "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me"))
             .await
             .unwrap();
 
         // Identical: both select the earlier-registered :id route.
         assert_eq!(optimized.body, linear.body);
-        assert_eq!(optimized.body, b"param:me");
+        assert_eq!(optimized.body, Bytes::from_static(b"param:me"));
     }
 
     #[tokio::test]
@@ -1259,10 +1251,10 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         let resp = opt
-            .route(HttpRequest::new("GET", "/search?q=hello%20world".into()))
+            .route(HttpRequest::new("GET", "/search?q=hello%20world"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"hello world");
+        assert_eq!(resp.body, Bytes::from_static(b"hello world"));
     }
 
     #[test]

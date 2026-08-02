@@ -1,5 +1,4 @@
 //! Azure Functions runtime for Armature applications.
-
 use std::sync::Arc;
 use tracing::{debug, error, info};
 

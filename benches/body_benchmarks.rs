@@ -120,7 +120,7 @@ fn bench_http_request_body(c: &mut Criterion) {
     group.bench_function("legacy_vec_assignment", |b| {
         b.iter(|| {
             let mut req = HttpRequest::new("POST", "/api".to_string());
-            req.body = black_box(vec![0u8; 1024]);
+            req.body = black_box(armature_core::Bytes::from(vec![0u8; 1024]));
             black_box(req.body.len())
         })
     });
@@ -214,7 +214,7 @@ fn bench_hyper_passthrough(c: &mut Criterion) {
         b.iter(|| {
             let resp = HttpResponse::ok().with_body(black_box(vec![0u8; 1024]));
             // Simulates: Full::new(bytes::Bytes::from(response.body))
-            let body_bytes = Bytes::from(resp.body);
+            let body_bytes = resp.body;
             black_box(body_bytes.len())
         })
     });

@@ -1079,7 +1079,7 @@ impl ErrorTransformer {
 
         // Add path
         if self.include_path {
-            response = response.path(&context.request.path);
+            response = response.path(context.request.path_str());
         }
 
         // Add request ID
@@ -1181,7 +1181,7 @@ impl ErrorTransformer {
                 if error.is_server_error() {
                     crate::logging::error!(
                         status = response.status,
-                        path = ctx.request.path,
+                        path = %ctx.request.path,
                         request_id = ctx.request_id,
                         error = %error,
                         "Server error occurred"
@@ -1189,7 +1189,7 @@ impl ErrorTransformer {
                 } else {
                     crate::logging::warn!(
                         status = response.status,
-                        path = ctx.request.path,
+                        path = %ctx.request.path,
                         request_id = ctx.request_id,
                         "Client error occurred"
                     );
@@ -1232,31 +1232,31 @@ impl ErrorResponseBuilder {
     /// Create a bad request (400) response.
     pub fn bad_request(message: impl Into<String>) -> HttpResponse {
         let error = Error::BadRequest(message.into());
-        ErrorTransformer::new().transform(&error, &HttpRequest::new("", "".into()))
+        ErrorTransformer::new().transform(&error, &HttpRequest::new("", ""))
     }
 
     /// Create an unauthorized (401) response.
     pub fn unauthorized(message: impl Into<String>) -> HttpResponse {
         let error = Error::Unauthorized(message.into());
-        ErrorTransformer::new().transform(&error, &HttpRequest::new("", "".into()))
+        ErrorTransformer::new().transform(&error, &HttpRequest::new("", ""))
     }
 
     /// Create a forbidden (403) response.
     pub fn forbidden(message: impl Into<String>) -> HttpResponse {
         let error = Error::Forbidden(message.into());
-        ErrorTransformer::new().transform(&error, &HttpRequest::new("", "".into()))
+        ErrorTransformer::new().transform(&error, &HttpRequest::new("", ""))
     }
 
     /// Create a not found (404) response.
     pub fn not_found(message: impl Into<String>) -> HttpResponse {
         let error = Error::NotFound(message.into());
-        ErrorTransformer::new().transform(&error, &HttpRequest::new("", "".into()))
+        ErrorTransformer::new().transform(&error, &HttpRequest::new("", ""))
     }
 
     /// Create an internal server error (500) response.
     pub fn internal_error(message: impl Into<String>) -> HttpResponse {
         let error = Error::Internal(message.into());
-        ErrorTransformer::new().transform(&error, &HttpRequest::new("", "".into()))
+        ErrorTransformer::new().transform(&error, &HttpRequest::new("", ""))
     }
 
     /// Create a validation error (422) response with field errors.
@@ -1450,7 +1450,7 @@ mod tests {
         let response = transformer.transform(&error, &request);
         assert_eq!(response.status, 500);
         // In production mode, internal errors should hide details
-        let body = String::from_utf8(response.body).unwrap();
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
         assert!(body.contains("internal server error"));
     }
 
@@ -1468,7 +1468,7 @@ mod tests {
         let request = HttpRequest::new("GET", "/test".to_string());
 
         let response = transformer.transform(&error, &request);
-        let body = String::from_utf8(response.body).unwrap();
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
         assert!(body.contains("Custom not found message"));
     }
 
@@ -1479,7 +1479,7 @@ mod tests {
         let request = HttpRequest::new("POST", "/login".to_string());
 
         let response = transformer.transform(&error, &request);
-        let body = String::from_utf8(response.body).unwrap();
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
         assert!(!body.contains("secret123"));
         assert!(body.contains("[FILTERED]"));
     }
@@ -1652,7 +1652,7 @@ mod tests {
     #[test]
     fn test_transform_preserves_status_of_unlisted_variants() {
         let transformer = ErrorTransformer::new();
-        let request = HttpRequest::new("GET", "/test".into());
+        let request = HttpRequest::new("GET", "/test");
 
         let response = transformer.transform(&Error::TooManyRequests("slow down".into()), &request);
         assert_eq!(response.status, 429);
@@ -1668,7 +1668,7 @@ mod tests {
     fn test_user_registered_filters_are_applied() {
         let transformer =
             ErrorTransformer::new().with_filter(|_| Error::NotFound("filtered by user".into()));
-        let request = HttpRequest::new("GET", "/test".into());
+        let request = HttpRequest::new("GET", "/test");
 
         let response = transformer.transform(&Error::Internal("original".into()), &request);
         assert_eq!(response.status, 404);

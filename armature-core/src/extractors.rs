@@ -35,6 +35,7 @@
 //! ```
 
 use crate::{Error, HttpRequest};
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -484,12 +485,12 @@ impl Deref for Headers {
 /// println!("Body length: {} bytes", raw.len());
 /// ```
 #[derive(Debug, Clone)]
-pub struct RawBody(pub Vec<u8>);
+pub struct RawBody(pub Bytes);
 
 impl RawBody {
     /// Create a new RawBody
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data)
+    pub fn new(data: impl Into<Bytes>) -> Self {
+        Self(data.into())
     }
 
     /// Get the body length
@@ -509,11 +510,11 @@ impl RawBody {
 
     /// Try to convert to a UTF-8 string
     pub fn to_string(&self) -> Result<String, std::string::FromUtf8Error> {
-        String::from_utf8(self.0.clone())
+        String::from_utf8(self.0.to_vec())
     }
 
     /// Get the inner bytes
-    pub fn into_inner(self) -> Vec<u8> {
+    pub fn into_inner(self) -> Bytes {
         self.0
     }
 }
@@ -834,11 +835,13 @@ mod tests {
     #[test]
     fn test_body_extraction() {
         let mut request = create_request();
-        request.body = serde_json::to_vec(&serde_json::json!({
-            "name": "Test",
-            "email": "test@example.com"
-        }))
-        .unwrap();
+        request.body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "name": "Test",
+                "email": "test@example.com"
+            }))
+            .unwrap(),
+        );
 
         #[derive(Debug, Deserialize)]
         struct CreateUser {
@@ -854,7 +857,7 @@ mod tests {
     #[test]
     fn test_raw_body() {
         let mut request = create_request();
-        request.body = b"raw content".to_vec();
+        request.body = Bytes::from_static(b"raw content");
 
         let raw: RawBody = RawBody::from_request(&request).unwrap();
         assert_eq!(raw.len(), 11);

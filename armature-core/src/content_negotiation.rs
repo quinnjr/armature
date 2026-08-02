@@ -29,6 +29,7 @@
 //! ```
 
 use crate::{Error, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -940,7 +941,7 @@ where
                 let value = f();
                 let body =
                     serde_json::to_vec(&value).map_err(|e| Error::Serialization(e.to_string()))?;
-                response.body = body;
+                response.body = Bytes::from(body);
                 response
                     .headers
                     .insert("Content-Type".to_string(), "application/json".to_string());
@@ -948,7 +949,7 @@ where
         } else if best.matches(&MediaType::html()) {
             if let Some(f) = self.html_fn {
                 let html = f();
-                response.body = html.into_bytes();
+                response.body = Bytes::from(html.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "text/html; charset=utf-8".to_string(),
@@ -957,7 +958,7 @@ where
         } else if best.matches(&MediaType::plain_text()) {
             if let Some(f) = self.text_fn {
                 let text = f();
-                response.body = text.into_bytes();
+                response.body = Bytes::from(text.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "text/plain; charset=utf-8".to_string(),
@@ -966,7 +967,7 @@ where
         } else if best.matches(&MediaType::xml()) {
             if let Some(f) = self.xml_fn {
                 let xml = f();
-                response.body = xml.into_bytes();
+                response.body = Bytes::from(xml.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "application/xml; charset=utf-8".to_string(),
@@ -1025,7 +1026,7 @@ pub fn respond_with<T: Serialize>(request: &HttpRequest, data: &T) -> Result<Htt
             "<!DOCTYPE html><html><body><pre>{}</pre></body></html>",
             html_escape(&json)
         );
-        response.body = html.into_bytes();
+        response.body = Bytes::from(html.into_bytes());
         response.headers.insert(
             "Content-Type".to_string(),
             "text/html; charset=utf-8".to_string(),
@@ -1033,7 +1034,7 @@ pub fn respond_with<T: Serialize>(request: &HttpRequest, data: &T) -> Result<Htt
     } else {
         // Default to JSON
         response.body =
-            serde_json::to_vec(data).map_err(|e| Error::Serialization(e.to_string()))?;
+            Bytes::from(serde_json::to_vec(data).map_err(|e| Error::Serialization(e.to_string()))?);
         response
             .headers
             .insert("Content-Type".to_string(), "application/json".to_string());

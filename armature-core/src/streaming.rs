@@ -797,7 +797,7 @@ impl StreamingResponse {
 
         let mut response = HttpResponse::new(self.status);
         response.headers = self.headers.into();
-        response.body = body;
+        response.body = Bytes::from(body);
         Ok(response)
     }
 }
@@ -1009,7 +1009,7 @@ mod tests {
 
         let buffered = response.into_buffered().await.unwrap();
         assert_eq!(buffered.status, 200);
-        assert_eq!(buffered.body, b"buffered");
+        assert_eq!(buffered.body, Bytes::from_static(b"buffered"));
     }
 
     #[test]

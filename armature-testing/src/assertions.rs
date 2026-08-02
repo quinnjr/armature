@@ -127,7 +127,7 @@ mod tests {
 
     fn create_test_response(status: u16, body: &str) -> TestResponse {
         let mut response = HttpResponse::new(status);
-        response.body = body.as_bytes().to_vec();
+        response.body = armature_core::Bytes::copy_from_slice(body.as_bytes());
         TestResponse::Success(response)
     }
 

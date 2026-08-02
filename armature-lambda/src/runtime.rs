@@ -330,6 +330,6 @@ mod tests {
             captured.claims.get("sub").map(String::as_str),
             Some("user-1")
         );
-        assert_eq!(captured.body, b"payload");
+        assert_eq!(captured.body, b"payload".to_vec());
     }
 }

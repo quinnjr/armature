@@ -3,6 +3,7 @@
 
 use armature_core::handler::from_legacy_handler;
 use armature_core::*;
+use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -48,7 +49,7 @@ fn bench_json_parsing(c: &mut Criterion) {
 
     let json_data = br#"{"id":123,"name":"John Doe","email":"john@example.com","active":true}"#;
     let mut request = HttpRequest::new("POST", "/api/test".to_string());
-    request.body = json_data.to_vec();
+    request.body = Bytes::copy_from_slice(json_data);
 
     c.bench_function("json_parse", |b| {
         b.iter(|| {
@@ -60,7 +61,7 @@ fn bench_json_parsing(c: &mut Criterion) {
 fn bench_form_parsing(c: &mut Criterion) {
     let form_data = b"name=John+Doe&email=john%40example.com&age=30&city=New+York";
     let mut request = HttpRequest::new("POST", "/api/form".to_string());
-    request.body = form_data.to_vec();
+    request.body = Bytes::copy_from_slice(form_data);
 
     c.bench_function("form_parse_map", |b| {
         b.iter(|| {

@@ -410,7 +410,7 @@ mod tests {
         let middleware = RequestMetricsMiddleware::with_path();
 
         let mut request = HttpRequest::new(method.to_string(), path.to_string());
-        request.body = b"hello".to_vec(); // 5-byte request body
+        request.body = armature_core::Bytes::from_static(b"hello"); // 5-byte request body
 
         let count_before = HTTP_REQUEST_COUNTER
             .with_label_values(&[method, path, "200"])

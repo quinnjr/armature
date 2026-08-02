@@ -55,7 +55,7 @@ impl IntoHttpRequest for HttpRequest {
     fn into_http_request(self) -> Request<Bytes> {
         let mut builder = Request::builder()
             .method(self.method.as_str())
-            .uri(&self.path);
+            .uri(self.path_str());
 
         // Add headers
         if let Some(headers) = builder.headers_mut() {

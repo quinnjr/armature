@@ -52,6 +52,7 @@
 //! ```
 
 use crate::{Error, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
@@ -611,7 +612,7 @@ impl ConditionalResponse for HttpResponse {
 
         let mut response = Self::new(412);
         if let Ok(body_bytes) = serde_json::to_vec(&body) {
-            response.body = body_bytes;
+            response.body = Bytes::from(body_bytes);
             response
                 .headers
                 .insert("Content-Type".to_string(), "application/json".to_string());

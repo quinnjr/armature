@@ -8,6 +8,7 @@
 #![allow(dead_code, unused_imports)]
 
 use armature::prelude::*;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 // ========== Data Transfer Objects ==========
@@ -81,12 +82,14 @@ fn demonstrate_body_extraction() {
 
     // Simulate a POST request with JSON body
     let mut request = HttpRequest::new("POST", "/users".to_string());
-    request.body = serde_json::to_vec(&serde_json::json!({
-        "name": "Alice Smith",
-        "email": "alice@example.com",
-        "role": "admin"
-    }))
-    .unwrap();
+    request.body = Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "name": "Alice Smith",
+            "email": "alice@example.com",
+            "role": "admin"
+        }))
+        .unwrap(),
+    );
 
     // Method 1: Using the Body extractor type
     let body: Body<CreateUserDto> = Body::from_request(&request).unwrap();
@@ -239,11 +242,13 @@ fn demonstrate_combined_extraction() {
         .insert("notify".to_string(), "true".to_string());
 
     // Set body
-    request.body = serde_json::to_vec(&serde_json::json!({
-        "name": "Alice Updated",
-        "email": "alice.new@example.com"
-    }))
-    .unwrap();
+    request.body = Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "name": "Alice Updated",
+            "email": "alice.new@example.com"
+        }))
+        .unwrap(),
+    );
 
     // Set headers
     request

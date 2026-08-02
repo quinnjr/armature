@@ -461,6 +461,7 @@ pub fn parse_size(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_size_constants() {
@@ -608,7 +609,7 @@ mod tests {
 
         let middleware = BodyLimitMiddleware::kilobytes(10);
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = vec![0; 5 * sizes::KB]; // 5KB, within limit
+        req.body = Bytes::from(vec![0; 5 * sizes::KB]); // 5KB, within limit
 
         let result = middleware
             .handle(
@@ -626,7 +627,7 @@ mod tests {
 
         let middleware = BodyLimitMiddleware::kilobytes(1);
         let mut req = HttpRequest::new("POST", "/api".to_string());
-        req.body = vec![0; 5 * sizes::KB]; // 5KB, exceeds 1KB limit
+        req.body = Bytes::from(vec![0; 5 * sizes::KB]); // 5KB, exceeds 1KB limit
 
         let result = middleware
             .handle(
@@ -650,7 +651,7 @@ mod tests {
 
         // Small body on upload route should pass
         let mut req = HttpRequest::new("POST", "/api/upload".to_string());
-        req.body = vec![0; 5 * sizes::MB]; // 5MB
+        req.body = Bytes::from(vec![0; 5 * sizes::MB]); // 5MB
 
         let result = middleware
             .handle(
@@ -663,7 +664,7 @@ mod tests {
 
         // Same body on regular route should fail
         let mut req = HttpRequest::new("POST", "/api/other".to_string());
-        req.body = vec![0; 5 * sizes::KB]; // 5KB, exceeds 1KB default
+        req.body = Bytes::from(vec![0; 5 * sizes::KB]); // 5KB, exceeds 1KB default
 
         let result = middleware
             .handle(

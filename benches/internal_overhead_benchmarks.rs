@@ -205,7 +205,7 @@ fn bench_request_creation(c: &mut Criterion) {
             );
             req.headers
                 .insert("Content-Type", "application/json".to_string());
-            req.body = black_box(body.clone());
+            req.body = black_box(armature_core::Bytes::from(body.clone()));
             req
         })
     });
@@ -621,7 +621,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
             let b = body.clone();
             runtime.block_on(async move {
                 let mut req = HttpRequest::new("POST", "/api/data".to_string());
-                req.body = b;
+                req.body = armature_core::Bytes::from(b);
                 let _ = h.call(black_box(req)).await;
             })
         })
@@ -703,7 +703,7 @@ fn bench_full_cycle(c: &mut Criterion) {
                 let mut req = HttpRequest::new("POST", "/api/users".to_string());
                 req.headers
                     .insert("Content-Type", "application/json".to_string());
-                req.body = b;
+                req.body = armature_core::Bytes::from(b);
                 let _ = router.route(black_box(req)).await;
             })
         })

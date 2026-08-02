@@ -176,6 +176,7 @@ impl Guard for ApiKeyGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -315,7 +316,7 @@ mod tests {
     #[test]
     fn test_guard_context_creation() {
         let mut request = HttpRequest::new("POST", "/api/test".to_string());
-        request.body = vec![1, 2, 3];
+        request.body = Bytes::from(vec![1, 2, 3]);
         let context = GuardContext::new(request.clone());
 
         assert_eq!(context.request.method, "POST");
