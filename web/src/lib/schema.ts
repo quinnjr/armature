@@ -1,8 +1,13 @@
 /**
- * JSON-LD structured data, pre-serialized once at module load.
- * Organization and WebSite are site-wide; the rest are home-page-only
- * (they describe the product/FAQ content, not every subpage).
+ * Site-wide JSON-LD, pre-serialized once at module load.
+ *
+ * Only the schemas that describe the *site* live here. Page-specific documents
+ * (TechArticle, BreadcrumbList, FAQPage, CollectionPage) are built per page in
+ * `seo.ts` — emitting one static breadcrumb and one static FAQ on every page
+ * described neither the page it appeared on nor, in the FAQ's case, the
+ * questions actually rendered.
  */
+import { FRAMEWORK_VERSION, MSRV, RUST_EDITION } from './version';
 
 export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   '@context': 'https://schema.org',
@@ -20,7 +25,7 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   description:
     'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Features dependency injection, decorators, middleware, JWT/OAuth2/SAML authentication, validation, caching, job queues, GraphQL, and 150+ enterprise features.',
   url: 'https://quinnjr.github.io/armature/',
-  softwareVersion: '0.1.0',
+  softwareVersion: FRAMEWORK_VERSION,
   releaseNotes: 'https://github.com/quinnjr/armature/releases',
   license: 'https://opensource.org/licenses/Apache-2.0',
   author: {
@@ -39,15 +44,12 @@ export const SOFTWARE_APPLICATION_SCHEMA = JSON.stringify({
   installUrl: 'https://quinnjr.github.io/armature/getting-started',
   softwareHelp: 'https://quinnjr.github.io/armature/docs',
   programmingModel: 'Async/Await',
-  runtimePlatform: 'Tokio',
+  runtimePlatform: `Tokio, Rust ${RUST_EDITION} edition (MSRV ${MSRV})`,
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-  aggregateRating: {
-    '@type': 'AggregateRating',
-    ratingValue: '5',
-    ratingCount: '1',
-    bestRating: '5',
-    worstRating: '1',
-  },
+  // No `aggregateRating`: the previous 5-stars-from-1-rating was self-issued.
+  // Google's structured-data policy forbids self-serving review markup for the
+  // entity publishing it, and enforcement is a manual action against the whole
+  // site — a rich-result gamble with the site's indexing as the stake.
   keywords:
     'rust, web framework, http server, nestjs alternative, express alternative, actix-web, rocket, axum, dependency injection, async rust, type-safe, middleware, jwt, oauth2, saml, graphql, openapi, swagger, enterprise, production-ready',
   featureList: [
@@ -98,73 +100,9 @@ export const WEBSITE_SCHEMA = JSON.stringify({
   '@type': 'WebSite',
   name: 'Armature Framework',
   url: 'https://quinnjr.github.io/armature/',
-  potentialAction: {
-    '@type': 'SearchAction',
-    target: 'https://quinnjr.github.io/armature/docs?q={search_term_string}',
-    'query-input': 'required name=search_term_string',
-  },
-});
-
-export const FAQ_PAGE_SCHEMA = JSON.stringify({
-  '@context': 'https://schema.org',
-  '@type': 'FAQPage',
-  mainEntity: [
-    {
-      '@type': 'Question',
-      name: 'Is Armature a good NestJS alternative for Rust?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: "Yes! Armature is specifically designed to bring NestJS's architectural patterns to Rust. It features dependency injection, decorators (via Rust macros), modules, guards, interceptors, and pipes - all concepts familiar to NestJS developers.",
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'How does Armature compare to Express or Koa?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: "Armature provides Express's simplicity and Koa's async/await patterns, but adds type safety, dependency injection, and compile-time error catching. The middleware system will feel familiar, but you get Rust's performance (8-15x faster) and memory safety guarantees.",
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'Why choose Armature over Actix-web, Rocket, or Axum?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'Armature focuses on enterprise features and developer experience. While Actix-web, Rocket, and Axum are excellent low-level frameworks, Armature provides built-in authentication (JWT, OAuth2, SAML), validation, caching, job queues, and OpenAPI generation - reducing the need for external crates.',
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'How fast is Armature compared to Node.js?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'Armature is 8-15x faster than Node.js frameworks like Express and NestJS, with ~3x less memory usage and sub-2ms p99 latency for typical API endpoints.',
-      },
-    },
-  ],
-});
-
-export const BREADCRUMB_SCHEMA = JSON.stringify({
-  '@context': 'https://schema.org',
-  '@type': 'BreadcrumbList',
-  itemListElement: [
-    {
-      '@type': 'ListItem',
-      position: 1,
-      name: 'Home',
-      item: 'https://quinnjr.github.io/armature/',
-    },
-    {
-      '@type': 'ListItem',
-      position: 2,
-      name: 'Documentation',
-      item: 'https://quinnjr.github.io/armature/docs',
-    },
-    {
-      '@type': 'ListItem',
-      position: 3,
-      name: 'Getting Started',
-      item: 'https://quinnjr.github.io/armature/getting-started',
-    },
-  ],
+  // No `SearchAction`: the sitelinks searchbox requires a working search
+  // endpoint, and `/docs?q=` is not one — the docs index ignores the parameter.
+  // Declaring the action anyway asks Google to send users to a URL that does
+  // nothing with their query.
+  inLanguage: 'en',
 });

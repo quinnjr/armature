@@ -2,13 +2,8 @@
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 import { url } from '../lib/url';
-import {
-  SOFTWARE_APPLICATION_SCHEMA,
-  ORGANIZATION_SCHEMA,
-  WEBSITE_SCHEMA,
-  FAQ_PAGE_SCHEMA,
-  BREADCRUMB_SCHEMA,
-} from '../lib/schema';
+import { absolute, breadcrumbSchema, type Crumb } from '../lib/seo';
+import { SOFTWARE_APPLICATION_SCHEMA, ORGANIZATION_SCHEMA, WEBSITE_SCHEMA } from '../lib/schema';
 import '../styles/global.css';
 
 interface Props {
@@ -16,19 +11,47 @@ interface Props {
   description?: string;
   /** Site-absolute path (without base) to canonicalize this page to, e.g. '/docs'. */
   canonicalPath?: string;
-  /** Emit the home-page-only schemas (SoftwareApplication, FAQPage, BreadcrumbList). */
+  /** Emit the site-describing SoftwareApplication schema (home page only). */
   richSchemas?: boolean;
+  /** Breadcrumb trail for this page, root first. Omit on the home page. */
+  breadcrumbs?: Crumb[];
+  /** Extra JSON-LD documents, already serialized. */
+  schemas?: string[];
+  /** Keep this page out of the index (error pages, thin placeholders). */
+  noindex?: boolean;
+  /** ISO-8601 last-modified, surfaced to crawlers as a freshness signal. */
+  dateModified?: string;
+  /** Open Graph type; 'article' for documentation pages. */
+  ogType?: 'website' | 'article';
 }
 
+const DEFAULT_TITLE = 'Armature Framework - Enterprise Rust Web Framework | NestJS Alternative';
+const DEFAULT_DESCRIPTION =
+  'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Build production-ready APIs with dependency injection, decorators, JWT/OAuth2 auth, and 150+ features.';
+
 const {
-  title = 'Armature Framework - Enterprise Rust Web Framework | NestJS Alternative',
-  description = 'Armature is a batteries-included, enterprise-grade web framework for Rust inspired by NestJS and Angular. Build production-ready APIs with dependency injection, decorators, JWT/OAuth2 auth, and 150+ features. 8-15x faster than Node.js.',
+  title = DEFAULT_TITLE,
+  description = DEFAULT_DESCRIPTION,
   canonicalPath,
   richSchemas = false,
+  breadcrumbs,
+  schemas = [],
+  noindex = false,
+  dateModified,
+  ogType = 'website',
 } = Astro.props;
 
 const site = Astro.site ?? new URL('https://quinnjr.github.io');
 const canonical = new URL(canonicalPath ? url(canonicalPath) : Astro.url.pathname, site).href;
+const ogImage = absolute('/og-image.png', site);
+
+// Each page contributes its own trail; the site-wide schemas describe the site,
+// and anything page-specific arrives through `schemas`.
+const breadcrumbJson = breadcrumbs && breadcrumbs.length > 0 ? breadcrumbSchema(breadcrumbs, site) : null;
+
+const robots = noindex
+  ? 'noindex, follow'
+  : 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1';
 ---
 
 <!doctype html>
@@ -39,51 +62,42 @@ const canonical = new URL(canonicalPath ? url(canonicalPath) : Astro.url.pathnam
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <!-- Primary Meta Tags -->
-    <meta name="title" content={title} />
     <meta name="description" content={description} />
-    <meta
-      name="keywords"
-      content="rust web framework, nestjs rust, nestjs alternative, express rust alternative, rust http server, async rust framework, dependency injection rust, rust api framework, type-safe rust, rust backend, rust microservices, actix-web alternative, axum alternative, rocket alternative, rust enterprise framework, rust production framework"
-    />
     <meta name="author" content="Joseph R. Quinn" />
-    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
-    <meta name="language" content="English" />
-    <meta name="revisit-after" content="7 days" />
-    <meta name="rating" content="General" />
-    <meta name="distribution" content="global" />
+    <meta name="robots" content={robots} />
+    <link rel="canonical" href={canonical} />
 
-    <!-- Open Graph / Facebook -->
-    <meta property="og:type" content="website" />
+    <!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    -->
+    <meta property="og:type" content={ogType} />
     <meta property="og:url" content={canonical} />
-    <meta property="og:title" content="Armature Framework - Enterprise Rust Web Framework" />
-    <meta
-      property="og:description"
-      content="Batteries-included Rust web framework with NestJS-style architecture. Dependency injection, decorators, JWT/OAuth2, GraphQL, and 150+ enterprise features. 8-15x faster than Node.js."
-    />
-    <meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={ogImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework" />
     <meta property="og:site_name" content="Armature Framework" />
     <meta property="og:locale" content="en_US" />
+    {dateModified && <meta property="article:modified_time" content={dateModified} />}
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:url" content={canonical} />
-    <meta name="twitter:title" content="Armature Framework - Enterprise Rust Web Framework" />
-    <meta
-      name="twitter:description"
-      content="Batteries-included Rust web framework with NestJS-style architecture. 8-15x faster than Node.js with 150+ enterprise features."
-    />
-    <meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework" />
     <meta name="twitter:creator" content="@quinnjr" />
 
-    <!-- Canonical URL -->
-    <link rel="canonical" href={canonical} />
-
-    <!-- Alternate Languages (if applicable) -->
     <link rel="alternate" hreflang="en" href={canonical} />
     <link rel="alternate" hreflang="x-default" href={canonical} />
+
+    <!-- An AI-readable summary of the whole site, per llmstxt.org. -->
+    <link rel="alternate" type="text/plain" href={url('/llms.txt')} title="LLM-readable site summary" />
 
     <!-- Favicon and Icons -->
     <link rel="icon" type="image/x-icon" href={url('/favicon.ico')} />
@@ -106,11 +120,11 @@ const canonical = new URL(canonicalPath ? url(canonicalPath) : Astro.url.pathnam
     />
 
     <!-- Structured Data / JSON-LD for Search Engines and LLMs -->
-    {richSchemas && <script type="application/ld+json" set:html={SOFTWARE_APPLICATION_SCHEMA} />}
     <script type="application/ld+json" set:html={ORGANIZATION_SCHEMA} />
     <script type="application/ld+json" set:html={WEBSITE_SCHEMA} />
-    {richSchemas && <script type="application/ld+json" set:html={FAQ_PAGE_SCHEMA} />}
-    {richSchemas && <script type="application/ld+json" set:html={BREADCRUMB_SCHEMA} />}
+    {richSchemas && <script type="application/ld+json" set:html={SOFTWARE_APPLICATION_SCHEMA} />}
+    {breadcrumbJson && <script type="application/ld+json" set:html={breadcrumbJson} />}
+    {schemas.map((schema) => <script type="application/ld+json" set:html={schema} />)}
   </head>
   <body>
     <Nav />

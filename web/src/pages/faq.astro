@@ -2,81 +2,47 @@
 import { faChevronDown } from '@fortawesome/free-solid-svg-icons';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Icon from '../components/Icon.astro';
+import { faqs } from '../lib/faq';
+import { faqSchema } from '../lib/seo';
+
+// Rendered from the same array the schema is built from: Google requires FAQ
+// markup to match the questions and answers visible on the page, and when the
+// two were maintained separately they had already diverged — the markup
+// declared a question the page never asked and omitted two that it did.
+const schema = faqSchema(faqs);
 ---
 
-<BaseLayout title="FAQ - Armature">
+<BaseLayout
+  title="Armature FAQ - Rust Web Framework Questions Answered"
+  description="Answers to common questions about Armature: how it compares to NestJS, Express, Actix-web, Axum and Rocket; GraphQL support; the learning curve from Node.js; MSRV; and licensing."
+  canonicalPath="/faq"
+  breadcrumbs={[
+    { name: 'Home', path: '/' },
+    { name: 'FAQ', path: '/faq' },
+  ]}
+  schemas={[schema]}
+>
   <section class="py-20 px-4 sm:px-6 lg:px-8 bg-stone-950">
     <div class="max-w-4xl mx-auto">
-      <h2 class="text-4xl font-bold text-center text-white mb-12">Frequently Asked Questions</h2>
+      <h1 class="text-4xl font-bold text-center text-white mb-4">Frequently Asked Questions</h1>
+      <p class="text-center text-stone-400 mb-12">
+        Common questions about Armature, the batteries-included Rust web framework.
+      </p>
 
       <div class="space-y-6">
-        <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
-          <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
-            <span>Is Armature a good NestJS alternative for Rust?</span>
-            <span class="text-rust-500 group-open:rotate-180 transition-transform">
-              <Icon icon={faChevronDown} />
-            </span>
-          </summary>
-          <p class="mt-4 text-stone-400">
-            Yes! Armature is specifically designed to bring NestJS's architectural patterns to Rust. It features
-            dependency injection, decorators (via Rust macros), modules, guards, interceptors, and pipes - all concepts
-            familiar to NestJS developers.
-          </p>
-        </details>
-
-        <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
-          <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
-            <span>How does Armature compare to Express or Koa?</span>
-            <span class="text-rust-500 group-open:rotate-180 transition-transform">
-              <Icon icon={faChevronDown} />
-            </span>
-          </summary>
-          <p class="mt-4 text-stone-400">
-            Armature provides Express's simplicity and Koa's async/await patterns, but adds type safety, dependency
-            injection, and compile-time error catching. The middleware system will feel familiar, but you get Rust's
-            performance and memory safety guarantees.
-          </p>
-        </details>
-
-        <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
-          <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
-            <span>Why choose Armature over Actix-web, Rocket, or Axum?</span>
-            <span class="text-rust-500 group-open:rotate-180 transition-transform">
-              <Icon icon={faChevronDown} />
-            </span>
-          </summary>
-          <p class="mt-4 text-stone-400">
-            Armature focuses on enterprise features and developer experience. While Actix-web, Rocket, and Axum are
-            excellent low-level frameworks, Armature provides built-in authentication, validation, caching, job queues,
-            and OpenAPI generation - reducing the need for external crates.
-          </p>
-        </details>
-
-        <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
-          <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
-            <span>Does Armature support GraphQL?</span>
-            <span class="text-rust-500 group-open:rotate-180 transition-transform">
-              <Icon icon={faChevronDown} />
-            </span>
-          </summary>
-          <p class="mt-4 text-stone-400">
-            Yes! Armature includes GraphQL support with schema-first or code-first approaches, similar to NestJS's
-            GraphQL module.
-          </p>
-        </details>
-
-        <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
-          <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
-            <span>What's the learning curve coming from Node.js?</span>
-            <span class="text-rust-500 group-open:rotate-180 transition-transform">
-              <Icon icon={faChevronDown} />
-            </span>
-          </summary>
-          <p class="mt-4 text-stone-400">
-            If you know NestJS or Express, the concepts transfer directly. You'll need to learn Rust syntax and
-            ownership, but the architectural patterns (@controller, @injectable, middleware) are identical.
-          </p>
-        </details>
+        {
+          faqs.map((faq) => (
+            <details class="bg-stone-900 border border-stone-800 p-6 rounded-lg cursor-pointer group">
+              <summary class="font-bold text-lg text-white list-none flex justify-between items-center">
+                <h2 class="text-lg font-bold inline">{faq.question}</h2>
+                <span class="text-rust-500 group-open:rotate-180 transition-transform">
+                  <Icon icon={faChevronDown} />
+                </span>
+              </summary>
+              <p class="mt-4 text-stone-400">{faq.answer}</p>
+            </details>
+          ))
+        }
       </div>
     </div>
   </section>
