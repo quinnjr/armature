@@ -7,13 +7,14 @@
 
 use crate::handler::{BoxedHandler, IntoHandler};
 use crate::logging::{debug, trace};
+use crate::param_intern;
 use crate::route_constraint::RouteConstraints;
-use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
+use crate::{Error, HttpMethod, HttpRequest, HttpResponse, Method, RouteParams};
 use bytes::Bytes;
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// A route handler function type (legacy - for backwards compatibility)
 ///
@@ -93,22 +94,53 @@ impl Route {
 /// - Monomorphization of handler code
 /// - Inlining of handler bodies
 /// - Minimal allocation in the hot path
-#[derive(Clone)]
 pub struct Router {
     pub routes: Vec<Route>,
+    /// Built on first dispatch, invalidated by [`Router::add_route`].
+    ///
+    /// Lazy rather than built per insertion because routes are registered in
+    /// bulk at startup, and rebuilding the trees on every `add_route` would be
+    /// quadratic for no benefit.
+    index: OnceLock<MethodIndex>,
+}
+
+impl Clone for Router {
+    /// The clone starts with an unbuilt index.
+    ///
+    /// `OnceLock` is not `Clone`, and the index is a pure function of `routes`,
+    /// so rebuilding it on first dispatch costs nothing that carrying it would
+    /// have saved.
+    fn clone(&self) -> Self {
+        Self {
+            routes: self.routes.clone(),
+            index: OnceLock::new(),
+        }
+    }
 }
 
 impl Router {
     /// Create a new empty router.
     #[inline]
     pub fn new() -> Self {
-        Self { routes: Vec::new() }
+        Self {
+            routes: Vec::new(),
+            index: OnceLock::new(),
+        }
     }
 
     /// Add a route to the router.
     #[inline]
     pub fn add_route(&mut self, route: Route) {
         self.routes.push(route);
+        // `&mut self` is what makes this sound: no dispatch can be reading the
+        // index while it is replaced.
+        self.index = OnceLock::new();
+    }
+
+    /// The method-indexed trees, built on first use.
+    #[inline]
+    fn index(&self) -> &MethodIndex {
+        self.index.get_or_init(|| MethodIndex::build(&self.routes))
     }
 
     /// Add a GET route with an optimized handler.
@@ -117,7 +149,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes.push(Route::new(HttpMethod::GET, path, handler));
+        self.add_route(Route::new(HttpMethod::GET, path, handler));
         self
     }
 
@@ -127,8 +159,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::POST, path, handler));
+        self.add_route(Route::new(HttpMethod::POST, path, handler));
         self
     }
 
@@ -138,7 +169,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes.push(Route::new(HttpMethod::PUT, path, handler));
+        self.add_route(Route::new(HttpMethod::PUT, path, handler));
         self
     }
 
@@ -148,8 +179,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::DELETE, path, handler));
+        self.add_route(Route::new(HttpMethod::DELETE, path, handler));
         self
     }
 
@@ -159,8 +189,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::PATCH, path, handler));
+        self.add_route(Route::new(HttpMethod::PATCH, path, handler));
         self
     }
 
@@ -173,8 +202,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::OPTIONS, path, handler));
+        self.add_route(Route::new(HttpMethod::OPTIONS, path, handler));
         self
     }
 
@@ -187,8 +215,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::HEAD, path, handler));
+        self.add_route(Route::new(HttpMethod::HEAD, path, handler));
         self
     }
 
@@ -202,8 +229,7 @@ impl Router {
     where
         H: IntoHandler<Args>,
     {
-        self.routes
-            .push(Route::new(HttpMethod::QUERY, path, handler));
+        self.add_route(Route::new(HttpMethod::QUERY, path, handler));
         self
     }
 
@@ -211,28 +237,13 @@ impl Router {
     /// Returns the handler and path parameters if a route matches.
     /// Useful for route lookup benchmarking and inspection.
     #[inline]
-    pub fn match_route(
-        &self,
-        method: &str,
-        path: &str,
-    ) -> Option<(BoxedHandler, crate::RouteParams)> {
+    pub fn match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, RouteParams)> {
         // Strip query string if present
         let path = path.split('?').next().unwrap_or(path);
-
-        // Split the request path once, up front, rather than per candidate route.
-        let path_parts: SmallVec<[&str; 8]> = split_segments(path).collect();
-
-        for route in &self.routes {
-            if route.method.as_str() != method {
-                continue;
-            }
-
-            if let Some(params) = match_path(&route.path, &path_parts) {
-                return Some((route.handler.clone(), params));
-            }
-        }
-
-        None
+        let method = Method::from(method);
+        self.index()
+            .find(&self.routes, &method, path)
+            .map(|(idx, params)| (self.routes[idx].handler.clone(), params))
     }
 
     /// Find a route that matches the request and execute the handler.
@@ -248,31 +259,10 @@ impl Router {
         // `HttpRequest::query`, and only if a handler asks for it.
         let path = request.path_only();
 
-        // Find matching route - this is the route matching hot path. The request
-        // path is split once, up front, rather than per candidate route. The
-        // `path_parts` borrow of `request.path` is confined to this block (which
-        // drops the `SmallVec`) so `request` can be moved into the handler below;
-        // we only carry out the matched index + params.
-        let matched: Option<(usize, crate::RouteParams)> = {
-            let path_parts: SmallVec<[&str; 8]> = split_segments(path).collect();
-
-            let mut found = None;
-            for (idx, route) in self.routes.iter().enumerate() {
-                if route.method.as_str() != request.method_str() {
-                    continue;
-                }
-
-                if let Some(params) = match_path(&route.path, &path_parts) {
-                    debug!(
-                        "Route matched: {} {} -> {}",
-                        request.method, path, route.path
-                    );
-                    found = Some((idx, params));
-                    break;
-                }
-            }
-            found
-        };
+        // The borrow of `request.path` is confined to this statement so the
+        // request can be moved into the handler below; only the matched index
+        // and the captured params are carried out.
+        let matched = self.index().find(&self.routes, &request.method, path);
 
         if let Some((idx, params)) = matched {
             let route = &self.routes[idx];
@@ -283,7 +273,7 @@ impl Router {
                 constraints.validate(&params)?;
             }
 
-            request.path_params = params;
+            request.set_params(params);
 
             // Handler dispatch - the BoxedHandler.call() is optimized
             // to allow the compiler to inline the actual handler body
@@ -308,14 +298,158 @@ fn split_segments(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|s| !s.is_empty())
 }
 
-/// Match a route path pattern against a request path that has already been
-/// split into non-empty segments.
+/// Rewrite an armature route pattern into `matchit` syntax.
 ///
-/// The pattern is compared segment-by-segment using a `split('/')` iterator,
-/// so no `Vec` is allocated per candidate route. The `HashMap` of parameters is
-/// only allocated once a route actually matches (and only sized for the number
-/// of parameters the pattern declares).
-fn match_path(pattern: &str, path_parts: &[&str]) -> Option<crate::RouteParams> {
+/// `:id` becomes `{id}` and `*rest` becomes `{*rest}`. User-facing pattern
+/// syntax does not change — this is the seam that keeps it from having to.
+/// Segments that are already braced pass through untouched.
+pub(crate) fn translate_pattern(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    for (i, segment) in pattern.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        match segment.as_bytes().first() {
+            Some(b':') => {
+                out.push('{');
+                out.push_str(&segment[1..]);
+                out.push('}');
+            }
+            Some(b'*') => {
+                out.push_str("{*");
+                out.push_str(&segment[1..]);
+                out.push('}');
+            }
+            _ => out.push_str(segment),
+        }
+    }
+    out
+}
+
+/// Whether an earlier same-method route already answers everything `idx` would.
+///
+/// Only decidable for a static pattern, which matches exactly one concrete path:
+/// if an earlier route matches that path, this route can never be reached under
+/// first-registered-wins. A pattern containing `:` or `*` is not a concrete
+/// path, so it is never reported as shadowed.
+fn is_shadowed_by_earlier(routes: &[Route], idx: usize) -> bool {
+    let route = &routes[idx];
+    if route.path.contains(':') || route.path.contains('*') {
+        return false;
+    }
+    let parts: SmallVec<[&str; 8]> = split_segments(&route.path).collect();
+    routes[..idx].iter().any(|earlier| {
+        earlier.method == route.method && match_path_spans(&earlier.path, &parts).is_some()
+    })
+}
+
+/// The number of method-indexed trees: the routable methods of [`HttpMethod`].
+const METHOD_SLOTS: usize = 8;
+
+/// Index of `method` into the tree array.
+#[inline]
+fn method_slot(method: &Method) -> Option<usize> {
+    Some(match method {
+        Method::Get => 0,
+        Method::Post => 1,
+        Method::Put => 2,
+        Method::Delete => 3,
+        Method::Patch => 4,
+        Method::Head => 5,
+        Method::Options => 6,
+        Method::Query => 7,
+        // CONNECT, TRACE, and unknown tokens are not routable; the caller
+        // answers them the same way it answers a path that does not match.
+        _ => return None,
+    })
+}
+
+/// One `matchit` tree per routable method, plus a linear fallback.
+///
+/// The fallback exists because `matchit` rejects conflicting patterns while the
+/// linear scan this replaces accepted them and took the first match. Silently
+/// dropping the loser would change the behavior of applications that register
+/// overlapping routes, so a rejected insert lands here and is scanned in
+/// registration order.
+struct MethodIndex {
+    trees: [Option<matchit::Router<usize>>; METHOD_SLOTS],
+    fallback: Vec<usize>,
+}
+
+impl MethodIndex {
+    fn build(routes: &[Route]) -> Self {
+        let mut trees: [Option<matchit::Router<usize>>; METHOD_SLOTS] = Default::default();
+        let mut fallback = Vec::new();
+
+        for (idx, route) in routes.iter().enumerate() {
+            let method = Method::from(route.method.clone());
+            let Some(slot) = method_slot(&method) else {
+                fallback.push(idx);
+                continue;
+            };
+            if is_shadowed_by_earlier(routes, idx) {
+                // Unreachable under first-registered-wins, and inserting it
+                // anyway would hand it the match: `matchit` prefers a static
+                // segment over a parameter, where this framework prefers the
+                // earlier registration. Dropping it keeps the two agreeing.
+                continue;
+            }
+            let tree = trees[slot].get_or_insert_with(matchit::Router::new);
+            if tree.insert(translate_pattern(&route.path), idx).is_err() {
+                // A conflict, an unsupported pattern, or a duplicate. Preserve
+                // first-registered-wins by scanning instead.
+                fallback.push(idx);
+            }
+        }
+
+        Self { trees, fallback }
+    }
+
+    /// The lowest-registration-index route matching `method` and `path`.
+    fn find(&self, routes: &[Route], method: &Method, path: &str) -> Option<(usize, RouteParams)> {
+        let mut best: Option<(usize, RouteParams)> = None;
+
+        if let Some(slot) = method_slot(method)
+            && let Some(tree) = self.trees[slot].as_ref()
+            && let Ok(m) = tree.at(path)
+        {
+            let mut params = RouteParams::new();
+            for (name, value) in m.params.iter() {
+                params.push((
+                    param_intern::intern(name),
+                    Bytes::copy_from_slice(value.as_bytes()),
+                ));
+            }
+            best = Some((*m.value, params));
+        }
+
+        // A fallback route registered earlier than the tree match has to win, or
+        // adding a conflicting route later would silently change which handler
+        // serves an existing path.
+        for &idx in &self.fallback {
+            if best.as_ref().is_some_and(|(b, _)| *b < idx) {
+                break;
+            }
+            let route = &routes[idx];
+            if Method::from(route.method.clone()) != *method {
+                continue;
+            }
+            let parts: SmallVec<[&str; 8]> = split_segments(path).collect();
+            if let Some(params) = match_path_spans(&route.path, &parts) {
+                best = Some((idx, params));
+                break;
+            }
+        }
+
+        best
+    }
+}
+
+/// Match `pattern` against pre-split `path_parts`, capturing spans.
+///
+/// The fallback matcher, used only for routes `matchit` would not accept. The
+/// tree path does not come through here.
+fn match_path_spans(pattern: &str, path_parts: &[&str]) -> Option<RouteParams> {
     // First pass: validate the segment count and static segments, and count
     // how many parameters the pattern declares. No allocation happens here.
     //
@@ -366,7 +500,7 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<crate::RouteParams> 
     // route-registration time, so the table cannot grow with traffic. It does
     // mean a lock per captured parameter on the match path; the compiled router
     // interns once at registration instead.
-    let mut params = crate::RouteParams::new();
+    let mut params = RouteParams::new();
     if param_count > 0 {
         for (i, pattern_part) in split_segments(pattern).enumerate() {
             if let Some(name) = pattern_part.strip_prefix('*') {
@@ -374,13 +508,13 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<crate::RouteParams> 
                 // `CompiledRoute::extract_params`'s joining convention.
                 let name = if name.is_empty() { "*" } else { name };
                 params.push((
-                    crate::param_intern::intern(name),
+                    param_intern::intern(name),
                     Bytes::from(path_parts[i..].join("/")),
                 ));
                 break;
             } else if let Some(param_name) = pattern_part.strip_prefix(':') {
                 params.push((
-                    crate::param_intern::intern(param_name),
+                    param_intern::intern(param_name),
                     Bytes::copy_from_slice(path_parts[i].as_bytes()),
                 ));
             }
@@ -403,9 +537,187 @@ mod tests {
 
     // Test helper: split a raw path and run match_path, mirroring how the
     // router pre-splits the request path before the route loop.
-    fn match_path_str(pattern: &str, path: &str) -> Option<crate::RouteParams> {
+    fn match_path_str(pattern: &str, path: &str) -> Option<RouteParams> {
         let parts: Vec<&str> = super::split_segments(path).collect();
-        match_path(pattern, &parts)
+        match_path_spans(pattern, &parts)
+    }
+
+    #[test]
+    fn translates_armature_patterns_to_matchit_syntax() {
+        assert_eq!(translate_pattern("/users"), "/users");
+        assert_eq!(translate_pattern("/users/:id"), "/users/{id}");
+        assert_eq!(
+            translate_pattern("/users/:user_id/posts/:post_id"),
+            "/users/{user_id}/posts/{post_id}"
+        );
+        assert_eq!(translate_pattern("/files/*path"), "/files/{*path}");
+        assert_eq!(
+            translate_pattern("/users/:id/files/*path"),
+            "/users/{id}/files/{*path}"
+        );
+        // Already-braced patterns pass through, so a user who wrote matchit
+        // syntax directly is not broken by the translation.
+        assert_eq!(translate_pattern("/users/{id}"), "/users/{id}");
+    }
+
+    #[tokio::test]
+    async fn dispatches_by_method_without_comparing_strings() {
+        let mut router = Router::new();
+        router.get("/r", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        router.post("/r", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(201))
+        });
+
+        let get = router.route(HttpRequest::new("GET", "/r")).await.unwrap();
+        let post = router.route(HttpRequest::new("POST", "/r")).await.unwrap();
+        assert_eq!(get.status, 200);
+        assert_eq!(post.status, 201);
+    }
+
+    #[tokio::test]
+    async fn captures_params_as_spans_of_the_target() {
+        let mut router = Router::new();
+        router.get("/users/:id/posts/:post", |req: HttpRequest| async move {
+            let mut r = HttpResponse::new(200);
+            r.body = Bytes::from(format!(
+                "{}:{}",
+                req.param("id").unwrap_or("-"),
+                req.param("post").unwrap_or("-")
+            ));
+            Ok::<_, Error>(r)
+        });
+
+        let resp = router
+            .route(HttpRequest::new("GET", "/users/42/posts/7"))
+            .await
+            .unwrap();
+        assert_eq!(resp.body_slice(), b"42:7");
+    }
+
+    #[tokio::test]
+    async fn catch_all_still_matches() {
+        let mut router = Router::new();
+        router.get("/files/*path", |req: HttpRequest| async move {
+            let mut r = HttpResponse::new(200);
+            r.body = Bytes::from(req.param("path").unwrap_or("-").to_owned());
+            Ok::<_, Error>(r)
+        });
+        let resp = router
+            .route(HttpRequest::new("GET", "/files/a/b/c.txt"))
+            .await
+            .unwrap();
+        assert_eq!(resp.body_slice(), b"a/b/c.txt");
+    }
+
+    #[tokio::test]
+    async fn a_query_string_does_not_participate_in_matching() {
+        let mut router = Router::new();
+        router.get("/s", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        let resp = router
+            .route(HttpRequest::new("GET", "/s?a=1&b=2"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    #[tokio::test]
+    async fn duplicate_routes_keep_first_registered_wins() {
+        // matchit rejects conflicting inserts; the old linear scan accepted them
+        // and took the first. Existing applications rely on that, so a conflict
+        // must fall back to a scan rather than panicking or reordering.
+        let mut router = Router::new();
+        router.get("/dup", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        router.get("/dup", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(500))
+        });
+        let resp = router.route(HttpRequest::new("GET", "/dup")).await.unwrap();
+        assert_eq!(resp.status, 200, "the first registration must win");
+    }
+
+    #[tokio::test]
+    async fn routes_added_after_the_first_dispatch_are_visible() {
+        let mut router = Router::new();
+        router.get("/a", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        assert_eq!(
+            router
+                .route(HttpRequest::new("GET", "/a"))
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+
+        // The index is built lazily; adding a route has to invalidate it.
+        router.get("/b", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(201))
+        });
+        assert_eq!(
+            router
+                .route(HttpRequest::new("GET", "/b"))
+                .await
+                .unwrap()
+                .status,
+            201
+        );
+    }
+
+    /// Registration order beats `matchit`'s static-over-parameter preference,
+    /// matching both the scan this replaced and `OptimizedRouter`.
+    #[tokio::test]
+    async fn an_earlier_param_route_shadows_a_later_static_one() {
+        let mut router = Router::new();
+        router.get("/users/:id", |req: HttpRequest| async move {
+            let id = req.param("id").unwrap_or("-").to_owned();
+            Ok::<_, Error>(HttpResponse::ok().with_body(format!("param:{id}").into_bytes()))
+        });
+        router.get("/users/me", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::ok().with_body(b"static".to_vec()))
+        });
+
+        let resp = router
+            .route(HttpRequest::new("GET", "/users/me"))
+            .await
+            .unwrap();
+        assert_eq!(resp.body_slice(), b"param:me");
+    }
+
+    /// The other order is unambiguous: the static route is both earlier and the
+    /// one `matchit` would pick.
+    #[tokio::test]
+    async fn an_earlier_static_route_wins_over_a_later_param_one() {
+        let mut router = Router::new();
+        router.get("/users/me", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::ok().with_body(b"static".to_vec()))
+        });
+        router.get("/users/:id", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::ok().with_body(b"param".to_vec()))
+        });
+
+        let resp = router
+            .route(HttpRequest::new("GET", "/users/me"))
+            .await
+            .unwrap();
+        assert_eq!(resp.body_slice(), b"static");
+    }
+
+    #[tokio::test]
+    async fn an_unroutable_method_is_not_a_panic() {
+        let mut router = Router::new();
+        router.get("/a", |_req: HttpRequest| async {
+            Ok::<_, Error>(HttpResponse::new(200))
+        });
+        // An `Other` method has no tree; it must reach the no-match branch
+        // rather than unwrapping a missing one.
+        let resp = router.route(HttpRequest::new("PURGE", "/a")).await;
+        assert!(matches!(resp, Err(Error::RouteNotFound(_))));
     }
 
     #[test]
