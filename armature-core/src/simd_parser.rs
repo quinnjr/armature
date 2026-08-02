@@ -171,6 +171,12 @@ pub fn parse_query_string_fast(query: &str) -> HashMap<String, String> {
 ///
 /// This handles percent-encoded characters like %20 for space.
 ///
+/// Not on the serve path: it allocates a `HashMap` and an owned `String` per
+/// key and value, whether or not a handler reads any of them.
+/// [`crate::HttpRequest::query`] is the request-path accessor — it parses on
+/// first access and memoizes. This remains for callers with a query string in
+/// hand and a genuine need for an owned map.
+///
 /// # Example
 ///
 /// ```rust,ignore

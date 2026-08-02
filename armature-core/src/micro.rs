@@ -1206,11 +1206,13 @@ async fn handle_micro_request(
 
     let mut http_req = HttpRequest::new(method.clone(), path.clone());
 
-    // Copy headers
+    // Copy headers. One copy per value, because hyper's `HeaderValue` owns its
+    // own buffer and cannot be projected into our `Bytes`; the name goes in as
+    // a `&str`, so it costs nothing for a well-known header.
     for (name, value) in req.headers() {
-        if let Ok(v) = value.to_str() {
-            http_req.headers.insert(name.as_str(), v);
-        }
+        http_req
+            .headers
+            .insert(name.as_str(), Bytes::copy_from_slice(value.as_bytes()));
     }
 
     // Fast-path rejection: if the client declares a Content-Length larger
@@ -1238,7 +1240,7 @@ async fn handle_micro_request(
     // otherwise be buffered into a `Vec<u8>` with no cap at all.
     let limited = Limited::new(req.into_body(), app.max_body_size);
     let body_bytes = match limited.collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
+        Ok(collected) => collected.to_bytes(),
         Err(err) if err.is::<http_body_util::LengthLimitError>() => {
             tracing::warn!(
                 method = %method,
@@ -1261,7 +1263,8 @@ async fn handle_micro_request(
             return Ok(to_hyper_response(HttpResponse::new(400)));
         }
     };
-    http_req.body = Bytes::from(body_bytes);
+    // Hyper already handed back `Bytes`, so this is a refcount move, not a copy.
+    http_req.body = body_bytes;
 
     // Handle request
     let response = app.handle(http_req).await;
