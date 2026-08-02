@@ -288,7 +288,7 @@ fn authorize_and_resolve_model(
             render::render_unauthorized(&inst.config),
         )));
     }
-    let model_name = req.param("model").cloned().unwrap_or_default();
+    let model_name = req.param("model").map(str::to_owned).unwrap_or_default();
     match inst.get_model(&model_name) {
         Some(m) => Ok(m.clone()),
         None => Err(Box::new(html_response(
@@ -488,7 +488,7 @@ async fn handle_detail(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<Htt
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
 
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
@@ -552,7 +552,7 @@ async fn handle_edit_form(
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
             let view = EditView::new(&model, id).with_data(record);
@@ -570,7 +570,7 @@ async fn handle_update_submit(
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     if !model.can_edit {
         return Ok(html_response(
             403,
@@ -595,7 +595,7 @@ async fn handle_delete(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<Htt
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     if !model.can_delete {
         return Ok(html_response(
             403,

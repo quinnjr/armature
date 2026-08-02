@@ -165,7 +165,9 @@ impl ScriptRouter {
             Some((route, params)) => {
                 // Make captured path params visible to the script as
                 // `request.param("id")` before dispatching.
-                request.path_params.extend(params);
+                for (name, value) in params {
+                    request.push_param(&name, value);
+                }
                 let handler = ScriptHandler::new(self.engine.clone(), &route.script_path);
                 match handler.handle(request.clone()).await {
                     Ok(resp) => resp,
@@ -443,12 +445,12 @@ mod tests {
     #[test]
     fn test_pattern_matching_captures_named_params() {
         let params = ScriptRouter::match_pattern("/users/:id", "/users/123").unwrap();
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get("id").map(String::as_str), Some("123"));
 
         let params =
             ScriptRouter::match_pattern("/users/:id/posts/:post_id", "/users/1/posts/2").unwrap();
-        assert_eq!(params.get("id"), Some(&"1".to_string()));
-        assert_eq!(params.get("post_id"), Some(&"2".to_string()));
+        assert_eq!(params.get("id").map(String::as_str), Some("1"));
+        assert_eq!(params.get("post_id").map(String::as_str), Some("2"));
     }
 
     #[test]
@@ -462,7 +464,7 @@ mod tests {
         assert!(ScriptRouter::match_pattern("/api/*", "/api/v1/users").is_some());
 
         let params = ScriptRouter::match_pattern("/api/*", "/api/v1/users").unwrap();
-        assert_eq!(params.get("*"), Some(&"v1/users".to_string()));
+        assert_eq!(params.get("*").map(String::as_str), Some("v1/users"));
     }
 
     #[tokio::test]

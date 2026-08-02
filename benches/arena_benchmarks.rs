@@ -158,7 +158,7 @@ fn bench_request_creation(c: &mut Criterion) {
             req.headers.insert("Accept", "application/json".to_string());
             req.headers
                 .insert("User-Agent", "TestClient/1.0".to_string());
-            req.path_params.insert("id".to_string(), "123".to_string());
+            req.push_param("id", "123");
             req.push_query_param("include", "profile");
             req.push_query_param("fields", "name,email");
             black_box(req)

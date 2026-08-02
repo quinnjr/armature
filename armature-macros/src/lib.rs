@@ -151,8 +151,7 @@ macro_rules! internal_error {
 #[macro_export]
 macro_rules! path_param {
     ($req:expr, $name:expr) => {{
-        $req.path_params
-            .get($name)
+        $req.param($name)
             .ok_or_else(|| {
                 armature_core::Error::BadRequest(format!("Missing path parameter: {}", $name))
             })?
@@ -297,8 +296,7 @@ macro_rules! path_params {
             (
                 $(
                     {
-                        $req.path_params
-                            .get($name)
+                        $req.param($name)
                             .ok_or_else(|| armature_core::Error::BadRequest(
                                 format!("Missing path parameter: {}", $name)
                             ))?

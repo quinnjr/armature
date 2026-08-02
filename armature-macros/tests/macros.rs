@@ -22,7 +22,7 @@ fn request_with(
 ) -> HttpRequest {
     let mut req = HttpRequest::new("GET", "/".to_string());
     for (k, v) in path_params {
-        req.path_params.insert((*k).to_string(), (*v).to_string());
+        req.push_param(k, armature_core::Bytes::copy_from_slice(v.as_bytes()));
     }
     for (k, v) in query_params {
         req.push_query_param(*k, *v);

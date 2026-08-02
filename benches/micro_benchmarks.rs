@@ -21,7 +21,7 @@ async fn json_handler(_req: HttpRequest) -> Result<HttpResponse, Error> {
 }
 
 async fn param_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     HttpResponse::json(&serde_json::json!({ "id": id }))
 }
 

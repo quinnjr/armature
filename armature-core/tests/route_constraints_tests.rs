@@ -2,7 +2,7 @@
 
 use armature_core::handler::from_legacy_handler;
 use armature_core::*;
-use std::collections::HashMap;
+use bytes::Bytes;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -254,8 +254,11 @@ fn test_regex_constraint_invalid() {
 fn test_route_constraints_single() {
     let constraints = RouteConstraints::new().add("id", Box::new(IntConstraint));
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), "123".to_string());
+    let mut params = armature_core::RouteParams::new();
+    params.push((
+        armature_core::param_intern::intern("id"),
+        Bytes::from_static(b"123"),
+    ));
 
     assert!(constraints.validate(&params).is_ok());
 }
@@ -264,8 +267,11 @@ fn test_route_constraints_single() {
 fn test_route_constraints_single_invalid() {
     let constraints = RouteConstraints::new().add("id", Box::new(IntConstraint));
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), "abc".to_string());
+    let mut params = armature_core::RouteParams::new();
+    params.push((
+        armature_core::param_intern::intern("id"),
+        Bytes::from_static(b"abc"),
+    ));
 
     assert!(constraints.validate(&params).is_err());
 }
@@ -276,9 +282,15 @@ fn test_route_constraints_multiple() {
         .add("id", Box::new(IntConstraint))
         .add("name", Box::new(AlphaConstraint));
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), "123".to_string());
-    params.insert("name".to_string(), "john".to_string());
+    let mut params = armature_core::RouteParams::new();
+    params.push((
+        armature_core::param_intern::intern("id"),
+        Bytes::from_static(b"123"),
+    ));
+    params.push((
+        armature_core::param_intern::intern("name"),
+        Bytes::from_static(b"john"),
+    ));
 
     assert!(constraints.validate(&params).is_ok());
 }
@@ -289,9 +301,15 @@ fn test_route_constraints_multiple_one_invalid() {
         .add("id", Box::new(IntConstraint))
         .add("name", Box::new(AlphaConstraint));
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), "abc".to_string());
-    params.insert("name".to_string(), "john".to_string());
+    let mut params = armature_core::RouteParams::new();
+    params.push((
+        armature_core::param_intern::intern("id"),
+        Bytes::from_static(b"abc"),
+    ));
+    params.push((
+        armature_core::param_intern::intern("name"),
+        Bytes::from_static(b"john"),
+    ));
 
     assert!(constraints.validate(&params).is_err());
 }
@@ -300,7 +318,7 @@ fn test_route_constraints_multiple_one_invalid() {
 fn test_route_constraints_missing_param() {
     let constraints = RouteConstraints::new().add("id", Box::new(IntConstraint));
 
-    let params = HashMap::new();
+    let params = armature_core::RouteParams::new();
 
     // Missing parameter should not fail validation
     // (it only validates parameters that exist)
@@ -314,8 +332,11 @@ fn test_route_constraints_empty() {
     assert!(constraints.is_empty());
     assert_eq!(constraints.len(), 0);
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), "anything".to_string());
+    let mut params = armature_core::RouteParams::new();
+    params.push((
+        armature_core::param_intern::intern("id"),
+        Bytes::from_static(b"anything"),
+    ));
 
     assert!(constraints.validate(&params).is_ok());
 }
@@ -351,7 +372,7 @@ async fn test_route_with_constraints_valid() {
         path: "/users/:id".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
             Box::pin(async move {
-                let id = req.path_params.get("id").unwrap();
+                let id = req.param("id").unwrap();
                 Ok(HttpResponse::ok().with_body(id.as_bytes().to_vec()))
             })
         })),
@@ -374,7 +395,7 @@ async fn test_route_with_constraints_invalid() {
         path: "/users/:id".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| -> Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>> {
             Box::pin(async move {
-                let id = req.path_params.get("id").unwrap();
+                let id = req.param("id").unwrap();
                 Ok(HttpResponse::ok().with_body(id.as_bytes().to_vec()))
             })
         })),

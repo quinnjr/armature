@@ -128,7 +128,7 @@ pub fn intern_header_name(name: &str) -> Cow<'static, str> {
 ///
 /// ```rust,ignore
 /// let params = parse_query_string_fast("name=john&age=30&city=NYC");
-/// assert_eq!(params.get("name"), Some(&"john".to_string()));
+/// assert_eq!(params.get("name").map(String::as_str), Some("john"));
 /// ```
 #[inline]
 pub fn parse_query_string_fast(query: &str) -> HashMap<String, String> {
@@ -175,7 +175,7 @@ pub fn parse_query_string_fast(query: &str) -> HashMap<String, String> {
 ///
 /// ```rust,ignore
 /// let params = parse_query_string_decoded("name=john%20doe&age=30");
-/// assert_eq!(params.get("name"), Some(&"john doe".to_string()));
+/// assert_eq!(params.get("name").map(String::as_str), Some("john doe"));
 /// ```
 #[inline]
 pub fn parse_query_string_decoded(query: &str) -> HashMap<String, String> {
@@ -390,8 +390,8 @@ pub fn is_valid_header_name(name: &[u8]) -> bool {
 ///
 /// ```rust,ignore
 /// let params = extract_path_params("/users/:id/posts/:post_id", "/users/123/posts/456");
-/// assert_eq!(params.get("id"), Some(&"123".to_string()));
-/// assert_eq!(params.get("post_id"), Some(&"456".to_string()));
+/// assert_eq!(params.get("id").map(String::as_str), Some("123"));
+/// assert_eq!(params.get("post_id").map(String::as_str), Some("456"));
 /// ```
 #[inline]
 pub fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, String> {
@@ -450,9 +450,9 @@ mod tests {
     #[test]
     fn test_parse_query_string_fast() {
         let params = parse_query_string_fast("name=john&age=30&city=NYC");
-        assert_eq!(params.get("name"), Some(&"john".to_string()));
-        assert_eq!(params.get("age"), Some(&"30".to_string()));
-        assert_eq!(params.get("city"), Some(&"NYC".to_string()));
+        assert_eq!(params.get("name").map(String::as_str), Some("john"));
+        assert_eq!(params.get("age").map(String::as_str), Some("30"));
+        assert_eq!(params.get("city").map(String::as_str), Some("NYC"));
 
         // Empty query
         let params = parse_query_string_fast("");
@@ -460,27 +460,30 @@ mod tests {
 
         // Single param
         let params = parse_query_string_fast("key=value");
-        assert_eq!(params.get("key"), Some(&"value".to_string()));
+        assert_eq!(params.get("key").map(String::as_str), Some("value"));
 
         // Key without value
         let params = parse_query_string_fast("flag&debug=true");
         assert!(params.contains_key("flag"));
-        assert_eq!(params.get("debug"), Some(&"true".to_string()));
+        assert_eq!(params.get("debug").map(String::as_str), Some("true"));
     }
 
     #[test]
     fn test_parse_query_string_decoded() {
         let params = parse_query_string_decoded("name=john%20doe&age=30");
-        assert_eq!(params.get("name"), Some(&"john doe".to_string()));
-        assert_eq!(params.get("age"), Some(&"30".to_string()));
+        assert_eq!(params.get("name").map(String::as_str), Some("john doe"));
+        assert_eq!(params.get("age").map(String::as_str), Some("30"));
 
         // Plus as space
         let params = parse_query_string_decoded("name=john+doe");
-        assert_eq!(params.get("name"), Some(&"john doe".to_string()));
+        assert_eq!(params.get("name").map(String::as_str), Some("john doe"));
 
         // Special characters
         let params = parse_query_string_decoded("email=test%40example.com");
-        assert_eq!(params.get("email"), Some(&"test@example.com".to_string()));
+        assert_eq!(
+            params.get("email").map(String::as_str),
+            Some("test@example.com")
+        );
     }
 
     #[test]
@@ -502,8 +505,8 @@ mod tests {
         assert_eq!(url_decode("%F0%9F%A6%80"), "\u{1F980}"); // 🦀
 
         let params = parse_query_string_decoded("price=%E2%82%AC10&name=caf%C3%A9");
-        assert_eq!(params.get("price"), Some(&"\u{20AC}10".to_string()));
-        assert_eq!(params.get("name"), Some(&"caf\u{e9}".to_string()));
+        assert_eq!(params.get("price").map(String::as_str), Some("\u{20AC}10"));
+        assert_eq!(params.get("name").map(String::as_str), Some("caf\u{e9}"));
     }
 
     #[test]
@@ -532,8 +535,8 @@ mod tests {
     #[test]
     fn test_extract_path_params() {
         let params = extract_path_params("/users/:id/posts/:post_id", "/users/123/posts/456");
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
-        assert_eq!(params.get("post_id"), Some(&"456".to_string()));
+        assert_eq!(params.get("id").map(String::as_str), Some("123"));
+        assert_eq!(params.get("post_id").map(String::as_str), Some("456"));
 
         // No params
         let params = extract_path_params("/users/list", "/users/list");

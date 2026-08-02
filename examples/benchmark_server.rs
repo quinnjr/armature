@@ -181,9 +181,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
                 let id = req
-                    .path_params
-                    .get("id")
-                    .cloned()
+                    .param("id")
+                    .map(str::to_owned)
                     .unwrap_or_else(|| "0".to_string());
 
                 Ok(HttpResponse::ok().with_json(&UserResponse {

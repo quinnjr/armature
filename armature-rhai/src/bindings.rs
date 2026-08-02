@@ -34,7 +34,9 @@ impl RequestBinding {
 
         let mut params = HashMap::new();
         for (key, value) in req.path_params.iter() {
-            params.insert(key.clone(), value.clone());
+            if let Ok(value) = std::str::from_utf8(value) {
+                params.insert((*key).to_owned(), value.to_owned());
+            }
         }
 
         Self {

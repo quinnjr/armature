@@ -1435,7 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn test_built_app_dispatches_catch_all() {
         async fn files(req: HttpRequest) -> Result<HttpResponse, Error> {
-            let p = req.path_params.get("path").cloned().unwrap_or_default();
+            let p = req.param("path").map(str::to_owned).unwrap_or_default();
             Ok(HttpResponse::ok().with_body(p.into_bytes()))
         }
 

@@ -897,7 +897,7 @@ mod tests {
         let params = match_path("/users/{userId}/posts/{postId}", "/users/1/posts/2");
         assert!(params.is_some());
         let params = params.unwrap();
-        assert_eq!(params.get("userId"), Some(&"1".to_string()));
-        assert_eq!(params.get("postId"), Some(&"2".to_string()));
+        assert_eq!(params.get("userId").map(String::as_str), Some("1"));
+        assert_eq!(params.get("postId").map(String::as_str), Some("2"));
     }
 }

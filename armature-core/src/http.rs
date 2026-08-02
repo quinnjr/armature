@@ -7,8 +7,42 @@ use crate::query::{QueryPairs, QueryView, parse as parse_query};
 use crate::{ByteStr, Method};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+
+/// Route parameters captured from the request target.
+///
+/// Names are `&'static str` from the compiled route pattern (see
+/// [`crate::param_intern`]), values are slices of the target — so a matched
+/// route costs no allocation for either half. Four inline slots covers the
+/// overwhelming majority of routes.
+pub type RouteParams = SmallVec<[(&'static str, Bytes); 4]>;
+
+/// Read helpers for [`RouteParams`].
+///
+/// The type is a `SmallVec` of pairs rather than a map, so `get` on it means
+/// "index into the slice". This is the by-name lookup.
+pub trait RouteParamsExt {
+    /// The value captured for `name`, as UTF-8.
+    fn get_str(&self, name: &str) -> Option<&str>;
+
+    /// The value captured for `name`, raw.
+    fn get_bytes(&self, name: &str) -> Option<&Bytes>;
+}
+
+impl RouteParamsExt for RouteParams {
+    #[inline]
+    fn get_str(&self, name: &str) -> Option<&str> {
+        self.get_bytes(name)
+            .and_then(|v| std::str::from_utf8(v).ok())
+    }
+
+    #[inline]
+    fn get_bytes(&self, name: &str) -> Option<&Bytes> {
+        self.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    }
+}
 
 /// The memoized query pairs.
 ///
@@ -58,7 +92,7 @@ pub struct HttpRequest {
     /// Was a `Vec<u8>` shadowed by an optional `Bytes` that could disagree with
     /// it. One field, always authoritative.
     pub body: Bytes,
-    pub path_params: HashMap<String, String>,
+    pub path_params: RouteParams,
     /// Type-safe extensions for storing application state.
     ///
     /// Use this to pass typed data to handlers without DI container lookups.
@@ -80,7 +114,7 @@ impl HttpRequest {
             path: path.into(),
             headers: HeaderMap::new(),
             body: Bytes::new(),
-            path_params: HashMap::new(),
+            path_params: RouteParams::new(),
             extensions: Extensions::new(),
             query_cache: QueryCache::default(),
         }
@@ -98,7 +132,7 @@ impl HttpRequest {
             path: path.into(),
             headers: HeaderMap::new(),
             body: Bytes::new(),
-            path_params: HashMap::new(),
+            path_params: RouteParams::new(),
             extensions: Extensions::with_capacity(capacity),
             query_cache: QueryCache::default(),
         }
@@ -119,7 +153,7 @@ impl HttpRequest {
             path: path.into(),
             headers: HeaderMap::new(),
             body,
-            path_params: HashMap::new(),
+            path_params: RouteParams::new(),
             extensions: Extensions::new(),
             query_cache: QueryCache::default(),
         }
@@ -204,6 +238,13 @@ impl HttpRequest {
         path_params: HashMap<String, String>,
         query_params: HashMap<String, String>,
     ) -> Self {
+        // Names are interned rather than borrowed: `from_parts` is a
+        // compatibility shim taking an owned map, so there is no route pattern
+        // to borrow a `&'static str` from.
+        let path_params: RouteParams = path_params
+            .into_iter()
+            .map(|(k, v)| (crate::param_intern::intern(&k), Bytes::from(v)))
+            .collect();
         // `query_params` is accepted for source compatibility and ignored: the
         // query now comes from `path`, parsed on demand. Callers that need one
         // honoured should put it in the path.
@@ -294,9 +335,35 @@ impl HttpRequest {
         parser.parse(self.body_ref())
     }
 
-    /// Get a path parameter by name
-    pub fn param(&self, name: &str) -> Option<&String> {
-        self.path_params.get(name)
+    /// A captured route parameter, as UTF-8.
+    #[inline]
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.param_bytes(name)
+            .and_then(|v| std::str::from_utf8(v).ok())
+    }
+
+    /// A captured route parameter, raw.
+    #[inline]
+    pub fn param_bytes(&self, name: &str) -> Option<&Bytes> {
+        self.path_params
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v)
+    }
+
+    /// Add one captured route parameter, interning its name.
+    ///
+    /// The router uses [`HttpRequest::set_params`] with names already interned
+    /// at registration; this is for callers assembling a request by hand.
+    pub fn push_param(&mut self, name: &str, value: impl Into<Bytes>) {
+        self.path_params
+            .push((crate::param_intern::intern(name), value.into()));
+    }
+
+    /// Replace the captured parameters. Called by the router.
+    #[inline]
+    pub fn set_params(&mut self, params: RouteParams) {
+        self.path_params = params;
     }
 
     /// The raw query string, without the `?`.
@@ -977,6 +1044,39 @@ mod tests {
     }
 
     #[test]
+    fn params_read_back_as_str_and_bytes() {
+        let mut req = HttpRequest::new("GET", "/users/42/posts/7");
+        let mut params = RouteParams::new();
+        params.push((
+            crate::param_intern::intern("user_id"),
+            Bytes::from_static(b"42"),
+        ));
+        params.push((
+            crate::param_intern::intern("post_id"),
+            Bytes::from_static(b"7"),
+        ));
+        req.set_params(params);
+
+        assert_eq!(req.param("user_id"), Some("42"));
+        assert_eq!(req.param("post_id"), Some("7"));
+        assert_eq!(req.param("nope"), None);
+        assert_eq!(req.param_bytes("user_id").map(|b| b.len()), Some(2));
+        assert_eq!(
+            req.param("user_id").and_then(|v| v.parse::<u32>().ok()),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn four_params_stay_inline() {
+        let mut params = RouteParams::new();
+        for name in ["a", "b", "c", "d"] {
+            params.push((crate::param_intern::intern(name), Bytes::from_static(b"x")));
+        }
+        assert!(!params.spilled(), "four params must not allocate");
+    }
+
+    #[test]
     fn path_is_a_bytestr_and_still_compares_and_prints_as_a_str() {
         let req = HttpRequest::new("GET", "/users/42?a=1");
         assert_eq!(req.path_str(), "/users/42?a=1");
@@ -1073,9 +1173,9 @@ mod tests {
     #[test]
     fn test_http_request_param() {
         let mut req = HttpRequest::new("GET", "/users/123".to_string());
-        req.path_params.insert("id".to_string(), "123".to_string());
+        req.push_param("id", "123");
 
-        assert_eq!(req.param("id"), Some(&"123".to_string()));
+        assert_eq!(req.param("id"), Some("123"));
         assert_eq!(req.param("name"), None);
     }
 

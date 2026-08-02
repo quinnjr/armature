@@ -230,12 +230,11 @@ impl<const INDEX: usize> Extract for PathParam<INDEX> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("PathParam");
-        // Get the Nth path parameter
+        // Get the Nth path parameter, in capture order.
         req.path_params
-            .values()
-            .nth(INDEX)
-            .cloned()
-            .map(PathParam)
+            .get(INDEX)
+            .and_then(|(_, v)| std::str::from_utf8(v).ok())
+            .map(|v| PathParam(v.to_owned()))
             .ok_or_else(|| {
                 Error::RouteNotFound(format!("Path parameter at index {} not found", INDEX))
             })
@@ -937,7 +936,7 @@ mod tests {
         req.headers
             .insert("authorization", "Bearer token123".to_string());
         req.body = Bytes::from_static(br#"{"name":"test"}"#);
-        req.path_params.insert("id".to_string(), "123".to_string());
+        req.push_param("id", "123");
         req
     }
 

@@ -139,12 +139,8 @@ fn demonstrate_path_extraction() {
 
     // Simulate a GET request with path parameters
     let mut request = HttpRequest::new("GET", "/users/123/posts/456".to_string());
-    request
-        .path_params
-        .insert("user_id".to_string(), "123".to_string());
-    request
-        .path_params
-        .insert("post_id".to_string(), "456".to_string());
+    request.push_param("user_id", "123");
+    request.push_param("post_id", "456");
 
     // Method 1: Extract single path parameter with Path<T>
     let user_id: Path<u32> = Path::from_request(&request, "user_id").unwrap();
@@ -222,9 +218,7 @@ fn demonstrate_combined_extraction() {
     let mut request = HttpRequest::new("PUT", "/users/42".to_string());
 
     // Set path parameter
-    request
-        .path_params
-        .insert("id".to_string(), "42".to_string());
+    request.push_param("id", "42");
 
     // Set query parameter
     request.push_query_param("notify", "true");

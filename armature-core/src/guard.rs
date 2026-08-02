@@ -17,8 +17,8 @@ impl GuardContext {
         self.request.headers.get(name)
     }
 
-    pub fn get_param(&self, name: &str) -> Option<&String> {
-        self.request.path_params.get(name)
+    pub fn get_param(&self, name: &str) -> Option<&str> {
+        self.request.param(name)
     }
 }
 
@@ -417,10 +417,7 @@ mod tests {
         );
         let context = GuardContext::new(request);
 
-        assert_eq!(
-            context.request.path_params.get("id"),
-            Some(&"123".to_string())
-        );
+        assert_eq!(context.request.param("id"), Some("123"));
         assert_eq!(context.request.query_param("sort"), Some("asc"));
     }
 }

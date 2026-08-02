@@ -1076,7 +1076,7 @@ mod tests {
         let mt = MediaType::parse("text/html; charset=utf-8").unwrap();
         assert_eq!(mt.type_, "text");
         assert_eq!(mt.subtype, "html");
-        assert_eq!(mt.params.get("charset"), Some(&"utf-8".to_string()));
+        assert_eq!(mt.params.get("charset").map(String::as_str), Some("utf-8"));
     }
 
     #[test]

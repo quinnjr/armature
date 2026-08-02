@@ -158,7 +158,7 @@ fn bench_request_creation(c: &mut Criterion) {
                 black_box("GET".to_string()),
                 black_box("/api/users/123".to_string()),
             );
-            req.path_params.insert("id".to_string(), "123".to_string());
+            req.push_param("id", "123");
             req
         })
     });
@@ -560,7 +560,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
 
     #[allow(clippy::needless_question_mark)]
     async fn param_handler_fn(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.path_params.get("id").cloned().unwrap_or_default();
+        let id = req.param("id").map(str::to_owned).unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({ "id": id }))?)
     }
 
@@ -604,7 +604,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
             let h = handler.clone();
             runtime.block_on(async move {
                 let mut req = HttpRequest::new("GET", "/users/123".to_string());
-                req.path_params.insert("id".to_string(), "123".to_string());
+                req.push_param("id", "123");
                 let _ = h.call(black_box(req)).await;
             })
         })
@@ -648,7 +648,7 @@ fn bench_full_cycle(c: &mut Criterion) {
 
     #[allow(clippy::needless_question_mark)]
     async fn get_user_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.path_params.get("id").cloned().unwrap_or_default();
+        let id = req.param("id").map(str::to_owned).unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({
             "id": id,
             "name": "John Doe",

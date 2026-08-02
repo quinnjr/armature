@@ -30,6 +30,7 @@ use crate::handler::BoxedHandler;
 use crate::route_constraint::RouteConstraints;
 use crate::routing::Router;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -147,22 +148,28 @@ impl CachedRoute {
 
     /// Extract parameters from a path using cached indices.
     #[inline]
-    pub fn extract_params(&self, path: &str) -> HashMap<String, String> {
+    pub fn extract_params(&self, path: &str) -> crate::RouteParams {
+        let mut params = crate::RouteParams::new();
         if self.is_static {
-            return HashMap::new();
+            return params;
         }
 
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut params = HashMap::with_capacity(self.param_indices.len());
 
         for (name, idx) in &self.param_indices {
             if self.catch_all_index == Some(*idx) {
                 // Catch-all: join all remaining segments
                 if let Some(rest) = segments.get(*idx..) {
-                    params.insert(name.clone(), rest.join("/"));
+                    params.push((
+                        crate::param_intern::intern(name),
+                        Bytes::from(rest.join("/")),
+                    ));
                 }
             } else if let Some(value) = segments.get(*idx) {
-                params.insert(name.clone(), (*value).to_string());
+                params.push((
+                    crate::param_intern::intern(name),
+                    Bytes::copy_from_slice(value.as_bytes()),
+                ));
             }
         }
 
@@ -445,26 +452,29 @@ impl CompiledRoute {
     }
 
     /// Extract parameters from a matching path.
-    pub fn extract_params(&self, path: &str) -> HashMap<String, String> {
+    pub fn extract_params(&self, path: &str) -> crate::RouteParams {
+        let mut params = crate::RouteParams::new();
         if self.is_static {
-            return HashMap::new();
+            return params;
         }
 
         let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut params = HashMap::with_capacity(self.param_indices.len());
 
         for (name, idx) in &self.param_indices {
             if let Some(segment) = self.segments.get(*idx) {
                 match segment {
                     RouteSegment::Param(_) => {
                         if let Some(value) = path_segments.get(*idx) {
-                            params.insert(name.clone(), (*value).to_string());
+                            params.push((
+                                crate::param_intern::intern(name),
+                                Bytes::copy_from_slice(value.as_bytes()),
+                            ));
                         }
                     }
                     RouteSegment::CatchAll(_) => {
                         // Join remaining segments
                         let remaining: String = path_segments[*idx..].join("/");
-                        params.insert(name.clone(), remaining);
+                        params.push((crate::param_intern::intern(name), Bytes::from(remaining)));
                     }
                     _ => {}
                 }
@@ -822,7 +832,7 @@ impl RouterStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::RouteParamsExt;
 
     #[test]
     fn test_route_key_equality() {
@@ -849,7 +859,7 @@ mod tests {
         assert!(!cached.is_static);
 
         let params = cached.extract_params("/users/123");
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get_str("id"), Some("123"));
     }
 
     #[test]
@@ -869,10 +879,10 @@ mod tests {
         assert_eq!(cached.catch_all_index, Some(1));
 
         let params = cached.extract_params("/files/docs/readme.md");
-        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs/readme.md"));
 
         let params = cached.extract_params("/files/docs");
-        assert_eq!(params.get("path"), Some(&"docs".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs"));
     }
 
     #[tokio::test]
@@ -906,7 +916,7 @@ mod tests {
             HttpMethod::GET,
             "/files/*path",
             crate::handler::handler(|req: HttpRequest| async move {
-                let path = req.path_params.get("path").cloned().unwrap_or_default();
+                let path = req.param("path").map(str::to_owned).unwrap_or_default();
                 let mut response = HttpResponse::ok();
                 response.body = Bytes::from(path.into_bytes());
                 Ok::<_, Error>(response)
@@ -1018,7 +1028,7 @@ mod tests {
         assert!(!compiled.matches("/users/123/extra"));
 
         let params = compiled.extract_params("/users/123");
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get_str("id"), Some("123"));
     }
 
     #[test]
@@ -1030,8 +1040,8 @@ mod tests {
         assert!(compiled.matches("/users/123/posts/456"));
 
         let params = compiled.extract_params("/users/123/posts/456");
-        assert_eq!(params.get("user_id"), Some(&"123".to_string()));
-        assert_eq!(params.get("post_id"), Some(&"456".to_string()));
+        assert_eq!(params.get_str("user_id"), Some("123"));
+        assert_eq!(params.get_str("post_id"), Some("456"));
     }
 
     #[test]
@@ -1044,7 +1054,7 @@ mod tests {
         assert!(compiled.matches("/files/docs/readme.md"));
 
         let params = compiled.extract_params("/files/docs/readme.md");
-        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs/readme.md"));
     }
 
     #[test]
@@ -1080,7 +1090,7 @@ mod tests {
             HttpMethod::GET,
             "/users/:id",
             |req: HttpRequest| async move {
-                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                let id = req.param("id").map(str::to_owned).unwrap_or_default();
                 let mut r = HttpResponse::ok();
                 r.body = Bytes::from(id.into_bytes());
                 Ok::<_, Error>(r)
@@ -1109,7 +1119,7 @@ mod tests {
             HttpMethod::GET,
             "/files/*path",
             |req: HttpRequest| async move {
-                let p = req.path_params.get("path").cloned().unwrap_or_default();
+                let p = req.param("path").map(str::to_owned).unwrap_or_default();
                 let mut r = HttpResponse::ok();
                 r.body = Bytes::from(p.into_bytes());
                 Ok::<_, Error>(r)
@@ -1200,7 +1210,7 @@ mod tests {
             HttpMethod::GET,
             "/users/:id",
             |req: HttpRequest| async move {
-                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                let id = req.param("id").map(str::to_owned).unwrap_or_default();
                 Ok::<_, Error>(HttpResponse::ok().with_body(format!("param:{id}").into_bytes()))
             },
         ));

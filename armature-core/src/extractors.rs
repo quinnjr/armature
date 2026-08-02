@@ -344,13 +344,15 @@ impl<T> Deref for PathParams<T> {
 
 impl<T: DeserializeOwned> FromRequest for PathParams<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from path params and deserialize
-        let params_string: String = request
+        // Percent-encoded rather than joined by hand, so a captured segment
+        // containing `&`, `=` or `%` survives the round-trip.
+        let pairs: Vec<(&str, &str)> = request
             .path_params
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
+            .filter_map(|(k, v)| std::str::from_utf8(v).ok().map(|v| (*k, v)))
+            .collect();
+        let params_string = serde_urlencoded::to_string(&pairs)
+            .map_err(|e| Error::Validation(format!("Invalid path parameters: {}", e)))?;
 
         let value: T = serde_urlencoded::from_str(&params_string)
             .map_err(|e| Error::Validation(format!("Invalid path parameters: {}", e)))?;
@@ -759,7 +761,7 @@ mod tests {
 
     fn create_request() -> HttpRequest {
         let mut req = HttpRequest::new("GET", "/users/123?page=1&limit=10");
-        req.path_params.insert("id".to_string(), "123".to_string());
+        req.push_param("id", "123");
         req.headers
             .insert("Authorization", "Bearer token123".to_string());
         req.headers

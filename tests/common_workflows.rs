@@ -219,9 +219,7 @@ fn test_error_help_messages() {
 #[test]
 fn test_http_request_helpers() {
     let mut request = HttpRequest::new("GET", "/api/users/123".to_string());
-    request
-        .path_params
-        .insert("id".to_string(), "123".to_string());
+    request.push_param("id", "123");
     request.push_query_param("format", "json");
     request
         .headers
@@ -229,7 +227,7 @@ fn test_http_request_helpers() {
     request.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
     // Test param helper
-    assert_eq!(request.param("id"), Some(&"123".to_string()));
+    assert_eq!(request.param("id"), Some("123"));
     assert_eq!(request.param("unknown"), None);
 
     // Test query helper

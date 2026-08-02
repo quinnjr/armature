@@ -517,9 +517,18 @@ impl<'a> ArenaRequest<'a> {
             req.headers.insert(k.as_str(), v.as_str());
         }
 
-        for (k, v) in self.path_params.iter() {
-            req.path_params.insert(k.to_string(), v.to_string());
-        }
+        // Names are interned: the arena request owns its names, and a request
+        // param name has to be `&'static str`.
+        req.path_params = self
+            .path_params
+            .iter()
+            .map(|(k, v)| {
+                (
+                    crate::param_intern::intern(k.as_str()),
+                    Bytes::copy_from_slice(v.as_str().as_bytes()),
+                )
+            })
+            .collect();
 
         // The query lives in the target now, so it has to be re-encoded onto
         // the path rather than handed over as a map.
