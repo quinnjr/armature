@@ -73,7 +73,9 @@ fn strip_incoming_tenant_headers(request: &mut HttpRequest) {
                 .get(..INTERNAL_TENANT_HEADER_PREFIX.len())
                 .is_some_and(|p| p.eq_ignore_ascii_case(INTERNAL_TENANT_HEADER_PREFIX.as_bytes()))
         })
-        .cloned()
+        // Owned, because the loop below mutates the same map it is iterating
+        // the names of.
+        .map(str::to_owned)
         .collect();
 
     for name in to_remove {
@@ -227,9 +229,7 @@ mod tests {
 
         // Even a spoofed header must not rescue an unresolved request.
         let mut request = create_request();
-        request
-            .headers
-            .insert("__tenant_id".to_string(), "victim".to_string());
+        request.headers.insert("__tenant_id", "victim".to_string());
 
         let result = middleware
             .handle(
@@ -251,12 +251,10 @@ mod tests {
 
         // Client tries to spoof a different tenant; the resolved one must win.
         let mut request = create_request();
+        request.headers.insert("__tenant_id", "victim".to_string());
         request
             .headers
-            .insert("__tenant_id".to_string(), "victim".to_string());
-        request
-            .headers
-            .insert("__tenant_name".to_string(), "victim-corp".to_string());
+            .insert("__tenant_name", "victim-corp".to_string());
 
         let result = middleware
             .handle(
@@ -282,12 +280,10 @@ mod tests {
         let middleware = TenantMiddleware::new(resolver).with_optional(true);
 
         let mut request = create_request();
+        request.headers.insert("__tenant_id", "victim".to_string());
         request
             .headers
-            .insert("__tenant_id".to_string(), "victim".to_string());
-        request
-            .headers
-            .insert("__tenant_name".to_string(), "victim-corp".to_string());
+            .insert("__tenant_name", "victim-corp".to_string());
 
         let result = middleware
             .handle(

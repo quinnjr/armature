@@ -79,7 +79,7 @@ git worktree add -b worktree-feat+armature-core-types \
 | `armature-core/src/traits.rs` | `HttpMethod` ↔ `Method` conversions | 1 |
 | `armature-core/src/headers.rs` | `HeaderMap` stores `(HeaderId, Bytes)`; `&str` facade; `HeaderValueInput` trait | 2 |
 | `armature-core/src/http.rs` | `HttpRequest.method`/`path`/`body`, `HttpResponse.body`, `Query`, path-param spans | 3, 4, 5, 6 |
-| `armature-core/src/query.rs` | **new** — `Query<'a>` lazy view and the percent-decoding parser | 5 |
+| `armature-core/src/query.rs` | **new** — `QueryView<'a>` lazy view and the percent-decoding parser | 5 |
 | `armature-core/src/param_intern.rs` | **new** — leak-once interner producing `&'static str` param names | 6 |
 | `armature-core/src/extensions.rs` | `SmallVec<[(TypeId, Arc<dyn Any + Send + Sync>); 8]>` | 7 |
 | `armature-core/src/routing.rs` | method-indexed `matchit` trees, pattern translation, linear fallback | 8 |
@@ -1200,11 +1200,11 @@ it. This task makes that work happen on first access, or never.
 **Interfaces:**
 - Consumes: `ByteStr`, `HttpRequest.path` (Task 4).
 - Produces:
-  - `pub struct Query<'a>` with `get(&self, key: &str) -> Option<&str>`,
+  - `pub struct QueryView<'a>` with `get(&self, key: &str) -> Option<&str>`,
     `get_all(&self, key: &str) -> impl Iterator<Item = &str>`,
     `iter() -> impl Iterator<Item = (&str, &str)>`, `len()`, `is_empty()`,
     `to_hash_map() -> HashMap<String, String>`
-  - `HttpRequest::query(&self) -> Query<'_>` — **renamed from the old
+  - `HttpRequest::query(&self) -> QueryView<'_>` — **renamed from the old
     `query(&self, name: &str) -> Option<&String>`**
   - `HttpRequest::query_param(&self, name: &str) -> Option<&str>` — the
     replacement for the old `query(name)`; 57 call sites move to it
@@ -1322,11 +1322,11 @@ pub type QueryPairs = SmallVec<[(String, String); 8]>;
 /// Borrowed from the request, so it cannot outlive it — which is what lets the
 /// values be slices of the request's own memory rather than copies.
 #[derive(Debug, Clone, Copy)]
-pub struct Query<'a> {
+pub struct QueryView<'a> {
     pairs: &'a [(String, String)],
 }
 
-impl<'a> Query<'a> {
+impl<'a> QueryView<'a> {
     #[inline]
     pub(crate) fn new(pairs: &'a [(String, String)]) -> Self {
         Self { pairs }
@@ -1486,7 +1486,7 @@ pub struct HttpRequest {
     pub path: ByteStr,
     pub headers: HeaderMap,
     pub body: Bytes,
-    pub path_params: PathParams, // Task 6
+    pub path_params: RouteParams, // Task 6
     pub extensions: Extensions,
     /// Parsed lazily by [`HttpRequest::query`].
     query_cache: QueryCache,
@@ -1505,12 +1505,12 @@ impl HttpRequest {
     /// pays nothing. Note the shape change: this used to take a name and return
     /// one value — that accessor is now [`HttpRequest::query_param`].
     #[inline]
-    pub fn query(&self) -> Query<'_> {
+    pub fn query(&self) -> QueryView<'_> {
         let pairs = self.query_cache.0.get_or_init(|| match self.query_string() {
             Some(q) => parse_query(q),
             None => QueryPairs::new(),
         });
-        Query::new(pairs)
+        QueryView::new(pairs)
     }
 
     /// The first query value for `name`.
@@ -1522,7 +1522,7 @@ impl HttpRequest {
 ```
 
 Delete the `query_params` field and the old `query(&self, name)` method. Add
-`pub mod query;` and `pub use query::Query;` to `armature-core/src/lib.rs`.
+`pub mod query;` and `pub use query::QueryView;` to `armature-core/src/lib.rs`.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1578,11 +1578,11 @@ git commit -m "perf(core)!: parse the query string lazily instead of on every re
 **Interfaces:**
 - Consumes: `Bytes`, `HttpRequest` (Task 4).
 - Produces:
-  - `pub type PathParams = SmallVec<[(&'static str, Bytes); 4]>`
-  - `HttpRequest.path_params: PathParams`
+  - `pub type RouteParams = SmallVec<[(&'static str, Bytes); 4]>`
+  - `HttpRequest.path_params: RouteParams`
   - `HttpRequest::param(&self, name: &str) -> Option<&str>` (was `Option<&String>`)
   - `HttpRequest::param_bytes(&self, name: &str) -> Option<&Bytes>`
-  - `HttpRequest::set_params(&mut self, params: PathParams)`
+  - `HttpRequest::set_params(&mut self, params: RouteParams)`
   - `armature_core::param_intern::intern(name: &str) -> &'static str`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1620,7 +1620,7 @@ mod tests {
     #[test]
     fn params_read_back_as_str_and_bytes() {
         let mut req = HttpRequest::new("GET", "/users/42/posts/7");
-        let mut params = PathParams::new();
+        let mut params = RouteParams::new();
         params.push((crate::param_intern::intern("user_id"), bytes::Bytes::from_static(b"42")));
         params.push((crate::param_intern::intern("post_id"), bytes::Bytes::from_static(b"7")));
         req.set_params(params);
@@ -1634,7 +1634,7 @@ mod tests {
 
     #[test]
     fn four_params_stay_inline() {
-        let mut params = PathParams::new();
+        let mut params = RouteParams::new();
         for name in ["a", "b", "c", "d"] {
             params.push((crate::param_intern::intern(name), bytes::Bytes::from_static(b"x")));
         }
@@ -1698,7 +1698,7 @@ In `armature-core/src/http.rs`:
 /// [`crate::param_intern`]), values are slices of the target — so a matched
 /// route costs no allocation for either half. Four inline slots covers the
 /// overwhelming majority of routes.
-pub type PathParams = SmallVec<[(&'static str, Bytes); 4]>;
+pub type RouteParams = SmallVec<[(&'static str, Bytes); 4]>;
 
 impl HttpRequest {
     /// A captured route parameter, as UTF-8.
@@ -1719,13 +1719,13 @@ impl HttpRequest {
 
     /// Replace the captured parameters. Called by the router.
     #[inline]
-    pub fn set_params(&mut self, params: PathParams) {
+    pub fn set_params(&mut self, params: RouteParams) {
         self.path_params = params;
     }
 }
 ```
 
-Add `pub mod param_intern;` and `pub use http::PathParams;` to `lib.rs`.
+Add `pub mod param_intern;` and `pub use http::RouteParams;` to `lib.rs`.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1737,11 +1737,11 @@ Expected: PASS.
 | Old | New |
 |---|---|
 | `req.path_params.get("id")` | `req.param("id")` |
-| `req.path_params.insert(k, v)` | build a `PathParams` and `req.set_params(..)` |
-| `req.path_params = map` (from `match_path`) | Task 8 supplies a `PathParams` directly |
+| `req.path_params.insert(k, v)` | build a `RouteParams` and `req.set_params(..)` |
+| `req.path_params = map` (from `match_path`) | Task 8 supplies a `RouteParams` directly |
 | `req.param("id").unwrap().parse()` | unchanged — `&str` parses the same |
 | `req.param("id").cloned()` | `req.param("id").map(str::to_owned)` |
-| `constraints.validate(&params)` (takes `&HashMap`) | change `RouteConstraints::validate` to take `&PathParams`; it only reads names and values |
+| `constraints.validate(&params)` (takes `&HashMap`) | change `RouteConstraints::validate` to take `&RouteParams`; it only reads names and values |
 
 - [ ] **Step 7: Run the gate**
 
@@ -1966,12 +1966,12 @@ dependency of `armature-core` since before this plan and is not used anywhere.
   `armature-core/tests/routing_tests.rs`
 
 **Interfaces:**
-- Consumes: `Method` (Task 1), `PathParams` and `param_intern` (Task 6),
+- Consumes: `Method` (Task 1), `RouteParams` and `param_intern` (Task 6),
   `HttpRequest.path`/`method` (Tasks 3–4).
 - Produces:
   - `Router::route(&self, req: HttpRequest) -> Result<HttpResponse, Error>` —
     unchanged signature, new internals
-  - `Router::match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, PathParams)>`
+  - `Router::match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, RouteParams)>`
     — **return type changes** from `HashMap<String, String>`
   - `pub(crate) fn translate_pattern(pattern: &str) -> String` — `:id` → `{id}`,
     `*rest` → `{*rest}`
@@ -2125,7 +2125,7 @@ pub(crate) fn translate_pattern(pattern: &str) -> String {
 
 ```rust
 use crate::param_intern;
-use crate::{Method, PathParams};
+use crate::{Method, RouteParams};
 use std::sync::OnceLock;
 
 /// The number of method-indexed trees: the routable methods of `HttpMethod`.
@@ -2184,14 +2184,14 @@ impl MethodIndex {
     }
 
     /// The lowest-registration-index route matching `method` and `path`.
-    fn find(&self, routes: &[Route], method: &Method, path: &str) -> Option<(usize, PathParams)> {
-        let mut best: Option<(usize, PathParams)> = None;
+    fn find(&self, routes: &[Route], method: &Method, path: &str) -> Option<(usize, RouteParams)> {
+        let mut best: Option<(usize, RouteParams)> = None;
 
         if let Some(slot) = method_slot(method)
             && let Some(tree) = self.trees[slot].as_ref()
             && let Ok(m) = tree.at(path)
         {
-            let mut params = PathParams::new();
+            let mut params = RouteParams::new();
             for (name, value) in m.params.iter() {
                 params.push((
                     param_intern::intern(name),
@@ -2224,7 +2224,7 @@ impl MethodIndex {
 }
 ```
 
-- [ ] **Step 5: Replace `match_path`'s `HashMap` with `PathParams`**
+- [ ] **Step 5: Replace `match_path`'s `HashMap` with `RouteParams`**
 
 Rename `match_path` to `match_path_spans` and change its return type. The
 matching logic is unchanged; only the accumulator differs:
@@ -2234,10 +2234,10 @@ matching logic is unchanged; only the accumulator differs:
 ///
 /// The fallback matcher, used only for routes `matchit` would not accept. The
 /// tree path does not come through here.
-fn match_path_spans(pattern: &str, path_parts: &[&str]) -> Option<PathParams> {
+fn match_path_spans(pattern: &str, path_parts: &[&str]) -> Option<RouteParams> {
     // ... the existing two-pass validation, unchanged ...
 
-    let mut params = PathParams::new();
+    let mut params = RouteParams::new();
     // In the capture pass, replace
     //   params.insert(name.to_string(), value.to_string());
     // with
@@ -2285,7 +2285,7 @@ impl Router {
 
     /// Match without dispatching.
     #[inline]
-    pub fn match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, PathParams)> {
+    pub fn match_route(&self, method: &str, path: &str) -> Option<(BoxedHandler, RouteParams)> {
         let path = path.split('?').next().unwrap_or(path);
         let method = Method::from(method);
         self.index()
@@ -2576,7 +2576,7 @@ grep -rn 'armature-core' --include=Cargo.toml . | grep -v '0\.6'
   `body_slice()` returns `&[u8]`. The private `body_bytes` shadow field is gone,
   so the two can no longer disagree.
 - `HttpRequest.query_params` is removed. `req.query()` returns a lazily parsed
-  `Query<'_>` view and `req.query_param(name)` replaces the old
+  `QueryView<'_>` view and `req.query_param(name)` replaces the old
   `req.query(name)`. The query string is no longer parsed or percent-decoded
   unless a handler reads it.
 - `HttpRequest.path_params` is now `SmallVec<[(&'static str, Bytes); 4]>`.
@@ -2587,9 +2587,9 @@ grep -rn 'armature-core' --include=Cargo.toml . | grep -v '0\.6'
   `get_bytes` for those. `remove` returns `Option<Bytes>`. `iter`, `keys`,
   `names`, and `values` yield `&str`. Custom header names are lowercased at
   insert.
-- `Router::match_route` returns `Option<(BoxedHandler, PathParams)>` (was
+- `Router::match_route` returns `Option<(BoxedHandler, RouteParams)>` (was
   `HashMap<String, String>`).
-- `RouteConstraints::validate` takes `&PathParams`.
+- `RouteConstraints::validate` takes `&RouteParams`.
 
 ### Performance
 
@@ -2724,7 +2724,7 @@ fn count<T>(f: impl FnOnce() -> T) -> u64 {
 }
 
 /// Constructing a request from static strings: the `ByteStr` copies of the
-/// method token and target, and nothing else. `HeaderMap`, `PathParams`, and
+/// method token and target, and nothing else. `HeaderMap`, `RouteParams`, and
 /// `Extensions` are all inline, and `QueryCache` is cold.
 const BUDGET_CONSTRUCT: u64 = 2;
 
@@ -2955,6 +2955,14 @@ git commit -m "test(core): allocation budget and router dispatch benchmark"
   Plan 3, where the response write path is already being rebuilt.
 - **`matchit` was already a declared dependency and entirely unused.** B7 is
   therefore the first code to use it; no dependency is added.
+- **Three names in `armature-core` already belonged to extractors, so the new
+  types took different ones.** `extractors::Method`, `extractors::Query<T>`, and
+  `extractors::PathParams<T>` are all re-exported at the crate root. The wire
+  method type needs the name `Method` (B1 names it), so the extractor became
+  `MethodExtractor` — it had no callers outside its own definition. The two
+  generic extractors are widely used and keep their names, so the new types are
+  `QueryView<'a>` and `RouteParams` instead. `zero_cost::Method` is
+  module-qualified and not re-exported, so it stays where it is.
 
 **Placeholder scan.** No `TODO`, `TBD`, "similar to Task N", or "add error
 handling" steps. Every code step carries the code. Two steps deliberately hand
@@ -2970,11 +2978,11 @@ legitimate number from a regression being papered over.
 - `Method::as_str()` is the name used in Tasks 1, 3, 8, and 9. Task 3 Step 3
   flags that `armature-h1` may already have `as_str` for this and says to keep one
   name — resolve it there, then use that name in the later tasks.
-- `PathParams` is `SmallVec<[(&'static str, Bytes); 4]>`, defined in
+- `RouteParams` is `SmallVec<[(&'static str, Bytes); 4]>`, defined in
   `http.rs` (Task 6), consumed by `routing.rs` (Task 8) and
   `route_constraint.rs` (Task 6 Step 6).
 - `QueryPairs` is `SmallVec<[(String, String); 8]>` and lives in `query.rs`;
-  `Query<'a>` borrows `&'a [(String, String)]` from the `OnceLock`. The pairs are
+  `QueryView<'a>` borrows `&'a [(String, String)]` from the `OnceLock`. The pairs are
   `String` rather than `ByteStr` because percent-decoding produces owned bytes for
   any value that needs it, and a `ByteStr` that sometimes borrows the target and
   sometimes owns a decoded copy would be the same type doing two jobs.

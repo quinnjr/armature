@@ -408,11 +408,9 @@ impl Header {
 
     /// Extract a header, returning None if not present
     pub fn optional(request: &HttpRequest, name: &str) -> Option<Self> {
-        request
-            .headers
-            .get(name)
-            .or_else(|| request.headers.get(&name.to_lowercase()))
-            .map(|v| Header::new(name, v.clone()))
+        // One lookup: header names intern case-insensitively, so the
+        // lowercased retry was always redundant.
+        request.headers.get(name).map(|v| Header::new(name, v))
     }
 }
 
@@ -421,10 +419,9 @@ impl FromRequestNamed for Header {
         let value = request
             .headers
             .get(name)
-            .or_else(|| request.headers.get(&name.to_lowercase()))
             .ok_or_else(|| Error::Validation(format!("Missing header: {}", name)))?;
 
-        Ok(Header::new(name, value.clone()))
+        Ok(Header::new(name, value))
     }
 }
 
@@ -612,9 +609,8 @@ impl FromRequest for ContentType {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
         let value = request
             .headers
-            .get("Content-Type")
-            .or_else(|| request.headers.get("content-type"))
-            .cloned()
+            .get("content-type")
+            .map(str::to_owned)
             .unwrap_or_default();
 
         Ok(ContentType(value))
@@ -772,9 +768,9 @@ mod tests {
         req.query_params
             .insert("limit".to_string(), "10".to_string());
         req.headers
-            .insert("Authorization".to_string(), "Bearer token123".to_string());
+            .insert("Authorization", "Bearer token123".to_string());
         req.headers
-            .insert("Content-Type".to_string(), "application/json".to_string());
+            .insert("Content-Type", "application/json".to_string());
         req
     }
 

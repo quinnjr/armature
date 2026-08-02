@@ -55,12 +55,12 @@ impl TelemetryMiddleware {
 
         // Add host header if present
         if let Some(host) = req.headers.get("host") {
-            attributes.push(KeyValue::new("http.host", host.clone()));
+            attributes.push(KeyValue::new("http.host", host.to_owned()));
         }
 
         // Add user agent if present
         if let Some(ua) = req.headers.get("user-agent") {
-            attributes.push(KeyValue::new("http.user_agent", ua.clone()));
+            attributes.push(KeyValue::new("http.user_agent", ua.to_owned()));
         }
 
         attributes
@@ -182,11 +182,11 @@ struct HeaderExtractor<'a>(&'a armature_core::headers::HeaderMap);
 
 impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(|s| s.as_str())
+        self.0.get(key)
     }
 
     fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(|k| k.as_str()).collect()
+        self.0.keys().collect()
     }
 }
 
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn test_header_extractor() {
         let mut headers = armature_core::headers::HeaderMap::new();
-        headers.insert("traceparent".to_string(), "00-123-456-01".to_string());
+        headers.insert("traceparent", "00-123-456-01".to_string());
 
         let extractor = HeaderExtractor(&headers);
         assert_eq!(extractor.get("traceparent"), Some("00-123-456-01"));
@@ -479,8 +479,8 @@ mod tests {
     #[test]
     fn test_header_extractor_multiple_keys() {
         let mut headers = armature_core::headers::HeaderMap::new();
-        headers.insert("key1".to_string(), "value1".to_string());
-        headers.insert("key2".to_string(), "value2".to_string());
+        headers.insert("key1", "value1".to_string());
+        headers.insert("key2", "value2".to_string());
 
         let extractor = HeaderExtractor(&headers);
         assert_eq!(extractor.keys().len(), 2);

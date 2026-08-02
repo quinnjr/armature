@@ -1216,7 +1216,7 @@ async fn handle_micro_request(
     // Copy headers
     for (name, value) in req.headers() {
         if let Ok(v) = value.to_str() {
-            http_req.headers.insert(name.to_string(), v.to_string());
+            http_req.headers.insert(name.as_str(), v);
         }
     }
 
@@ -1568,7 +1568,12 @@ mod tests {
         let original = vec![b'b'; 8192];
         let resp = mw.call(req, body_next(original.clone())).await.unwrap();
 
-        assert!(resp.headers.get("Content-Encoding").is_none());
+        assert!(
+            resp.headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(resp.body_ref(), original.as_slice());
         assert_eq!(
             resp.headers.get("Vary").map(String::as_str),

@@ -435,11 +435,12 @@ impl CacheKey {
         let mut vary_values: Vec<(String, String)> = vary_headers
             .iter()
             .filter_map(|header| {
+                // One lookup: header names intern case-insensitively, so the
+                // lowercased retry was always redundant.
                 request
                     .headers
                     .get(header)
-                    .or_else(|| request.headers.get(&header.to_lowercase()))
-                    .map(|v| (header.to_lowercase(), v.clone()))
+                    .map(|v| (header.to_lowercase(), v.to_owned()))
             })
             .collect();
         vary_values.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1259,10 +1260,8 @@ pub struct CacheStats {
 impl HttpRequest {
     /// Get the Cache-Control header from the request.
     pub fn cache_control(&self) -> Option<CacheControl> {
-        self.headers
-            .get("Cache-Control")
-            .or_else(|| self.headers.get("cache-control"))
-            .map(|h| CacheControl::parse(h))
+        // One lookup: header names intern case-insensitively.
+        self.headers.get("Cache-Control").map(CacheControl::parse)
     }
 
     /// Check if the request allows cached responses.
@@ -1438,7 +1437,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
         request
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
 
         let key = CacheKey::from_request_with_vary(&request, &["Accept"]);
         assert_eq!(key.vary_values.len(), 1);
@@ -1580,7 +1579,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api/me".to_string());
         request
             .headers
-            .insert("Authorization".to_string(), "Bearer user-a".to_string());
+            .insert("Authorization", "Bearer user-a".to_string());
         let response = HttpResponse::ok();
 
         cache.store(&request, &response).await;
@@ -1596,7 +1595,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api/assets".to_string());
         request
             .headers
-            .insert("Authorization".to_string(), "Bearer user-a".to_string());
+            .insert("Authorization", "Bearer user-a".to_string());
         let response = HttpResponse::ok().cache_public(Duration::from_secs(60));
 
         cache.store(&request, &response).await;
@@ -1622,7 +1621,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api/data".to_string());
         request
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
 
         let mut response = HttpResponse::ok().with_vary(&["Accept"]);
         response.body = b"json".to_vec();
@@ -1636,9 +1635,7 @@ mod tests {
 
         // A request with a different Accept value is a different variant.
         let mut other = HttpRequest::new("GET".to_string(), "/api/data".to_string());
-        other
-            .headers
-            .insert("Accept".to_string(), "text/xml".to_string());
+        other.headers.insert("Accept", "text/xml".to_string());
         assert!(cache.get(&other).await.is_none());
     }
 
@@ -1648,7 +1645,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api/data".to_string());
         request
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
 
         let response = HttpResponse::ok().with_vary(&["Accept"]);
         cache.store(&request, &response).await;
@@ -1687,7 +1684,7 @@ mod tests {
         let mut request_no_cache = HttpRequest::new("GET".to_string(), "/api/users".to_string());
         request_no_cache
             .headers
-            .insert("Cache-Control".to_string(), "no-cache".to_string());
+            .insert("Cache-Control", "no-cache".to_string());
         assert!(!request_no_cache.allows_cached());
     }
 
@@ -1909,7 +1906,7 @@ mod tests {
         let mut req_accept = HttpRequest::new("GET".to_string(), "/api/data".to_string());
         req_accept
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
         let mut resp_accept = HttpResponse::ok().with_vary(&["Accept"]);
         resp_accept.body = b"json-body".to_vec();
         cache.store(&req_accept, &resp_accept).await;
@@ -1918,7 +1915,7 @@ mod tests {
         let mut req_enc = HttpRequest::new("GET".to_string(), "/api/data".to_string());
         req_enc
             .headers
-            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+            .insert("Accept-Encoding", "gzip".to_string());
         let mut resp_enc = HttpResponse::ok().with_vary(&["Accept-Encoding"]);
         resp_enc.body = b"gzip-body".to_vec();
         cache.store(&req_enc, &resp_enc).await;

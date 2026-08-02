@@ -1549,9 +1549,7 @@ async fn handle_request(
     let header_count = req.headers().len();
     for (name, value) in req.headers() {
         if let Ok(value_str) = value.to_str() {
-            armature_req
-                .headers
-                .insert(name.to_string(), value_str.to_string());
+            armature_req.headers.insert(name, value_str);
         }
     }
     trace!(header_count = header_count, "Headers parsed");

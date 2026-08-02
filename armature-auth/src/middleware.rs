@@ -308,7 +308,7 @@ mod tests {
     fn bearer_request(token: &str) -> HttpRequest {
         let mut req = HttpRequest::new("GET".to_string(), "/admin".to_string());
         req.headers
-            .insert("authorization".to_string(), format!("Bearer {token}"));
+            .insert("authorization", format!("Bearer {token}"));
         req
     }
 
@@ -399,7 +399,7 @@ mod tests {
         let mut req_with_header = req;
         req_with_header
             .headers
-            .insert("authorization".to_string(), "Bearer ".to_string());
+            .insert("authorization", "Bearer ".to_string());
         let resp = mw.handle(req_with_header, next).await.unwrap();
         assert_eq!(resp.status, 403);
     }

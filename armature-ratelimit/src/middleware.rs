@@ -357,12 +357,12 @@ impl armature_core::Middleware for RateLimitMiddleware {
                 })
         };
 
-        let user_id = req.headers.get("x-user-id").map(|s| s.as_str());
+        let user_id = req.headers.get("x-user-id");
 
         let headers: Vec<(String, String)> = req
             .headers
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
 
         let info = Self::extract_request_info(ip, &req.path, &req.method, user_id, &headers);

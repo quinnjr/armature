@@ -291,7 +291,7 @@ mod tests {
     fn get_request_with_auth(path: &str, header_value: &str) -> HttpRequest {
         let mut req = get_request(path);
         req.headers
-            .insert("Authorization".to_string(), header_value.to_string());
+            .insert("Authorization", header_value.to_string());
         req
     }
 

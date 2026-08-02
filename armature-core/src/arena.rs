@@ -510,7 +510,10 @@ impl<'a> ArenaRequest<'a> {
         let mut req = crate::HttpRequest::new(self.method.to_string(), self.path.to_string());
 
         for (k, v) in self.headers.iter() {
-            req.headers.insert(k.to_string(), v.to_string());
+            // `as_str` on both halves: `ArenaStr` derefs to `str`, and the
+            // header map takes anything that can become a value without an
+            // intermediate `String`.
+            req.headers.insert(k.as_str(), v.as_str());
         }
 
         for (k, v) in self.path_params.iter() {
@@ -723,10 +726,7 @@ mod tests {
             let http_request = request.to_http_request();
             assert_eq!(http_request.method, "GET");
             assert_eq!(http_request.path, "/test");
-            assert_eq!(
-                http_request.headers.get("Accept"),
-                Some(&"application/json".to_string())
-            );
+            assert_eq!(http_request.headers.get("Accept"), Some("application/json"));
         });
         reset_arena();
     }

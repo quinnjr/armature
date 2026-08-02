@@ -737,7 +737,7 @@ impl HttpRequest {
         self.headers
             .get("Accept")
             .or_else(|| self.headers.get("accept"))
-            .map(|h| Accept::parse(h))
+            .map(Accept::parse)
             .unwrap_or_default()
     }
 
@@ -746,7 +746,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Language")
             .or_else(|| self.headers.get("accept-language"))
-            .map(|h| AcceptLanguage::parse(h))
+            .map(AcceptLanguage::parse)
             .unwrap_or_default()
     }
 
@@ -755,7 +755,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Encoding")
             .or_else(|| self.headers.get("accept-encoding"))
-            .map(|h| AcceptEncoding::parse(h))
+            .map(AcceptEncoding::parse)
             .unwrap_or_default()
     }
 
@@ -764,7 +764,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Charset")
             .or_else(|| self.headers.get("accept-charset"))
-            .map(|h| AcceptCharset::parse(h))
+            .map(AcceptCharset::parse)
             .unwrap_or_default()
     }
 
@@ -1211,7 +1211,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
         request
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
 
         let accept = request.accept();
         assert!(accept.accepts(&MediaType::json()));
@@ -1220,10 +1220,9 @@ mod tests {
     #[test]
     fn test_http_request_prefers_json() {
         let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
-        request.headers.insert(
-            "Accept".to_string(),
-            "application/json, text/html;q=0.9".to_string(),
-        );
+        request
+            .headers
+            .insert("Accept", "application/json, text/html;q=0.9".to_string());
 
         assert!(request.prefers_json());
         assert!(!request.prefers_html());

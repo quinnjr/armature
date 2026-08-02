@@ -226,7 +226,7 @@ fn test_http_request_helpers() {
         .insert("format".to_string(), "json".to_string());
     request
         .headers
-        .insert("Content-Type".to_string(), "application/json".to_string());
+        .insert("Content-Type", "application/json".to_string());
     request.body = b"{\"name\":\"John\"}".to_vec();
 
     // Test param helper

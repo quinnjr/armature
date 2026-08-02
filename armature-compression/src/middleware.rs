@@ -166,11 +166,8 @@ impl Middleware for CompressionMiddleware {
         >,
     ) -> Result<HttpResponse, Error> {
         // Get Accept-Encoding header before passing request
-        let accept_encoding = req
-            .headers
-            .get("Accept-Encoding")
-            .or_else(|| req.headers.get("accept-encoding"))
-            .cloned();
+        // One lookup: header names intern case-insensitively.
+        let accept_encoding = req.headers.get("Accept-Encoding").map(str::to_owned);
 
         // Call the next handler
         let response = next(req).await?;
@@ -368,8 +365,7 @@ mod tests {
         );
 
         let mut req = HttpRequest::new("GET".to_string(), "/data".to_string());
-        req.headers
-            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+        req.headers.insert("Accept-Encoding", "gzip");
 
         let body = "Hello, World! ".repeat(100);
         let next = next_returning(create_response(&body, "text/plain"));

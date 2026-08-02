@@ -1050,9 +1050,9 @@ mod tests {
     fn test_http_request_with_headers() {
         let mut req = HttpRequest::new("GET".to_string(), "/api".to_string());
         req.headers
-            .insert("Authorization".to_string(), "Bearer token".to_string());
+            .insert("Authorization", "Bearer token".to_string());
         req.headers
-            .insert("Content-Type".to_string(), "application/json".to_string());
+            .insert("Content-Type", "application/json".to_string());
 
         assert_eq!(req.headers.len(), 2);
     }
@@ -1076,14 +1076,8 @@ mod tests {
 
         assert_eq!(req.headers.len(), 2);
         // Case-insensitive lookup via HeaderMap.
-        assert_eq!(
-            req.headers.get("content-type"),
-            Some(&"application/json".to_string())
-        );
-        assert_eq!(
-            req.headers.get("Content-Type"),
-            Some(&"application/json".to_string())
-        );
+        assert_eq!(req.headers.get("content-type"), Some("application/json"));
+        assert_eq!(req.headers.get("Content-Type"), Some("application/json"));
         assert!(req.headers.contains_key("x-custom"));
     }
 

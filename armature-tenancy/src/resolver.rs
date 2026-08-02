@@ -101,7 +101,7 @@ impl TenantResolver for HeaderTenantResolver {
             .store
             .find_by_id(tenant_id)
             .await?
-            .ok_or_else(|| TenantError::NotFound(tenant_id.clone()))?;
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_owned()))?;
 
         if !tenant.active {
             return Err(TenantError::Inactive);
@@ -436,7 +436,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("x-tenant-id".to_string(), "tenant-1".to_string());
+            .insert("x-tenant-id", "tenant-1".to_string());
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.id, "tenant-1");
@@ -451,7 +451,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("host".to_string(), "acme.example.com".to_string());
+            .insert("host", "acme.example.com".to_string());
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.name, "acme");
@@ -479,7 +479,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.id, "tenant-1");
@@ -495,7 +495,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let result = resolver.resolve(&request).await;
         assert!(matches!(result, Err(TenantError::ResolutionFailed(_))));
@@ -510,7 +510,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let result = resolver.resolve(&request).await;
         assert!(matches!(result, Err(TenantError::Invalid(_))));
@@ -532,7 +532,7 @@ mod tests {
             let mut request = create_request("GET", "/api/users");
             request
                 .headers
-                .insert("authorization".to_string(), format!("Bearer {}", bad_token));
+                .insert("authorization", format!("Bearer {}", bad_token));
 
             let result = resolver.resolve(&request).await;
             assert!(

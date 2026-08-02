@@ -125,7 +125,7 @@ async fn create_user(req: HttpRequest) -> Result<HttpResponse, Error> {
 /// `not_found!`, `json_object!` and `ok_json!`.
 async fn get_user(req: HttpRequest) -> Result<HttpResponse, Error> {
     // Requires callers to send an (unchecked, demo-only) API key header.
-    let _api_key: &String = header!(req, "x-api-key")?;
+    let _api_key: &str = header!(req, "x-api-key")?;
 
     let id: i64 = path_param!(req, "id")?;
     guard!(id > 0, "id must be a positive integer");

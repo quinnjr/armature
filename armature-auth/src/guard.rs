@@ -295,7 +295,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/admin".to_string());
         request
             .headers
-            .insert("authorization".to_string(), "Bearer token123".to_string());
+            .insert("authorization", "Bearer token123".to_string());
         request
     }
 

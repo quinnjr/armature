@@ -60,10 +60,9 @@ impl IntoHttpRequest for HttpRequest {
         // Add headers
         if let Some(headers) = builder.headers_mut() {
             for (name, value) in &self.headers {
-                if let (Ok(name), Ok(value)) = (
-                    HeaderName::try_from(name.as_str()),
-                    HeaderValue::try_from(value.as_str()),
-                ) {
+                if let (Ok(name), Ok(value)) =
+                    (HeaderName::try_from(name), HeaderValue::try_from(value))
+                {
                     headers.insert(name, value);
                 }
             }
@@ -215,10 +214,9 @@ impl ArmatureHeaderMapExt for ArmatureHeaderMap {
     fn to_http_headers(&self) -> HeaderMap {
         let mut result = HeaderMap::new();
         for (name, value) in self.iter() {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::try_from(name.as_str()),
-                HeaderValue::try_from(value.as_str()),
-            ) {
+            if let (Ok(name), Ok(value)) =
+                (HeaderName::try_from(name), HeaderValue::try_from(value))
+            {
                 result.insert(name, value);
             }
         }

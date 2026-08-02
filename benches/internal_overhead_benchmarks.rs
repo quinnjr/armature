@@ -187,11 +187,10 @@ fn bench_request_creation(c: &mut Criterion) {
                 black_box("/api/data".to_string()),
             );
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer token123".to_string());
-            req.headers
-                .insert("X-Request-ID".to_string(), "abc-123".to_string());
+                .insert("Authorization", "Bearer token123".to_string());
+            req.headers.insert("X-Request-ID", "abc-123".to_string());
             req
         })
     });
@@ -205,7 +204,7 @@ fn bench_request_creation(c: &mut Criterion) {
                 black_box("/api/users".to_string()),
             );
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.body = black_box(body.clone());
             req
         })
@@ -703,7 +702,7 @@ fn bench_full_cycle(c: &mut Criterion) {
             runtime.block_on(async {
                 let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
                 req.headers
-                    .insert("Content-Type".to_string(), "application/json".to_string());
+                    .insert("Content-Type", "application/json".to_string());
                 req.body = b;
                 let _ = router.route(black_box(req)).await;
             })

@@ -13,7 +13,7 @@ impl GuardContext {
         Self { request }
     }
 
-    pub fn get_header(&self, name: &str) -> Option<&String> {
+    pub fn get_header(&self, name: &str) -> Option<&str> {
         self.request.headers.get(name)
     }
 
@@ -165,7 +165,7 @@ impl Guard for ApiKeyGuard {
             .get_header("x-api-key")
             .ok_or_else(|| Error::Forbidden("Missing API key".to_string()))?;
 
-        if self.valid_keys.contains(api_key) {
+        if self.valid_keys.iter().any(|k| k == api_key) {
             Ok(true)
         } else {
             Err(Error::Forbidden("Invalid API key".to_string()))

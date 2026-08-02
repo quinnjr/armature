@@ -103,11 +103,7 @@ pub struct ExceptionContext {
 impl ExceptionContext {
     /// Create a new exception context from an HTTP request.
     pub fn from_request(request: HttpRequest) -> Self {
-        let request_id = request
-            .headers
-            .get("x-request-id")
-            .or_else(|| request.headers.get("X-Request-Id"))
-            .cloned();
+        let request_id = request.headers.get("x-request-id").map(str::to_owned);
 
         let path = request.path.clone();
         let method = request.method.clone();

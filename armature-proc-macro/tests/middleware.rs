@@ -125,7 +125,7 @@ impl Middleware for OrderMiddleware {
             Some(prev) => format!("{},{}", prev, self.0),
             None => self.0.to_string(),
         };
-        req.headers.insert("X-Order".to_string(), order);
+        req.headers.insert("X-Order", order);
         next(req).await
     }
 }
@@ -139,7 +139,7 @@ struct OrderedController;
 impl OrderedController {
     #[get("/thing")]
     async fn thing(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let order = req.headers.get("X-Order").cloned().unwrap_or_default();
+        let order = req.headers.get("X-Order").unwrap_or_default().to_owned();
         Ok(HttpResponse::ok().with_header("X-Order".to_string(), order))
     }
 }

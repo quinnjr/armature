@@ -151,13 +151,12 @@ fn bench_request_creation(c: &mut Criterion) {
         b.iter(|| {
             let mut req = HttpRequest::new("POST".to_string(), "/api/v1/users/123".to_string());
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer token123".to_string());
+                .insert("Authorization", "Bearer token123".to_string());
+            req.headers.insert("Accept", "application/json".to_string());
             req.headers
-                .insert("Accept".to_string(), "application/json".to_string());
-            req.headers
-                .insert("User-Agent".to_string(), "TestClient/1.0".to_string());
+                .insert("User-Agent", "TestClient/1.0".to_string());
             req.path_params.insert("id".to_string(), "123".to_string());
             req.query_params
                 .insert("include".to_string(), "profile".to_string());
@@ -234,16 +233,16 @@ fn bench_request_lifecycle(c: &mut Criterion) {
             // Create request
             let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer xyz".to_string());
+                .insert("Authorization", "Bearer xyz".to_string());
             req.query_params.insert("page".to_string(), "1".to_string());
             req.body = b"{\"name\":\"John\"}".to_vec();
 
             // "Process" request
             let _method = req.method.clone();
             let _path = req.path.clone();
-            let _ct = req.headers.get("Content-Type").cloned();
+            let _ct = req.headers.get("Content-Type").map(str::to_owned);
 
             // Request dropped here - multiple deallocations
             black_box(req)
@@ -279,8 +278,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..100 {
                 let mut req = HttpRequest::new("GET".to_string(), format!("/api/item/{}", i));
-                req.headers
-                    .insert("Accept".to_string(), "application/json".to_string());
+                req.headers.insert("Accept", "application/json".to_string());
                 req.query_params.insert("v".to_string(), "1".to_string());
                 black_box(&req);
             }

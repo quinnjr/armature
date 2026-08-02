@@ -1203,8 +1203,7 @@ mod tests {
 
         // Conditional request with matching ETag yields 304 Not Modified.
         let mut cond = get_req("/data.js");
-        cond.headers
-            .insert("If-None-Match".to_string(), etag1.clone());
+        cond.headers.insert("If-None-Match", etag1.clone());
         let resp304 = server.serve(&cond).await.unwrap();
         assert_eq!(resp304.status, 304);
         assert_eq!(resp304.headers.get("ETag"), Some(&etag1));
@@ -1219,8 +1218,7 @@ mod tests {
         let server = StaticAssetServer::new(config).unwrap();
 
         let mut req = get_req("/app.js");
-        req.headers
-            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+        req.headers.insert("Accept-Encoding", "gzip".to_string());
 
         let resp1 = server.serve(&req).await.unwrap();
         assert_eq!(resp1.status, 200);
@@ -1303,8 +1301,7 @@ mod tests {
         let server = StaticAssetServer::new(config).unwrap();
 
         let mut req = get_req("/app.js");
-        req.headers
-            .insert("Accept-Encoding".to_string(), "zstd".to_string());
+        req.headers.insert("Accept-Encoding", "zstd".to_string());
 
         let resp1 = server.serve(&req).await.unwrap();
         assert_eq!(resp1.status, 200);

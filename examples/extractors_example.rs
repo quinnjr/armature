@@ -181,15 +181,15 @@ fn demonstrate_header_extraction() {
 
     let mut request = HttpRequest::new("GET".to_string(), "/api/protected".to_string());
     request.headers.insert(
-        "Authorization".to_string(),
+        "Authorization",
         "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9".to_string(),
     );
     request
         .headers
-        .insert("X-Request-ID".to_string(), "req-12345".to_string());
+        .insert("X-Request-ID", "req-12345".to_string());
     request
         .headers
-        .insert("Content-Type".to_string(), "application/json".to_string());
+        .insert("Content-Type", "application/json".to_string());
 
     // Method 1: Extract single header
     let auth: Header = Header::from_request(&request, "Authorization").unwrap();
@@ -248,10 +248,10 @@ fn demonstrate_combined_extraction() {
     // Set headers
     request
         .headers
-        .insert("Authorization".to_string(), "Bearer token123".to_string());
+        .insert("Authorization", "Bearer token123".to_string());
     request
         .headers
-        .insert("Content-Type".to_string(), "application/json".to_string());
+        .insert("Content-Type", "application/json".to_string());
 
     // Extract everything in a handler-like function
     fn handle_update(req: &HttpRequest) -> Result<(), Error> {

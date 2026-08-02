@@ -22,7 +22,9 @@ impl RequestBinding {
     pub fn from_request(req: &HttpRequest) -> Self {
         let mut headers = HashMap::new();
         for (name, value) in req.headers.iter() {
-            headers.insert(name.clone(), value.clone());
+            // Rhai bindings hand owned strings to the script engine, so this is
+            // one of the places a copy is the point rather than an oversight.
+            headers.insert(name.to_owned(), value.to_owned());
         }
 
         let mut query = HashMap::new();
@@ -57,6 +59,8 @@ impl RequestBinding {
 
     /// Get a header value.
     pub fn header(&mut self, name: &str) -> Dynamic {
+        // `self.headers` is the binding's own owned HashMap, not a HeaderMap,
+        // and the script engine needs an owned value.
         self.headers
             .get(name)
             .cloned()

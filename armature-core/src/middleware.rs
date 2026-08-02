@@ -264,11 +264,10 @@ impl Middleware for RequestIdMiddleware {
         let request_id = req
             .headers
             .get("x-request-id")
-            .cloned()
+            .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        req.headers
-            .insert("x-request-id".to_string(), request_id.clone());
+        req.headers.insert("x-request-id", request_id.as_str());
 
         let mut response = next(req).await?;
         response
@@ -854,7 +853,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.headers.get("Content-Encoding").is_none());
+        assert!(
+            response
+                .headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(response.body_ref(), b"tiny");
     }
 
@@ -876,7 +881,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.headers.get("Content-Encoding").is_none());
+        assert!(
+            response
+                .headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(response.body_ref(), expected.as_slice());
     }
 
@@ -981,12 +992,9 @@ mod tests {
         let cors = CorsMiddleware::new().allow_origin("https://example.com");
 
         let mut req = HttpRequest::new("OPTIONS".to_string(), "/api".to_string());
+        req.headers.insert("Origin", "https://example.com");
         req.headers
-            .insert("Origin".to_string(), "https://example.com".to_string());
-        req.headers.insert(
-            "Access-Control-Request-Method".to_string(),
-            "POST".to_string(),
-        );
+            .insert("Access-Control-Request-Method", "POST".to_string());
 
         let result = cors
             .handle(

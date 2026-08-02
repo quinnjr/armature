@@ -317,7 +317,7 @@ impl AuditMiddleware {
 
         // Try X-Real-IP
         if let Some(real_ip) = request.headers.get("x-real-ip") {
-            return Some(real_ip.clone());
+            return Some(real_ip.to_owned());
         }
 
         None
@@ -325,7 +325,7 @@ impl AuditMiddleware {
 
     /// Extract user agent from request
     fn extract_user_agent(&self, request: &HttpRequest) -> Option<String> {
-        request.headers.get("user-agent").cloned()
+        request.headers.get("user-agent").map(str::to_owned)
     }
 
     /// Truncate body if too large

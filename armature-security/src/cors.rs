@@ -372,7 +372,7 @@ impl CorsConfig {
                 response.headers.insert(
                     "Access-Control-Allow-Headers".to_string(),
                     if self.allow_any_header {
-                        headers.clone()
+                        headers.to_owned()
                     } else {
                         allowed.join(", ")
                     },

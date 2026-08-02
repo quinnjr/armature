@@ -267,7 +267,7 @@ impl Header {
     /// Create extractor for a specific header.
     pub fn named(name: impl Into<String>, req: &HttpRequest) -> Self {
         let name = name.into();
-        let value = req.headers.get(&name).cloned();
+        let value = req.headers.get(&name).map(str::to_owned);
         EXTRACTOR_STATS.record_extraction("Header");
         Self { name, value }
     }
@@ -297,7 +297,9 @@ impl Extract for ContentType {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("ContentType");
-        Ok(ContentType(req.headers.get("content-type").cloned()))
+        Ok(ContentType(
+            req.headers.get("content-type").map(str::to_owned),
+        ))
     }
 }
 
@@ -323,7 +325,9 @@ impl Extract for Authorization {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("Authorization");
-        Ok(Authorization(req.headers.get("authorization").cloned()))
+        Ok(Authorization(
+            req.headers.get("authorization").map(str::to_owned),
+        ))
     }
 }
 
@@ -719,11 +723,10 @@ where
         let request_id = req
             .headers
             .get("x-request-id")
-            .cloned()
+            .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        req.headers
-            .insert("x-request-id".to_string(), request_id.clone());
+        req.headers.insert("x-request-id", request_id.as_str());
 
         Box::pin(async move {
             let mut resp = inner.call(req).await?;
@@ -931,9 +934,9 @@ mod tests {
     fn create_request() -> HttpRequest {
         let mut req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
         req.headers
-            .insert("content-type".to_string(), "application/json".to_string());
+            .insert("content-type", "application/json".to_string());
         req.headers
-            .insert("authorization".to_string(), "Bearer token123".to_string());
+            .insert("authorization", "Bearer token123".to_string());
         req.body = br#"{"name":"test"}"#.to_vec();
         req.path_params.insert("id".to_string(), "123".to_string());
         req.query_params.insert("page".to_string(), "1".to_string());

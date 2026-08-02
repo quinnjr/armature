@@ -88,7 +88,7 @@ impl AnalyticsContext {
 /// `x-real-ip` headers. Returns `None` when no identifying header is present.
 fn extract_client_id(req: &HttpRequest) -> Option<String> {
     if let Some(id) = req.headers.get("x-client-id") {
-        return Some(id.clone());
+        return Some(id.to_owned());
     }
     if let Some(fwd) = req.headers.get("x-forwarded-for") {
         // The first entry is the originating client.
@@ -100,7 +100,7 @@ fn extract_client_id(req: &HttpRequest) -> Option<String> {
         }
     }
     if let Some(ip) = req.headers.get("x-real-ip") {
-        return Some(ip.clone());
+        return Some(ip.to_owned());
     }
     None
 }

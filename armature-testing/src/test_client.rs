@@ -218,9 +218,6 @@ mod tests {
 
         assert_eq!(req.method, "GET");
         assert!(req.path.contains("/test"));
-        assert_eq!(
-            req.headers.get("Authorization"),
-            Some(&"Bearer token".to_string())
-        );
+        assert_eq!(req.headers.get("Authorization"), Some("Bearer token"));
     }
 }

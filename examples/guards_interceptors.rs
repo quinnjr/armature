@@ -82,7 +82,7 @@ struct AdminRoleMiddleware;
 #[async_trait::async_trait]
 impl Middleware for AdminRoleMiddleware {
     async fn handle(&self, mut req: HttpRequest, next: Next) -> Result<HttpResponse, Error> {
-        if req.headers.get("authorization").map(String::as_str) == Some("Bearer admin-token") {
+        if req.headers.get("authorization") == Some("Bearer admin-token") {
             req.extensions.insert(RequestRoles::new(["admin"]));
         }
         next(req).await

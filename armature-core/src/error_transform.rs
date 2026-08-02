@@ -842,11 +842,8 @@ pub struct ErrorContext {
 impl ErrorContext {
     /// Create error context from a request.
     pub fn from_request(request: HttpRequest) -> Self {
-        let request_id = request
-            .headers
-            .get("x-request-id")
-            .or_else(|| request.headers.get("X-Request-Id"))
-            .cloned();
+        // Lookup is case-insensitive, so the second spelling was redundant.
+        let request_id = request.headers.get("x-request-id").map(str::to_owned);
 
         Self {
             request,
@@ -1492,7 +1489,7 @@ mod tests {
         let mut request = HttpRequest::new("GET".to_string(), "/api".to_string());
         request
             .headers
-            .insert("X-Request-Id".to_string(), "req-456".to_string());
+            .insert("X-Request-Id", "req-456".to_string());
 
         let context = ErrorContext::from_request(request)
             .user_id("user-123")
