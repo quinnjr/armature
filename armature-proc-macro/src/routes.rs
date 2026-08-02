@@ -132,7 +132,7 @@ fn generate_extraction(
             // Extract specific query parameter
             quote! {
                 let #param_name: #param_type = {
-                    let __query_value = __request.query_params.get(#field)
+                    let __query_value = __request.query_param(#field)
                         .ok_or_else(|| armature_core::Error::BadRequest(
                             format!("Missing query parameter '{}'", #field)
                         ))?;

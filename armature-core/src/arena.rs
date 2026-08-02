@@ -521,8 +521,17 @@ impl<'a> ArenaRequest<'a> {
             req.path_params.insert(k.to_string(), v.to_string());
         }
 
-        for (k, v) in self.query_params.iter() {
-            req.query_params.insert(k.to_string(), v.to_string());
+        // The query lives in the target now, so it has to be re-encoded onto
+        // the path rather than handed over as a map.
+        if !self.query_params.is_empty() {
+            let pairs: Vec<(&str, &str)> = self
+                .query_params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            if let Ok(query) = serde_urlencoded::to_string(&pairs) {
+                req.path = crate::ByteStr::from(format!("{}?{}", self.path.as_str(), query));
+            }
         }
 
         req.body = Bytes::copy_from_slice(self.body);

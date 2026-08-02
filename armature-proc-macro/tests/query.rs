@@ -8,7 +8,6 @@
 use armature_core::HttpRequest;
 use armature_proc_macro::Query;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Query, Deserialize, Debug, PartialEq)]
 struct Filters {
@@ -17,18 +16,13 @@ struct Filters {
 }
 
 fn request_with_query(pairs: &[(&str, &str)]) -> HttpRequest {
-    let mut query = HashMap::new();
+    // The query lives in the request target, so the pairs are percent-encoded
+    // onto it — which is exactly the round-trip these tests are checking.
+    let mut req = HttpRequest::new("GET", "/search");
     for (k, v) in pairs {
-        query.insert(k.to_string(), v.to_string());
+        req.push_query_param(*k, *v);
     }
-    HttpRequest::from_parts(
-        "GET",
-        "/search".to_string(),
-        HashMap::new(),
-        vec![],
-        HashMap::new(),
-        query,
-    )
+    req
 }
 
 #[test]

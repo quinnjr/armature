@@ -159,10 +159,8 @@ fn bench_request_creation(c: &mut Criterion) {
             req.headers
                 .insert("User-Agent", "TestClient/1.0".to_string());
             req.path_params.insert("id".to_string(), "123".to_string());
-            req.query_params
-                .insert("include".to_string(), "profile".to_string());
-            req.query_params
-                .insert("fields".to_string(), "name,email".to_string());
+            req.push_query_param("include", "profile");
+            req.push_query_param("fields", "name,email");
             black_box(req)
         })
     });
@@ -237,7 +235,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
                 .insert("Content-Type", "application/json".to_string());
             req.headers
                 .insert("Authorization", "Bearer xyz".to_string());
-            req.query_params.insert("page".to_string(), "1".to_string());
+            req.push_query_param("page", "1");
             req.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
             // "Process" request
@@ -280,7 +278,7 @@ fn bench_request_lifecycle(c: &mut Criterion) {
             for i in 0..100 {
                 let mut req = HttpRequest::new("GET", format!("/api/item/{}", i));
                 req.headers.insert("Accept", "application/json".to_string());
-                req.query_params.insert("v".to_string(), "1".to_string());
+                req.push_query_param("v", "1");
                 black_box(&req);
             }
         })

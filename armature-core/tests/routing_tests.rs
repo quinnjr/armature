@@ -72,8 +72,8 @@ async fn test_query_parameters() {
 
     let handler: LegacyHandler = Arc::new(|req| {
         Box::pin(async move {
-            let query = req.query("q").unwrap();
-            Ok(HttpResponse::ok().with_body(query.as_bytes().to_vec()))
+            let query = req.query_param("q").unwrap().to_owned();
+            Ok(HttpResponse::ok().with_body(query.into_bytes()))
         })
     });
     router.add_route(Route {

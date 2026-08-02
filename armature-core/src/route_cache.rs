@@ -606,16 +606,9 @@ impl OptimizedRouter {
     pub async fn route(&self, mut request: HttpRequest) -> Result<HttpResponse, Error> {
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
 
-        // Parse query parameters from path
-        let (path, query_string) = request
-            .path
-            .split_once('?')
-            .map(|(p, q)| (p, Some(q)))
-            .unwrap_or((&request.path, None));
-
-        if let Some(query) = query_string {
-            request.query_params = crate::simd_parser::parse_query_string_decoded(query);
-        }
+        // Match on the path alone; the query is parsed on demand by
+        // `HttpRequest::query`, and only if a handler asks for it.
+        let path = request.path_only();
 
         // Unknown HTTP methods must not fall back to GET handlers.
         let Ok(method) = HttpMethod::try_from(&request.method) else {
@@ -943,7 +936,7 @@ mod tests {
             HttpMethod::GET,
             "/search",
             crate::handler::handler(|req: HttpRequest| async move {
-                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                let q = req.query_param("q").unwrap_or_default().to_owned();
                 let mut response = HttpResponse::ok();
                 response.body = Bytes::from(q.into_bytes());
                 Ok::<_, Error>(response)
@@ -1244,7 +1237,7 @@ mod tests {
             HttpMethod::GET,
             "/search",
             |req: HttpRequest| async move {
-                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                let q = req.query_param("q").unwrap_or_default().to_owned();
                 Ok::<_, Error>(HttpResponse::ok().with_body(q.into_bytes()))
             },
         ));

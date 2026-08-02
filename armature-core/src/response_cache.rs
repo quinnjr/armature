@@ -423,7 +423,7 @@ impl CacheKey {
     /// Generate a cache key from a request with Vary headers.
     pub fn from_request_with_vary(request: &HttpRequest, vary_headers: &[&str]) -> Self {
         // Sort query params for consistent keys
-        let mut query_params: Vec<_> = request.query_params.iter().collect();
+        let mut query_params: Vec<_> = request.query().iter().collect();
         query_params.sort_by(|a, b| a.0.cmp(b.0));
         let query = query_params
             .iter()
@@ -460,7 +460,9 @@ impl CacheKey {
 
         Self {
             method,
-            path: request.path.clone(),
+            // The path alone: `query` is a separate, sorted field, so folding
+            // the raw query in here would key the same request two ways.
+            path: crate::ByteStr::from(request.path_only()),
             query,
             vary_values,
             body_hash,
@@ -1421,13 +1423,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_from_request() {
-        let mut request = HttpRequest::new("GET", "/api/users".to_string());
-        request
-            .query_params
-            .insert("page".to_string(), "1".to_string());
-        request
-            .query_params
-            .insert("limit".to_string(), "10".to_string());
+        let request = HttpRequest::new("GET", "/api/users?page=1&limit=10");
 
         let key = CacheKey::from_request(&request);
         assert_eq!(key.method, "GET");

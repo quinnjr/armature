@@ -222,9 +222,7 @@ fn test_http_request_helpers() {
     request
         .path_params
         .insert("id".to_string(), "123".to_string());
-    request
-        .query_params
-        .insert("format".to_string(), "json".to_string());
+    request.push_query_param("format", "json");
     request
         .headers
         .insert("Content-Type", "application/json".to_string());
@@ -235,8 +233,8 @@ fn test_http_request_helpers() {
     assert_eq!(request.param("unknown"), None);
 
     // Test query helper
-    assert_eq!(request.query("format"), Some(&"json".to_string()));
-    assert_eq!(request.query("unknown"), None);
+    assert_eq!(request.query_param("format"), Some("json"));
+    assert_eq!(request.query_param("unknown"), None);
 
     // Test json deserialization
     #[derive(serde::Deserialize)]

@@ -129,8 +129,8 @@ impl Middleware for AnalyticsMiddleware {
         // Build the recording path (before `req` is consumed by `next`).
         // Optionally fold query parameters into the tracked path.
         let mut tracked_path = normalize_path(&raw_path);
-        if config.include_query_params && !req.query_params.is_empty() {
-            let mut pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
+        if config.include_query_params && !req.query().is_empty() {
+            let mut pairs: Vec<(&str, &str)> = req.query().iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(b.0));
             let query: Vec<String> = pairs.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
             tracked_path = format!("{}?{}", tracked_path, query.join("&"));

@@ -244,17 +244,9 @@ impl Router {
     pub async fn route(&self, mut request: HttpRequest) -> Result<HttpResponse, Error> {
         debug!("Routing request: {} {}", request.method, request.path);
 
-        // Parse query parameters from path
-        let (path, query_string) = request
-            .path
-            .split_once('?')
-            .map(|(p, q)| (p, Some(q)))
-            .unwrap_or((&request.path, None));
-
-        if let Some(query) = query_string {
-            trace!("Parsing query string: {}", query);
-            request.query_params = parse_query_string(query);
-        }
+        // Match on the path alone; the query is parsed on demand by
+        // `HttpRequest::query`, and only if a handler asks for it.
+        let path = request.path_only();
 
         // Find matching route - this is the route matching hot path. The request
         // path is split once, up front, rather than per candidate route. The
@@ -387,17 +379,6 @@ fn match_path(pattern: &str, path_parts: &[&str]) -> Option<HashMap<String, Stri
     Some(params)
 }
 
-/// Parse a query string into a map of parameters
-///
-/// Uses SIMD-optimized byte searching via memchr for faster parsing.
-/// Values are percent-decoded (and `+` decoded as space) so handlers
-/// receive the actual parameter values, not their encoded form.
-#[inline]
-fn parse_query_string(query: &str) -> HashMap<String, String> {
-    // Use the SIMD-optimized decoding parser
-    crate::simd_parser::parse_query_string_decoded(query)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,22 +421,6 @@ mod tests {
         let path = "/posts/123";
         let result = match_path_str(pattern, path);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_query_string() {
-        let query = "name=john&age=30";
-        let params = parse_query_string(query);
-        assert_eq!(params.get("name"), Some(&"john".to_string()));
-        assert_eq!(params.get("age"), Some(&"30".to_string()));
-    }
-
-    #[test]
-    fn test_parse_query_string_decodes_values() {
-        let query = "name=john%20doe&x=a%26b";
-        let params = parse_query_string(query);
-        assert_eq!(params.get("name"), Some(&"john doe".to_string()));
-        assert_eq!(params.get("x"), Some(&"a&b".to_string()));
     }
 
     #[test]
@@ -521,30 +486,6 @@ mod tests {
         let path = "/";
         let result = match_path_str(pattern, path);
         assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_parse_query_string_empty() {
-        let query = "";
-        let params = parse_query_string(query);
-        // Empty string may return one empty entry, which is fine
-        assert!(params.is_empty() || params.len() == 1);
-    }
-
-    #[test]
-    fn test_parse_query_string_special_chars() {
-        let query = "name=john%20doe&email=test%40example.com";
-        let params = parse_query_string(query);
-        assert!(params.contains_key("name"));
-        assert!(params.contains_key("email"));
-    }
-
-    #[test]
-    fn test_parse_query_string_no_value() {
-        let query = "flag&debug=true";
-        let params = parse_query_string(query);
-        assert!(params.contains_key("debug"));
-        assert_eq!(params.get("debug"), Some(&"true".to_string()));
     }
 
     #[test]
@@ -697,14 +638,6 @@ mod tests {
         }
 
         assert_eq!(router.routes.len(), 5);
-    }
-
-    #[test]
-    fn test_parse_query_string_multiple_same_key() {
-        let query = "tag=rust&tag=web&tag=framework";
-        let params = parse_query_string(query);
-        // Should contain at least one tag
-        assert!(params.contains_key("tag"));
     }
 
     #[test]

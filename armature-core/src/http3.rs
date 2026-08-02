@@ -627,24 +627,23 @@ mod server {
     }
 
     /// Convert a resolved HTTP/3 request into an Armature [`HttpRequest`],
-    /// copying method, path, headers, and — critically — percent-decoded
-    /// query parameters (mirrors `application.rs::handle_request`'s hyper
-    /// conversion, which extracts `req.uri().query()` and decodes it via
-    /// [`crate::simd_parser::parse_query_string_decoded`] before routing).
+    /// copying method, headers, and the full request target — query string
+    /// included, so [`HttpRequest::query`] can parse it on demand (mirrors
+    /// `application.rs::handle_request`'s hyper conversion).
     ///
     /// Split out from [`handle_request_resolver`] so the conversion is
     /// unit-testable without a live QUIC connection.
     pub(super) fn build_armature_request(request: &http::Request<()>) -> HttpRequest {
         let method = request.method().to_string();
-        let path = request.uri().path().to_string();
-        let mut armature_req = HttpRequest::new(method, path);
-
-        // Parse and percent-decode the query string, if present. Without
-        // this, `?a=b` on a QUIC request was silently dropped: the request
-        // never reached the router with `query_params` populated.
-        if let Some(query) = request.uri().query() {
-            armature_req.query_params = crate::simd_parser::parse_query_string_decoded(query);
-        }
+        // The full target, query included. Without the query, `?a=b` on a QUIC
+        // request was silently dropped; carrying it in the target means the
+        // router still matches on the path alone and a handler that asks for
+        // the query gets it.
+        let target = match request.uri().query() {
+            Some(q) => format!("{}?{}", request.uri().path(), q),
+            None => request.uri().path().to_string(),
+        };
+        let mut armature_req = HttpRequest::new(method, target);
 
         // Copy headers
         for (name, value) in request.headers() {
@@ -957,18 +956,12 @@ mod tests {
         let armature_req = super::server::build_armature_request(&request);
 
         assert_eq!(armature_req.method, "GET");
-        assert_eq!(armature_req.path, "/search");
-        assert_eq!(
-            armature_req.query_params.get("a").map(String::as_str),
-            Some("b")
-        );
-        assert_eq!(
-            armature_req.query_params.get("name").map(String::as_str),
-            Some("hello world")
-        );
+        assert_eq!(armature_req.path_only(), "/search");
+        assert_eq!(armature_req.query_param("a"), Some("b"));
+        assert_eq!(armature_req.query_param("name"), Some("hello world"));
     }
 
-    /// Requests without a query string must not populate `query_params`.
+    /// Requests without a query string must yield an empty query view.
     #[cfg(feature = "http3")]
     #[test]
     fn test_build_armature_request_without_query_string() {
@@ -980,13 +973,14 @@ mod tests {
 
         let armature_req = super::server::build_armature_request(&request);
 
-        assert!(armature_req.query_params.is_empty());
+        assert!(armature_req.query().is_empty());
+        assert_eq!(armature_req.query_string(), None);
     }
 
     /// A URI ending in a bare `?` has a query string that is present but
     /// empty (`request.uri().query()` returns `Some("")`), distinct from no
     /// query string at all. `build_armature_request` must not panic and
-    /// must produce an empty `query_params` map in this case.
+    /// must produce an empty query view in this case.
     #[cfg(feature = "http3")]
     #[test]
     fn test_build_armature_request_with_empty_query_string() {
@@ -1000,13 +994,13 @@ mod tests {
 
         let armature_req = super::server::build_armature_request(&request);
 
-        assert_eq!(armature_req.path, "/search");
-        assert!(armature_req.query_params.is_empty());
+        assert_eq!(armature_req.path_only(), "/search");
+        assert!(armature_req.query().is_empty());
     }
 
-    /// Duplicate query keys: `parse_query_string_decoded` stores params in
-    /// a `HashMap`, processing segments left-to-right and inserting each
-    /// parsed pair in turn, so the last occurrence of a repeated key wins.
+    /// Duplicate query keys are all preserved, in the order the client sent
+    /// them; `get` answers with the first. The old `HashMap`-backed parse kept
+    /// only the last.
     #[cfg(feature = "http3")]
     #[test]
     fn test_build_armature_request_with_duplicate_query_keys() {
@@ -1018,10 +1012,11 @@ mod tests {
 
         let armature_req = super::server::build_armature_request(&request);
 
-        assert_eq!(armature_req.query_params.len(), 1);
+        assert_eq!(armature_req.query().len(), 2);
+        assert_eq!(armature_req.query_param("a"), Some("1"));
         assert_eq!(
-            armature_req.query_params.get("a").map(String::as_str),
-            Some("2")
+            armature_req.query().get_all("a").collect::<Vec<_>>(),
+            vec!["1", "2"]
         );
     }
 }

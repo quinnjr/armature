@@ -1538,12 +1538,13 @@ async fn handle_request(
         return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
     }
 
-    let mut armature_req = HttpRequest::new(method.clone(), path.clone());
-
-    // Parse query parameters (percent-decoded)
-    if let Some(ref q) = query {
-        armature_req.query_params = crate::simd_parser::parse_query_string_decoded(q);
-    }
+    // The full request target, query included: `HttpRequest` splits and parses
+    // it on demand, so a handler that ignores the query never pays for it.
+    let target = match query {
+        Some(ref q) => format!("{path}?{q}"),
+        None => path.clone(),
+    };
+    let mut armature_req = HttpRequest::new(method.clone(), target);
 
     // Copy headers
     let header_count = req.headers().len();

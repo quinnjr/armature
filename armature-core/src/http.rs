@@ -3,11 +3,31 @@
 use crate::body::RequestBody;
 use crate::extensions::Extensions;
 use crate::headers::HeaderMap;
+use crate::query::{QueryPairs, QueryView, parse as parse_query};
 use crate::{ByteStr, Method};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// The memoized query pairs.
+///
+/// `OnceLock` rather than `OnceCell` because `HttpRequest` must stay `Sync`:
+/// extractors hold `&HttpRequest` across an `await` inside a `Send` future, and
+/// `&T: Send` requires `T: Sync`.
+#[derive(Debug, Default)]
+pub struct QueryCache(OnceLock<QueryPairs>);
+
+impl Clone for QueryCache {
+    /// A clone starts cold.
+    ///
+    /// Carrying the parsed pairs across a clone would be wrong, not merely
+    /// wasteful: `path` is a public field, so a caller can clone a request and
+    /// then change its target. A cold cache cannot answer for the wrong path.
+    fn clone(&self) -> Self {
+        Self(OnceLock::new())
+    }
+}
 
 /// HTTP request wrapper
 ///
@@ -39,12 +59,13 @@ pub struct HttpRequest {
     /// it. One field, always authoritative.
     pub body: Bytes,
     pub path_params: HashMap<String, String>,
-    pub query_params: HashMap<String, String>,
     /// Type-safe extensions for storing application state.
     ///
     /// Use this to pass typed data to handlers without DI container lookups.
     /// Access via the `State<T>` extractor for zero-cost state retrieval.
     pub extensions: Extensions,
+    /// Parsed lazily by [`HttpRequest::query`].
+    query_cache: QueryCache,
 }
 
 impl HttpRequest {
@@ -60,8 +81,8 @@ impl HttpRequest {
             headers: HeaderMap::new(),
             body: Bytes::new(),
             path_params: HashMap::new(),
-            query_params: HashMap::new(),
             extensions: Extensions::new(),
+            query_cache: QueryCache::default(),
         }
     }
 
@@ -78,8 +99,8 @@ impl HttpRequest {
             headers: HeaderMap::new(),
             body: Bytes::new(),
             path_params: HashMap::new(),
-            query_params: HashMap::new(),
             extensions: Extensions::with_capacity(capacity),
+            query_cache: QueryCache::default(),
         }
     }
 
@@ -99,8 +120,8 @@ impl HttpRequest {
             headers: HeaderMap::new(),
             body,
             path_params: HashMap::new(),
-            query_params: HashMap::new(),
             extensions: Extensions::new(),
+            query_cache: QueryCache::default(),
         }
     }
 
@@ -128,10 +149,22 @@ impl HttpRequest {
         &self.body
     }
 
-    /// The request target as a string.
+    /// The request target as a string, query string included.
     #[inline]
     pub fn path_str(&self) -> &str {
         self.path.as_str()
+    }
+
+    /// The request target with any query string removed.
+    ///
+    /// This is what routing matches on, and what most callers mean when they
+    /// say "the path" — `path`/`path_str` are the raw target, which is what the
+    /// query is parsed out of.
+    #[inline]
+    pub fn path_only(&self) -> &str {
+        self.path
+            .split_once('?')
+            .map_or(self.path.as_str(), |(p, _)| p)
     }
 
     /// Get the body as a RequestBody (zero-copy wrapper).
@@ -171,14 +204,18 @@ impl HttpRequest {
         path_params: HashMap<String, String>,
         query_params: HashMap<String, String>,
     ) -> Self {
+        // `query_params` is accepted for source compatibility and ignored: the
+        // query now comes from `path`, parsed on demand. Callers that need one
+        // honoured should put it in the path.
+        let _ = query_params;
         Self {
             method: method.into(),
             path: path.into(),
             headers: headers.into(),
             body: Bytes::from(body),
             path_params,
-            query_params,
             extensions: Extensions::new(),
+            query_cache: QueryCache::default(),
         }
     }
 
@@ -262,9 +299,48 @@ impl HttpRequest {
         self.path_params.get(name)
     }
 
-    /// Get a query parameter by name
-    pub fn query(&self, name: &str) -> Option<&String> {
-        self.query_params.get(name)
+    /// The raw query string, without the `?`.
+    #[inline]
+    pub fn query_string(&self) -> Option<&str> {
+        self.path.as_str().split_once('?').map(|(_, q)| q)
+    }
+
+    /// A parsed view of the query string.
+    ///
+    /// Parses on the first call and memoizes; a handler that never calls this
+    /// pays nothing. Note the shape change: this used to take a name and return
+    /// one value — that accessor is now [`HttpRequest::query_param`].
+    #[inline]
+    pub fn query(&self) -> QueryView<'_> {
+        let pairs = self
+            .query_cache
+            .0
+            .get_or_init(|| match self.query_string() {
+                Some(q) => parse_query(q),
+                None => QueryPairs::new(),
+            });
+        QueryView::new(pairs)
+    }
+
+    /// Append a query parameter to the target, percent-encoding both sides.
+    ///
+    /// The query lives in `path` now, so this is how a caller adds one without
+    /// hand-assembling the target. Any memoized parse is discarded, since the
+    /// target it was parsed from no longer describes this request.
+    pub fn push_query_param(&mut self, name: impl AsRef<str>, value: impl AsRef<str>) {
+        let pair = [(name.as_ref(), value.as_ref())];
+        let Ok(encoded) = serde_urlencoded::to_string(pair) else {
+            return;
+        };
+        let separator = if self.path.contains('?') { '&' } else { '?' };
+        self.path = ByteStr::from(format!("{}{separator}{encoded}", self.path.as_str()));
+        self.query_cache = QueryCache::default();
+    }
+
+    /// The first query value for `name`.
+    #[inline]
+    pub fn query_param(&self, name: &str) -> Option<&str> {
+        self.query().get(name)
     }
 }
 
@@ -1005,12 +1081,10 @@ mod tests {
 
     #[test]
     fn test_http_request_query() {
-        let mut req = HttpRequest::new("GET", "/users".to_string());
-        req.query_params
-            .insert("sort".to_string(), "asc".to_string());
+        let req = HttpRequest::new("GET", "/users?sort=asc");
 
-        assert_eq!(req.query("sort"), Some(&"asc".to_string()));
-        assert_eq!(req.query("limit"), None);
+        assert_eq!(req.query_param("sort"), Some("asc"));
+        assert_eq!(req.query_param("limit"), None);
     }
 
     #[test]

@@ -25,7 +25,7 @@ fn request_with(
         req.path_params.insert((*k).to_string(), (*v).to_string());
     }
     for (k, v) in query_params {
-        req.query_params.insert((*k).to_string(), (*v).to_string());
+        req.push_query_param(*k, *v);
     }
     for (k, v) in headers {
         req.headers.insert(*k, *v);

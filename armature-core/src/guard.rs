@@ -407,16 +407,13 @@ mod tests {
         let mut path_params = HashMap::new();
         path_params.insert("id".to_string(), "123".to_string());
 
-        let mut query_params = HashMap::new();
-        query_params.insert("sort".to_string(), "asc".to_string());
-
         let request = HttpRequest::from_parts(
             "GET",
-            "/users/123".to_string(),
+            "/users/123?sort=asc",
             HashMap::new(),
             vec![],
             path_params,
-            query_params,
+            HashMap::new(),
         );
         let context = GuardContext::new(request);
 
@@ -424,9 +421,6 @@ mod tests {
             context.request.path_params.get("id"),
             Some(&"123".to_string())
         );
-        assert_eq!(
-            context.request.query_params.get("sort"),
-            Some(&"asc".to_string())
-        );
+        assert_eq!(context.request.query_param("sort"), Some("asc"));
     }
 }

@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
                 // Parse query parameters
-                let query = QueryParams::from_hashmap(&req.query_params);
+                let query = QueryParams::from_hashmap(&req.query().to_hash_map());
 
                 // Get all users
                 let mut users = get_mock_users();
@@ -288,7 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
                 // Parse cursor pagination
-                let pagination = CursorPagination::from_query_params(&req.query_params);
+                let pagination = CursorPagination::from_query_params(&req.query().to_hash_map());
 
                 let users = get_mock_users();
 

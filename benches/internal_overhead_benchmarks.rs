@@ -170,11 +170,9 @@ fn bench_request_creation(c: &mut Criterion) {
                 black_box("GET".to_string()),
                 black_box("/api/users".to_string()),
             );
-            req.query_params.insert("page".to_string(), "1".to_string());
-            req.query_params
-                .insert("limit".to_string(), "10".to_string());
-            req.query_params
-                .insert("sort".to_string(), "-created_at".to_string());
+            req.push_query_param("page", "1");
+            req.push_query_param("limit", "10");
+            req.push_query_param("sort", "-created_at");
             req
         })
     });

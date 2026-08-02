@@ -28,8 +28,8 @@ impl RequestBinding {
         }
 
         let mut query = HashMap::new();
-        for (key, value) in req.query_params.iter() {
-            query.insert(key.clone(), value.clone());
+        for (key, value) in req.query().iter() {
+            query.insert(key.to_owned(), value.to_owned());
         }
 
         let mut params = HashMap::new();

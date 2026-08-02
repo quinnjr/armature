@@ -176,7 +176,7 @@ macro_rules! path_param {
 /// ```
 #[macro_export]
 macro_rules! query_param {
-    ($req:expr, $name:expr) => {{ $req.query_params.get($name).and_then(|v| v.parse().ok()) }};
+    ($req:expr, $name:expr) => {{ $req.query_param($name).and_then(|v| v.parse().ok()) }};
 }
 
 /// Extract header value

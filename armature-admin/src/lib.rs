@@ -300,23 +300,23 @@ fn authorize_and_resolve_model(
 
 /// Build [`ListParams`] from the request's query string.
 fn list_params_from_request(req: &HttpRequest) -> ListParams {
-    let get = |k: &str| req.query_params.get(k).cloned();
+    let get = |k: &str| req.query_param(k);
     let mut filters = HashMap::new();
-    for (k, v) in req.query_params.iter() {
+    for (k, v) in req.query().iter() {
         if let Some(field) = k.strip_prefix("filter.") {
-            filters.insert(field.to_string(), v.clone());
+            filters.insert(field.to_string(), v.to_owned());
         }
     }
     ListParams {
         page: get("page").and_then(|p| p.parse().ok()),
         per_page: get("per_page").and_then(|p| p.parse().ok()),
-        sort: get("sort"),
-        order: match get("order").as_deref() {
+        sort: get("sort").map(str::to_owned),
+        order: match get("order") {
             Some("desc") | Some("DESC") => Some(SortOrder::Desc),
             Some("asc") | Some("ASC") => Some(SortOrder::Asc),
             _ => None,
         },
-        search: get("search"),
+        search: get("search").map(str::to_owned),
         filters,
     }
 }
@@ -443,9 +443,7 @@ async fn handle_list(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpR
     // CSV export of the current query (honoring search/filters/ordering). A
     // `limit` of 0 tells the data source to return every matching row rather
     // than a single page.
-    if inst.config.enable_export
-        && req.query_params.get("export").map(String::as_str) == Some("csv")
-    {
+    if inst.config.enable_export && req.query_param("export") == Some("csv") {
         let query = DataQuery {
             offset: 0,
             limit: 0,

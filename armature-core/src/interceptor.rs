@@ -211,7 +211,7 @@ fn cache_key(request: &HttpRequest) -> String {
     // Cheap upper-bound capacity pass so the common case (few short params)
     // needs no reallocation while building the key below.
     let mut capacity = method.len() + 1 + 20 + 1 + path.len() + 1;
-    for (k, v) in request.query_params.iter() {
+    for (k, v) in request.query().iter() {
         capacity += 20 + 1 + k.len() + 1 + 20 + 1 + v.len() + 1;
     }
     let mut key = String::with_capacity(capacity);
@@ -222,10 +222,10 @@ fn cache_key(request: &HttpRequest) -> String {
     key.push(':');
     key.push_str(path);
 
-    if request.query_params.is_empty() {
+    if request.query().is_empty() {
         return key;
     }
-    let mut params: Vec<(&String, &String)> = request.query_params.iter().collect();
+    let mut params: Vec<(&str, &str)> = request.query().iter().collect();
     params.sort_by(|a, b| a.0.cmp(b.0));
     key.push('?');
     for (k, v) in params {
@@ -519,8 +519,7 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let mut req_cats = HttpRequest::new("GET", "/search");
-        req_cats.query_params.insert("q".into(), "cats".into());
+        let req_cats = HttpRequest::new("GET", "/search?q=cats");
         let first = interceptor
             .intercept(
                 ExecutionContext::new(req_cats),
@@ -530,8 +529,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"cats-result");
 
-        let mut req_dogs = HttpRequest::new("GET", "/search");
-        req_dogs.query_params.insert("q".into(), "dogs".into());
+        let req_dogs = HttpRequest::new("GET", "/search?q=dogs");
         let second = interceptor
             .intercept(
                 ExecutionContext::new(req_dogs),
@@ -722,8 +720,7 @@ mod tests {
         let interceptor = CacheInterceptor::new(60);
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let mut req_encoded = HttpRequest::new("GET", "/inject");
-        req_encoded.query_params.insert("a".into(), "1&b=2".into());
+        let req_encoded = HttpRequest::new("GET", "/inject?a=1%26b%3D2");
         let first = interceptor
             .intercept(
                 ExecutionContext::new(req_encoded),
@@ -733,9 +730,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"encoded-result");
 
-        let mut req_plain = HttpRequest::new("GET", "/inject");
-        req_plain.query_params.insert("a".into(), "1".into());
-        req_plain.query_params.insert("b".into(), "2".into());
+        let req_plain = HttpRequest::new("GET", "/inject?a=1&b=2");
         let second = interceptor
             .intercept(
                 ExecutionContext::new(req_plain),
@@ -826,10 +821,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.body_ref(), b"path-result");
 
-        let mut req_path_plus_query = HttpRequest::new("GET", "/a");
-        req_path_plus_query
-            .query_params
-            .insert("b".into(), "c".into());
+        let req_path_plus_query = HttpRequest::new("GET", "/a?b=c");
         let second = interceptor
             .intercept(
                 ExecutionContext::new(req_path_plus_query),

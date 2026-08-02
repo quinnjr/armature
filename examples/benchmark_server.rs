@@ -238,11 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/data".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let size = req
-                    .query_params
-                    .get("size")
-                    .map(|s| s.as_str())
-                    .unwrap_or("medium");
+                let size = req.query_param("size").unwrap_or("medium");
                 let count = match size {
                     "small" => 10,
                     "large" => 100,

@@ -79,7 +79,7 @@ pub trait FromRequest: Sized {
 /// // Extract in handler - zero-cost after setup
 /// #[get("/users")]
 /// async fn list_users(state: State<AppState>) -> Result<HttpResponse, Error> {
-///     let users = state.db_pool.query("SELECT * FROM users").await?;
+///     let users = state.db_pool.query_param("SELECT * FROM users").await?;
 ///     HttpResponse::json(&users)
 /// }
 /// ```
@@ -242,15 +242,10 @@ impl<T> Deref for Query<T> {
 
 impl<T: DeserializeOwned> FromRequest for Query<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from params and deserialize
-        let query_string: String = request
-            .query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let value: T = serde_urlencoded::from_str(&query_string)
+        // Deserialize the raw query string. Going through the decoded pairs and
+        // re-joining them on `&`/`=` corrupted any value that itself contained
+        // one of those characters.
+        let value: T = serde_urlencoded::from_str(request.query_string().unwrap_or(""))
             .map_err(|e| Error::Validation(format!("Invalid query parameters: {}", e)))?;
 
         Ok(Query(value))
@@ -763,11 +758,8 @@ mod tests {
     use serde::Deserialize;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET", "/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/users/123?page=1&limit=10");
         req.path_params.insert("id".to_string(), "123".to_string());
-        req.query_params.insert("page".to_string(), "1".to_string());
-        req.query_params
-            .insert("limit".to_string(), "10".to_string());
         req.headers
             .insert("Authorization", "Bearer token123".to_string());
         req.headers

@@ -34,11 +34,11 @@
 //! // Access path and query parameters
 //! let mut post = HttpRequest::new("POST", "/api/users/123");
 //! post.path_params.insert("id".to_string(), "123".to_string());
-//! post.query_params.insert("format".to_string(), "json".to_string());
+//! post.push_query_param("format", "json");
 //! post.body = Bytes::from_static(b"{\"name\":\"John\"}");
 //!
 //! assert_eq!(post.param("id"), Some(&"123".to_string()));
-//! assert_eq!(post.query("format"), Some(&"json".to_string()));
+//! assert_eq!(post.query_param("format"), Some("json"));
 //! ```
 //!
 //! ### HTTP Response Builder
@@ -170,6 +170,7 @@ pub mod module;
 pub mod numa;
 pub mod pagination;
 pub mod pipeline;
+pub mod query;
 pub mod read_buffer;
 pub mod read_state;
 pub mod resilience;
@@ -213,6 +214,7 @@ pub use application::*;
 /// `armature-h1` so downstream crates need not depend on it directly.
 pub use armature_h1::header as header_id;
 pub use armature_h1::{ByteStr, HeaderId, Method};
+pub use query::QueryView;
 // Re-exported because `HttpRequest.body`/`HttpResponse.body` are `Bytes`:
 // downstream crates need to name the type without taking their own `bytes`
 // dependency, and a version skew between theirs and ours would not compile.

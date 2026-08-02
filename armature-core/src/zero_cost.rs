@@ -206,13 +206,9 @@ impl<T: serde::de::DeserializeOwned> Extract for QueryParams<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("QueryParams");
-        // Re-encode the already-decoded params so reserved characters
-        // (`&`, `=`, `%`, `+`, ...) in keys/values survive the round-trip.
-        let pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
-        let query_string = serde_urlencoded::to_string(&pairs)
-            .map_err(|e| Error::Deserialization(format!("Query encoding error: {}", e)))?;
-
-        serde_urlencoded::from_str(&query_string)
+        // The raw query string, not the decoded pairs: re-encoding a decoded
+        // pair cannot always reproduce what the client sent.
+        serde_urlencoded::from_str(req.query_string().unwrap_or(""))
             .map(QueryParams)
             .map_err(|e| Error::Deserialization(format!("Query parsing error: {}", e)))
     }
@@ -376,7 +372,9 @@ impl Extract for RequestPath {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
         EXTRACTOR_STATS.record_extraction("RequestPath");
-        Ok(RequestPath(req.path.clone()))
+        // The path without the query: `RequestPath` names the resource, and the
+        // query is reachable through `QueryParams`.
+        Ok(RequestPath(crate::ByteStr::from(req.path_only())))
     }
 }
 
@@ -933,16 +931,13 @@ mod tests {
     use bytes::Bytes;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET", "/api/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/api/users/123?page=1&limit=10");
         req.headers
             .insert("content-type", "application/json".to_string());
         req.headers
             .insert("authorization", "Bearer token123".to_string());
         req.body = Bytes::from_static(br#"{"name":"test"}"#);
         req.path_params.insert("id".to_string(), "123".to_string());
-        req.query_params.insert("page".to_string(), "1".to_string());
-        req.query_params
-            .insert("limit".to_string(), "10".to_string());
         req
     }
 
@@ -999,11 +994,10 @@ mod tests {
             plus: String,
         }
 
-        let mut req = HttpRequest::new("GET", "/search".to_string());
-        req.query_params
-            .insert("q".to_string(), "a&b=c%d".to_string());
-        req.query_params
-            .insert("plus".to_string(), "1+1".to_string());
+        // Percent-encoded on the wire, so the reserved characters survive the
+        // trip: a literal `&`/`=`/`%` in a value, and a literal `+` (which is a
+        // space when unescaped).
+        let req = HttpRequest::new("GET", "/search?q=a%26b%3Dc%25d&plus=1%2B1");
 
         let QueryParams(query) = QueryParams::<Query>::extract(&req).unwrap();
         assert_eq!(query.q, "a&b=c%d");

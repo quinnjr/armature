@@ -111,21 +111,11 @@ fn demonstrate_query_extraction() {
 
     // Simulate a GET request with query parameters
     let mut request = HttpRequest::new("GET", "/users".to_string());
-    request
-        .query_params
-        .insert("page".to_string(), "2".to_string());
-    request
-        .query_params
-        .insert("limit".to_string(), "25".to_string());
-    request
-        .query_params
-        .insert("sort".to_string(), "created_at".to_string());
-    request
-        .query_params
-        .insert("order".to_string(), "desc".to_string());
-    request
-        .query_params
-        .insert("search".to_string(), "alice".to_string());
+    request.push_query_param("page", "2");
+    request.push_query_param("limit", "25");
+    request.push_query_param("sort", "created_at");
+    request.push_query_param("order", "desc");
+    request.push_query_param("search", "alice");
 
     // Method 1: Using the Query extractor type
     let query: Query<UserListQuery> = Query::from_request(&request).unwrap();
@@ -237,9 +227,7 @@ fn demonstrate_combined_extraction() {
         .insert("id".to_string(), "42".to_string());
 
     // Set query parameter
-    request
-        .query_params
-        .insert("notify".to_string(), "true".to_string());
+    request.push_query_param("notify", "true");
 
     // Set body
     request.body = Bytes::from(

@@ -121,7 +121,14 @@ impl HttpRequestBuilderExt for HttpRequest {
     }
 
     fn with_query_params(mut self, params: HashMap<String, String>) -> Self {
-        self.query_params = params;
+        // The query lives in the target now, so the map is re-encoded onto the
+        // path rather than stored alongside it.
+        if !params.is_empty()
+            && let Ok(query) = serde_urlencoded::to_string(&params)
+        {
+            let path = self.path_only();
+            self.path = crate::ByteStr::from(format!("{path}?{query}"));
+        }
         self
     }
 }
@@ -535,7 +542,11 @@ mod tests {
 
         let armature_req = <HttpRequest as FromHttpRequest>::from_http_request(http_req);
         assert_eq!(armature_req.method, "POST");
-        assert_eq!(armature_req.path, "/api/users");
+        // `path` is the raw target, query included; `path_only` is what routing
+        // matches on.
+        assert_eq!(armature_req.path, "/api/users?page=1");
+        assert_eq!(armature_req.path_only(), "/api/users");
+        assert_eq!(armature_req.query_param("page"), Some("1"));
     }
 
     #[test]
