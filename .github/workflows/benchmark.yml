@@ -51,6 +51,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -193,6 +195,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Install Rust toolchain
@@ -287,6 +290,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Download benchmark results
         uses: actions/download-artifact@v8
@@ -328,6 +333,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
