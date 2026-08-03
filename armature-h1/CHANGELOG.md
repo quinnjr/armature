@@ -9,6 +9,14 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ### Fixed
 
+- **Two remaining response-desync vectors closed.** A 204, 304 or 1xx response
+  now drops any body a handler attached: the writer already suppresses their
+  framing field, so writing body bytes anyway left them unaccounted for and a
+  keep-alive peer read them as the next response. And a handler
+  `Content-Length` that disagrees with the body it framed is dropped in favour
+  of the true length, rather than trusted verbatim — response splitting reached
+  through arithmetic instead of through a CRLF.
+
 - **Request smuggling on the fixed-length body path.** `take_buffered` is
   bounded by what the body is owed, but `fill` is not — it hands over the whole
   socket read. When a `Content-Length` body straddled two reads and the second

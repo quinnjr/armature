@@ -465,8 +465,14 @@ where
         }
 
         // A HEAD response carries the headers a GET would, and no body
-        // (RFC 9112 section 6.3).
-        if !is_head_request && !upgrading {
+        // (RFC 9112 section 6.3). 204, 304 and 1xx likewise forbid one, and the
+        // writer already suppresses their framing field — so writing a body
+        // anyway would put bytes on the wire that no `Content-Length` or chunk
+        // framing accounts for, and a keep-alive peer reads them as the start of
+        // the next response. A handler that attaches a body to a 304 should lose
+        // the body, not desync the connection.
+        let body_forbidden = matches!(status, 204 | 304) || (100..200).contains(&status);
+        if !is_head_request && !upgrading && !body_forbidden {
             match body {
                 ResponseBody::Empty => {}
                 ResponseBody::Full(b) => self.out.extend_from_slice(&b),

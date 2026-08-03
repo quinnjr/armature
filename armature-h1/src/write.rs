@@ -221,6 +221,18 @@ fn writable(id: &HeaderId, value: &[u8]) -> bool {
 /// for containing CRLF would otherwise suppress the framing field too and leave
 /// the response undelimited — trading one splitting bug for another.
 #[inline]
+/// Parse a header value as a decimal length, rejecting anything else.
+///
+/// Deliberately stricter than `str::parse`: no sign, no whitespace, no empty
+/// value. A value this cannot read is treated as disagreeing with the body,
+/// which is the safe direction — the writer then emits the true length.
+fn parse_len(v: &Bytes) -> Option<u64> {
+    if v.is_empty() || !v.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(v).ok()?.parse().ok()
+}
+
 fn emitted<'a>(v: &'a HeaderVec, id: &HeaderId) -> Option<&'a Bytes> {
     v.iter()
         .find(|(k, val)| k == id && writable(k, val))
@@ -251,8 +263,27 @@ pub fn write_head(
     }
     out.put_slice(b"\r\n");
 
+    // A handler `Content-Length` that disagrees with the body it framed is
+    // dropped, so the writer below reclaims framing and emits the true length.
+    // Trusting it would put more (or fewer) bytes on the wire than the field
+    // accounts for, and a keep-alive peer reads the difference as the start of
+    // the next response — response splitting reached through arithmetic rather
+    // than through a CRLF.
+    let stale_content_length = match body {
+        OutBody::Fixed(b) => emitted(&resp.headers, &HeaderId::ContentLength)
+            .is_some_and(|v| parse_len(v) != Some(b.len() as u64)),
+        OutBody::None => emitted(&resp.headers, &HeaderId::ContentLength)
+            .is_some_and(|v| parse_len(v) != Some(0)),
+        // A chunked body carries its own framing; a handler length cannot agree.
+        OutBody::Chunked => emitted(&resp.headers, &HeaderId::ContentLength).is_some(),
+    };
+
     // Handler-supplied headers first, so the checks below can see them.
     for (id, value) in resp.headers.iter() {
+        if stale_content_length && id == &HeaderId::ContentLength {
+            tracing::warn!("dropping response content-length that disagrees with the body length");
+            continue;
+        }
         if !writable(id, value) {
             // The status line is already in `out`, so there is no error left to
             // return; dropping the field is the only outcome that does not put
@@ -277,7 +308,8 @@ pub fn write_head(
 
     // Body framing, unless the handler already framed it or the status forbids
     // framing entirely.
-    let handler_framed = emitted(&resp.headers, &HeaderId::ContentLength).is_some()
+    let handler_framed = (!stale_content_length
+        && emitted(&resp.headers, &HeaderId::ContentLength).is_some())
         || emitted(&resp.headers, &HeaderId::TransferEncoding).is_some();
     if !handler_framed && !forbids_body_framing(resp.status) {
         match body {
@@ -675,5 +707,45 @@ mod tests {
         // Strict CRLF throughout, and exactly one blank-line terminator.
         assert!(crate::parse::prescan(got.as_bytes()).is_ok());
         assert_eq!(crate::parse::find_head_end(got.as_bytes()), Some(got.len()));
+    }
+
+    /// A handler `Content-Length` that disagrees with the body it framed must
+    /// not reach the wire: the peer would read the difference as the start of
+    /// the next response.
+    #[test]
+    fn a_wrong_handler_content_length_is_replaced_with_the_true_one() {
+        let mut headers = HeaderVec::new();
+        headers.push((HeaderId::ContentLength, Bytes::from_static(b"5")));
+        let head = ResponseHead {
+            status: 200,
+            headers,
+        };
+        let mut out = BytesMut::new();
+        let body = OutBody::Fixed(Bytes::from_static(b"hello world"));
+        write_head(&mut out, Version::Http11, &head, &body, b"D", true);
+
+        let text = String::from_utf8_lossy(&out).to_lowercase();
+        assert_eq!(text.matches("content-length:").count(), 1, "{text}");
+        assert!(text.contains("content-length: 11"), "{text}");
+        assert!(!text.contains("content-length: 5"), "{text}");
+    }
+
+    /// An agreeing one is left alone, so a handler stays in charge of its own
+    /// framing whenever it is telling the truth.
+    #[test]
+    fn a_correct_handler_content_length_is_preserved() {
+        let mut headers = HeaderVec::new();
+        headers.push((HeaderId::ContentLength, Bytes::from_static(b"11")));
+        let head = ResponseHead {
+            status: 200,
+            headers,
+        };
+        let mut out = BytesMut::new();
+        let body = OutBody::Fixed(Bytes::from_static(b"hello world"));
+        write_head(&mut out, Version::Http11, &head, &body, b"D", true);
+
+        let text = String::from_utf8_lossy(&out).to_lowercase();
+        assert_eq!(text.matches("content-length:").count(), 1, "{text}");
+        assert!(text.contains("content-length: 11"), "{text}");
     }
 }
