@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 
 # Time
-chrono = { version = "0.5", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }
