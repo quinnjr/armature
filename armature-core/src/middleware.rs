@@ -1,6 +1,6 @@
 // Middleware system for request/response processing
 
-use crate::logging::{debug, trace};
+use crate::logging::{debug, error, info, trace};
 use crate::{Error, HttpRequest, HttpResponse};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -202,6 +202,13 @@ impl Middleware for CorsMiddleware {
 
 /// Logging middleware
 pub struct LoggerMiddleware {
+    /// Log the request body's *size* (`body_bytes`), not its contents.
+    ///
+    /// Request bodies routinely carry credentials, tokens and PII, and logs are
+    /// shipped to places with a wider audience than the service itself, so only
+    /// the byte count is recorded here. If you need to see the payload during
+    /// development, use [`RequestLoggerMiddleware`], which logs a truncated,
+    /// deliberately opt-in body preview.
     pub log_body: bool,
 }
 
@@ -210,6 +217,12 @@ impl LoggerMiddleware {
         Self { log_body: false }
     }
 
+    /// Record the request body's *size* (`body_bytes`) alongside each request.
+    ///
+    /// This does not log the body's contents: bodies routinely carry
+    /// credentials, tokens and PII, and logs are shipped to places with a wider
+    /// audience than the service itself, so the size is logged instead. For a
+    /// truncated preview of the actual payload, use [`RequestLoggerMiddleware`].
     pub fn with_body(mut self) -> Self {
         self.log_body = true;
         self
@@ -230,9 +243,14 @@ impl Middleware for LoggerMiddleware {
         let path = req.path.clone();
 
         if self.log_body && !req.body.is_empty() {
-            println!("→ {} {} (body: {} bytes)", method, path, req.body.len());
+            info!(
+                method = %method,
+                path = %path,
+                body_bytes = req.body.len(),
+                "request received"
+            );
         } else {
-            println!("→ {} {}", method, path);
+            info!(method = %method, path = %path, "request received");
         }
 
         let result = next(req).await;
@@ -240,13 +258,22 @@ impl Middleware for LoggerMiddleware {
 
         match &result {
             Ok(response) => {
-                println!(
-                    "← {} {} - {} ({:?})",
-                    method, path, response.status, duration
+                info!(
+                    method = %method,
+                    path = %path,
+                    status = response.status,
+                    duration_ms = duration.as_millis(),
+                    "response sent"
                 );
             }
             Err(e) => {
-                println!("← {} {} - Error: {} ({:?})", method, path, e, duration);
+                error!(
+                    method = %method,
+                    path = %path,
+                    error = %e,
+                    duration_ms = duration.as_millis(),
+                    "request failed"
+                );
             }
         }
 

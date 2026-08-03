@@ -83,10 +83,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Check if NUMA is available on this system.
 ///
-/// Returns `true` if:
-/// - Running on Linux with libnuma
-/// - System has multiple NUMA nodes
-/// - NUMA policy can be set
+/// On Linux, this is a lightweight heuristic: it returns `true` only if
+/// `/sys/devices/system/node/node1` exists, i.e. the kernel exposes a
+/// *second* NUMA node under sysfs. It does **not** use libnuma, does not
+/// attempt to call `set_mempolicy`/`mbind`, and does not verify that NUMA
+/// syscalls actually work (e.g. under seccomp or a container sandbox that
+/// blocks them) — the binding functions ([`bind_to_node`],
+/// [`bind_to_local_node`]) are the ones that surface those failures. They
+/// distinguish the two causes: [`NumaError::NotSupported`] when the kernel
+/// does not implement the syscall at all (`ENOSYS`), and
+/// [`NumaError::BindFailed`] when the syscall exists but is rejected — which
+/// is what a seccomp filter or container sandbox typically produces
+/// (`EPERM`). On non-Linux platforms this always returns `false`.
+///
+/// In short: `true` means "sysfs reports more than one NUMA node," not
+/// "NUMA placement is guaranteed to work."
 #[inline]
 pub fn numa_available() -> bool {
     #[cfg(target_os = "linux")]
@@ -102,7 +113,8 @@ pub fn numa_available() -> bool {
 
 #[cfg(target_os = "linux")]
 fn is_numa_available_linux() -> bool {
-    // Check if /sys/devices/system/node exists and has multiple nodes
+    // Heuristic only: a second `nodeN` entry under sysfs implies a NUMA
+    // topology, but doesn't confirm set_mempolicy/mbind will succeed.
     std::path::Path::new("/sys/devices/system/node/node1").exists()
 }
 
@@ -686,6 +698,28 @@ impl NumaAllocator {
             // SAFETY: caller guarantees ptr was allocated with this size/alignment
             unsafe { dealloc(ptr, layout) };
             self.stats.record_deallocation(size);
+        } else {
+            // Layout::from_size_align only fails if `size`, rounded up to
+            // `numa_alloc_align()`, would overflow `isize`. Reaching this
+            // means the caller already violated this function's documented
+            // `unsafe` precondition (ptr/size must match a prior `allocate`
+            // call, whose size was validated against the same alignment).
+            // There's nothing safe to free `ptr` with, so we deliberately
+            // leak rather than guess at a layout — surface it so it's at
+            // least observable in debug builds instead of vanishing silently.
+            debug_assert!(
+                false,
+                "NumaAllocator::deallocate: invalid Layout for size={size}, align={}; \
+                 caller violated documented safety preconditions, leaking ptr={ptr:p}",
+                numa_alloc_align()
+            );
+            tracing::warn!(
+                size,
+                align = numa_alloc_align(),
+                ?ptr,
+                "NumaAllocator::deallocate: invalid Layout, leaking memory \
+                 (caller violated documented unsafe preconditions)"
+            );
         }
     }
 
@@ -1154,8 +1188,20 @@ mod tests {
 
     #[test]
     fn test_numa_available() {
-        // Just check it doesn't panic
-        let _ = numa_available();
+        // The Linux implementation promises exactly one thing: sysfs exposes a
+        // second NUMA node. Pin that relationship rather than the raw value,
+        // which varies with the host, so a stubbed-out detector can't pass.
+        #[cfg(target_os = "linux")]
+        {
+            let has_node1 = std::path::Path::new("/sys/devices/system/node/node1").exists();
+            assert_eq!(numa_available(), has_node1);
+        }
+
+        // Non-Linux has no NUMA support at all, so the answer is unconditional.
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(!numa_available());
+        }
     }
 
     #[test]

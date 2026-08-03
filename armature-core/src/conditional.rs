@@ -321,6 +321,10 @@ pub struct ConditionalHeaders {
 
 impl ConditionalHeaders {
     /// Parse conditional headers from an HTTP request.
+    ///
+    /// Lookups use the canonical casing only: `HeaderMap::get` compares names
+    /// with `eq_ignore_ascii_case`, so a client sending `if-none-match` is
+    /// matched by the same call that matches `If-None-Match`.
     pub fn from_request(request: &HttpRequest) -> Self {
         // One lookup each: header names intern case-insensitively, so the
         // lowercased retry was always redundant.
@@ -886,6 +890,41 @@ mod tests {
 
         let etag = ETag::strong("abc123");
         assert!(headers.is_not_modified(Some(&etag), None));
+    }
+
+    /// Clients are free to send header names in any casing, and HTTP/2 and
+    /// HTTP/3 send them lowercased on the wire, so parsing must not depend on
+    /// the canonical spelling used in the lookups above.
+    #[test]
+    fn test_conditional_headers_lowercase_header_names() {
+        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        request
+            .headers
+            .insert("if-none-match", "\"abc123\"".to_string());
+        request.headers.insert("if-match", "\"abc123\"".to_string());
+        request.headers.insert(
+            "if-modified-since",
+            "Sun, 06 Nov 1994 08:49:37 GMT".to_string(),
+        );
+        request.headers.insert(
+            "if-unmodified-since",
+            "Sun, 06 Nov 1994 08:49:37 GMT".to_string(),
+        );
+
+        let headers = ConditionalHeaders::from_request(&request);
+        assert!(headers.if_none_match.is_some());
+        assert!(headers.if_match.is_some());
+        assert!(headers.if_modified_since.is_some());
+        assert!(headers.if_unmodified_since.is_some());
+
+        let etag = ETag::strong("abc123");
+        assert!(headers.is_not_modified(Some(&etag), None));
+
+        // The ConditionalRequest accessors read the same headers directly.
+        assert!(request.if_none_match().is_some());
+        assert!(request.if_match().is_some());
+        assert!(request.if_modified_since().is_some());
+        assert!(request.if_unmodified_since().is_some());
     }
 
     #[test]

@@ -91,12 +91,23 @@ impl ResponseItem {
 /// in sequence order (0, 1, 2, ...).
 #[derive(Debug)]
 pub struct ResponseQueue {
-    /// Pending responses (may be out of order)
-    pending: Vec<Option<ResponseItem>>,
+    /// Pending responses (may be out of order). Stored in a `VecDeque` so
+    /// that promoting the front item to `ready` (see `promote_ready`) is
+    /// O(1) amortized instead of the O(n) shift a `Vec::remove(0)` would
+    /// incur on every promotion.
+    pending: VecDeque<Option<ResponseItem>>,
     /// Next expected sequence number
     next_sequence: u64,
     /// Ready responses (in order, ready to send)
     ready: VecDeque<ResponseItem>,
+    /// Running total of `ready` item sizes. Maintained incrementally because
+    /// the hot path (`should_flush` / `must_flush`) asks for it on every
+    /// poll, and re-summing the deque each time would make a cheap predicate
+    /// walk the whole queue.
+    ready_bytes: usize,
+    /// Number of occupied slots in `pending`. Same rationale as
+    /// `ready_bytes`: `has_pending` only needs a boolean and should not scan.
+    pending_occupied: usize,
     /// Maximum pending responses
     capacity: usize,
     /// Statistics
@@ -106,12 +117,14 @@ pub struct ResponseQueue {
 impl ResponseQueue {
     /// Create a new response queue with the given capacity.
     pub fn new(capacity: usize) -> Self {
-        let mut pending = Vec::with_capacity(capacity);
+        let mut pending = VecDeque::with_capacity(capacity);
         pending.resize_with(capacity, || None);
         Self {
             pending,
             next_sequence: 0,
             ready: VecDeque::with_capacity(capacity),
+            ready_bytes: 0,
+            pending_occupied: 0,
             capacity,
             stats: ResponseQueueStats::new(),
         }
@@ -139,11 +152,15 @@ impl ResponseQueue {
 
         // Ensure pending vec is large enough
         while self.pending.len() <= offset {
-            self.pending.push(None);
+            self.pending.push_back(None);
         }
 
         self.stats.record_push(item.size);
-        self.pending[offset] = Some(item);
+        // A re-push of an already-occupied slot replaces it rather than
+        // adding one, so only count genuinely new occupants.
+        if self.pending[offset].replace(item).is_none() {
+            self.pending_occupied += 1;
+        }
 
         // Move any ready items to the ready queue
         self.promote_ready();
@@ -152,11 +169,17 @@ impl ResponseQueue {
     }
 
     /// Move items from pending to ready queue.
+    ///
+    /// Uses `VecDeque::pop_front` rather than `Vec::remove(0)` so each
+    /// promoted item is removed in O(1) amortized time instead of O(n),
+    /// keeping the overall promotion loop O(n) rather than O(n^2).
     fn promote_ready(&mut self) {
-        while !self.pending.is_empty() {
-            if let Some(item) = self.pending[0].take() {
+        while let Some(slot) = self.pending.front_mut() {
+            if let Some(item) = slot.take() {
+                self.pending.pop_front();
+                self.pending_occupied -= 1;
+                self.ready_bytes += item.size;
                 self.ready.push_back(item);
-                self.pending.remove(0);
                 self.next_sequence += 1;
             } else {
                 break;
@@ -167,9 +190,12 @@ impl ResponseQueue {
     /// Pop the next ready response.
     #[inline]
     pub fn pop_ready(&mut self) -> Option<ResponseItem> {
-        self.ready.pop_front().inspect(|item| {
+        let item = self.ready.pop_front();
+        if let Some(item) = &item {
+            self.ready_bytes -= item.size;
             self.stats.record_pop(item.size);
-        })
+        }
+        item
     }
 
     /// Peek at the next ready response without removing it.
@@ -193,7 +219,7 @@ impl ResponseQueue {
     /// Get the number of pending (out-of-order) responses.
     #[inline]
     pub fn pending_count(&self) -> usize {
-        self.pending.iter().filter(|x| x.is_some()).count()
+        self.pending_occupied
     }
 
     /// Get the next expected sequence number.
@@ -205,7 +231,7 @@ impl ResponseQueue {
     /// Get total bytes ready to send.
     #[inline]
     pub fn ready_bytes(&self) -> usize {
-        self.ready.iter().map(|r| r.size).sum()
+        self.ready_bytes
     }
 
     /// Get queue statistics.
@@ -218,7 +244,9 @@ impl ResponseQueue {
     #[inline]
     pub fn drain_ready(&mut self) -> ResponseBatch {
         let items: Vec<_> = self.ready.drain(..).collect();
-        let total_size: usize = items.iter().map(|r| r.size).sum();
+        // Everything left, so the running total is the batch total.
+        let total_size = self.ready_bytes;
+        self.ready_bytes = 0;
         self.stats.record_batch_drain(items.len(), total_size);
         ResponseBatch { items, total_size }
     }
@@ -227,8 +255,16 @@ impl ResponseQueue {
     #[inline]
     pub fn drain_ready_max(&mut self, max: usize) -> ResponseBatch {
         let count = max.min(self.ready.len());
+        let drains_all = count == self.ready.len();
         let items: Vec<_> = self.ready.drain(..count).collect();
-        let total_size: usize = items.iter().map(|r| r.size).sum();
+        let total_size = if drains_all {
+            // Whole queue: reuse the running total instead of re-summing.
+            std::mem::take(&mut self.ready_bytes)
+        } else {
+            let drained: usize = items.iter().map(|r| r.size).sum();
+            self.ready_bytes -= drained;
+            drained
+        };
         self.stats.record_batch_drain(items.len(), total_size);
         ResponseBatch { items, total_size }
     }
@@ -237,7 +273,9 @@ impl ResponseQueue {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.pending.resize_with(self.capacity, || None);
+        self.pending_occupied = 0;
         self.ready.clear();
+        self.ready_bytes = 0;
         // Note: don't reset next_sequence to maintain ordering
     }
 
@@ -429,7 +467,17 @@ pub struct ResponseWriterConfig {
     pub min_batch_bytes: usize,
     /// Maximum bytes to batch before forcing flush
     pub max_batch_bytes: usize,
-    /// Use TCP_CORK for batching (Linux only)
+    /// Whether the connection's socket should be corked (via `TCP_CORK`,
+    /// Linux only) while a batch is being written, so multiple queued
+    /// responses coalesce into fewer TCP segments.
+    ///
+    /// This struct only *decides* the policy; it does not itself hold a
+    /// socket, so nothing in this module applies the setsockopt call.
+    /// Callers that own the connection's file descriptor should read this
+    /// flag via [`ConnectionPipeline::config`] and apply it with
+    /// [`ConnectionPipeline::apply_cork`] (which wraps
+    /// [`crate::socket_batch::set_tcp_cork`]) immediately before writing a
+    /// [`ResponseBatch`] and again to uncork once the write completes.
     pub use_tcp_cork: bool,
     /// Flush timeout in microseconds
     pub flush_timeout_us: u64,
@@ -655,6 +703,7 @@ impl ConnectionPipeline {
     /// Check if there are pending responses.
     #[inline]
     pub fn has_pending(&self) -> bool {
+        // O(1): `pending_count` is a maintained counter, not a scan.
         self.queue.pending_count() > 0
     }
 
@@ -686,6 +735,24 @@ impl ConnectionPipeline {
     #[inline]
     pub fn config(&self) -> &ResponseWriterConfig {
         &self.config
+    }
+
+    /// Apply (or clear) `TCP_CORK` on `fd` according to
+    /// [`ResponseWriterConfig::use_tcp_cork`].
+    ///
+    /// This is a no-op that returns `Ok(())` immediately when corking is
+    /// disabled in the config. Callers that own the connection's socket
+    /// should invoke this with `cork = true` before writing a batch
+    /// produced by [`Self::drain_for_send`] / [`Self::drain_max`], and with
+    /// `cork = false` right after the write completes to flush any
+    /// coalesced segments.
+    #[cfg(unix)]
+    pub fn apply_cork(&self, fd: std::os::unix::io::RawFd, cork: bool) -> std::io::Result<()> {
+        if self.config.use_tcp_cork {
+            crate::socket_batch::set_tcp_cork(fd, cork)
+        } else {
+            Ok(())
+        }
     }
 
     /// Reset the pipeline (for connection reuse).
@@ -1037,6 +1104,33 @@ mod tests {
 
         queue.pop_ready();
         assert_eq!(queue.stats().popped(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_cork_honors_config() {
+        use std::os::unix::io::AsRawFd;
+
+        // Corking disabled: apply_cork must not touch the socket at all. An
+        // invalid fd proves it — a real setsockopt on -1 would fail EBADF.
+        // (On non-Linux unix `set_tcp_cork` is an Ok(()) stub, so this only
+        // demonstrates the short-circuit on Linux; it stays green elsewhere.)
+        let quiet = ConnectionPipeline::with_config(1, 8, ResponseWriterConfig::low_latency());
+        assert!(!quiet.config().use_tcp_cork);
+        assert!(quiet.apply_cork(-1, true).is_ok());
+        assert!(quiet.apply_cork(-1, false).is_ok());
+
+        // Corking enabled: the option is really set on a connected socket,
+        // both on the way in and on the way out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let stream = std::net::TcpStream::connect(addr).expect("connect loopback");
+        let _accepted = listener.accept().expect("accept");
+
+        let corked = ConnectionPipeline::with_config(2, 8, ResponseWriterConfig::high_throughput());
+        assert!(corked.config().use_tcp_cork);
+        assert!(corked.apply_cork(stream.as_raw_fd(), true).is_ok());
+        assert!(corked.apply_cork(stream.as_raw_fd(), false).is_ok());
     }
 
     #[test]
