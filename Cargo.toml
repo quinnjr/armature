@@ -1,6 +1,13 @@
 [workspace]
 members = [
     "armature-log",
+    # Listed explicitly even though `armature-core`'s path dependency already
+    # pulls it into the workspace. Tooling that reads this list rather than
+    # `cargo metadata` cannot see an inferred member: `scripts/publish.sh`
+    # walks `members`, so it skipped `armature-h1` entirely and would have
+    # tried to publish `armature-core` against an `armature-h1` that was not
+    # on crates.io yet.
+    "armature-h1",
     "armature-core",
     "armature-proc-macro",
     "armature-graphql",
