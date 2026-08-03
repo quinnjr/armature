@@ -9,6 +9,14 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ### Fixed
 
+- **Request smuggling on the fixed-length body path.** `take_buffered` is
+  bounded by what the body is owed, but `fill` is not — it hands over the whole
+  socket read. When a `Content-Length` body straddled two reads and the second
+  carried the front of a pipelined request, those bytes were dropped while the
+  body still reported itself fully read, so keep-alive survived and the peer's
+  response queue shifted by one. The chunked decoder already returned its
+  residue; the fixed-length arm now does too.
+
 - Every deadline in `Limits` is now enforced against something that polls it.
   `body_timeout` was armed and never awaited, so it had no effect at all — and
   its test passed by reaching the idle timeout instead. `write_timeout` now

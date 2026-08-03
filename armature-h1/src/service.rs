@@ -336,6 +336,19 @@ impl Body {
                         if s.remaining == 0 {
                             s.finish();
                             s.trailers = Some(HeaderVec::new());
+                            // `take_buffered` is bounded by what this body is
+                            // owed, but `fill` is not: it hands over the whole
+                            // read, which can carry the front of the next
+                            // pipelined request. Dropping that residue desyncs
+                            // the connection while `fully_read` still reports
+                            // success, so keep-alive survives and the peer's
+                            // response queue shifts by one.
+                            if !s.buffered.is_empty()
+                                && let Some(io) = &s.io
+                            {
+                                let leftover = std::mem::take(&mut s.buffered);
+                                io.borrow_mut().push_back(leftover);
+                            }
                         }
                         return Poll::Ready(Some(Ok(chunk)));
                     }
@@ -720,12 +733,34 @@ mod tests {
         assert_eq!(&b.collect(1024).await.unwrap()[..], &b"hello world"[..10]);
     }
 
-    /// A truncated body must never be reported as a success.
+    /// A fixed-length body must hand back whatever it over-read.
+    ///
+    /// `take_buffered` is bounded by what the body is owed, but `fill` is not —
+    /// it yields the whole socket read. When that read carries the front of the
+    /// next pipelined request, dropping the residue desyncs the connection
+    /// while still reporting the body fully read, so keep-alive survives and
+    /// every later response is delivered against the wrong request.
     #[tokio::test]
-    async fn fixed_body_short_read_is_incomplete() {
-        let mut b = body(BodyKind::Length(10), b"hel", vec![]);
-        let err = b.collect(1024).await.unwrap_err();
-        assert!(matches!(err, BodyError::Incomplete), "got {err:?}");
+    async fn fixed_body_returns_over_read_bytes_to_the_connection() {
+        const NEXT: &[u8] = b"GET /admin HTTP/1.1\r\nHost: a\r\n\r\n";
+        // One read carrying the body's last two bytes *and* a whole pipelined
+        // request behind them.
+        let io = MockIo::with_buffered(b"hel", vec![b"loGET /admin HTTP/1.1\r\nHost: a\r\n\r\n"]);
+        let mut b = Body::new(
+            BodyKind::Length(5),
+            io.clone(),
+            false,
+            &Limits::default(),
+            Rc::new(Cell::new(false)),
+        );
+
+        assert_eq!(&b.collect(1024).await.unwrap()[..], b"hello");
+        assert!(b.is_end());
+        assert_eq!(
+            &io.borrow().buffered[..],
+            NEXT,
+            "the next request must be readable by the connection, not dropped"
+        );
     }
 
     #[tokio::test]
