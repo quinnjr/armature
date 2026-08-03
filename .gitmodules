@@ -1,0 +1,264 @@
+[submodule "armature-acme"]
+	path = armature-acme
+	url = https://github.com/quinnjr/armature-acme.git
+	branch = main
+[submodule "armature-admin"]
+	path = armature-admin
+	url = https://github.com/quinnjr/armature-admin.git
+	branch = main
+[submodule "armature-analytics"]
+	path = armature-analytics
+	url = https://github.com/quinnjr/armature-analytics.git
+	branch = main
+[submodule "armature-app"]
+	path = armature-app
+	url = https://github.com/quinnjr/armature-app.git
+	branch = main
+[submodule "armature-audit"]
+	path = armature-audit
+	url = https://github.com/quinnjr/armature-audit.git
+	branch = main
+[submodule "armature-auth"]
+	path = armature-auth
+	url = https://github.com/quinnjr/armature-auth.git
+	branch = main
+[submodule "armature-aws"]
+	path = armature-aws
+	url = https://github.com/quinnjr/armature-aws.git
+	branch = main
+[submodule "armature-azure-functions"]
+	path = armature-azure-functions
+	url = https://github.com/quinnjr/armature-azure-functions.git
+	branch = main
+[submodule "armature-azure"]
+	path = armature-azure
+	url = https://github.com/quinnjr/armature-azure.git
+	branch = main
+[submodule "armature-cache"]
+	path = armature-cache
+	url = https://github.com/quinnjr/armature-cache.git
+	branch = main
+[submodule "armature-cli"]
+	path = armature-cli
+	url = https://github.com/quinnjr/armature-cli.git
+	branch = main
+[submodule "armature-cloudrun"]
+	path = armature-cloudrun
+	url = https://github.com/quinnjr/armature-cloudrun.git
+	branch = main
+[submodule "armature-collab"]
+	path = armature-collab
+	url = https://github.com/quinnjr/armature-collab.git
+	branch = main
+[submodule "armature-compression"]
+	path = armature-compression
+	url = https://github.com/quinnjr/armature-compression.git
+	branch = main
+[submodule "armature-config"]
+	path = armature-config
+	url = https://github.com/quinnjr/armature-config.git
+	branch = main
+[submodule "armature-core"]
+	path = armature-core
+	url = https://github.com/quinnjr/armature-core.git
+	branch = main
+[submodule "armature-cqrs"]
+	path = armature-cqrs
+	url = https://github.com/quinnjr/armature-cqrs.git
+	branch = main
+[submodule "armature-cron"]
+	path = armature-cron
+	url = https://github.com/quinnjr/armature-cron.git
+	branch = main
+[submodule "armature-diesel"]
+	path = armature-diesel
+	url = https://github.com/quinnjr/armature-diesel.git
+	branch = main
+[submodule "armature-discovery"]
+	path = armature-discovery
+	url = https://github.com/quinnjr/armature-discovery.git
+	branch = main
+[submodule "armature-distributed"]
+	path = armature-distributed
+	url = https://github.com/quinnjr/armature-distributed.git
+	branch = main
+[submodule "armature-events"]
+	path = armature-events
+	url = https://github.com/quinnjr/armature-events.git
+	branch = main
+[submodule "armature-eventsourcing"]
+	path = armature-eventsourcing
+	url = https://github.com/quinnjr/armature-eventsourcing.git
+	branch = main
+[submodule "armature-features"]
+	path = armature-features
+	url = https://github.com/quinnjr/armature-features.git
+	branch = main
+[submodule "armature-ferron"]
+	path = armature-ferron
+	url = https://github.com/quinnjr/armature-ferron.git
+	branch = main
+[submodule "armature-files"]
+	path = armature-files
+	url = https://github.com/quinnjr/armature-files.git
+	branch = main
+[submodule "armature-fuzz"]
+	path = armature-fuzz
+	url = https://github.com/quinnjr/armature-fuzz.git
+	branch = main
+[submodule "armature-gcp"]
+	path = armature-gcp
+	url = https://github.com/quinnjr/armature-gcp.git
+	branch = main
+[submodule "armature-graphql-client"]
+	path = armature-graphql-client
+	url = https://github.com/quinnjr/armature-graphql-client.git
+	branch = main
+[submodule "armature-graphql-macros"]
+	path = armature-graphql-macros
+	url = https://github.com/quinnjr/armature-graphql-macros.git
+	branch = main
+[submodule "armature-graphql"]
+	path = armature-graphql
+	url = https://github.com/quinnjr/armature-graphql.git
+	branch = main
+[submodule "armature-grpc"]
+	path = armature-grpc
+	url = https://github.com/quinnjr/armature-grpc.git
+	branch = main
+[submodule "armature-h1"]
+	path = armature-h1
+	url = https://github.com/quinnjr/armature-h1.git
+	branch = main
+[submodule "armature-http-client"]
+	path = armature-http-client
+	url = https://github.com/quinnjr/armature-http-client.git
+	branch = main
+[submodule "armature-i18n"]
+	path = armature-i18n
+	url = https://github.com/quinnjr/armature-i18n.git
+	branch = main
+[submodule "armature-jwt"]
+	path = armature-jwt
+	url = https://github.com/quinnjr/armature-jwt.git
+	branch = main
+[submodule "armature-lambda"]
+	path = armature-lambda
+	url = https://github.com/quinnjr/armature-lambda.git
+	branch = main
+[submodule "armature-log"]
+	path = armature-log
+	url = https://github.com/quinnjr/armature-log.git
+	branch = main
+[submodule "armature-macros-utils"]
+	path = armature-macros-utils
+	url = https://github.com/quinnjr/armature-macros-utils.git
+	branch = main
+[submodule "armature-macros"]
+	path = armature-macros
+	url = https://github.com/quinnjr/armature-macros.git
+	branch = main
+[submodule "armature-mail"]
+	path = armature-mail
+	url = https://github.com/quinnjr/armature-mail.git
+	branch = main
+[submodule "armature-mcp"]
+	path = armature-mcp
+	url = https://github.com/quinnjr/armature-mcp.git
+	branch = main
+[submodule "armature-messaging"]
+	path = armature-messaging
+	url = https://github.com/quinnjr/armature-messaging.git
+	branch = main
+[submodule "armature-metrics"]
+	path = armature-metrics
+	url = https://github.com/quinnjr/armature-metrics.git
+	branch = main
+[submodule "armature-openapi"]
+	path = armature-openapi
+	url = https://github.com/quinnjr/armature-openapi.git
+	branch = main
+[submodule "armature-opensearch"]
+	path = armature-opensearch
+	url = https://github.com/quinnjr/armature-opensearch.git
+	branch = main
+[submodule "armature-opentelemetry"]
+	path = armature-opentelemetry
+	url = https://github.com/quinnjr/armature-opentelemetry.git
+	branch = main
+[submodule "armature-payments"]
+	path = armature-payments
+	url = https://github.com/quinnjr/armature-payments.git
+	branch = main
+[submodule "armature-proc-macro"]
+	path = armature-proc-macro
+	url = https://github.com/quinnjr/armature-proc-macro.git
+	branch = main
+[submodule "armature-push"]
+	path = armature-push
+	url = https://github.com/quinnjr/armature-push.git
+	branch = main
+[submodule "armature-queue"]
+	path = armature-queue
+	url = https://github.com/quinnjr/armature-queue.git
+	branch = main
+[submodule "armature-ratelimit"]
+	path = armature-ratelimit
+	url = https://github.com/quinnjr/armature-ratelimit.git
+	branch = main
+[submodule "armature-redis"]
+	path = armature-redis
+	url = https://github.com/quinnjr/armature-redis.git
+	branch = main
+[submodule "armature-rhai"]
+	path = armature-rhai
+	url = https://github.com/quinnjr/armature-rhai.git
+	branch = main
+[submodule "armature-seaorm"]
+	path = armature-seaorm
+	url = https://github.com/quinnjr/armature-seaorm.git
+	branch = main
+[submodule "armature-security"]
+	path = armature-security
+	url = https://github.com/quinnjr/armature-security.git
+	branch = main
+[submodule "armature-session"]
+	path = armature-session
+	url = https://github.com/quinnjr/armature-session.git
+	branch = main
+[submodule "armature-siem"]
+	path = armature-siem
+	url = https://github.com/quinnjr/armature-siem.git
+	branch = main
+[submodule "armature-storage"]
+	path = armature-storage
+	url = https://github.com/quinnjr/armature-storage.git
+	branch = main
+[submodule "armature-tenancy"]
+	path = armature-tenancy
+	url = https://github.com/quinnjr/armature-tenancy.git
+	branch = main
+[submodule "armature-testing"]
+	path = armature-testing
+	url = https://github.com/quinnjr/armature-testing.git
+	branch = main
+[submodule "armature-testkit"]
+	path = armature-testkit
+	url = https://github.com/quinnjr/armature-testkit.git
+	branch = main
+[submodule "armature-toon"]
+	path = armature-toon
+	url = https://github.com/quinnjr/armature-toon.git
+	branch = main
+[submodule "armature-validation"]
+	path = armature-validation
+	url = https://github.com/quinnjr/armature-validation.git
+	branch = main
+[submodule "armature-webhooks"]
+	path = armature-webhooks
+	url = https://github.com/quinnjr/armature-webhooks.git
+	branch = main
+[submodule "armature-websocket"]
+	path = armature-websocket
+	url = https://github.com/quinnjr/armature-websocket.git
+	branch = main

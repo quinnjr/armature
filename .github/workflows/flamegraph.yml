@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install system dependencies
         run: |
@@ -224,11 +226,13 @@ jobs:
       - name: Checkout PR branch
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           path: pr
 
       - name: Checkout base branch
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           ref: ${{ github.base_ref }}
           path: base
 
