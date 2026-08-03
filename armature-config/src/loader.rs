@@ -24,6 +24,19 @@ impl FileFormat {
     }
 }
 
+/// Name the shape of a JSON value, for an error message that says what was
+/// found rather than only what was wanted.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Configuration file loader
 pub struct ConfigLoader {
     format: FileFormat,
@@ -66,8 +79,29 @@ impl ConfigLoader {
     }
 
     fn parse_json(&self, content: &str) -> Result<Value> {
-        serde_json::from_str(content)
-            .map_err(|e| ConfigError::ParseError(format!("JSON parse error: {}", e)))
+        let value: Value = serde_json::from_str(content)
+            .map_err(|e| ConfigError::ParseError(format!("JSON parse error: {}", e)))?;
+
+        // A configuration document is a mapping of keys to values. JSON is the
+        // only format here that can parse to something else — a TOML document
+        // is a table and a `.env` file is a set of assignments, both objects by
+        // construction — so `99`, `[1, 2]` or `"text"` at the top level parses
+        // happily and then carries no keys.
+        //
+        // Rejecting it here rather than downstream matters because
+        // `ConfigManager::load_file` pattern-matches the object case and
+        // otherwise falls through to `Ok(())`. A file that renders to a bare
+        // scalar — a templating mistake is the usual way — would load
+        // "successfully" while applying nothing, leaving the service on
+        // defaults with no error to explain why.
+        if !value.is_object() {
+            return Err(ConfigError::ParseError(format!(
+                "JSON parse error: expected a top-level object, found {}",
+                json_kind(&value)
+            )));
+        }
+
+        Ok(value)
     }
 
     fn parse_toml(&self, content: &str) -> Result<Value> {
@@ -164,6 +198,30 @@ mod tests {
             Some("exported value")
         );
         assert_eq!(obj.get("INLINE").and_then(Value::as_str), Some("kept"));
+    }
+
+    /// JSON is the only supported format whose document can parse to something
+    /// that is not a mapping. Accepting one produces a config carrying no keys,
+    /// which downstream cannot distinguish from a file that legitimately set
+    /// nothing — so a rendering mistake would leave the service on defaults
+    /// and report success.
+    #[test]
+    fn top_level_json_that_is_not_an_object_is_rejected() {
+        let loader = ConfigLoader::new(FileFormat::Json);
+
+        for content in ["99", "\"text\"", "[1, 2]", "true", "null"] {
+            let err = loader
+                .parse(content)
+                .expect_err("a non-object JSON document must not parse as configuration");
+            assert!(
+                err.to_string().contains("expected a top-level object"),
+                "{content:?} was rejected, but not for the reason we mean: {err}"
+            );
+        }
+
+        // The empty object carries no keys either, but it says so deliberately
+        // and is a valid config document.
+        assert!(loader.parse("{}").is_ok());
     }
 
     #[test]

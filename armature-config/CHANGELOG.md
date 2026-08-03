@@ -11,6 +11,15 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Behaviour:** a configuration document whose top level is not an object is
+  now rejected instead of silently applying nothing. JSON is the only supported
+  format that can parse to something else -- a TOML document is a table and a
+  `.env` file is a set of assignments -- so `99`, `[1, 2]` or `"text"` parsed
+  happily and carried no keys. `ConfigManager::load_file` then matched only the
+  object case and fell through to `Ok(())`, so a file rendered to a bare scalar
+  (the usual shape of a templating mistake) started the service on defaults
+  with no error to explain it. Both the loader and `load_file` now report it.
+
 - **Breaking:** `__` in an environment variable maps to `.`, so an env var can finally satisfy the dotted lookups the docs demonstrate.
 - **Breaking:** `FileFormat::Env` delegates to `dotenvy`. The hand-rolled parser disagreed with the crate's other `.env` path on the same file — no `export`, no escapes, no inline comments — and stripped every quote rather than one matched pair.
 - Source precedence is documented and pinned by a test; `in_range`/`one_of` interpolate the bounds they rejected against.
