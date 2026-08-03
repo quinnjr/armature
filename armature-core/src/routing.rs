@@ -306,6 +306,15 @@ fn split_segments(path: &str) -> impl Iterator<Item = &str> {
 
 /// Rewrite an armature route pattern into `matchit` syntax.
 ///
+/// How many parameters one route may carry before `matchit` refuses it.
+///
+/// It rewrites each parameter to a single letter while normalizing a route and
+/// starts at `a`, so the 26th exhausts the alphabet — and it announces that by
+/// panicking rather than returning an error, which no `is_err` arm can turn
+/// into a fallback. 25 is therefore the most a route may carry; anything above
+/// is kept out of the tree and answered by the linear scan instead.
+const MATCHIT_MAX_PARAMS: usize = 25;
+
 /// `:id` becomes `{id}` and `*rest` becomes `{*rest}`. User-facing pattern
 /// syntax does not change — this is the seam that keeps it from having to.
 /// Segments that are already braced pass through untouched.
@@ -441,9 +450,27 @@ impl MethodIndex {
                 }
             }
 
+            // `matchit` renames parameters to single letters starting at `a`
+            // while normalizing, and *panics* — it does not return an error —
+            // once a route needs one past `z`. A panic is not something the
+            // `is_err` arm below can turn into a fallback, so the count is
+            // checked first. Such a route is pathological, but registering one
+            // should cost a linear scan, not abort the process.
+            //
+            // Counted on the *translated* pattern rather than on
+            // `param_names`, which sees only this crate's `:name` and `*name`
+            // spellings. A pattern written with braces directly is passed
+            // through untouched, so it is a parameter to `matchit` while being
+            // invisible here — and 26 of those panic just the same.
+            let translated = translate_pattern(&route.path);
             let tree = trees[slot].get_or_insert_with(matchit::Router::new);
+            if translated.bytes().filter(|&b| b == b'{').count() > MATCHIT_MAX_PARAMS {
+                fallback.push(idx);
+                continue;
+            }
+
             let value = (idx, param_names(&route.path));
-            if tree.insert(translate_pattern(&route.path), value).is_err() {
+            if tree.insert(translated, value).is_err() {
                 // A conflict, an unsupported pattern, or a duplicate. Preserve
                 // first-registered-wins by scanning instead.
                 fallback.push(idx);
@@ -1118,6 +1145,59 @@ mod tests {
             Route::new(HttpMethod::GET, "/users/:id", test_handler).with_constraints(constraints);
 
         assert!(route.constraints.is_some());
+    }
+
+    /// `matchit` panics rather than erroring once a route needs a 27th
+    /// parameter letter, and a panic during index construction takes down
+    /// whatever was registering the route. Such a route has to fall back to the
+    /// linear scan, and — the part worth asserting — still match.
+    #[tokio::test]
+    async fn a_route_past_matchits_parameter_ceiling_still_matches() {
+        async fn last_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
+            let v = req.param("p29").unwrap_or_default().to_owned();
+            Ok(HttpResponse::ok().with_body(v.into_bytes()))
+        }
+
+        // 30 parameters: comfortably past the 25 `matchit` can normalize.
+        let pattern: String = (0..30).map(|i| format!("/:p{i}")).collect();
+        let target: String = (0..30).map(|i| format!("/v{i}")).collect();
+
+        let mut router = Router::new();
+        router.get(&pattern, last_handler);
+
+        let response = router
+            .route(HttpRequest::new("GET", target))
+            .await
+            .expect("an over-parameterized route must route, not panic");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body.as_ref(),
+            b"v29",
+            "the fallback scan must still bind parameters"
+        );
+    }
+
+    /// The same ceiling, reached through brace syntax instead of `:name`.
+    /// `translate_pattern` passes an already-braced segment through untouched,
+    /// so those parameters never appear in `param_names` — counting there
+    /// rather than on the translated pattern leaves the panic reachable.
+    ///
+    /// Only the absence of a panic is asserted. Such a route is answered by the
+    /// linear scan, and `match_path_spans` understands `:name` and `*name` but
+    /// not braces, so it does not match — brace spelling has only ever worked
+    /// by reaching `matchit`. Turning a process-killing panic into a route that
+    /// does not match is the fix; making brace syntax work in the fallback is a
+    /// separate question about whether it is a supported spelling at all.
+    #[tokio::test]
+    async fn brace_spelled_parameters_do_not_panic_past_the_ceiling() {
+        let pattern: String = (0..30).map(|i| format!("/{{p{i}}}")).collect();
+        let target: String = (0..30).map(|i| format!("/v{i}")).collect();
+
+        let mut router = Router::new();
+        router.get(&pattern, test_handler);
+
+        // `route` returning `Err(RouteNotFound)` is a result; a panic is not.
+        let _ = router.route(HttpRequest::new("GET", target)).await;
     }
 
     #[tokio::test]

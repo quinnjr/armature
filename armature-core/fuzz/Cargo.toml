@@ -1,8 +1,14 @@
 [package]
-name = "armature-fuzz"
+name = "armature-core-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+
+# Its own workspace root, matching `armature-h1/fuzz`. A fuzz crate pulls
+# `libfuzzer-sys`, which links a sanitizer runtime and only builds on nightly;
+# keeping it out of the main workspace means a plain `cargo build` at the root
+# never tries to compile it.
+[workspace]
 
 [package.metadata]
 cargo-fuzz = true
@@ -10,76 +16,64 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+armature-core = { path = ".." }
 
-# Armature crates to fuzz
-armature-core = { path = "../armature-core", version = "0" }
-
-# Common dependencies for fuzzing
 bytes = "1"
-http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-[dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
-
-# Prevent this from interfering with workspaces
-[workspace]
-members = ["."]
-
 [[bin]]
-name = "fuzz_http_request"
+name = "http_request"
 path = "fuzz_targets/http_request.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_http_response"
+name = "http_response"
 path = "fuzz_targets/http_response.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_routing"
+name = "routing"
 path = "fuzz_targets/routing.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_json"
+name = "json"
 path = "fuzz_targets/json.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_url_parsing"
+name = "url_parsing"
 path = "fuzz_targets/url_parsing.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_headers"
+name = "headers"
 path = "fuzz_targets/headers.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_query_params"
+name = "query_params"
 path = "fuzz_targets/query_params.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_path_params"
+name = "path_params"
 path = "fuzz_targets/path_params.rs"
 test = false
 doc = false
 bench = false
-
