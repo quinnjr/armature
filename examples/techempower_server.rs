@@ -209,7 +209,7 @@ impl TechEmpowerController {
     #[get("/queries")]
     async fn queries_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
         let state = get_state();
-        let count = parse_queries(req.query_params.get("queries").map(|s| s.as_str()));
+        let count = parse_queries(req.query_param("queries"));
 
         let worlds: Vec<World> = (0..count).map(|_| state.db.get_random_world()).collect();
 
@@ -250,7 +250,7 @@ impl TechEmpowerController {
     #[get("/updates")]
     async fn updates_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
         let state = get_state();
-        let count = parse_queries(req.query_params.get("queries").map(|s| s.as_str()));
+        let count = parse_queries(req.query_param("queries"));
 
         let worlds: Vec<World> = (0..count)
             .map(|_| {
@@ -271,7 +271,7 @@ impl TechEmpowerController {
         // For simplicity, we use the same implementation as queries
         // A real implementation would use armature-cache with Redis/Memcached
         let state = get_state();
-        let count = parse_queries(req.query_params.get("queries").map(|s| s.as_str()));
+        let count = parse_queries(req.query_param("queries"));
 
         let worlds: Vec<World> = (0..count).map(|_| state.db.get_random_world()).collect();
 

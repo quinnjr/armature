@@ -31,6 +31,23 @@ pub struct AuditMiddleware {
     /// non-repudiation guarantee. Only enable this in an environment where the
     /// token was already verified upstream and cannot be attacker-supplied.
     trust_unverified_jwt_subject: bool,
+    /// Number of reverse proxies in front of the app that are trusted to have
+    /// appended to `X-Forwarded-For`.
+    ///
+    /// **Default: `0` (safe)** — no proxy is trusted, so forwarding headers are
+    /// ignored and no client address is recorded. `X-Forwarded-For` is written
+    /// by the client on the way in; each proxy *appends* the peer it saw, so
+    /// only the rightmost `trusted_proxy_depth` entries were added by
+    /// infrastructure you control. Taking the leftmost hop, as this middleware
+    /// previously did, let any caller write an arbitrary address into a
+    /// non-repudiation record — the same forgery this module already refuses to
+    /// accept for the principal. Mirrors
+    /// `RateLimitMiddleware::trusted_proxy_depth` (armature-ratelimit).
+    trusted_proxy_depth: usize,
+    /// Whether to record the client-supplied address anyway when no proxy is
+    /// trusted, prefixed with `unverified:` so nothing downstream mistakes it
+    /// for an attested value. Default `false`.
+    record_unverified_ip: bool,
     /// When an audit-write fails: `false` (default) fails open — the request
     /// still completes normally and the failure is only observable via
     /// [`AuditMiddleware::write_failure_count`] and a `tracing::error!` line.
@@ -75,6 +92,8 @@ impl AuditMiddleware {
             max_body_size: 10_000, // 10KB default
             subject_claim: "sub".to_string(),
             trust_unverified_jwt_subject: false,
+            trusted_proxy_depth: 0,
+            record_unverified_ip: false,
             fail_on_error: false,
             write_failures: AtomicU64::new(0),
         }
@@ -95,6 +114,29 @@ impl AuditMiddleware {
     /// attacker-supplied.
     pub fn trust_unverified_jwt_subject(mut self, trust: bool) -> Self {
         self.trust_unverified_jwt_subject = trust;
+        self
+    }
+
+    /// Set how many reverse proxies in front of the app are trusted to have
+    /// appended to `X-Forwarded-For`.
+    ///
+    /// Defaults to `0` (forwarding headers ignored). Set it to the number of
+    /// proxies that actually sit in front of this service — with one trusted
+    /// proxy, the rightmost hop is the address that proxy observed. See
+    /// [`AuditMiddleware::trusted_proxy_depth`] (the field docs).
+    pub fn trusted_proxy_depth(mut self, depth: usize) -> Self {
+        self.trusted_proxy_depth = depth;
+        self
+    }
+
+    /// Record the client-supplied address even when no proxy is trusted,
+    /// prefixed with `unverified:`.
+    ///
+    /// Useful when the address has troubleshooting value and the record must
+    /// not imply it was attested. It remains fully attacker-controlled; prefer
+    /// configuring [`Self::trusted_proxy_depth`] instead.
+    pub fn record_unverified_ip(mut self, record: bool) -> Self {
+        self.record_unverified_ip = record;
         self
     }
 
@@ -217,7 +259,7 @@ impl AuditMiddleware {
     /// let middleware = AuditMiddleware::new(logger);
     /// assert_eq!(middleware.write_failure_count(), 0);
     ///
-    /// let request = HttpRequest::new("GET".to_string(), "/".to_string());
+    /// let request = HttpRequest::new("GET", "/".to_string());
     /// let result = middleware
     ///     .handle(
     ///         request,
@@ -301,31 +343,62 @@ impl AuditMiddleware {
             .map(str::to_string)
     }
 
-    /// Extract IP address from request
+    /// Extract the client address to record, or `None` when nothing
+    /// trustworthy is available.
+    ///
+    /// The address is selected `trusted_proxy_depth`-from-the-right of
+    /// `X-Forwarded-For`, because each trusted proxy appends the peer it saw
+    /// and only those trailing entries are attested. With the default depth of
+    /// `0` nothing in the forwarding headers is trusted and `None` is returned
+    /// (or an explicitly `unverified:`-tagged value, if
+    /// [`Self::record_unverified_ip`] is on) — an audit record is a
+    /// non-repudiation artefact, and a caller-chosen address in it is worse
+    /// than no address at all.
     fn extract_ip(&self, request: &HttpRequest) -> Option<String> {
-        // Try X-Forwarded-For first
+        if self.trusted_proxy_depth == 0 {
+            if !self.record_unverified_ip {
+                return None;
+            }
+
+            let claimed = request
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|xff| xff.split(',').next())
+                .or_else(|| request.headers.get("x-real-ip"))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+
+            return Some(format!("unverified:{claimed}"));
+        }
+
         if let Some(forwarded) = request.headers.get("x-forwarded-for") {
-            return Some(
-                forwarded
-                    .split(',')
-                    .next()
-                    .unwrap_or(forwarded)
-                    .trim()
-                    .to_string(),
-            );
+            let hops: Vec<&str> = forwarded
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            // Out-of-range depth attests nothing: fall through rather than
+            // reaching into hops the client could have written.
+            if let Some(idx) = hops.len().checked_sub(self.trusted_proxy_depth)
+                && let Some(hop) = hops.get(idx)
+            {
+                return Some((*hop).to_string());
+            }
         }
 
-        // Try X-Real-IP
-        if let Some(real_ip) = request.headers.get("x-real-ip") {
-            return Some(real_ip.clone());
-        }
-
-        None
+        // `X-Real-IP` carries a single value set by the nearest proxy, so it is
+        // meaningful exactly when a proxy is trusted.
+        request
+            .headers
+            .get("x-real-ip")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// Extract user agent from request
     fn extract_user_agent(&self, request: &HttpRequest) -> Option<String> {
-        request.headers.get("user-agent").cloned()
+        request.headers.get("user-agent").map(str::to_owned)
     }
 
     /// Truncate body if too large
@@ -355,8 +428,8 @@ impl Middleware for AuditMiddleware {
         let start = Instant::now();
 
         // Extract request information
-        let method = request.method.clone();
-        let path = request.path.clone();
+        let method = request.method_str().to_owned();
+        let path = request.path_str().to_owned();
         let user_id = self.extract_user_id(&request);
         let ip_address = self.extract_ip(&request);
         let user_agent = self.extract_user_agent(&request);
@@ -509,6 +582,62 @@ mod tests {
         }
     }
 
+    fn request_with_xff(xff: &str) -> HttpRequest {
+        let mut request = HttpRequest::new("GET", "/api/test".to_string());
+        request.headers.insert("x-forwarded-for", xff);
+        request
+    }
+
+    fn test_middleware() -> AuditMiddleware {
+        let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
+        AuditMiddleware::new(logger)
+    }
+
+    #[test]
+    fn test_forged_xff_is_not_recorded_by_default() {
+        // An audit record is a non-repudiation artefact; letting the client
+        // choose the address written into it defeats that. With no trusted
+        // proxy configured the header is not evidence of anything.
+        let middleware = test_middleware();
+        assert_eq!(middleware.extract_ip(&request_with_xff("1.2.3.4")), None);
+
+        let mut request = HttpRequest::new("GET", "/api/test".to_string());
+        request.headers.insert("x-real-ip", "1.2.3.4");
+        assert_eq!(middleware.extract_ip(&request), None);
+    }
+
+    #[test]
+    fn test_xff_hop_is_selected_from_the_right() {
+        let middleware = test_middleware().trusted_proxy_depth(1);
+        // The attacker controls the leftmost hops; our proxy appended the last.
+        assert_eq!(
+            middleware.extract_ip(&request_with_xff("203.0.113.9, 10.0.0.1")),
+            Some("10.0.0.1".to_string())
+        );
+
+        let middleware = test_middleware().trusted_proxy_depth(2);
+        assert_eq!(
+            middleware.extract_ip(&request_with_xff("203.0.113.9, 10.0.0.1, 10.0.0.2")),
+            Some("10.0.0.1".to_string())
+        );
+
+        // Fewer hops than trusted proxies: nothing in the header is attested.
+        let middleware = test_middleware().trusted_proxy_depth(3);
+        assert_eq!(
+            middleware.extract_ip(&request_with_xff("203.0.113.9, 10.0.0.1")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unverified_ip_is_tagged_when_opted_in() {
+        let middleware = test_middleware().record_unverified_ip(true);
+        assert_eq!(
+            middleware.extract_ip(&request_with_xff("203.0.113.9, 10.0.0.1")),
+            Some("unverified:203.0.113.9".to_string())
+        );
+    }
+
     #[test]
     fn test_audit_middleware_creation() {
         let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
@@ -545,7 +674,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"alice-42","role":"admin"}"#);
         let token = format!("{header}.{payload}.signature");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {token}"));
 
@@ -575,7 +704,7 @@ mod tests {
         let payload = engine.encode(br#"{"user_id":"bob-7"}"#);
         let token = format!("{header}.{payload}.sig");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {token}"));
 
@@ -587,7 +716,7 @@ mod tests {
         let logger = Arc::new(AuditLogger::builder().backend(MemoryBackend::new()).build());
         let middleware = AuditMiddleware::new(logger);
 
-        let req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let req = HttpRequest::new("GET", "/".to_string());
         assert_eq!(middleware.extract_user_id(&req), None);
     }
 
@@ -606,7 +735,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"victim"}"#);
         let forged = format!("{header}.{payload}.not-a-real-signature");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {forged}"));
 
@@ -632,7 +761,7 @@ mod tests {
         let payload = engine.encode(br#"{"sub":"victim"}"#);
         let forged = format!("{header}.{payload}.sig");
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.headers
             .insert("authorization", format!("Bearer {forged}"));
         // Real auth middleware attached a verified principal.
@@ -653,7 +782,7 @@ mod tests {
         let ctx = UserContext::new("sub-value".to_string())
             .with_metadata(serde_json::json!({ "account_id": "acct-9" }));
 
-        let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut req = HttpRequest::new("GET", "/".to_string());
         req.insert_extension(ctx);
 
         // Custom claim is read from the verified claim set (metadata).
@@ -683,7 +812,7 @@ mod tests {
 
         assert_eq!(middleware.write_failure_count(), 0);
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let result = middleware
             .handle(
                 request,
@@ -708,7 +837,7 @@ mod tests {
         let logger = Arc::new(AuditLogger::builder().backend(FailingBackend).build());
         let middleware = AuditMiddleware::new(logger).fail_on_error(true);
 
-        let request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let request = HttpRequest::new("GET", "/".to_string());
         let result = middleware
             .handle(
                 request,

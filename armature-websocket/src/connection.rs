@@ -138,7 +138,16 @@ impl ConnectionWriter {
     pub async fn run(mut self) -> WebSocketResult<()> {
         while let Some(message) = self.rx.recv().await {
             let is_close = message.is_close();
-            let raw_message: tungstenite::Message = message.into();
+            // A text message with a non-UTF-8 payload cannot go on the wire
+            // (RFC 6455 §5.6). Drop that one message and keep the connection
+            // running rather than lossily corrupting it into U+FFFD runs.
+            let raw_message: tungstenite::Message = match message.try_into() {
+                Ok(raw) => raw,
+                Err(e) => {
+                    tracing::error!(error = %e, "Dropping unsendable WebSocket message");
+                    continue;
+                }
+            };
 
             if let Err(e) = self.sink.send(raw_message).await {
                 tracing::error!(error = %e, "Failed to send WebSocket message");

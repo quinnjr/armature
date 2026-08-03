@@ -3,7 +3,8 @@
 use crate::error::CacheResult;
 use crate::traits::CacheStore;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -277,16 +278,136 @@ pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 /// entries are evicted lazily on read and eagerly when making room for a new
 /// key; when the map is full of live entries the one nearest to expiry is
 /// evicted to admit a new write.
+///
+/// # Eviction cost
+///
+/// Eviction order is maintained incrementally rather than recomputed: entries
+/// carrying a TTL are tracked in a min-heap keyed by expiry, and entries
+/// without one in an insertion-ordered queue. Making room is therefore
+/// `O(log n)` (amortised) instead of the full `O(n)` map scan a naive
+/// `min_by_key` would need on **every** admission once the map is full —
+/// which, because every L2 -> L1 promotion in [`TieredCache::get`] is such an
+/// admission, otherwise put a full scan of the (10,000-entry by default) map
+/// on the hot read path and made filling the cache `O(n^2)`.
 pub struct InMemoryCache {
-    data: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    data: Arc<RwLock<CacheState>>,
     /// Maximum number of retained entries. `0` means unbounded.
     max_entries: usize,
+}
+
+/// The map plus the auxiliary structures that keep eviction order.
+///
+/// The two order-tracking structures use **lazy deletion**: removing or
+/// overwriting a key does not touch them, so they can hold entries that no
+/// longer describe the map. Every pop is therefore validated against `entries`
+/// before it is acted on, and [`CacheState::compact`] rebuilds both once the
+/// accumulated slack outgrows the live set.
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<String, CacheEntry>,
+    /// Keys with a TTL, ordered soonest-expiry-first.
+    by_expiry: BinaryHeap<Reverse<(tokio::time::Instant, String)>>,
+    /// Keys without a TTL, in insertion order. These are evicted only once no
+    /// TTL-carrying entry remains, matching the documented policy that
+    /// unexpiring entries are evicted last.
+    without_expiry: VecDeque<String>,
 }
 
 #[derive(Clone)]
 struct CacheEntry {
     value: String,
     expires_at: Option<tokio::time::Instant>,
+}
+
+impl CacheState {
+    /// Insert or overwrite `key`, recording it in the matching order structure.
+    fn insert(&mut self, key: String, entry: CacheEntry) {
+        match entry.expires_at {
+            Some(expires_at) => self.by_expiry.push(Reverse((expires_at, key.clone()))),
+            None => self.without_expiry.push_back(key.clone()),
+        }
+        self.entries.insert(key, entry);
+        self.compact_if_slack();
+    }
+
+    /// Whether `key`'s live entry is the one that `expires_at` describes.
+    /// Guards against acting on a stale order-structure record.
+    fn is_current(&self, key: &str, expires_at: Option<tokio::time::Instant>) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|entry| entry.expires_at == expires_at)
+    }
+
+    /// Drop every entry whose TTL has elapsed as of `now`.
+    ///
+    /// Only the expired prefix of the heap is examined, so this costs
+    /// `O(k log n)` in the number of entries actually reclaimed rather than
+    /// `O(n)` in the size of the map.
+    fn prune_expired(&mut self, now: tokio::time::Instant) {
+        while matches!(self.by_expiry.peek(), Some(Reverse((exp, _))) if *exp <= now) {
+            let Some(Reverse((expires_at, key))) = self.by_expiry.pop() else {
+                break;
+            };
+            if self.is_current(&key, Some(expires_at)) {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    /// Evict a single entry to make room, preferring the one nearest to expiry;
+    /// entries without a TTL are evicted last, oldest first.
+    fn evict_one(&mut self) {
+        while let Some(Reverse((expires_at, key))) = self.by_expiry.pop() {
+            if self.is_current(&key, Some(expires_at)) {
+                self.entries.remove(&key);
+                return;
+            }
+        }
+
+        while let Some(key) = self.without_expiry.pop_front() {
+            if self.is_current(&key, None) {
+                self.entries.remove(&key);
+                return;
+            }
+        }
+    }
+
+    /// Rebuild both order structures from `entries` once lazy deletion has left
+    /// more slack than live data, so repeated overwrites/deletes cannot grow
+    /// them without bound.
+    fn compact_if_slack(&mut self) {
+        let tracked = self.by_expiry.len() + self.without_expiry.len();
+        if tracked > 2 * self.entries.len().max(16) {
+            self.compact();
+        }
+    }
+
+    /// Discard both order structures and rebuild them from the live entries.
+    ///
+    /// Insertion order among unexpiring entries is not recoverable from the
+    /// map, so their relative eviction order is reset. That order is not part
+    /// of the documented policy (which only fixes that they are evicted after
+    /// every TTL-carrying entry), and compaction is rare.
+    fn compact(&mut self) {
+        let mut by_expiry = BinaryHeap::with_capacity(self.entries.len());
+        let mut without_expiry = VecDeque::with_capacity(self.entries.len());
+
+        for (key, entry) in &self.entries {
+            match entry.expires_at {
+                Some(expires_at) => by_expiry.push(Reverse((expires_at, key.clone()))),
+                None => without_expiry.push_back(key.clone()),
+            }
+        }
+
+        self.by_expiry = by_expiry;
+        self.without_expiry = without_expiry;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.by_expiry.clear();
+        self.without_expiry.clear();
+    }
 }
 
 impl InMemoryCache {
@@ -301,7 +422,7 @@ impl InMemoryCache {
     /// responsibility).
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
-            data: Arc::new(RwLock::new(HashMap::new())),
+            data: Arc::new(RwLock::new(CacheState::default())),
             max_entries,
         }
     }
@@ -309,12 +430,12 @@ impl InMemoryCache {
     /// Number of entries currently held (including any not-yet-evicted expired
     /// ones). Primarily useful for tests and capacity assertions.
     pub async fn len(&self) -> usize {
-        self.data.read().await.len()
+        self.data.read().await.entries.len()
     }
 
     /// Whether the cache currently holds no entries.
     pub async fn is_empty(&self) -> bool {
-        self.data.read().await.is_empty()
+        self.data.read().await.entries.is_empty()
     }
 
     /// Eagerly remove every expired entry in one pass.
@@ -325,30 +446,7 @@ impl InMemoryCache {
     pub async fn cleanup_expired(&self) {
         let mut data = self.data.write().await;
         let now = tokio::time::Instant::now();
-        Self::prune_expired(&mut data, now);
-    }
-
-    /// Drop all entries whose TTL has elapsed as of `now`. Operates on an
-    /// already-held write guard so callers avoid re-locking.
-    fn prune_expired(data: &mut HashMap<String, CacheEntry>, now: tokio::time::Instant) {
-        data.retain(|_, entry| entry.expires_at.is_none_or(|exp| exp > now));
-    }
-
-    /// Evict a single entry to make room, preferring the one nearest to expiry
-    /// (entries without a TTL are evicted last).
-    fn evict_one(data: &mut HashMap<String, CacheEntry>, now: tokio::time::Instant) {
-        if let Some(victim) = data
-            .iter()
-            .min_by_key(|(_, entry)| match entry.expires_at {
-                // Entries with a TTL sort before those without; among them the
-                // soonest-to-expire is evicted first.
-                Some(exp) => (0u8, exp),
-                None => (1u8, now),
-            })
-            .map(|(key, _)| key.clone())
-        {
-            data.remove(&victim);
-        }
+        data.prune_expired(now);
     }
 }
 
@@ -364,7 +462,7 @@ impl CacheStore for InMemoryCache {
         // Fast path under a read lock.
         {
             let data = self.data.read().await;
-            match data.get(key) {
+            match data.entries.get(key) {
                 None => return Ok(None),
                 Some(entry) => match entry.expires_at {
                     Some(expires_at) if tokio::time::Instant::now() > expires_at => {
@@ -376,14 +474,15 @@ impl CacheStore for InMemoryCache {
         }
 
         // Lazy eviction: drop the expired entry so the map does not accumulate
-        // dead keys that are read but never overwritten.
+        // dead keys that are read but never overwritten. The heap record is
+        // left behind and skipped when it surfaces (lazy deletion).
         let mut data = self.data.write().await;
-        if let Some(entry) = data.get(key)
+        if let Some(entry) = data.entries.get(key)
             && entry
                 .expires_at
                 .is_some_and(|exp| tokio::time::Instant::now() > exp)
         {
-            data.remove(key);
+            data.entries.remove(key);
         }
         Ok(None)
     }
@@ -396,11 +495,14 @@ impl CacheStore for InMemoryCache {
         let mut data = self.data.write().await;
 
         // Enforce the capacity bound only when admitting a genuinely new key.
-        if self.max_entries != 0 && data.len() >= self.max_entries && !data.contains_key(key) {
+        if self.max_entries != 0
+            && data.entries.len() >= self.max_entries
+            && !data.entries.contains_key(key)
+        {
             // Reclaim expired entries first; only evict a live one if still full.
-            Self::prune_expired(&mut data, now);
-            if data.len() >= self.max_entries {
-                Self::evict_one(&mut data, now);
+            data.prune_expired(now);
+            if data.entries.len() >= self.max_entries {
+                data.evict_one();
             }
         }
 
@@ -409,7 +511,7 @@ impl CacheStore for InMemoryCache {
     }
 
     async fn delete(&self, key: &str) -> CacheResult<()> {
-        self.data.write().await.remove(key);
+        self.data.write().await.entries.remove(key);
         Ok(())
     }
 
@@ -426,6 +528,7 @@ impl CacheStore for InMemoryCache {
         let data = self.data.read().await;
         let now = tokio::time::Instant::now();
         Ok(data
+            .entries
             .get(key)
             .and_then(|e| e.expires_at)
             .filter(|&x| x > now)
@@ -434,22 +537,48 @@ impl CacheStore for InMemoryCache {
 
     async fn expire(&self, key: &str, ttl: Duration) -> CacheResult<()> {
         let mut data = self.data.write().await;
-        if let Some(entry) = data.get_mut(key) {
-            entry.expires_at = Some(tokio::time::Instant::now() + ttl);
+        let expires_at = tokio::time::Instant::now() + ttl;
+
+        let updated = match data.entries.get_mut(key) {
+            Some(entry) => {
+                entry.expires_at = Some(expires_at);
+                true
+            }
+            None => false,
+        };
+
+        if updated {
+            // The key now sorts by expiry, so record it where eviction can find
+            // it. Any earlier record for it is stale and gets skipped on pop.
+            data.by_expiry.push(Reverse((expires_at, key.to_string())));
+            data.compact_if_slack();
         }
         Ok(())
     }
 
     async fn increment(&self, key: &str, delta: i64) -> CacheResult<i64> {
         let mut data = self.data.write().await;
-        let entry = data.entry(key.to_string()).or_insert_with(|| CacheEntry {
-            value: "0".to_string(),
-            expires_at: None,
-        });
 
-        let current: i64 = entry.value.parse().unwrap_or(0);
-        let new_value = current + delta;
-        entry.value = new_value.to_string();
+        let new_value = match data.entries.get_mut(key) {
+            Some(entry) => {
+                let current: i64 = entry.value.parse().unwrap_or(0);
+                let new_value = current + delta;
+                entry.value = new_value.to_string();
+                new_value
+            }
+            None => {
+                // A counter created here has no TTL, so it goes through
+                // `insert` to be registered for eviction like any other write.
+                data.insert(
+                    key.to_string(),
+                    CacheEntry {
+                        value: delta.to_string(),
+                        expires_at: None,
+                    },
+                );
+                delta
+            }
+        };
 
         Ok(new_value)
     }
@@ -632,5 +761,150 @@ mod tests_tiered {
         assert!(cache.len().await <= 2);
         assert_eq!(cache.get_json("keep").await.unwrap(), Some("y".to_string()));
         assert_eq!(cache.get_json("new").await.unwrap(), Some("z".to_string()));
+    }
+
+    /// The heap-ordered eviction must pick the same victim the old linear
+    /// `min_by_key` scan did: among live entries, the one nearest to expiry.
+    #[tokio::test(start_paused = true)]
+    async fn test_evicts_the_entry_nearest_to_expiry() {
+        let cache = InMemoryCache::with_capacity(3);
+        cache
+            .set_json("far", "1".to_string(), Some(Duration::from_secs(300)))
+            .await
+            .unwrap();
+        cache
+            .set_json("soon", "2".to_string(), Some(Duration::from_secs(10)))
+            .await
+            .unwrap();
+        cache
+            .set_json("mid", "3".to_string(), Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+
+        // Full and nothing has expired yet, so a new key evicts a live one.
+        cache.set_json("new", "4".to_string(), None).await.unwrap();
+
+        assert_eq!(cache.len().await, 3);
+        assert_eq!(
+            cache.get_json("soon").await.unwrap(),
+            None,
+            "the soonest-to-expire entry must be the victim"
+        );
+        assert_eq!(cache.get_json("far").await.unwrap(), Some("1".to_string()));
+        assert_eq!(cache.get_json("mid").await.unwrap(), Some("3".to_string()));
+        assert_eq!(cache.get_json("new").await.unwrap(), Some("4".to_string()));
+    }
+
+    /// Entries without a TTL are evicted only once no TTL-carrying entry is
+    /// left, matching the documented policy.
+    #[tokio::test(start_paused = true)]
+    async fn test_entries_without_ttl_are_evicted_last() {
+        let cache = InMemoryCache::with_capacity(2);
+        cache
+            .set_json("nottl", "1".to_string(), None)
+            .await
+            .unwrap();
+        cache
+            .set_json("ttl", "2".to_string(), Some(Duration::from_secs(300)))
+            .await
+            .unwrap();
+
+        cache.set_json("new", "3".to_string(), None).await.unwrap();
+
+        assert_eq!(
+            cache.get_json("ttl").await.unwrap(),
+            None,
+            "a TTL-carrying entry must be evicted before an unexpiring one"
+        );
+        assert_eq!(
+            cache.get_json("nottl").await.unwrap(),
+            Some("1".to_string())
+        );
+
+        // With no TTL-carrying entry left, the oldest unexpiring one goes.
+        cache
+            .set_json("newest", "4".to_string(), None)
+            .await
+            .unwrap();
+        assert_eq!(cache.get_json("nottl").await.unwrap(), None);
+        assert_eq!(cache.get_json("new").await.unwrap(), Some("3".to_string()));
+        assert_eq!(
+            cache.get_json("newest").await.unwrap(),
+            Some("4".to_string())
+        );
+    }
+
+    /// `expire()` re-registers the key in the expiry ordering, so a key given a
+    /// TTL after the fact is still evicted ahead of unexpiring entries.
+    #[tokio::test(start_paused = true)]
+    async fn test_expire_updates_eviction_order() {
+        let cache = InMemoryCache::with_capacity(2);
+        cache.set_json("a", "1".to_string(), None).await.unwrap();
+        cache.set_json("b", "2".to_string(), None).await.unwrap();
+
+        // "b" was written second, so FIFO would evict "a" first; giving "b" a
+        // TTL must move it ahead of every unexpiring entry instead.
+        cache.expire("b", Duration::from_secs(300)).await.unwrap();
+        cache.set_json("c", "3".to_string(), None).await.unwrap();
+
+        assert_eq!(cache.get_json("b").await.unwrap(), None);
+        assert_eq!(cache.get_json("a").await.unwrap(), Some("1".to_string()));
+        assert_eq!(cache.get_json("c").await.unwrap(), Some("3".to_string()));
+    }
+
+    /// Lazy deletion must not leak: repeatedly overwriting the same keys leaves
+    /// stale ordering records behind, and compaction has to reclaim them rather
+    /// than let them grow without bound.
+    #[tokio::test(start_paused = true)]
+    async fn test_repeated_overwrites_do_not_grow_ordering_structures() {
+        let cache = InMemoryCache::with_capacity(8);
+
+        for round in 0..500 {
+            for key in ["a", "b", "c", "d"] {
+                cache
+                    .set_json(key, round.to_string(), Some(Duration::from_secs(300)))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let state = cache.data.read().await;
+        assert_eq!(state.entries.len(), 4);
+        assert!(
+            state.by_expiry.len() + state.without_expiry.len() <= 2 * 16,
+            "stale ordering records must be compacted away, got {} tracked for {} entries",
+            state.by_expiry.len() + state.without_expiry.len(),
+            state.entries.len()
+        );
+    }
+
+    /// Filling a bounded cache with far more distinct keys than it can hold
+    /// must stay correct: the bound holds and the most recent writes survive.
+    #[tokio::test(start_paused = true)]
+    async fn test_admission_churn_keeps_cache_bounded() {
+        let cache = InMemoryCache::with_capacity(64);
+
+        for i in 0..2_000 {
+            cache
+                .set_json(
+                    &format!("k{i}"),
+                    i.to_string(),
+                    // Alternate so both ordering structures are exercised.
+                    if i % 2 == 0 {
+                        Some(Duration::from_secs(300 + i as u64))
+                    } else {
+                        None
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(cache.len().await, 64);
+        assert_eq!(
+            cache.get_json("k1999").await.unwrap(),
+            Some("1999".to_string()),
+            "the most recent write must survive"
+        );
     }
 }

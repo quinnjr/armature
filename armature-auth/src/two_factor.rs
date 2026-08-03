@@ -251,7 +251,18 @@ pub struct BackupCodes {
 }
 
 impl BackupCodes {
+    /// Number of random bytes behind each backup code. Backup codes are 2FA
+    /// bypass credentials: presenting one substitutes for the second factor
+    /// entirely, so the code must be as hard to guess as the factor it replaces.
+    /// Eight bytes are drawn and all eight are rendered — an earlier version
+    /// dropped half of them, leaving 32 bits, which is within reach of an online
+    /// guessing campaign against a known account.
+    const CODE_BYTES: usize = 8;
+
     /// Generate backup codes
+    ///
+    /// Each code carries `CODE_BYTES` bytes (64 bits) of entropy, rendered as
+    /// four hyphen-separated groups of four hex digits for transcription.
     ///
     /// # Examples
     ///
@@ -267,9 +278,13 @@ impl BackupCodes {
         let mut rng = rand::rng();
         let codes = (0..count)
             .map(|_| {
-                let bytes: Vec<u8> = (0..8).map(|_| rng.random()).collect();
+                let bytes: Vec<u8> = (0..Self::CODE_BYTES).map(|_| rng.random()).collect();
                 let hex = hex::encode(bytes);
-                format!("{}-{}", &hex[..4], &hex[4..8])
+                hex.as_bytes()
+                    .chunks(4)
+                    .map(|c| std::str::from_utf8(c).expect("hex is ASCII"))
+                    .collect::<Vec<_>>()
+                    .join("-")
             })
             .collect();
 
@@ -372,6 +387,29 @@ mod tests {
         for code in &codes.codes {
             assert!(code.contains('-'));
         }
+    }
+
+    #[test]
+    fn test_backup_codes_use_full_entropy() {
+        // A backup code bypasses the second factor, so its guessability is the
+        // security of 2FA for that account. The generator previously rendered
+        // only 4 of the 16 hex digits it drew, leaving 32 bits.
+        let codes = BackupCodes::generate(64);
+
+        for code in &codes.codes {
+            let hex: String = code.chars().filter(|c| *c != '-').collect();
+            assert_eq!(
+                hex.len(),
+                BackupCodes::CODE_BYTES * 2,
+                "every drawn byte must reach the code: {code}"
+            );
+            assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        // With 64 bits per code, 64 codes colliding is not something that
+        // happens by chance — it happens when entropy is being discarded.
+        let unique: std::collections::HashSet<&String> = codes.codes.iter().collect();
+        assert_eq!(unique.len(), codes.codes.len());
     }
 
     #[test]

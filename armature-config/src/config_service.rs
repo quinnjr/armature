@@ -69,7 +69,27 @@ impl Default for ConfigService {
     }
 }
 
-/// Builder for ConfigService
+/// Builder for [`ConfigService`].
+///
+/// # Precedence
+///
+/// Sources are loaded in this order, each overwriting keys already present:
+///
+/// 1. `.env` file (`load_dotenv`)
+/// 2. Process environment (`load_env`)
+/// 3. Config files (`add_file`), in the order they were added
+///
+/// **Later wins, so a config FILE overrides an environment variable.** That is
+/// the inverse of the 12-factor convention, where the environment is the last
+/// word and files hold defaults. It is documented rather than reordered
+/// because reversing it would silently change which value every existing
+/// deployment resolves.
+///
+/// To get environment-wins behaviour, add your files first and call
+/// `load_env()` last is *not* sufficient — the builder applies the fixed order
+/// above regardless of call order. Instead, override explicitly after
+/// building, via `ConfigService::manager().set(..)`, or keep environment-only
+/// keys out of your config files.
 pub struct ConfigServiceBuilder {
     manager: ConfigManager,
     load_env: bool,
@@ -165,5 +185,48 @@ mod tests {
     fn test_build_without_dotenv_succeeds() {
         let result = ConfigService::builder().build();
         assert!(result.is_ok());
+    }
+
+    /// Pins the documented precedence: config files are loaded last and
+    /// therefore win over anything loaded before them, including the
+    /// environment. This is the inverse of 12-factor and is intentional; the
+    /// test exists so the ordering cannot change without someone deciding to
+    /// change it.
+    #[test]
+    fn test_config_file_overrides_earlier_sources() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "armature-config-precedence-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        write!(file, r#"{{"shared_key": "from_file"}}"#).unwrap();
+        drop(file);
+
+        // Stand in for an earlier source (dotenv/env both land in the same flat
+        // map, which is what makes the file overwrite them).
+        let service = ConfigService::new();
+        service.manager().set("shared_key", "from_env").unwrap();
+        assert_eq!(
+            service.manager().get_string("shared_key").unwrap(),
+            "from_env"
+        );
+
+        service
+            .manager()
+            .load_file(path.to_str().unwrap(), crate::FileFormat::Json)
+            .unwrap();
+
+        assert_eq!(
+            service.manager().get_string("shared_key").unwrap(),
+            "from_file",
+            "a config file loaded after another source overwrites it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

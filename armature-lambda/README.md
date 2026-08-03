@@ -55,33 +55,68 @@ let runtime = LambdaRuntime::new(app).with_config(config);
 runtime.run().await?;
 ```
 
-## API Gateway Integration
+## Adapting an existing application type
 
-An Armature `Application` becomes a handler via the `impl_request_handler!`
-macro, which forwards the full request (method, path, headers, query string,
-path parameters, stage variables, and authorizer claims) to your app:
+This crate does **not** convert between `armature_core`'s `HttpRequest` /
+`HttpResponse` and the Lambda event types, and there is no blanket
+`RequestHandler` implementation for an Armature `Application`. What it offers is
+`impl_lambda_handler!`, which removes the trait boilerplate around a
+`handle_request` method **you** write:
 
 ```rust
-use armature::prelude::*;
-use armature_lambda::{impl_request_handler, LambdaRuntime};
+use armature_lambda::{impl_lambda_handler, LambdaRequest, LambdaRuntime};
 
-// #[module(controllers: [HelloController])]
-// struct AppModule;
+struct MyApp { /* your Armature Application, router, etc. */ }
 
-impl_request_handler!(MyApplication);
+struct MyResponse {
+    status: u16,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+}
+
+impl MyApp {
+    // You write this: translate `LambdaRequest` into whatever your application
+    // consumes, and its result back into the shape below.
+    async fn handle_request(
+        &self,
+        request: LambdaRequest,
+    ) -> Result<MyResponse, std::io::Error> {
+        // ...
+    }
+}
+
+impl_lambda_handler!(MyApp);
 
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     armature_lambda::init_tracing();
-
-    let app = Application::create::<AppModule>();
-
-    LambdaRuntime::new(app).run().await
+    LambdaRuntime::new(MyApp { /* .. */ }).run().await
 }
 ```
 
+The macro forwards the whole `LambdaRequest` — method, path, headers, query
+string, path parameters, stage variables, and authorizer claims — so nothing is
+lost on the way in, and maps `status`/`body`/`headers` back out (any
+`Display` error becomes a 500).
+
 The runtime auto-detects API Gateway (REST v1 / HTTP v2), ALB, and Lambda
 Function URL events — no separate constructor is required.
+
+## Headers
+
+Request and response headers are `Vec<(String, String)>`, not maps, so repeated
+names survive in both directions. In particular a handler can emit more than one
+`Set-Cookie`:
+
+```rust
+LambdaResponse::ok("done")
+    .header("set-cookie", "session=abc; HttpOnly")
+    .header("set-cookie", "csrf=xyz");
+```
+
+`header(..)` appends; use `set_header(..)` to replace existing lines with the
+same name. Read them back with `header_value(..)` (first match) or
+`header_values(..)` (all, in order).
 
 ## Build for Lambda
 

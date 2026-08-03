@@ -100,14 +100,14 @@ use async_trait::async_trait;
 ///     };
 ///
 ///     // Authenticated request WITH the right role -> 200.
-///     let mut req = HttpRequest::new("GET".to_string(), "/admin".to_string());
+///     let mut req = HttpRequest::new("GET", "/admin".to_string());
 ///     req.headers
 ///         .insert("authorization".to_string(), format!("Bearer {token}"));
 ///     let resp = middleware.handle(req, make_next(guard.clone())).await.unwrap();
 ///     assert_eq!(resp.status, 200);
 ///
 ///     // No token, require_auth mode -> 401 before the guard even runs.
-///     let req = HttpRequest::new("GET".to_string(), "/admin".to_string());
+///     let req = HttpRequest::new("GET", "/admin".to_string());
 ///     let resp = middleware.handle(req, make_next(guard.clone())).await.unwrap();
 ///     assert_eq!(resp.status, 401);
 ///     Ok::<(), Box<dyn std::error::Error>>(())
@@ -306,9 +306,9 @@ mod tests {
     }
 
     fn bearer_request(token: &str) -> HttpRequest {
-        let mut req = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        let mut req = HttpRequest::new("GET", "/admin".to_string());
         req.headers
-            .insert("authorization".to_string(), format!("Bearer {token}"));
+            .insert("authorization", format!("Bearer {token}"));
         req
     }
 
@@ -356,7 +356,7 @@ mod tests {
         let mw = JwtAuthMiddleware::new(manager());
         let next = role_guard_next(RoleGuard::any(vec!["admin".to_string()]));
 
-        let req = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        let req = HttpRequest::new("GET", "/admin".to_string());
         let resp = mw.handle(req, next).await.unwrap();
         assert_eq!(resp.status, 401);
     }
@@ -393,13 +393,13 @@ mod tests {
 
         // No token: optional mode attaches nothing and forwards to the guard,
         // which fails closed because no verified roles are present.
-        let req = HttpRequest::new("GET".to_string(), "/admin".to_string());
+        let req = HttpRequest::new("GET", "/admin".to_string());
         // Give it a bearer header so the guard's auth precheck passes and we
         // exercise the "no verified roles" fail-closed path specifically.
         let mut req_with_header = req;
         req_with_header
             .headers
-            .insert("authorization".to_string(), "Bearer ".to_string());
+            .insert("authorization", "Bearer ".to_string());
         let resp = mw.handle(req_with_header, next).await.unwrap();
         assert_eq!(resp.status, 403);
     }

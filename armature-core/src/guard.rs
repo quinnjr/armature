@@ -15,12 +15,12 @@ impl GuardContext {
         Self { request }
     }
 
-    pub fn get_header(&self, name: &str) -> Option<&String> {
+    pub fn get_header(&self, name: &str) -> Option<&str> {
         self.request.headers.get(name)
     }
 
-    pub fn get_param(&self, name: &str) -> Option<&String> {
-        self.request.path_params.get(name)
+    pub fn get_param(&self, name: &str) -> Option<&str> {
+        self.request.param(name)
     }
 }
 
@@ -177,7 +177,7 @@ impl Guard for ApiKeyGuard {
             .get_header("x-api-key")
             .ok_or_else(|| Error::Forbidden("Missing API key".to_string()))?;
 
-        if self.valid_keys.contains(api_key) {
+        if self.valid_keys.iter().any(|k| k == api_key) {
             Ok(true)
         } else {
             Err(Error::Forbidden("Invalid API key".to_string()))
@@ -188,6 +188,7 @@ impl Guard for ApiKeyGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -198,7 +199,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer token123".to_string());
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/test".to_string(),
             headers,
             vec![],
@@ -214,7 +215,7 @@ mod tests {
     async fn test_authentication_guard_missing_header() {
         let guard = AuthenticationGuard;
 
-        let request = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let request = HttpRequest::new("GET", "/test".to_string());
         let context = GuardContext::new(request);
 
         assert!(guard.can_activate(&context).await.is_err());
@@ -228,7 +229,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("x-api-key".to_string(), "valid-key".to_string());
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/test".to_string(),
             headers,
             vec![],
@@ -247,7 +248,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("x-api-key".to_string(), "invalid-key".to_string());
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/test".to_string(),
             headers,
             vec![],
@@ -263,7 +264,7 @@ mod tests {
     async fn test_api_key_guard_missing() {
         let guard = ApiKeyGuard::new(vec!["valid-key".to_string()]);
 
-        let request = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let request = HttpRequest::new("GET", "/test".to_string());
         let context = GuardContext::new(request);
 
         assert!(guard.can_activate(&context).await.is_err());
@@ -273,7 +274,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer token123".to_string());
         HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/admin".to_string(),
             headers,
             vec![],
@@ -326,8 +327,8 @@ mod tests {
 
     #[test]
     fn test_guard_context_creation() {
-        let mut request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
-        request.body = vec![1, 2, 3];
+        let mut request = HttpRequest::new("POST", "/api/test".to_string());
+        request.body = Bytes::from(vec![1, 2, 3]);
         let context = GuardContext::new(request.clone());
 
         assert_eq!(context.request.method, "POST");
@@ -341,7 +342,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer abc123xyz".to_string());
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/secure".to_string(),
             headers,
             vec![],
@@ -361,7 +362,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Basic abc123".to_string());
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
+            "GET",
             "/secure".to_string(),
             headers,
             vec![],
@@ -386,7 +387,7 @@ mod tests {
             let mut headers = HashMap::new();
             headers.insert("x-api-key".to_string(), key.to_string());
             let request = HttpRequest::from_parts(
-                "GET".to_string(),
+                "GET",
                 "/test".to_string(),
                 headers,
                 vec![],
@@ -425,26 +426,17 @@ mod tests {
         let mut path_params = HashMap::new();
         path_params.insert("id".to_string(), "123".to_string());
 
-        let mut query_params = HashMap::new();
-        query_params.insert("sort".to_string(), "asc".to_string());
-
         let request = HttpRequest::from_parts(
-            "GET".to_string(),
-            "/users/123".to_string(),
+            "GET",
+            "/users/123?sort=asc",
             HashMap::new(),
             vec![],
             path_params,
-            query_params,
+            HashMap::new(),
         );
         let context = GuardContext::new(request);
 
-        assert_eq!(
-            context.request.path_params.get("id"),
-            Some(&"123".to_string())
-        );
-        assert_eq!(
-            context.request.query_params.get("sort"),
-            Some(&"asc".to_string())
-        );
+        assert_eq!(context.request.param("id"), Some("123"));
+        assert_eq!(context.request.query_param("sort"), Some("asc"));
     }
 }

@@ -36,7 +36,7 @@ const DENIED_SCRIPT: &str = r#"
 async fn module_level_guard_blocks_requests_to_its_controllers() {
     let router = support::build_router_from_script(DENIED_SCRIPT);
 
-    let request = HttpRequest::new("GET".to_string(), "/secure".to_string());
+    let request = HttpRequest::new("GET", "/secure".to_string());
     let response = router
         .route(request)
         .await
@@ -83,7 +83,7 @@ async fn module_guard_runs_ahead_of_a_permissive_controller_guard() {
     "#;
     let router = support::build_router_from_script(script);
 
-    let request = HttpRequest::new("GET".to_string(), "/secure".to_string());
+    let request = HttpRequest::new("GET", "/secure".to_string());
     let response = router.route(request).await.expect("router should dispatch");
 
     assert_eq!(
@@ -111,7 +111,7 @@ async fn controller_without_a_module_guard_is_unaffected() {
     "#;
     let router = support::build_router_from_script(script);
 
-    let request = HttpRequest::new("GET".to_string(), "/open".to_string());
+    let request = HttpRequest::new("GET", "/open".to_string());
     let response = router.route(request).await.expect("router should dispatch");
 
     assert_eq!(response.status, 200);
@@ -140,7 +140,7 @@ async fn module_guard_that_allows_lets_the_request_through() {
     "#;
     let router = support::build_router_from_script(script);
 
-    let request = HttpRequest::new("GET".to_string(), "/secure".to_string());
+    let request = HttpRequest::new("GET", "/secure".to_string());
     let response = router.route(request).await.expect("router should dispatch");
 
     assert_eq!(response.status, 200);

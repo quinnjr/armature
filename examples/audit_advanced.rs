@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let logger = audit_for_gdpr.clone();
             Box::pin(async move {
-                let user_id = req.path_params.get("id").unwrap();
+                let user_id = req.param("id").unwrap();
 
                 // Log GDPR data access
                 logger

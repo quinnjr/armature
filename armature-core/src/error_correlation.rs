@@ -408,7 +408,7 @@ impl CorrelationContext {
             req.headers
                 .get(headers::CORRELATION_ID.to_lowercase().as_str())
         }) {
-            ctx.correlation_id = id.clone();
+            ctx.correlation_id = id.to_owned();
         }
 
         // Extract request ID
@@ -417,7 +417,7 @@ impl CorrelationContext {
             .get(headers::REQUEST_ID)
             .or_else(|| req.headers.get(headers::REQUEST_ID.to_lowercase().as_str()))
         {
-            ctx.request_id = id.clone();
+            ctx.request_id = id.to_owned();
         }
 
         // Extract W3C trace context
@@ -435,23 +435,23 @@ impl CorrelationContext {
         if ctx.trace_id.is_none()
             && let Some(id) = req.headers.get(headers::B3_TRACE_ID)
         {
-            ctx.trace_id = Some(id.clone());
+            ctx.trace_id = Some(id.to_owned());
         }
         if ctx.span_id.is_none()
             && let Some(id) = req.headers.get(headers::B3_SPAN_ID)
         {
-            ctx.parent_span_id = Some(id.clone());
+            ctx.parent_span_id = Some(id.to_owned());
             ctx.span_id = Some(IdGenerationStrategy::Short.generate());
         }
 
         // Extract causation ID
         if let Some(id) = req.headers.get(headers::CAUSATION_ID) {
-            ctx.causation_id = Some(id.clone());
+            ctx.causation_id = Some(id.to_owned());
         }
 
         // Extract session ID
         if let Some(id) = req.headers.get(headers::SESSION_ID) {
-            ctx.session_id = Some(id.clone());
+            ctx.session_id = Some(id.to_owned());
         }
 
         ctx
@@ -459,43 +459,38 @@ impl CorrelationContext {
 
     /// Inject correlation context into HTTP request headers.
     pub fn inject_into_request(&self, req: &mut HttpRequest) {
-        req.headers.insert(
-            headers::CORRELATION_ID.to_string(),
-            self.correlation_id.clone(),
-        );
+        // Names are `&str` and values are borrowed where they can be: the header
+        // map interns the name and copies the value once, so a `to_string` on
+        // either side would be a second allocation for nothing.
         req.headers
-            .insert(headers::REQUEST_ID.to_string(), self.request_id.clone());
+            .insert(headers::CORRELATION_ID, self.correlation_id.as_str());
+        req.headers
+            .insert(headers::REQUEST_ID, self.request_id.as_str());
 
         if let Some(ref trace_id) = self.trace_id {
             let span_id = self.span_id.as_deref().unwrap_or("0000000000000000");
             let sampled = if self.sampled { "01" } else { "00" };
-            let traceparent = format!("00-{}-{}-{}", trace_id, span_id, sampled);
-            req.headers
-                .insert(headers::TRACE_PARENT.to_string(), traceparent);
+            let traceparent = format!("00-{trace_id}-{span_id}-{sampled}");
+            req.headers.insert(headers::TRACE_PARENT, traceparent);
 
             // Also add B3 headers for Zipkin compatibility
-            req.headers
-                .insert(headers::B3_TRACE_ID.to_string(), trace_id.clone());
-            req.headers
-                .insert(headers::B3_SPAN_ID.to_string(), span_id.to_string());
+            req.headers.insert(headers::B3_TRACE_ID, trace_id.as_str());
+            req.headers.insert(headers::B3_SPAN_ID, span_id);
             if let Some(ref parent) = self.parent_span_id {
                 req.headers
-                    .insert(headers::B3_PARENT_SPAN_ID.to_string(), parent.clone());
+                    .insert(headers::B3_PARENT_SPAN_ID, parent.as_str());
             }
-            req.headers.insert(
-                headers::B3_SAMPLED.to_string(),
-                if self.sampled { "1" } else { "0" }.to_string(),
-            );
+            req.headers
+                .insert(headers::B3_SAMPLED, if self.sampled { "1" } else { "0" });
         }
 
         if let Some(ref causation_id) = self.causation_id {
             req.headers
-                .insert(headers::CAUSATION_ID.to_string(), causation_id.clone());
+                .insert(headers::CAUSATION_ID, causation_id.as_str());
         }
 
         if let Some(ref session_id) = self.session_id {
-            req.headers
-                .insert(headers::SESSION_ID.to_string(), session_id.clone());
+            req.headers.insert(headers::SESSION_ID, session_id.as_str());
         }
     }
 
@@ -1102,23 +1097,13 @@ impl CorrelatedRequest for HttpRequest {
     }
 
     fn correlation_id(&self) -> Option<String> {
-        self.headers
-            .get(headers::CORRELATION_ID)
-            .or_else(|| {
-                self.headers
-                    .get(headers::CORRELATION_ID.to_lowercase().as_str())
-            })
-            .cloned()
+        // One lookup: header names intern case-insensitively, so the
+        // lowercased retry was always redundant.
+        self.headers.get(headers::CORRELATION_ID).map(str::to_owned)
     }
 
     fn request_id(&self) -> Option<String> {
-        self.headers
-            .get(headers::REQUEST_ID)
-            .or_else(|| {
-                self.headers
-                    .get(headers::REQUEST_ID.to_lowercase().as_str())
-            })
-            .cloned()
+        self.headers.get(headers::REQUEST_ID).map(str::to_owned)
     }
 
     fn trace_id(&self) -> Option<String> {
@@ -1129,7 +1114,7 @@ impl CorrelatedRequest for HttpRequest {
             return Some(trace_id);
         }
         // Fall back to B3
-        self.headers.get(headers::B3_TRACE_ID).cloned()
+        self.headers.get(headers::B3_TRACE_ID).map(str::to_owned)
     }
 
     fn span_id(&self) -> Option<String> {
@@ -1140,7 +1125,7 @@ impl CorrelatedRequest for HttpRequest {
             return Some(span_id);
         }
         // Fall back to B3
-        self.headers.get(headers::B3_SPAN_ID).cloned()
+        self.headers.get(headers::B3_SPAN_ID).map(str::to_owned)
     }
 }
 
@@ -1220,13 +1205,13 @@ mod tests {
 
     #[test]
     fn test_correlation_context_from_request() {
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers
-            .insert(headers::CORRELATION_ID.to_string(), "corr-123".to_string());
+            .insert(headers::CORRELATION_ID, "corr-123".to_string());
         req.headers
-            .insert(headers::REQUEST_ID.to_string(), "req-456".to_string());
+            .insert(headers::REQUEST_ID, "req-456".to_string());
         req.headers.insert(
-            headers::TRACE_PARENT.to_string(),
+            headers::TRACE_PARENT,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
         );
 
@@ -1309,11 +1294,11 @@ mod tests {
 
     #[test]
     fn test_correlated_request_extension() {
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers
-            .insert(headers::CORRELATION_ID.to_string(), "corr-123".to_string());
+            .insert(headers::CORRELATION_ID, "corr-123".to_string());
         req.headers
-            .insert(headers::REQUEST_ID.to_string(), "req-456".to_string());
+            .insert(headers::REQUEST_ID, "req-456".to_string());
 
         assert_eq!(req.correlation_id(), Some("corr-123".to_string()));
         assert_eq!(req.request_id(), Some("req-456".to_string()));
@@ -1342,18 +1327,12 @@ mod tests {
             .span_id("span-789")
             .with_session("session-abc");
 
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("POST", "/api".to_string());
         ctx.inject_into_request(&mut req);
 
-        assert_eq!(
-            req.headers.get(headers::CORRELATION_ID),
-            Some(&"corr-123".to_string())
-        );
+        assert_eq!(req.headers.get(headers::CORRELATION_ID), Some("corr-123"));
         assert!(req.headers.get(headers::TRACE_PARENT).is_some());
-        assert_eq!(
-            req.headers.get(headers::SESSION_ID),
-            Some(&"session-abc".to_string())
-        );
+        assert_eq!(req.headers.get(headers::SESSION_ID), Some("session-abc"));
     }
 
     #[test]

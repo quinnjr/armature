@@ -1,16 +1,20 @@
-//! Fuzz target for HTTP request parsing.
+//! Fuzz target for `HttpRequest` construction and its accessors.
 //!
-//! This target tests the robustness of HTTP request parsing against
-//! arbitrary input, looking for panics, hangs, or memory issues.
+//! `HttpRequest` is built on every served request, and the accessors fuzzed
+//! here — `path_only`, `query`/`query_param`, `param`, header lookup — are the
+//! ones handlers and middleware actually call, so arbitrary request targets
+//! reach the real target-splitting and query-parsing code rather than a
+//! stand-in. Bodies and headers are fuzzer-controlled to cover non-UTF-8 and
+//! degenerate header names.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use armature_core::http::{HttpMethod, HttpRequest};
+use armature_core::HttpMethod;
+use armature_core::http::HttpRequest;
 use bytes::Bytes;
-use std::collections::HashMap;
 
 /// Arbitrary HTTP request for fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -19,6 +23,7 @@ struct FuzzRequest {
     path: String,
     query: Option<String>,
     headers: Vec<(String, String)>,
+    params: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
 }
 
@@ -33,67 +38,75 @@ enum FuzzMethod {
     Options,
     Connect,
     Trace,
+    Query,
+    /// An unrecognized token, carried as `Method::Other` rather than rejected.
     Custom(String),
 }
 
 impl FuzzMethod {
-    fn to_http_method(&self) -> HttpMethod {
+    fn as_str(&self) -> &str {
         match self {
-            FuzzMethod::Get => HttpMethod::Get,
-            FuzzMethod::Post => HttpMethod::Post,
-            FuzzMethod::Put => HttpMethod::Put,
-            FuzzMethod::Delete => HttpMethod::Delete,
-            FuzzMethod::Patch => HttpMethod::Patch,
-            FuzzMethod::Head => HttpMethod::Head,
-            FuzzMethod::Options => HttpMethod::Options,
-            FuzzMethod::Connect => HttpMethod::Connect,
-            FuzzMethod::Trace => HttpMethod::Trace,
-            FuzzMethod::Custom(_) => HttpMethod::Get, // Default for custom
+            FuzzMethod::Get => HttpMethod::GET.as_str(),
+            FuzzMethod::Post => HttpMethod::POST.as_str(),
+            FuzzMethod::Put => HttpMethod::PUT.as_str(),
+            FuzzMethod::Delete => HttpMethod::DELETE.as_str(),
+            FuzzMethod::Patch => HttpMethod::PATCH.as_str(),
+            FuzzMethod::Head => HttpMethod::HEAD.as_str(),
+            FuzzMethod::Options => HttpMethod::OPTIONS.as_str(),
+            FuzzMethod::Connect => "CONNECT",
+            FuzzMethod::Trace => "TRACE",
+            FuzzMethod::Query => HttpMethod::QUERY.as_str(),
+            FuzzMethod::Custom(s) => s.as_str(),
         }
     }
 }
 
 fuzz_target!(|data: FuzzRequest| {
-    // Build path with optional query string
-    let path = if let Some(query) = &data.query {
-        format!("{}?{}", data.path, query)
-    } else {
-        data.path.clone()
-    };
-
-    // Create headers map
-    let mut headers = HashMap::new();
-    for (key, value) in &data.headers {
-        headers.insert(key.clone(), value.clone());
+    if data.path.len() > 10_000 || data.body.len() > 1_000_000 {
+        return;
     }
 
-    // Create the request - should not panic
-    let request = HttpRequest {
-        method: data.method.to_http_method(),
-        path: path.clone(),
-        query: data.query.clone(),
-        headers,
-        body: Bytes::from(data.body.clone()),
-        params: HashMap::new(),
-        extensions: armature_core::http::Extensions::new(),
+    // `path` is the raw request target, query string included - the same
+    // shape the H1 parser hands to `HttpRequest`.
+    let target = match &data.query {
+        Some(query) => format!("{}?{}", data.path, query),
+        None => data.path.clone(),
     };
 
-    // Test various accessors - should not panic
-    let _ = request.method.as_str();
+    let mut request = HttpRequest::new(data.method.as_str(), target);
+    request.body = Bytes::from(data.body.clone());
+
+    for (key, value) in &data.headers {
+        if key.is_empty() {
+            continue;
+        }
+        request.headers.insert(key.clone(), value.clone());
+    }
+
+    for (name, value) in &data.params {
+        request.push_param(name, Bytes::from(value.clone()));
+    }
+
+    // Accessors - none of these may panic on arbitrary input.
+    let _ = request.method_str();
     let _ = request.path.len();
+    let _ = request.path_only();
     let _ = request.body.len();
 
-    // Test header access
-    for (key, _) in &request.headers {
+    for (key, _) in request.headers.iter() {
         let _ = request.headers.get(key);
     }
 
-    // Test query parsing if present
-    if let Some(query) = &request.query {
-        // Parse query string manually - should handle malformed input
-        for pair in query.split('&') {
-            let _ = pair.split_once('=');
-        }
+    // Lazy query parsing over the fuzzer-controlled target.
+    let view = request.query();
+    let _ = view.len();
+    for (key, value) in view.iter() {
+        let _ = key.len();
+        let _ = value.len();
+        let _ = request.query_param(key);
+    }
+
+    for (name, _) in &data.params {
+        let _ = request.param(name);
     }
 });
-

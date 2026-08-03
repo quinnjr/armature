@@ -8,7 +8,9 @@ mod config;
 mod handlers;
 mod jobs;
 
-use armature::armature_queue::{Job, Queue, QueueConfig, QueueError, QueueResult, Worker, WorkerConfig};
+use armature::armature_queue::{
+    Job, Queue, QueueConfig, QueueError, QueueResult, Worker, WorkerConfig,
+};
 use armature::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -55,9 +57,7 @@ impl ServiceState {
     }
 
     pub fn uptime_seconds(&self) -> u64 {
-        self.start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0)
+        self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
     pub fn stats(&self) -> ServiceStats {
@@ -127,7 +127,8 @@ impl HealthController {
         if stats.is_healthy {
             HttpResponse::json(&serde_json::json!({ "status": "ready" }))
         } else {
-            HttpResponse::service_unavailable().with_json(&serde_json::json!({ "status": "not_ready" }))
+            HttpResponse::service_unavailable()
+                .with_json(&serde_json::json!({ "status": "not_ready" }))
         }
     }
 }
@@ -246,6 +247,7 @@ async fn run_queue_worker(
         poll_interval: Duration::from_millis(config.retry_delay_ms.max(50)),
         job_timeout: Duration::from_secs(30),
         log_execution: true,
+        ..Default::default()
     };
     let mut worker = Worker::with_config(queue.clone(), worker_config);
 
@@ -320,8 +322,8 @@ async fn seed_demo_jobs(queue: Queue, queue_name: String, max_attempts: u32) {
         let job_type = JOB_TYPES[next % JOB_TYPES.len()];
         next += 1;
 
-        let job =
-            Job::new(&queue_name, job_type, sample_payload(job_type)).with_max_attempts(max_attempts);
+        let job = Job::new(&queue_name, job_type, sample_payload(job_type))
+            .with_max_attempts(max_attempts);
 
         match queue.enqueue_job(job).await {
             Ok(job_id) => info!(job_id = %job_id, job_type, "Enqueued demo job"),

@@ -159,6 +159,16 @@ impl CacheStore for RedisCache {
         Ok(())
     }
 
+    /// Plain `SET` with no expiry, skipping the `default_ttl` fallback that
+    /// `set_json` applies to a `None` TTL. See [`CacheStore::set_json_forever`].
+    async fn set_json_forever(&self, key: &str, value: String) -> CacheResult<()> {
+        let key = self.build_key(key);
+        trace!("Cache SET (no expiry): {}", key);
+        let mut conn = self.connection.clone();
+        let _: () = self.with_op_timeout(conn.set(&key, value)).await?;
+        Ok(())
+    }
+
     async fn delete(&self, key: &str) -> CacheResult<()> {
         let key = self.build_key(key);
         let mut conn = self.connection.clone();
@@ -334,6 +344,29 @@ impl CacheStore for RedisCache {
         let set_key = self.build_key(set_key);
         let mut conn = self.connection.clone();
         let _: () = self.with_op_timeout(conn.srem(&set_key, member)).await?;
+        Ok(())
+    }
+
+    /// Variadic `SADD key m1 m2 ...`: one round-trip for the whole batch
+    /// rather than one per member.
+    async fn set_add_many(&self, set_key: &str, members: &[&str]) -> CacheResult<()> {
+        if members.is_empty() {
+            return Ok(());
+        }
+        let set_key = self.build_key(set_key);
+        let mut conn = self.connection.clone();
+        let _: () = self.with_op_timeout(conn.sadd(&set_key, members)).await?;
+        Ok(())
+    }
+
+    /// Variadic `SREM key m1 m2 ...`: one round-trip for the whole batch.
+    async fn set_remove_many(&self, set_key: &str, members: &[&str]) -> CacheResult<()> {
+        if members.is_empty() {
+            return Ok(());
+        }
+        let set_key = self.build_key(set_key);
+        let mut conn = self.connection.clone();
+        let _: () = self.with_op_timeout(conn.srem(&set_key, members)).await?;
         Ok(())
     }
 

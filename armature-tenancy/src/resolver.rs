@@ -90,18 +90,17 @@ impl HeaderTenantResolver {
 #[async_trait]
 impl TenantResolver for HeaderTenantResolver {
     async fn resolve(&self, request: &HttpRequest) -> Result<Tenant, TenantError> {
-        let tenant_id = request
-            .headers
-            .get(&self.header_name.to_lowercase())
-            .ok_or_else(|| {
-                TenantError::NotFound(format!("Missing header: {}", self.header_name))
-            })?;
+        // `HeaderMap::get` is already case-insensitive, so lowercasing the
+        // configured name here would allocate a `String` per request for nothing.
+        let tenant_id = request.headers.get(&self.header_name).ok_or_else(|| {
+            TenantError::NotFound(format!("Missing header: {}", self.header_name))
+        })?;
 
         let tenant = self
             .store
             .find_by_id(tenant_id)
             .await?
-            .ok_or_else(|| TenantError::NotFound(tenant_id.clone()))?;
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_owned()))?;
 
         if !tenant.active {
             return Err(TenantError::Inactive);
@@ -357,9 +356,12 @@ impl PathTenantResolver {
 #[async_trait]
 impl TenantResolver for PathTenantResolver {
     async fn resolve(&self, request: &HttpRequest) -> Result<Tenant, TenantError> {
+        // `path_only`, not `path`: the raw target still carries the query
+        // string, which would otherwise be captured as part of the tenant id
+        // (`/tenants/acme?page=2` -> `acme?page=2`) and fail to resolve.
         let captures = self
             .pattern
-            .captures(&request.path)
+            .captures(request.path_only())
             .ok_or_else(|| TenantError::ResolutionFailed("Path pattern not matched".to_string()))?;
 
         let tenant_name = captures
@@ -436,7 +438,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("x-tenant-id".to_string(), "tenant-1".to_string());
+            .insert("x-tenant-id", "tenant-1".to_string());
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.id, "tenant-1");
@@ -451,7 +453,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("host".to_string(), "acme.example.com".to_string());
+            .insert("host", "acme.example.com".to_string());
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.name, "acme");
@@ -479,7 +481,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.id, "tenant-1");
@@ -495,7 +497,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let result = resolver.resolve(&request).await;
         assert!(matches!(result, Err(TenantError::ResolutionFailed(_))));
@@ -510,7 +512,7 @@ mod tests {
         let mut request = create_request("GET", "/api/users");
         request
             .headers
-            .insert("authorization".to_string(), format!("Bearer {}", token));
+            .insert("authorization", format!("Bearer {}", token));
 
         let result = resolver.resolve(&request).await;
         assert!(matches!(result, Err(TenantError::Invalid(_))));
@@ -532,7 +534,7 @@ mod tests {
             let mut request = create_request("GET", "/api/users");
             request
                 .headers
-                .insert("authorization".to_string(), format!("Bearer {}", bad_token));
+                .insert("authorization", format!("Bearer {}", bad_token));
 
             let result = resolver.resolve(&request).await;
             assert!(
@@ -562,5 +564,41 @@ mod tests {
 
         let tenant = resolver.resolve(&request).await.unwrap();
         assert_eq!(tenant.name, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_path_resolver_ignores_query_string() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = PathTenantResolver::new(store, r"^/tenants/([^/]+)", 1).unwrap();
+
+        let request = create_request("GET", "/tenants/acme/users?page=2");
+
+        let tenant = resolver.resolve(&request).await.unwrap();
+        assert_eq!(tenant.name, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_path_resolver_query_directly_after_tenant() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = PathTenantResolver::new(store, r"^/tenants/([^/]+)", 1).unwrap();
+
+        let request = create_request("GET", "/tenants/acme?page=2");
+
+        let tenant = resolver.resolve(&request).await.unwrap();
+        assert_eq!(tenant.name, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_header_resolver_name_case_insensitive() {
+        let store: Arc<dyn TenantStore> = Arc::new(MockTenantStore::new());
+        let resolver = HeaderTenantResolver::new(store, "X-Tenant-ID");
+
+        let mut request = create_request("GET", "/api/users");
+        request
+            .headers
+            .insert("X-TENANT-ID", "tenant-1".to_string());
+
+        let tenant = resolver.resolve(&request).await.unwrap();
+        assert_eq!(tenant.id, "tenant-1");
     }
 }

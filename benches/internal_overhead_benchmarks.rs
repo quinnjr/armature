@@ -23,7 +23,7 @@
 //!
 //! For real cross-framework HTTP benchmarks, use the comparison runner instead:
 //! ```bash
-//! cargo run --bin benchmark-runner
+//! cargo run --bin http-benchmark
 //! ```
 
 use armature_core::*;
@@ -142,23 +142,27 @@ fn create_large_payload() -> LargePayload {
 // Request/Response Creation Benchmarks
 // =============================================================================
 
+/// Request construction, measured without the harness's own allocations.
+///
+/// The method and target are `&'static str`. Passing `"GET".to_string()` here
+/// put two heap allocations inside the timed loop that the serve path does not
+/// pay - `HttpRequest` takes `impl Into<Method>`/`impl Into<ByteStr>` and the
+/// H1 parser hands it borrowed bytes - so it both overstated construction cost
+/// and masked the improvement it is meant to show.
 fn bench_request_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("request_creation");
     group.throughput(Throughput::Elements(1));
 
     // Minimal request creation
     group.bench_function("minimal", |b| {
-        b.iter(|| HttpRequest::new(black_box("GET".to_string()), black_box("/".to_string())))
+        b.iter(|| HttpRequest::new(black_box("GET"), black_box("/")))
     });
 
     // Request with path parameters
     group.bench_function("with_path_params", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new(
-                black_box("GET".to_string()),
-                black_box("/api/users/123".to_string()),
-            );
-            req.path_params.insert("id".to_string(), "123".to_string());
+            let mut req = HttpRequest::new(black_box("GET"), black_box("/api/users/123"));
+            req.push_param("id", "123");
             req
         })
     });
@@ -166,15 +170,10 @@ fn bench_request_creation(c: &mut Criterion) {
     // Request with query parameters
     group.bench_function("with_query_params", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new(
-                black_box("GET".to_string()),
-                black_box("/api/users".to_string()),
-            );
-            req.query_params.insert("page".to_string(), "1".to_string());
-            req.query_params
-                .insert("limit".to_string(), "10".to_string());
-            req.query_params
-                .insert("sort".to_string(), "-created_at".to_string());
+            let mut req = HttpRequest::new(black_box("GET"), black_box("/api/users"));
+            req.push_query_param("page", "1");
+            req.push_query_param("limit", "10");
+            req.push_query_param("sort", "-created_at");
             req
         })
     });
@@ -182,16 +181,12 @@ fn bench_request_creation(c: &mut Criterion) {
     // Request with headers
     group.bench_function("with_headers", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new(
-                black_box("POST".to_string()),
-                black_box("/api/data".to_string()),
-            );
+            let mut req = HttpRequest::new(black_box("POST"), black_box("/api/data"));
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer token123".to_string());
-            req.headers
-                .insert("X-Request-ID".to_string(), "abc-123".to_string());
+                .insert("Authorization", "Bearer token123".to_string());
+            req.headers.insert("X-Request-ID", "abc-123".to_string());
             req
         })
     });
@@ -200,13 +195,10 @@ fn bench_request_creation(c: &mut Criterion) {
     group.bench_function("with_json_body", |b| {
         let body = serde_json::to_vec(&create_medium_payload()).unwrap();
         b.iter(|| {
-            let mut req = HttpRequest::new(
-                black_box("POST".to_string()),
-                black_box("/api/users".to_string()),
-            );
+            let mut req = HttpRequest::new(black_box("POST"), black_box("/api/users"));
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
-            req.body = black_box(body.clone());
+                .insert("Content-Type", "application/json".to_string());
+            req.body = black_box(armature_core::Bytes::from(body.clone()));
             req
         })
     });
@@ -425,6 +417,11 @@ fn bench_routing_performance(c: &mut Criterion) {
 // Middleware Benchmarks
 // =============================================================================
 
+/// Cost of *constructing* middleware, not of running it.
+///
+/// The `request_id` arm that used to live here measured `Uuid::new_v4()`, which
+/// is neither middleware construction nor middleware execution; it now sits in
+/// `bench_allocations` under its own name.
 fn bench_middleware_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("middleware_creation");
 
@@ -432,12 +429,41 @@ fn bench_middleware_creation(c: &mut Criterion) {
 
     group.bench_function("cors", |b| b.iter(CorsMiddleware::new));
 
-    group.bench_function("request_id", |b| {
-        b.iter(|| {
-            let id = Uuid::new_v4().to_string();
-            black_box(id);
-        })
-    });
+    group.finish();
+}
+
+/// Cost of *running* a middleware chain: `MiddlewareChain::apply` end to end.
+///
+/// This is the "middleware chain processing overhead" the module header claims
+/// to measure; before this existed the only middleware group constructed
+/// middleware and never invoked any. The depth sweep separates the fixed cost
+/// of `apply` (the empty-chain fast path) from the per-layer cost of the
+/// boxed-future recursion each additional middleware adds.
+fn bench_middleware_chain(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("middleware_chain");
+    group.throughput(Throughput::Elements(1));
+
+    let handler: armature_core::middleware::HandlerFn =
+        std::sync::Arc::new(|_req: HttpRequest| Box::pin(async move { Ok(HttpResponse::ok()) }));
+
+    for depth in [0usize, 1, 3, 8] {
+        let mut chain = MiddlewareChain::new();
+        for _ in 0..depth {
+            chain.use_middleware(LoggerMiddleware::new());
+        }
+
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, _| {
+            b.to_async(&runtime).iter(|| {
+                let chain = chain.clone();
+                let handler = handler.clone();
+                async move {
+                    let req = HttpRequest::new("GET", "/api/users");
+                    black_box(chain.apply(req, handler).await.unwrap())
+                }
+            })
+        });
+    }
 
     group.finish();
 }
@@ -563,7 +589,7 @@ fn bench_handler_invocation(c: &mut Criterion) {
 
     #[allow(clippy::needless_question_mark)]
     async fn param_handler_fn(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.path_params.get("id").cloned().unwrap_or_default();
+        let id = req.param("id").map(str::to_owned).unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({ "id": id }))?)
     }
 
@@ -579,52 +605,54 @@ fn bench_handler_invocation(c: &mut Criterion) {
     let param_handler = armature_core::handler::handler(param_handler_fn);
     let body_handler = armature_core::handler::handler(body_handler_fn);
 
+    // `b.to_async(&runtime)` rather than `runtime.block_on` inside `b.iter`:
+    // block_on parks and re-enters the runtime on every single iteration, and
+    // that fixed cost is charged to the handler. `to_async` drives the future
+    // on a runtime the harness already entered, so what is timed is the
+    // handler. (`micro_benchmarks.rs` already does this.)
     group.bench_function("simple_handler", |b| {
-        let handler = simple_handler.clone();
-        b.iter(|| {
-            let h = handler.clone();
-            runtime.block_on(async move {
-                let req = HttpRequest::new("GET".to_string(), "/".to_string());
-                let _ = h.call(black_box(req)).await;
-            })
+        b.to_async(&runtime).iter(|| {
+            let h = simple_handler.clone();
+            async move {
+                let req = HttpRequest::new("GET", "/");
+                black_box(h.call(req).await)
+            }
         })
     });
 
     group.bench_function("json_handler", |b| {
-        let handler = json_handler.clone();
-        b.iter(|| {
-            let h = handler.clone();
-            runtime.block_on(async move {
-                let req = HttpRequest::new("GET".to_string(), "/".to_string());
-                let _ = h.call(black_box(req)).await;
-            })
+        b.to_async(&runtime).iter(|| {
+            let h = json_handler.clone();
+            async move {
+                let req = HttpRequest::new("GET", "/");
+                black_box(h.call(req).await)
+            }
         })
     });
 
     group.bench_function("param_handler", |b| {
-        let handler = param_handler.clone();
-        b.iter(|| {
-            let h = handler.clone();
-            runtime.block_on(async move {
-                let mut req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
-                req.path_params.insert("id".to_string(), "123".to_string());
-                let _ = h.call(black_box(req)).await;
-            })
+        b.to_async(&runtime).iter(|| {
+            let h = param_handler.clone();
+            async move {
+                let mut req = HttpRequest::new("GET", "/users/123");
+                req.push_param("id", "123");
+                black_box(h.call(req).await)
+            }
         })
     });
 
-    let body = serde_json::to_vec(&create_medium_payload()).unwrap();
+    // Serialized once, outside the loop; `Bytes::clone` inside is a refcount
+    // bump, so the arm measures body parsing rather than a 1 KiB memcpy.
+    let body = armature_core::Bytes::from(serde_json::to_vec(&create_medium_payload()).unwrap());
     group.bench_function("body_handler", |b| {
-        let handler = body_handler.clone();
-        let body = body.clone();
-        b.iter(|| {
-            let h = handler.clone();
-            let b = body.clone();
-            runtime.block_on(async move {
-                let mut req = HttpRequest::new("POST".to_string(), "/api/data".to_string());
-                req.body = b;
-                let _ = h.call(black_box(req)).await;
-            })
+        b.to_async(&runtime).iter(|| {
+            let h = body_handler.clone();
+            let body = body.clone();
+            async move {
+                let mut req = HttpRequest::new("POST", "/api/data");
+                req.body = body;
+                black_box(h.call(req).await)
+            }
         })
     });
 
@@ -651,7 +679,7 @@ fn bench_full_cycle(c: &mut Criterion) {
 
     #[allow(clippy::needless_question_mark)]
     async fn get_user_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.path_params.get("id").cloned().unwrap_or_default();
+        let id = req.param("id").map(str::to_owned).unwrap_or_default();
         Ok(HttpResponse::ok().with_json(&serde_json::json!({
             "id": id,
             "name": "John Doe",
@@ -678,7 +706,7 @@ fn bench_full_cycle(c: &mut Criterion) {
     group.bench_function("health_check", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let req = HttpRequest::new("GET".to_string(), "/health".to_string());
+                let req = HttpRequest::new("GET", "/health".to_string());
                 let _ = router.route(black_box(req)).await;
             })
         })
@@ -688,7 +716,7 @@ fn bench_full_cycle(c: &mut Criterion) {
     group.bench_function("get_with_param", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+                let req = HttpRequest::new("GET", "/api/users/123".to_string());
                 let _ = router.route(black_box(req)).await;
             })
         })
@@ -701,10 +729,10 @@ fn bench_full_cycle(c: &mut Criterion) {
         b.iter(|| {
             let b = body.clone();
             runtime.block_on(async {
-                let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+                let mut req = HttpRequest::new("POST", "/api/users".to_string());
                 req.headers
-                    .insert("Content-Type".to_string(), "application/json".to_string());
-                req.body = b;
+                    .insert("Content-Type", "application/json".to_string());
+                req.body = armature_core::Bytes::from(b);
                 let _ = router.route(black_box(req)).await;
             })
         })
@@ -771,6 +799,17 @@ fn bench_allocations(c: &mut Criterion) {
         })
     });
 
+    // UUID v4 generation plus its hyphenated string form. This is what a
+    // request-id middleware pays per request; it used to sit in the
+    // `middleware_creation` group under the name `request_id`, where it looked
+    // like a measurement of middleware rather than of `Uuid`.
+    group.bench_function("uuid_v4_to_string", |b| {
+        b.iter(|| {
+            let id = Uuid::new_v4().to_string();
+            black_box(id);
+        })
+    });
+
     group.finish();
 }
 
@@ -790,6 +829,7 @@ criterion_group! {
         bench_json_operations,
         bench_routing_performance,
         bench_middleware_creation,
+        bench_middleware_chain,
         bench_dependency_injection,
         bench_handler_invocation,
         bench_full_cycle,

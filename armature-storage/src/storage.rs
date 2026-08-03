@@ -103,12 +103,51 @@ impl Default for StorageConfig {
 }
 
 /// Storage backend trait.
+///
+/// # Limitations
+///
+/// This trait is `Bytes`-in / `Bytes`-out end to end. There is no streaming,
+/// no multipart or resumable upload, and no ranged download anywhere in this
+/// crate -- neither in the trait nor in any backend that implements it. Note
+/// that [`crate::Multipart`] is an HTTP `multipart/form-data` *request body*
+/// parser and has nothing to do with S3-style multipart upload.
+///
+/// Two consequences follow, and they apply to every backend (S3, GCS, Azure,
+/// and the local filesystem one):
+///
+/// * **Objects are fully materialized in memory in both directions.** Writing
+///   an object requires the whole payload resident as a [`Bytes`] before the
+///   call, and reading one allocates the whole object. Peak usage is
+///   proportional to the largest single object, not to a bounded buffer, so
+///   concurrent transfers multiply. Size the objects you route through this
+///   trait against the process's memory budget, and cap uploads with
+///   [`StorageConfig::max_file_size`] or [`crate::FileValidator::max_size`].
+/// * **A single object cannot exceed the backend's single-request ceiling.**
+///   Because every write is one request, the S3 backend inherits S3's
+///   `PutObject` limit of **5 GiB** per object; larger objects are only
+///   reachable through multipart upload, which is not implemented. GCS and
+///   Azure have their own single-request ceilings that apply the same way.
+///
+/// If you need objects beyond those bounds, drive the vendor SDK directly
+/// rather than routing them through `Storage`.
 #[async_trait]
 pub trait Storage: Send + Sync {
     /// Store bytes with a given key.
+    ///
+    /// # Limitations
+    ///
+    /// `data` is the entire object: it must already be resident in memory, and
+    /// it is written in a single backend request. On S3 that request is
+    /// `PutObject`, which rejects anything over **5 GiB**. See the
+    /// [trait-level limitations](Storage#limitations).
     async fn put(&self, key: &str, data: Bytes) -> Result<StorageMetadata>;
 
     /// Store bytes with a given key and content type.
+    ///
+    /// # Limitations
+    ///
+    /// Same single-request, fully-buffered contract as [`Self::put`], including
+    /// the 5 GiB S3 `PutObject` ceiling.
     async fn put_with_content_type(
         &self,
         key: &str,
@@ -117,9 +156,21 @@ pub trait Storage: Send + Sync {
     ) -> Result<StorageMetadata>;
 
     /// Store an uploaded file.
+    ///
+    /// # Limitations
+    ///
+    /// The file's contents are already buffered in [`UploadedFile`] and are
+    /// written with the same single-request contract as [`Self::put`].
     async fn put_file(&self, file: &UploadedFile) -> Result<StorageMetadata>;
 
     /// Retrieve file contents.
+    ///
+    /// # Limitations
+    ///
+    /// The whole object is downloaded and allocated before this returns; there
+    /// is no ranged or streaming read, so a caller that wants only a slice of a
+    /// large object still pays for all of it in bandwidth and memory. See the
+    /// [trait-level limitations](Storage#limitations).
     async fn get(&self, key: &str) -> Result<Bytes>;
 
     /// Get file metadata without downloading.

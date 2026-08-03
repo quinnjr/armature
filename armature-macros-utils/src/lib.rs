@@ -300,6 +300,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///     pub password: String,
 /// }
 /// ```
+///
+/// `skip` is the only accepted `api` option, and it is a bare flag. Anything
+/// else (`#[api(skipp)]`, `#[api(skip = true)]`) is a compile error — the
+/// attribute exists to redact secrets, so a typo must not quietly leave the
+/// field in the payload.
 #[proc_macro_derive(ApiModel, attributes(api))]
 pub fn derive_api_model(input: TokenStream) -> TokenStream {
     model::derive_api_model_impl(input)

@@ -1,7 +1,13 @@
-//! Fuzz target for query parameter parsing.
+//! Fuzz target for the `simd_parser` query-string helpers.
 //!
-//! Tests the real production query-string parsers
-//! (`armature_core::simd_parser`) with various encodings and formats.
+//! These are **not** the live request path: `HttpRequest::query()` parses
+//! through the crate-private `armature_core::query::parse`, and nothing in
+//! `armature-core` routes a served request through
+//! `parse_query_string_fast`/`parse_query_string_decoded`. They are public
+//! API, so arbitrary input must still not panic — that is what this target
+//! covers. The production query parser is fuzzed via `HttpRequest::query()` in
+//! `http_request.rs`, which is the only way to reach it (`query::parse` is
+//! `pub(crate)`).
 
 #![no_main]
 
@@ -34,7 +40,9 @@ fuzz_target!(|data: FuzzQuery| {
     let _ = url_decode(&data.raw);
 
     // Test 4: Look for common parameter names in the decoded map.
-    let common_params = ["page", "limit", "offset", "sort", "order", "filter", "q", "search"];
+    let common_params = [
+        "page", "limit", "offset", "sort", "order", "filter", "q", "search",
+    ];
     for param in &common_params {
         let _ = decoded_params.get(*param);
     }

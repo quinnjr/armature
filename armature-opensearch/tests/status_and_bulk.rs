@@ -5,7 +5,9 @@
 //! 2. `BulkOperation`/`to_bulk_lines` had no caller; `OpenSearchClient::bulk_execute`
 //!    wires them up to actually send a mixed batch of bulk operations.
 
-use armature_opensearch::{BulkOperation, Document, OpenSearchClient, OpenSearchConfig};
+use armature_opensearch::{
+    BULK_MAX_DOCS_PER_REQUEST, BulkOperation, Document, OpenSearchClient, OpenSearchConfig,
+};
 use armature_testkit::{StubResponse, StubServer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -343,6 +345,90 @@ async fn bulk_delete_surfaces_rejected_status_instead_of_ok() {
         .bulk_delete::<TestDoc>(vec!["1".to_string()])
         .await
         .expect_err("a 429 bulk rejection must surface as an error, not Ok(count)");
+}
+
+/// `_bulk` is rejected wholesale when the body exceeds the cluster's
+/// `http.max_content_length`, so the client caps each request at
+/// `BULK_MAX_DOCS_PER_REQUEST` documents and issues one request per chunk.
+#[tokio::test]
+async fn bulk_index_splits_a_large_batch_across_requests() {
+    let ok_body = json!({ "took": 1, "errors": false, "items": [] }).to_string();
+    let server = StubServer::builder()
+        .route("POST", "/_bulk", StubResponse::json(200, ok_body))
+        .start()
+        .await;
+
+    let config = OpenSearchConfig::new(server.url());
+    let client = OpenSearchClient::new(config).expect("client construction");
+
+    let docs: Vec<(String, TestDoc)> = (0..BULK_MAX_DOCS_PER_REQUEST + 1)
+        .map(|i| {
+            (
+                i.to_string(),
+                TestDoc {
+                    name: format!("doc-{i}"),
+                },
+            )
+        })
+        .collect();
+    let total = docs.len();
+
+    let indexed = client
+        .bulk_index(docs)
+        .await
+        .expect("every chunk succeeded, so the whole batch should report success");
+
+    assert_eq!(indexed, total);
+    let bulk_requests = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/_bulk")
+        .count();
+    assert_eq!(
+        bulk_requests, 2,
+        "one document past the per-request cap must produce a second request"
+    );
+}
+
+/// OpenSearch keys each response item by the action it performed, so an error
+/// reported under any action key must be counted as a failure rather than read
+/// as a success because it is not under `index`.
+#[tokio::test]
+async fn bulk_index_counts_errors_reported_under_a_non_index_action() {
+    let body = json!({
+        "took": 1,
+        "errors": true,
+        "items": [
+            { "create": { "_index": "test_docs", "_id": "1", "status": 409,
+                          "error": { "type": "version_conflict_engine_exception",
+                                     "reason": "already exists" } } }
+        ]
+    })
+    .to_string();
+
+    let server = StubServer::builder()
+        .route("POST", "/_bulk", StubResponse::json(200, body))
+        .start()
+        .await;
+
+    let config = OpenSearchConfig::new(server.url());
+    let client = OpenSearchClient::new(config).expect("client construction");
+
+    let err = client
+        .bulk_index(vec![(
+            "1".to_string(),
+            TestDoc {
+                name: "alice".to_string(),
+            },
+        )])
+        .await
+        .expect_err("a failed item must not be reported as a success");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("0 succeeded, 1 failed"),
+        "the failure under the create action must be counted: {msg}"
+    );
 }
 
 #[tokio::test]

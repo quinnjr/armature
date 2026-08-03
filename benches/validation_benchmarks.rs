@@ -1,3 +1,14 @@
+//! Validator benchmarks.
+//!
+//! Times the `armature-validation` built-ins - email, URL, UUID, string length
+//! and character-class checks, numeric ranges, custom regex patterns - and the
+//! `ValidationRules`/`ValidationBuilder` layer that drives them. Every
+//! validator here is synchronous and CPU-bound; no request or I/O is involved.
+//!
+//! ```bash
+//! cargo bench --bench validation_benchmarks
+//! ```
+
 #![allow(deprecated)]
 #![allow(clippy::needless_question_mark)]
 

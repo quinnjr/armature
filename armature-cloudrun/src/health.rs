@@ -2,12 +2,28 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, Response, StatusCode};
+
+/// Cloud Run injects `K_SERVICE` and `K_REVISION` into the container
+/// environment at start and never mutates them for the life of the process,
+/// so they are read once rather than on every probe response (`/readyz` and
+/// `/livez` are hit continuously by the platform).
+static K_SERVICE: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("K_SERVICE").ok());
+static K_REVISION: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("K_REVISION").ok());
+
+/// Default per-checker deadline.
+///
+/// Cloud Run's own startup/liveness probes default to a 1s timeout and give up
+/// on the revision entirely after repeated failures, so an individual
+/// dependency check that has not answered within a few seconds is already a
+/// failure from the platform's point of view.
+const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,8 +84,12 @@ pub struct CheckResult {
 #[derive(Clone)]
 pub struct HealthCheck {
     start_time: std::time::Instant,
-    checks: Arc<RwLock<Vec<Box<dyn HealthChecker>>>>,
+    /// Checkers are held behind `Arc` (not `Box`) so [`HealthCheck::check`]
+    /// can hand each one to its own task without keeping the read guard —
+    /// or the collection's lifetime — alive across the awaits.
+    checks: Arc<RwLock<Vec<Arc<dyn HealthChecker>>>>,
     status_override: Arc<RwLock<Option<HealthStatus>>>,
+    check_timeout: Duration,
 }
 
 impl Default for HealthCheck {
@@ -85,13 +105,24 @@ impl HealthCheck {
             start_time: std::time::Instant::now(),
             checks: Arc::new(RwLock::new(Vec::new())),
             status_override: Arc::new(RwLock::new(None)),
+            check_timeout: DEFAULT_CHECK_TIMEOUT,
         }
+    }
+
+    /// Set the per-checker deadline used by [`HealthCheck::check`].
+    ///
+    /// Applies to each checker independently, not to the batch: readiness
+    /// latency is bounded by this value regardless of how many checkers are
+    /// registered, because they run concurrently.
+    pub fn with_check_timeout(mut self, timeout: Duration) -> Self {
+        self.check_timeout = timeout;
+        self
     }
 
     /// Register a health checker.
     pub async fn register(&self, checker: impl HealthChecker + 'static) {
         let mut checks = self.checks.write().await;
-        checks.push(Box::new(checker));
+        checks.push(Arc::new(checker));
     }
 
     /// Override the health status (useful during shutdown).
@@ -117,21 +148,85 @@ impl HealthCheck {
         if let Some(status) = *self.status_override.read().await {
             return HealthCheckResult {
                 status,
-                service: std::env::var("K_SERVICE").ok(),
-                revision: std::env::var("K_REVISION").ok(),
+                service: K_SERVICE.clone(),
+                revision: K_REVISION.clone(),
                 uptime_seconds: self.start_time.elapsed().as_secs(),
                 checks: vec![],
             };
         }
 
-        let checks = self.checks.read().await;
-        let mut results = Vec::with_capacity(checks.len());
+        // Snapshot the checkers and drop the read guard immediately: holding it
+        // across the awaits below would block `register` for the duration of a
+        // probe.
+        let checkers: Vec<Arc<dyn HealthChecker>> = self.checks.read().await.clone();
+        // Retained so a checker that times out or panics can still be named in
+        // the response — its own `CheckResult` never arrives.
+        let names: Vec<String> = checkers.iter().map(|c| c.name().to_string()).collect();
+        let count = checkers.len();
+
+        // Run every checker concurrently, each under its own deadline. Serial
+        // execution made readiness latency the SUM of all checks, and a single
+        // checker that never returns stalled `/readyz` forever -- on Cloud Run
+        // that means the revision never becomes ready and never drains.
+        let timeout = self.check_timeout;
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, checker) in checkers.into_iter().enumerate() {
+            tasks.spawn(async move {
+                let name = checker.name().to_string();
+                let start = std::time::Instant::now();
+                // `checker` is moved into the inner future so the deadline
+                // wrapper owns everything it borrows; on elapse the future is
+                // dropped, cancelling the hung check rather than leaking it.
+                let outcome =
+                    tokio::time::timeout(timeout, async move { checker.check().await }).await;
+                let duration_ms = start.elapsed().as_millis() as u64;
+
+                let result = match outcome {
+                    Ok(result) => result,
+                    Err(_) => CheckResult {
+                        name,
+                        status: HealthStatus::Unhealthy,
+                        message: Some(format!(
+                            "check did not complete within {}ms",
+                            timeout.as_millis()
+                        )),
+                        duration_ms: None,
+                    },
+                };
+
+                (
+                    index,
+                    CheckResult {
+                        duration_ms: Some(duration_ms),
+                        ..result
+                    },
+                )
+            });
+        }
+
+        let mut slots: Vec<Option<CheckResult>> = vec![None; count];
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((index, result)) => slots[index] = Some(result),
+                Err(e) => {
+                    // A checker panicked (or was cancelled). Which one is not
+                    // recoverable from the `JoinError`, so the empty slot is
+                    // filled in below from `names`.
+                    tracing::error!("health checker task failed: {e}");
+                }
+            }
+        }
+
+        let mut results = Vec::with_capacity(count);
         let mut overall_status = HealthStatus::Healthy;
 
-        for checker in checks.iter() {
-            let start = std::time::Instant::now();
-            let result = checker.check().await;
-            let duration_ms = start.elapsed().as_millis() as u64;
+        for (index, slot) in slots.into_iter().enumerate() {
+            let result = slot.unwrap_or_else(|| CheckResult {
+                name: names[index].clone(),
+                status: HealthStatus::Unhealthy,
+                message: Some("check panicked".to_string()),
+                duration_ms: None,
+            });
 
             // Update overall status
             match result.status {
@@ -142,18 +237,13 @@ impl HealthCheck {
                 _ => {}
             }
 
-            results.push(CheckResult {
-                name: result.name,
-                status: result.status,
-                message: result.message,
-                duration_ms: Some(duration_ms),
-            });
+            results.push(result);
         }
 
         HealthCheckResult {
             status: overall_status,
-            service: std::env::var("K_SERVICE").ok(),
-            revision: std::env::var("K_REVISION").ok(),
+            service: K_SERVICE.clone(),
+            revision: K_REVISION.clone(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
             checks: results,
         }
@@ -277,6 +367,15 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<By
 pub trait HealthChecker: Send + Sync {
     /// Run the health check.
     async fn check(&self) -> CheckResult;
+
+    /// Name reported for this checker when [`HealthChecker::check`] does not
+    /// produce a result of its own — i.e. when it exceeds the per-check
+    /// deadline or panics. Implementations should return the same name their
+    /// [`CheckResult`] carries so a hung dependency is identifiable in the
+    /// probe response.
+    fn name(&self) -> &str {
+        "unnamed"
+    }
 }
 
 /// Simple function-based health checker.
@@ -305,6 +404,10 @@ where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<(), String>> + Send,
 {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     async fn check(&self) -> CheckResult {
         match (self.check_fn)().await {
             Ok(()) => CheckResult {

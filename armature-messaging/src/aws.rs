@@ -334,20 +334,28 @@ impl MessageBroker for AwsBroker {
     ///
     /// Only [`SubscribeOptions::ack_mode`] and [`SubscribeOptions::concurrency`]
     /// are honored: `AckMode::None` leaves received messages in the queue
-    /// (they become visible again after the visibility timeout), while
-    /// `Auto`/`Manual` delete a message once the handler reports success;
+    /// (they become visible again after the visibility timeout), while `Auto`
+    /// deletes a message once the handler reports success;
     /// `concurrency` bounds how many handlers may run concurrently across the
     /// whole life of the subscription (not just within a single received
     /// batch - the permit pool is created once and shared across every poll).
-    /// The remaining options are not applicable to SQS and are ignored:
-    /// `prefetch_count`/`from_beginning`/`filter` have no SQS equivalent
-    /// (batch size and long-poll behavior come from [`AwsConfig`]).
+    /// `prefetch_count`/`from_beginning` have no SQS equivalent and are
+    /// ignored (batch size and long-poll behavior come from [`AwsConfig`]).
+    /// `ack_mode = Manual` and a non-`None` `filter` are rejected outright with
+    /// [`MessagingError::Unsupported`] rather than ignored -- see
+    /// [`AckMode::Manual`] and [`SubscribeOptions::filter`].
     async fn subscribe_with_options(
         &self,
         topic: &str,
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // Fail before any queue lookup or consumer task is spawned: an option
+        // this backend cannot honor must not produce a live subscription that
+        // quietly behaves differently than the caller asked for.
+        crate::reject_manual_ack("SQS", options.ack_mode)?;
+        crate::reject_filter("SQS", options.filter.as_ref())?;
+
         // Bounds how many per-message handler invocations may run
         // concurrently (see `poll_messages`). Defaults to 1, which
         // reproduces the previous strictly-sequential dispatch.
@@ -549,8 +557,39 @@ async fn handle_sqs_message(
                     warn!(error = %e, "Failed to change message visibility");
                 }
             }
-            ProcessingResult::DeadLetter | ProcessingResult::Reject => {
-                // Delete the message (it should go to DLQ if configured)
+            ProcessingResult::DeadLetter => {
+                // SQS has no "send this to the DLQ now" operation. A message
+                // reaches the dead-letter queue only after the redrive policy's
+                // `maxReceiveCount` REDELIVERIES, which means the message must
+                // stay in the queue to get there. `DeleteMessage` would remove
+                // it permanently and it would never reach the DLQ at all --
+                // an outcome indistinguishable from `Success`, and the exact
+                // opposite of what the caller asked for.
+                //
+                // So the message is deliberately NOT deleted. Resetting the
+                // visibility timeout to zero only accelerates the next
+                // redelivery, so the receive count reaches `maxReceiveCount`
+                // (and the redrive policy moves the message) promptly instead
+                // of after a full visibility timeout per attempt.
+                //
+                // This requires a redrive policy on the queue: without one the
+                // message is redelivered indefinitely rather than dead-lettered.
+                if let Some(handle) = receipt_handle
+                    && let Err(e) = client
+                        .change_message_visibility()
+                        .queue_url(queue_url)
+                        .receipt_handle(&handle)
+                        .visibility_timeout(0)
+                        .send()
+                        .await
+                {
+                    warn!(error = %e, "Failed to expedite redelivery of dead-lettered message");
+                }
+            }
+            ProcessingResult::Reject => {
+                // Reject means discard: unlike `DeadLetter`, the caller has
+                // decided the message is not worth preserving anywhere, so
+                // deleting it is correct and terminal.
                 if let Some(handle) = receipt_handle
                     && let Err(e) = client
                         .delete_message()

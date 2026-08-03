@@ -12,6 +12,9 @@ pub enum McpError {
     #[error("Resource not found: {0}")]
     ResourceNotFound(String),
 
+    #[error("Prompt not found: {0}")]
+    PromptNotFound(String),
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -45,6 +48,7 @@ impl McpError {
             McpError::Internal(_) => -32603,
             McpError::ToolNotFound(_) => -32002,
             McpError::ResourceNotFound(_) => -32002,
+            McpError::PromptNotFound(_) => -32002,
             McpError::ToolExecutionFailed(_) => -32000,
             McpError::Serialization(_) => -32700,
         }

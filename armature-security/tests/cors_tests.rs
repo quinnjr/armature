@@ -10,7 +10,7 @@ fn test_cors_strict_origin() {
     let mut request = create_request("GET", "/api/data");
     request
         .headers
-        .insert("origin".to_string(), "https://app.example.com".to_string());
+        .insert("origin", "https://app.example.com".to_string());
 
     let mut response = HttpResponse::ok();
     cors.add_cors_headers(&mut response, "https://app.example.com");
@@ -116,13 +116,12 @@ fn test_cors_preflight() {
     let mut request = create_request("OPTIONS", "/api/users");
     request
         .headers
-        .insert("origin".to_string(), "https://app.example.com".to_string());
+        .insert("origin", "https://app.example.com".to_string());
+    request
+        .headers
+        .insert("access-control-request-method", "POST".to_string());
     request.headers.insert(
-        "access-control-request-method".to_string(),
-        "POST".to_string(),
-    );
-    request.headers.insert(
-        "access-control-request-headers".to_string(),
+        "access-control-request-headers",
         "Content-Type, Authorization".to_string(),
     );
 
@@ -189,7 +188,7 @@ fn test_cors_apply() {
     let mut request = create_request("GET", "/api/data");
     request
         .headers
-        .insert("origin".to_string(), "https://app.example.com".to_string());
+        .insert("origin", "https://app.example.com".to_string());
 
     let response = HttpResponse::ok();
     let response = cors.apply(&request, response);

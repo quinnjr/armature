@@ -211,6 +211,15 @@ impl Application {
 
     /// Configure CORS for the application. Handles preflight OPTIONS
     /// requests automatically and adds CORS headers to every response.
+    ///
+    /// # Precedence over registered OPTIONS routes
+    ///
+    /// The preflight handler answers *every* `OPTIONS` request with `204` before
+    /// the router is consulted — it does not check whether a route exists, since
+    /// a preflight is sent for a path the browser is about to call with some
+    /// other method. A handler registered with `Router::options` is therefore
+    /// unreachable while CORS is configured. If you need to serve `OPTIONS`
+    /// yourself, leave CORS off here and add it as middleware you control.
     pub fn with_cors(mut self, config: CorsConfig) -> Self {
         self.cors_config = Some(Arc::new(config));
         self
@@ -1518,9 +1527,25 @@ async fn handle_request(
     let start = Instant::now();
 
     // Convert hyper request to our HttpRequest
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().map(str::to_owned);
+    let method = crate::Method::from(req.method().as_str());
+    // The full target, query included, taken whole rather than reassembled:
+    // `HttpRequest` splits and parses it on demand, so a handler that ignores
+    // the query never pays for it.
+    let target = req
+        .uri()
+        .path_and_query()
+        .map_or_else(|| req.uri().path().to_owned(), |pq| pq.as_str().to_owned());
+
+    let mut armature_req = HttpRequest::new(method.clone(), target);
+
+    // Guards and routing each consume `armature_req` by value, so the target
+    // has to be kept separately for logging and guard-scope prefix matching.
+    // A `ByteStr` clone is a refcount bump, not a second copy of the target,
+    // and `path_only` trims the query off it without allocating.
+    let target_handle = armature_req.path.clone();
+    let path = target_handle
+        .split_once('?')
+        .map_or(target_handle.as_str(), |(p, _)| p);
 
     trace!(method = %method, path = %path, "Incoming request");
 
@@ -1538,21 +1563,15 @@ async fn handle_request(
         return Ok(builder.body(Full::new(bytes::Bytes::new())).unwrap());
     }
 
-    let mut armature_req = HttpRequest::new(method.clone(), path.clone());
-
-    // Parse query parameters (percent-decoded)
-    if let Some(ref q) = query {
-        armature_req.query_params = crate::simd_parser::parse_query_string_decoded(q);
-    }
-
-    // Copy headers
+    // Copy headers. One copy per value, because hyper's `HeaderValue` owns its
+    // own buffer and cannot be projected into our `Bytes`; the name goes in as
+    // a `&str`, so it costs nothing for a well-known header.
     let header_count = req.headers().len();
     for (name, value) in req.headers() {
-        if let Ok(value_str) = value.to_str() {
-            armature_req
-                .headers
-                .insert(name.to_string(), value_str.to_string());
-        }
+        armature_req.headers.insert(
+            name.as_str(),
+            bytes::Bytes::copy_from_slice(value.as_bytes()),
+        );
     }
     trace!(header_count = header_count, "Headers parsed");
 
@@ -1636,7 +1655,7 @@ async fn handle_request(
     // controllers, while guards added via `Application::with_guard` use an empty
     // prefix and match every path. Guards always run before routing.
     if !state.guards.is_empty() {
-        match evaluate_scoped_guards(&state.guards, &path, armature_req).await {
+        match evaluate_scoped_guards(&state.guards, path, armature_req).await {
             Ok(req) => armature_req = req,
             Err(GuardRejection::Reject) => {
                 warn!(method = %method, path = %path, "Request rejected by guard");
@@ -2045,21 +2064,21 @@ mod tests {
         }];
 
         // Matches /admin/x → guard runs.
-        let req = HttpRequest::new("GET".to_string(), "/admin/x".to_string());
+        let req = HttpRequest::new("GET", "/admin/x".to_string());
         let decision = evaluate_scoped_guards(&guards, "/admin/x", req).await;
         assert!(decision.is_ok());
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
         // Does NOT match /public/y → guard is not evaluated.
         ran.store(false, std::sync::atomic::Ordering::SeqCst);
-        let req = HttpRequest::new("GET".to_string(), "/public/y".to_string());
+        let req = HttpRequest::new("GET", "/public/y".to_string());
         let decision = evaluate_scoped_guards(&guards, "/public/y", req).await;
         assert!(decision.is_ok());
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
 
         // /administrators must NOT match /admin → guard not evaluated.
         ran.store(false, std::sync::atomic::Ordering::SeqCst);
-        let req = HttpRequest::new("GET".to_string(), "/administrators".to_string());
+        let req = HttpRequest::new("GET", "/administrators".to_string());
         let _ = evaluate_scoped_guards(&guards, "/administrators", req).await;
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -2967,7 +2986,7 @@ mod tests {
         let chain = Arc::new(
             crate::exception_filter::ExceptionFilterChain::new().add_filter(PanickingFilter),
         );
-        let req = HttpRequest::new("GET".to_string(), "/panics".to_string());
+        let req = HttpRequest::new("GET", "/panics".to_string());
         let err = Error::Internal("boom".to_string());
 
         // Must fall back to exactly what `error_response(&err)` (i.e. no
@@ -2996,7 +3015,7 @@ mod tests {
         let chain = Arc::new(
             crate::exception_filter::ExceptionFilterChain::new().add_filter(HangingFilter),
         );
-        let req = HttpRequest::new("GET".to_string(), "/hangs".to_string());
+        let req = HttpRequest::new("GET", "/hangs".to_string());
         let err = Error::Internal("boom".to_string());
 
         // A short timeout (rather than the 5s production default) keeps this

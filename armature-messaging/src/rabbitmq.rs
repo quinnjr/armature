@@ -292,6 +292,14 @@ impl MessageBroker for RabbitMqBroker {
         // reproduces the previous strictly-sequential dispatch.
         let concurrency = dispatch::concurrency_or_default(options.concurrency);
 
+        // Reject before a channel is drawn from the pool. RabbitMQ *does* have
+        // real manual acknowledgment, but `Message` carries no delivery tag, so
+        // a caller has no handle to ack with; this backend consequently treated
+        // `Manual` exactly like `Auto`. Say so rather than acking on their
+        // behalf.
+        crate::reject_manual_ack("RabbitMQ", options.ack_mode)?;
+        crate::reject_filter("RabbitMQ", options.filter.as_ref())?;
+
         // Draw a pre-warmed channel from the pool if one is available;
         // otherwise fall back to creating a fresh one on demand.
         let channel = {
@@ -488,7 +496,12 @@ async fn handle_delivery(
 ) {
     match handler.handle(message).await {
         Ok(result) => {
-            if ack_mode == AckMode::Auto || ack_mode == AckMode::Manual {
+            // `Manual` never reaches here: `subscribe_with_options` rejects it,
+            // because there is no delivery tag on `Message` for a caller to ack
+            // with and this branch would otherwise ack on their behalf while
+            // claiming they were in control. `None` consumes with `no_ack`, so
+            // the broker considers the delivery settled already.
+            if ack_mode == AckMode::Auto {
                 match result {
                     ProcessingResult::Success => {
                         if let Err(e) = channel

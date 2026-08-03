@@ -94,7 +94,7 @@ async fn quick_start_example_runs_end_to_end() {
     let script = extracted_quick_start_script();
     let router = support::build_router_from_script(&script);
 
-    let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+    let request = HttpRequest::new("GET", "/api/users".to_string());
     let response = router
         .route(request)
         .await

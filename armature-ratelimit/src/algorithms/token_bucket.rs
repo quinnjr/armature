@@ -88,16 +88,14 @@ impl TokenBucket {
         self
     }
 
-    /// Evict the single least-recently-refilled entry to make room for a new key.
+    /// Reclaim a batch of the least-recently-refilled entries to make room for
+    /// new keys. See [`super::evict_oldest_batch`] for why this is batched.
     fn evict_oldest(&self) {
-        if let Some(oldest) = self
-            .buckets
-            .iter()
-            .min_by_key(|e| e.value().last_refill)
-            .map(|e| e.key().clone())
-        {
-            self.buckets.remove(&oldest);
-        }
+        super::evict_oldest_batch(
+            &self.buckets,
+            super::eviction_batch_size(self.max_keys),
+            |state| Some(state.last_refill),
+        );
     }
 
     /// Refill tokens based on elapsed time
@@ -261,6 +259,32 @@ mod tests {
             "map must stay within max_keys, got {}",
             bucket.buckets.len()
         );
+    }
+
+    #[test]
+    fn test_eviction_is_amortized_not_per_request() {
+        // Evicting exactly one entry per new key made every request past the cap
+        // pay a full scan. A batch pass must reclaim `max_keys / 64` entries at
+        // once, so the next batch-worth of insertions scan nothing.
+        let max_keys = 1280;
+        let batch = super::super::eviction_batch_size(max_keys);
+        assert_eq!(batch, 20);
+
+        let bucket = TokenBucket::new(10, 1.0).with_max_keys(max_keys);
+        for i in 0..max_keys {
+            bucket.check(&format!("client-{i}"));
+        }
+        assert_eq!(bucket.buckets.len(), max_keys, "cap not reached yet");
+
+        // The key that crosses the cap triggers one batch eviction.
+        bucket.check("client-overflow");
+        assert_eq!(bucket.buckets.len(), max_keys - batch + 1);
+
+        // The following insertions fit in the reclaimed headroom untouched.
+        for i in 0..batch - 1 {
+            bucket.check(&format!("filler-{i}"));
+        }
+        assert_eq!(bucket.buckets.len(), max_keys);
     }
 
     #[test]

@@ -670,6 +670,11 @@ impl MessageBroker for MqBridgeBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // Neither field is read anywhere in this bridge, so honoring the
+        // request is impossible; failing is the only way the caller finds out.
+        crate::reject_manual_ack("MQ bridge", options.ack_mode)?;
+        crate::reject_filter("MQ bridge", options.filter.as_ref())?;
+
         // Bounds how many per-message handler invocations may run
         // concurrently (see the spawned consumer task below). Defaults to 1,
         // which reproduces the previous strictly-sequential dispatch.

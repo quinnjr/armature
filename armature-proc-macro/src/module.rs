@@ -21,6 +21,11 @@ impl Parse for ModuleArgs {
         let mut imports = Vec::new();
         let mut exports = Vec::new();
 
+        // A mistyped or repeated key used to be dropped on the floor, producing
+        // a module that registers nothing and only fails at request time with a
+        // DI or 404 error. Both are compile errors now.
+        let mut seen: Vec<String> = Vec::new();
+
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![:]>()?;
@@ -30,13 +35,30 @@ impl Parse for ModuleArgs {
             let types: Punctuated<Type, Token![,]> =
                 content.parse_terminated(Type::parse, Token![,])?;
 
-            match key.to_string().as_str() {
-                "providers" => providers = types.into_iter().collect(),
-                "controllers" => controllers = types.into_iter().collect(),
-                "imports" => imports = types.into_iter().collect(),
-                "exports" => exports = types.into_iter().collect(),
-                _ => {}
+            let key_name = key.to_string();
+            if seen.contains(&key_name) {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("duplicate module key `{key_name}`"),
+                ));
             }
+
+            let slot = match key_name.as_str() {
+                "providers" => &mut providers,
+                "controllers" => &mut controllers,
+                "imports" => &mut imports,
+                "exports" => &mut exports,
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "unknown module key `{other}` (expected providers, controllers, imports or exports)"
+                        ),
+                    ));
+                }
+            };
+            *slot = types.into_iter().collect();
+            seen.push(key_name);
 
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
@@ -342,4 +364,31 @@ pub fn module_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_keys_are_collected() {
+        let args: ModuleArgs =
+            syn::parse_str("providers: [A, B], controllers: [C]").expect("must parse");
+        assert_eq!(args.providers.len(), 2);
+        assert_eq!(args.controllers.len(), 1);
+        assert!(args.imports.is_empty());
+        assert!(args.exports.is_empty());
+    }
+
+    #[test]
+    fn a_mistyped_key_is_rejected() {
+        // `provider:` (singular) used to register nothing and only fail at
+        // request time with a DI error.
+        assert!(syn::parse_str::<ModuleArgs>("provider: [A]").is_err());
+    }
+
+    #[test]
+    fn a_duplicate_key_is_rejected() {
+        assert!(syn::parse_str::<ModuleArgs>("providers: [A], providers: [B]").is_err());
+    }
 }

@@ -161,7 +161,14 @@ pub struct SecurityMiddleware {
 }
 
 impl SecurityMiddleware {
-    /// Create a new security middleware with no protections enabled
+    /// Create a new security middleware with the always-safe headers enabled
+    ///
+    /// `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+    /// `X-Content-Type-Options: nosniff`, `X-Download-Options: noopen` and
+    /// `X-Permitted-Cross-Domain-Policies: none` are on, since none of them can
+    /// break an application. The headers that need per-deployment tuning — CSP,
+    /// HSTS and Expect-CT — are off until configured, as is the legacy XSS
+    /// auditor.
     pub fn new() -> Self {
         Self {
             csp: None,

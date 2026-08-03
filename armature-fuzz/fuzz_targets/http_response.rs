@@ -20,11 +20,15 @@ struct FuzzResponse {
 }
 
 fuzz_target!(|data: FuzzResponse| {
+    if data.body.len() > 1_000_000 {
+        return;
+    }
+
     // Clamp status code to valid HTTP range
     let status = data.status.clamp(100, 599);
 
     // Create response - should not panic
-    let mut response = HttpResponse::new(status, Bytes::from(data.body.clone()));
+    let mut response = HttpResponse::new(status).with_bytes_body(Bytes::from(data.body.clone()));
 
     // Add headers - should handle arbitrary header names/values
     for (key, value) in &data.headers {
@@ -45,6 +49,9 @@ fuzz_target!(|data: FuzzResponse| {
     let _ = HttpResponse::internal_server_error();
     let _ = HttpResponse::bad_request();
 
+    // The `Vec<u8>` body setter takes a different path than `with_bytes_body`.
+    let _ = HttpResponse::new(status).with_body(data.body.clone());
+
     // Test JSON response with arbitrary body
     if !data.body.is_empty() {
         // Try to interpret body as JSON - should not panic
@@ -53,4 +60,3 @@ fuzz_target!(|data: FuzzResponse| {
         }
     }
 });
-

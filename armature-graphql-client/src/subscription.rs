@@ -20,9 +20,12 @@ use crate::{GraphQLResponse, Result};
 ///
 /// A subscription can be cancelled by the client at any time, either explicitly
 /// via [`SubscriptionStream::unsubscribe`] or implicitly by dropping the stream.
-/// In both cases a graphql-ws `complete` message carrying this subscription's id
-/// is sent to the server so it can stop producing events, rather than the
-/// connection just going away. The `complete` is sent at most once.
+/// In both cases the client makes a best-effort attempt to send a graphql-ws
+/// `complete` message carrying this subscription's id, so the server can stop
+/// producing events rather than the connection just going away. The `complete`
+/// is attempted at most once, and is skipped entirely when there is no tokio
+/// runtime to send it on (for example when the stream is dropped on a
+/// non-runtime thread or during runtime shutdown).
 pub struct SubscriptionStream<T = Value> {
     inner: Pin<Box<dyn Stream<Item = Result<GraphQLResponse<T>>> + Send>>,
     subscription: Option<Subscription>,
@@ -68,9 +71,9 @@ impl<T> SubscriptionStream<T> {
             .is_none_or(Subscription::is_active)
     }
 
-    /// Explicitly unsubscribe: send a graphql-ws `complete` for this
-    /// subscription's id (at most once). No-op if the stream has no handle or
-    /// has already been unsubscribed.
+    /// Explicitly unsubscribe: best-effort send of a graphql-ws `complete` for
+    /// this subscription's id (attempted at most once). No-op if the stream has
+    /// no handle or has already been unsubscribed.
     pub fn unsubscribe(&mut self) {
         if let Some(subscription) = self.subscription.as_mut() {
             subscription.deactivate();
@@ -109,8 +112,9 @@ impl<T: DeserializeOwned + Unpin> Stream for SubscriptionStream<T> {
 /// obtained from a live [`SubscriptionStream`] carries the wiring needed to
 /// send a client-initiated `complete` message: calling [`deactivate`] tells the
 /// server to stop producing events for this subscription. The `complete` is
-/// sent at most once, whether triggered by [`deactivate`], by
-/// [`SubscriptionStream::unsubscribe`], or by dropping the stream.
+/// attempted at most once, whether triggered by [`deactivate`], by
+/// [`SubscriptionStream::unsubscribe`], or by dropping the stream, and is
+/// best-effort — see [`SubscriptionStream`] for when it is skipped.
 ///
 /// [`deactivate`]: Subscription::deactivate
 #[derive(Clone)]
@@ -163,8 +167,9 @@ impl Subscription {
     }
 
     /// Unsubscribe: mark the subscription inactive and, if this handle is bound
-    /// to a live transport, send the graphql-ws `complete` message for its id.
-    /// Idempotent — the `complete` is emitted only on the first call.
+    /// to a live transport, make a best-effort attempt to send the graphql-ws
+    /// `complete` message for its id. Idempotent — the `complete` is attempted
+    /// only on the first call.
     pub fn deactivate(&mut self) {
         // `swap` returning the previous value guarantees exactly one caller
         // wins the transition from active→inactive and sends `complete`.

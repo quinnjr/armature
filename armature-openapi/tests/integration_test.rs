@@ -133,7 +133,7 @@ fn test_swagger_ui_response_escapes_script_but_not_backslashes() {
         .build();
     let config = SwaggerConfig::new("/api-docs", spec);
     let body_bytes = swagger_ui_response(&config).unwrap().body;
-    let body = String::from_utf8(body_bytes).unwrap();
+    let body = String::from_utf8(body_bytes.to_vec()).unwrap();
 
     // Backslash must be single-escaped by serde (`\\` in JSON text) and NOT
     // doubled again. A doubled backslash (`\\\\d+`) would corrupt the data

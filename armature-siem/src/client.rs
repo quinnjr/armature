@@ -259,11 +259,23 @@ impl SiemClient {
     }
 
     /// Add event to batch, flushing if full
+    ///
+    /// The batch length is capped at `batch_size`. In the normal course the
+    /// flush below drains it, so the cap is never reached; enforcing it makes
+    /// the invariant checked rather than assumed, and gives
+    /// [`SiemError::BatchFull`] a caller-visible meaning instead of being a
+    /// variant nothing ever constructs.
     async fn add_to_batch(&self, event: SiemEvent) -> SiemResult<()> {
+        let max_len = self.config.batch_size.max(1);
         let mut batch = self.batch.lock().await;
+
+        if batch.len() >= max_len {
+            return Err(SiemError::BatchFull(max_len));
+        }
+
         batch.push(event);
 
-        if batch.len() >= self.config.batch_size {
+        if batch.len() >= max_len {
             let events = std::mem::take(&mut *batch);
             drop(batch);
             self.flush_events(events).await?;

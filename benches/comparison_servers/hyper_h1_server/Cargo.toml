@@ -1,0 +1,20 @@
+[package]
+name = "hyper-h1-benchmark-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace root. `workspace.exclude` in the repo root covers the normal
+# checkout, but a git worktree nests this path under *another* clone's workspace,
+# where that exclude does not apply and cargo refuses to build. This makes the
+# crate buildable from anywhere, which is what a benchmark baseline needs to be.
+[workspace]
+
+# The armature-h1 baseline. Deliberately bare hyper rather than axum or another
+# framework on top of it: the claim under test is about the HTTP/1 layer, and a
+# router in the path would price routing on both sides of the comparison instead.
+[dependencies]
+hyper = { version = "1.10", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }

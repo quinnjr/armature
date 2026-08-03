@@ -18,8 +18,11 @@ name = "axum_bench"
 path = "axum_bench.rs"
 
 [dependencies]
-# Armature (full path with needed features)
-armature = { path = "../../", version = "0" }
+# Armature (full path with needed features).
+# The root package is `armature-framework`; only its `[lib]` is named
+# `armature`, so the dependency has to name the package explicitly or cargo
+# reports "no matching package named `armature`".
+armature = { package = "armature-framework", path = "../../" }
 armature-core = { path = "../../armature-core", version = "0" }
 armature-proc-macro = { path = "../../armature-proc-macro", version = "0" }
 async-trait = "0.1"

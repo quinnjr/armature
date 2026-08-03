@@ -20,12 +20,12 @@ fn request_with(
     query_params: &[(&str, &str)],
     headers: &[(&str, &str)],
 ) -> HttpRequest {
-    let mut req = HttpRequest::new("GET".to_string(), "/".to_string());
+    let mut req = HttpRequest::new("GET", "/".to_string());
     for (k, v) in path_params {
-        req.path_params.insert((*k).to_string(), (*v).to_string());
+        req.push_param(k, armature_core::Bytes::copy_from_slice(v.as_bytes()));
     }
     for (k, v) in query_params {
-        req.query_params.insert((*k).to_string(), (*v).to_string());
+        req.push_query_param(*k, *v);
     }
     for (k, v) in headers {
         req.headers.insert(*k, *v);

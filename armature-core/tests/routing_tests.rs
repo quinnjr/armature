@@ -24,7 +24,7 @@ async fn test_static_route() {
         constraints: None,
     });
 
-    let request = HttpRequest::new("GET".to_string(), "/hello".to_string());
+    let request = HttpRequest::new("GET", "/hello".to_string());
     let response = router.route(request).await.unwrap();
 
     assert_eq!(response.status, 200);
@@ -48,7 +48,7 @@ async fn test_path_parameter() {
         constraints: None,
     });
 
-    let request = HttpRequest::new("GET".to_string(), "/users/123".to_string());
+    let request = HttpRequest::new("GET", "/users/123".to_string());
     let response = router.route(request).await.unwrap();
 
     assert_eq!(response.status, 200);
@@ -59,7 +59,7 @@ async fn test_path_parameter() {
 async fn test_route_not_found() {
     let router = Router::new();
 
-    let request = HttpRequest::new("GET".to_string(), "/nonexistent".to_string());
+    let request = HttpRequest::new("GET", "/nonexistent".to_string());
     let result = router.route(request).await;
 
     assert!(result.is_err());
@@ -72,8 +72,8 @@ async fn test_query_parameters() {
 
     let handler: LegacyHandler = Arc::new(|req| {
         Box::pin(async move {
-            let query = req.query("q").unwrap();
-            Ok(HttpResponse::ok().with_body(query.as_bytes().to_vec()))
+            let query = req.query_param("q").unwrap().to_owned();
+            Ok(HttpResponse::ok().with_body(query.into_bytes()))
         })
     });
     router.add_route(Route {
@@ -83,7 +83,7 @@ async fn test_query_parameters() {
         constraints: None,
     });
 
-    let request = HttpRequest::new("GET".to_string(), "/search?q=rust".to_string());
+    let request = HttpRequest::new("GET", "/search?q=rust".to_string());
     let response = router.route(request).await.unwrap();
 
     assert_eq!(response.status, 200);

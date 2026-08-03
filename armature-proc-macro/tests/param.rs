@@ -15,7 +15,7 @@ fn request_with_params(pairs: &[(&str, &str)]) -> HttpRequest {
         path_params.insert(k.to_string(), v.to_string());
     }
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         "/".to_string(),
         HashMap::new(),
         vec![],

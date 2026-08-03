@@ -152,11 +152,16 @@ impl Job {
 
         self.status = JobStatus::Running;
 
-        let context = JobContext::new(
-            self.name.clone(),
-            self.next_run.unwrap_or_else(Utc::now),
-            self.execution_count,
-        );
+        let scheduled = self.next_run.unwrap_or_else(Utc::now);
+
+        // Advance the schedule at dispatch, not on completion. Advancing on
+        // completion leaves a now-past `next_run` in place for the whole
+        // duration of the run — so a long job stays due and is re-dispatched on
+        // every tick — and computes the following fire from the completion
+        // instant, which drifts the schedule by the execution time.
+        self.next_run = self.expression.next_after(scheduled);
+
+        let context = JobContext::new(self.name.clone(), scheduled, self.execution_count);
 
         let result = (self.function)(context).await;
 
@@ -166,12 +171,10 @@ impl Job {
         match result {
             Ok(()) => {
                 self.status = JobStatus::Completed;
-                self.next_run = self.expression.next();
                 Ok(())
             }
             Err(e) => {
                 self.status = JobStatus::Failed(e.to_string());
-                self.next_run = self.expression.next();
                 Err(e)
             }
         }
@@ -388,5 +391,28 @@ mod tests {
         }
 
         assert_eq!(job.execution_count, 4);
+    }
+
+    // The schedule must advance from the scheduled instant at dispatch, not
+    // from the completion instant: otherwise every run pushes the following
+    // fire out by however long the job took.
+    #[tokio::test]
+    async fn test_execute_advances_from_scheduled_instant_not_completion() {
+        let expr = CronExpression::parse("* * * * * *").unwrap();
+        let mut job = Job::new("slow", expr, |_ctx| async {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            Ok(())
+        });
+
+        let scheduled = Utc::now();
+        job.next_run = Some(scheduled);
+
+        job.execute().await.unwrap();
+
+        let next_run = job.next_run.expect("next_run must be set");
+        assert!(
+            next_run <= scheduled + chrono::Duration::seconds(1),
+            "next_run {next_run} was computed from the completion instant, not the scheduled instant {scheduled}"
+        );
     }
 }

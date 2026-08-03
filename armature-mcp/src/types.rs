@@ -254,6 +254,101 @@ impl ToolCallResult {
     }
 }
 
+/// A single argument accepted by an MCP prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// MCP prompt definition, as advertised by `prompts/list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<PromptArgument>,
+}
+
+/// Prompts list result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptsListResult {
+    pub prompts: Vec<PromptDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// `prompts/get` parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptGetParams {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+/// Who a rendered prompt message is attributed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptRole {
+    User,
+    Assistant,
+}
+
+/// A single message in a rendered prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptMessage {
+    pub role: PromptRole,
+    pub content: ContentItem,
+}
+
+impl PromptMessage {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::User,
+            content: ContentItem::text(text),
+        }
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::Assistant,
+            content: ContentItem::text(text),
+        }
+    }
+}
+
+/// `prompts/get` result: the rendered prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGetResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
+}
+
+impl PromptGetResult {
+    /// A single-message prompt attributed to the user.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            description: None,
+            messages: vec![PromptMessage::user(text)],
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
 /// MCP resource definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

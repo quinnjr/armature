@@ -175,6 +175,34 @@ pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     }
 /// }
 /// ```
+///
+/// # Parameter extractors
+///
+/// Handler parameters may be annotated with `#[body]`, `#[body("field")]`,
+/// `#[query]`, `#[query("field")]`, `#[param("name")]`, `#[header("name")]`,
+/// `#[headers]` and `#[raw_body]`. The method is rewritten to take a single
+/// `HttpRequest` and each parameter is bound from it before the body runs.
+///
+/// ```ignore
+/// #[routes]
+/// impl UserController {
+///     #[get("/:id")]
+///     async fn show(#[param("id")] id: Path<u32>) -> Result<HttpResponse, Error> {
+///         Ok(HttpResponse::ok().with_body(format!("user {}", *id).into_bytes()))
+///     }
+/// }
+/// ```
+///
+/// `#[body]`, `#[query]`, `#[headers]` and `#[raw_body]` are markers: the
+/// request source comes from the parameter's type through its `FromRequest`
+/// impl (`Body<T>`, `Query<T>`, `Headers`, `RawBody`). Pairing one of them with
+/// a different known extractor type is a compile error rather than a silent
+/// read of the wrong part of the request.
+///
+/// # Multiple routes per handler
+///
+/// A method may carry several route attributes; each one is registered
+/// separately (`#[get("/x")] #[head("/x")]` registers both).
 #[proc_macro_attribute]
 pub fn routes(attr: TokenStream, item: TokenStream) -> TokenStream {
     routes_impl::routes_impl(attr, item)
@@ -273,6 +301,10 @@ pub fn validate_derive(input: TokenStream) -> TokenStream {
 ///     Ok(HttpResponse::ok())
 /// }
 /// ```
+///
+/// Units are `s`/`secs`/`seconds`, `ms`/`millis`/`milliseconds` and
+/// `m`/`mins`/`minutes`; a bare number is seconds. An unrecognized unit is a
+/// compile error rather than a silently reinterpreted duration.
 #[proc_macro_attribute]
 pub fn timeout(attr: TokenStream, item: TokenStream) -> TokenStream {
     timeout_attr::timeout_impl(attr, item)
@@ -310,12 +342,17 @@ pub fn timeout(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 ///
 /// // Various formats supported:
-/// #[body_limit(512kb)]      // 512 kilobytes (identifier style)
+/// #[body_limit(512kb)]      // 512 kilobytes (suffixed literal)
 /// #[body_limit(kb = 512)]   // 512 kilobytes (named parameter)
+/// #[body_limit(1.5mb)]      // 1.5 megabytes (suffixed float literal)
 /// #[body_limit("1.5mb")]    // 1.5 megabytes (string with float)
 /// #[body_limit(1gb)]        // 1 gigabyte
 /// #[body_limit(bytes = 2048)] // 2048 bytes
 /// ```
+///
+/// Units are `b`/`bytes`, `k`/`kb`/`kilobytes`, `m`/`mb`/`megabytes` and
+/// `g`/`gb`/`gigabytes`; an unrecognized unit is a compile error rather than a
+/// silent fall back to bytes.
 #[proc_macro_attribute]
 pub fn body_limit(attr: TokenStream, item: TokenStream) -> TokenStream {
     body_limit_attr::body_limit_impl(attr, item)

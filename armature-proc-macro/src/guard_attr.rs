@@ -69,10 +69,10 @@ fn build_guard_wrapper(input: &ItemFn, bindings: &[TokenStream2]) -> TokenStream
     let is_async = input.sig.asyncness.is_some();
 
     if bindings.is_empty() {
-        return TokenStream::from(quote! {
-            #(#func_attrs)*
-            #func_vis #input
-        });
+        // `#input` is the whole `ItemFn` — it already carries its own
+        // attributes and visibility, so prefixing them again would emit
+        // duplicated attributes and `pub pub async fn`.
+        return TokenStream::from(quote! { #input });
     }
 
     let async_marker = if is_async {

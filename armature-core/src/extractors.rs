@@ -35,6 +35,7 @@
 //! ```
 
 use crate::{Error, HttpRequest};
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -78,7 +79,7 @@ pub trait FromRequest: Sized {
 /// // Extract in handler - zero-cost after setup
 /// #[get("/users")]
 /// async fn list_users(state: State<AppState>) -> Result<HttpResponse, Error> {
-///     let users = state.db_pool.query("SELECT * FROM users").await?;
+///     let users = state.db_pool.query_param("SELECT * FROM users").await?;
 ///     HttpResponse::json(&users)
 /// }
 /// ```
@@ -241,20 +242,10 @@ impl<T> Deref for Query<T> {
 
 impl<T: DeserializeOwned> FromRequest for Query<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from params and deserialize.
-        //
-        // `query_params` holds already percent-decoded key/value pairs, so we
-        // must re-percent-encode each component before rejoining with `=`/`&`.
-        // Otherwise a decoded value containing a literal `&` or `=` would be
-        // silently reparsed as extra/incorrect key-value pairs.
-        let query_string: String = request
-            .query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let value: T = serde_urlencoded::from_str(&query_string)
+        // Deserialize the raw query string. Going through the decoded pairs and
+        // re-joining them on `&`/`=` corrupted any value that itself contained
+        // one of those characters.
+        let value: T = serde_urlencoded::from_str(request.query_string().unwrap_or(""))
             .map_err(|e| Error::Validation(format!("Invalid query parameters: {}", e)))?;
 
         Ok(Query(value))
@@ -353,18 +344,15 @@ impl<T> Deref for PathParams<T> {
 
 impl<T: DeserializeOwned> FromRequest for PathParams<T> {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        // Build a query string from path params and deserialize.
-        //
-        // `path_params` holds already percent-decoded key/value pairs, so we
-        // must re-percent-encode each component before rejoining with `=`/`&`.
-        // Otherwise a decoded value containing a literal `&` or `=` would be
-        // silently reparsed as extra/incorrect key-value pairs.
-        let params_string: String = request
+        // Percent-encoded rather than joined by hand, so a captured segment
+        // containing `&`, `=` or `%` survives the round-trip.
+        let pairs: Vec<(&str, &str)> = request
             .path_params
             .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
+            .filter_map(|(k, v)| std::str::from_utf8(v).ok().map(|v| (*k, v)))
+            .collect();
+        let params_string = serde_urlencoded::to_string(&pairs)
+            .map_err(|e| Error::Validation(format!("Invalid path parameters: {}", e)))?;
 
         let value: T = serde_urlencoded::from_str(&params_string)
             .map_err(|e| Error::Validation(format!("Invalid path parameters: {}", e)))?;
@@ -418,11 +406,9 @@ impl Header {
 
     /// Extract a header, returning None if not present
     pub fn optional(request: &HttpRequest, name: &str) -> Option<Self> {
-        request
-            .headers
-            .get(name)
-            .or_else(|| request.headers.get(&name.to_lowercase()))
-            .map(|v| Header::new(name, v.clone()))
+        // One lookup: header names intern case-insensitively, so the
+        // lowercased retry was always redundant.
+        request.headers.get(name).map(|v| Header::new(name, v))
     }
 }
 
@@ -431,10 +417,9 @@ impl FromRequestNamed for Header {
         let value = request
             .headers
             .get(name)
-            .or_else(|| request.headers.get(&name.to_lowercase()))
             .ok_or_else(|| Error::Validation(format!("Missing header: {}", name)))?;
 
-        Ok(Header::new(name, value.clone()))
+        Ok(Header::new(name, value))
     }
 }
 
@@ -453,11 +438,23 @@ impl Deref for Header {
 pub struct Headers(pub std::collections::HashMap<String, String>);
 
 impl Headers {
-    /// Get a header value by name
+    /// Get a header value by name, case-insensitively.
     pub fn get(&self, name: &str) -> Option<&String> {
+        // Hash lookup first: `HeaderMap` emits lowercase names, so a lowercase
+        // needle — including every name this map was built from — lands here.
+        if let Some(value) = self.0.get(name) {
+            return Some(value);
+        }
+        // Otherwise walk. A hash lookup for a differently-cased name would need
+        // a lowercased copy of the needle just to compute the hash, so the
+        // "fall back" branch used to allocate on essentially every
+        // conventionally-cased call (`Content-Type`, `X-Request-ID`). A map of
+        // request headers is a handful of entries; scanning it is cheaper than
+        // the allocation was.
         self.0
-            .get(name)
-            .or_else(|| self.0.get(&name.to_lowercase()))
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v)
     }
 
     /// Check if a header exists
@@ -497,12 +494,12 @@ impl Deref for Headers {
 /// println!("Body length: {} bytes", raw.len());
 /// ```
 #[derive(Debug, Clone)]
-pub struct RawBody(pub Vec<u8>);
+pub struct RawBody(pub Bytes);
 
 impl RawBody {
     /// Create a new RawBody
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data)
+    pub fn new(data: impl Into<Bytes>) -> Self {
+        Self(data.into())
     }
 
     /// Get the body length
@@ -522,11 +519,11 @@ impl RawBody {
 
     /// Try to convert to a UTF-8 string
     pub fn to_string(&self) -> Result<String, std::string::FromUtf8Error> {
-        String::from_utf8(self.0.clone())
+        String::from_utf8(self.0.to_vec())
     }
 
     /// Get the inner bytes
-    pub fn into_inner(self) -> Vec<u8> {
+    pub fn into_inner(self) -> Bytes {
         self.0
     }
 }
@@ -622,9 +619,8 @@ impl FromRequest for ContentType {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
         let value = request
             .headers
-            .get("Content-Type")
-            .or_else(|| request.headers.get("content-type"))
-            .cloned()
+            .get("content-type")
+            .map(str::to_owned)
             .unwrap_or_default();
 
         Ok(ContentType(value))
@@ -641,11 +637,15 @@ impl Deref for ContentType {
 
 // ========== Method Extractor ==========
 
-/// Extracts the HTTP method
+/// Extracts the HTTP method.
+///
+/// Renamed from `Method` in 0.6: `armature_core::Method` is now the wire method
+/// type re-exported from `armature-h1`, and one crate root cannot hold both. The
+/// extractor is the less-used of the two names, so it is the one that moved.
 #[derive(Debug, Clone)]
-pub struct Method(pub String);
+pub struct MethodExtractor(pub crate::Method);
 
-impl Method {
+impl MethodExtractor {
     /// Check if the method is GET
     pub fn is_get(&self) -> bool {
         self.0 == "GET"
@@ -672,14 +672,14 @@ impl Method {
     }
 }
 
-impl FromRequest for Method {
+impl FromRequest for MethodExtractor {
     fn from_request(request: &HttpRequest) -> Result<Self, Error> {
-        Ok(Method(request.method.clone()))
+        Ok(MethodExtractor(request.method.clone()))
     }
 }
 
-impl Deref for Method {
-    type Target = str;
+impl Deref for MethodExtractor {
+    type Target = crate::Method;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -772,15 +772,12 @@ mod tests {
     use serde::Deserialize;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET".to_string(), "/users/123".to_string());
-        req.path_params.insert("id".to_string(), "123".to_string());
-        req.query_params.insert("page".to_string(), "1".to_string());
-        req.query_params
-            .insert("limit".to_string(), "10".to_string());
+        let mut req = HttpRequest::new("GET", "/users/123?page=1&limit=10");
+        req.push_param("id", "123");
         req.headers
-            .insert("Authorization".to_string(), "Bearer token123".to_string());
+            .insert("Authorization", "Bearer token123".to_string());
         req.headers
-            .insert("Content-Type".to_string(), "application/json".to_string());
+            .insert("Content-Type", "application/json".to_string());
         req
     }
 
@@ -843,17 +840,9 @@ mod tests {
 
     #[test]
     fn test_query_extraction_with_ampersand_and_equals_in_value() {
-        // Regression test: `query_params` stores already percent-decoded
-        // values. A decoded value containing a literal `&` or `=` (e.g. the
-        // original request was `?note=1%26b%3D2`) must not be corrupted when
-        // rejoined into a query string for deserialization.
-        let mut request = HttpRequest::new("GET".to_string(), "/items".to_string());
-        request
-            .query_params
-            .insert("note".to_string(), "1&b=2".to_string());
-        request
-            .query_params
-            .insert("name".to_string(), "a=b&c".to_string());
+        // Regression test: a value containing a literal `&` or `=` arrives
+        // percent-encoded on the wire and must survive deserialization intact.
+        let request = HttpRequest::new("GET", "/items?note=1%26b%3D2&name=a%3Db%26c");
 
         #[derive(Debug, Deserialize, PartialEq)]
         struct Filters {
@@ -870,10 +859,8 @@ mod tests {
     fn test_path_params_extraction_with_ampersand_and_equals_in_value() {
         // Regression test: same corruption risk as query params, but for
         // path params extracted via `PathParams<T>`.
-        let mut request = HttpRequest::new("GET".to_string(), "/items/x".to_string());
-        request
-            .path_params
-            .insert("slug".to_string(), "a&b=c".to_string());
+        let mut request = HttpRequest::new("GET", "/items/x");
+        request.push_param("slug", Bytes::from_static(b"a&b=c"));
 
         #[derive(Debug, Deserialize, PartialEq)]
         struct Params {
@@ -887,11 +874,13 @@ mod tests {
     #[test]
     fn test_body_extraction() {
         let mut request = create_request();
-        request.body = serde_json::to_vec(&serde_json::json!({
-            "name": "Test",
-            "email": "test@example.com"
-        }))
-        .unwrap();
+        request.body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "name": "Test",
+                "email": "test@example.com"
+            }))
+            .unwrap(),
+        );
 
         #[derive(Debug, Deserialize)]
         struct CreateUser {
@@ -907,7 +896,7 @@ mod tests {
     #[test]
     fn test_raw_body() {
         let mut request = create_request();
-        request.body = b"raw content".to_vec();
+        request.body = Bytes::from_static(b"raw content");
 
         let raw: RawBody = RawBody::from_request(&request).unwrap();
         assert_eq!(raw.len(), 11);
@@ -927,7 +916,7 @@ mod tests {
     #[test]
     fn test_method() {
         let request = create_request();
-        let method: Method = Method::from_request(&request).unwrap();
+        let method: MethodExtractor = MethodExtractor::from_request(&request).unwrap();
 
         assert!(method.is_get());
         assert!(!method.is_post());

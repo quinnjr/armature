@@ -151,8 +151,7 @@ macro_rules! internal_error {
 #[macro_export]
 macro_rules! path_param {
     ($req:expr, $name:expr) => {{
-        $req.path_params
-            .get($name)
+        $req.param($name)
             .ok_or_else(|| {
                 armature_core::Error::BadRequest(format!("Missing path parameter: {}", $name))
             })?
@@ -176,7 +175,7 @@ macro_rules! path_param {
 /// ```
 #[macro_export]
 macro_rules! query_param {
-    ($req:expr, $name:expr) => {{ $req.query_params.get($name).and_then(|v| v.parse().ok()) }};
+    ($req:expr, $name:expr) => {{ $req.query_param($name).and_then(|v| v.parse().ok()) }};
 }
 
 /// Extract header value
@@ -297,8 +296,7 @@ macro_rules! path_params {
             (
                 $(
                     {
-                        $req.path_params
-                            .get($name)
+                        $req.param($name)
                             .ok_or_else(|| armature_core::Error::BadRequest(
                                 format!("Missing path parameter: {}", $name)
                             ))?

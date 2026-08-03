@@ -105,10 +105,15 @@ fuzz_target!(|data: FuzzPathParams| {
         let _ = params.len();
         for (k, v) in &params {
             let _ = k.len();
-            let _ = v.parse::<i32>();
-            let _ = v.parse::<u64>();
-            let _ = v.parse::<f64>();
             let _ = v.is_empty();
+            // Captured values are raw `Bytes` now, so parsing one is exactly
+            // what a handler does: decode first, and a non-UTF-8 capture simply
+            // has no numeric interpretation.
+            if let Ok(s) = std::str::from_utf8(v) {
+                let _ = s.parse::<i32>();
+                let _ = s.parse::<u64>();
+                let _ = s.parse::<f64>();
+            }
         }
     }
 

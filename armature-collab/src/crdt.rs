@@ -402,9 +402,22 @@ impl<K: Eq + Hash + Clone, V: Clone> LwwMap<K, V> {
     }
 
     /// Remove a key
+    ///
+    /// A removal for a key this replica has never observed still records a
+    /// tombstone. Replicas receive operations out of order, so a causally later
+    /// `remove` routinely arrives before the `set` it supersedes; dropping it
+    /// as a no-op let the subsequent lower-timestamped `set` win forever, and
+    /// the two replicas then disagreed permanently — the one thing a CRDT
+    /// exists to prevent.
     pub fn remove(&mut self, key: &K, timestamp: LogicalClock) {
-        if let Some(register) = self.entries.get_mut(key) {
-            register.set(None, timestamp);
+        match self.entries.get_mut(key) {
+            Some(register) => {
+                register.set(None, timestamp);
+            }
+            None => {
+                self.entries
+                    .insert(key.clone(), LwwRegister::new(None, timestamp));
+            }
         }
     }
 
@@ -566,5 +579,51 @@ mod tests {
 
         map.remove(&"age", clock.tick());
         assert_eq!(map.get(&"age"), None);
+    }
+
+    /// A removal delivered before the add it supersedes must still win.
+    ///
+    /// Against the old `remove` — which was a no-op for an unobserved key — the
+    /// tombstone was dropped and the causally earlier `set` won forever.
+    #[test]
+    fn test_lwwmap_remove_before_add_is_not_lost() {
+        let replica = ReplicaId::new();
+        let mut map: LwwMap<&str, &str> = LwwMap::new();
+
+        // The remove happens at t=2 but is delivered first.
+        map.remove(&"name", LogicalClock::new(2, replica));
+        assert_eq!(map.get(&"name"), None);
+
+        // The causally earlier add arrives afterwards and must not resurrect
+        // the key.
+        map.set("name", "Alice", LogicalClock::new(1, replica));
+        assert_eq!(map.get(&"name"), None);
+        assert!(!map.contains_key(&"name"));
+        assert!(map.is_empty());
+
+        // A genuinely later add does take effect.
+        map.set("name", "Bob", LogicalClock::new(3, replica));
+        assert_eq!(map.get(&"name"), Some(&"Bob"));
+    }
+
+    /// The tombstone from an unobserved key must also survive a merge, so a
+    /// replica that never saw the remove converges on the removal.
+    #[test]
+    fn test_lwwmap_unobserved_remove_survives_merge() {
+        let replica = ReplicaId::new();
+
+        let mut remover: LwwMap<&str, &str> = LwwMap::new();
+        remover.remove(&"name", LogicalClock::new(2, replica));
+
+        let mut adder: LwwMap<&str, &str> = LwwMap::new();
+        adder.set("name", "Alice", LogicalClock::new(1, replica));
+        assert_eq!(adder.get(&"name"), Some(&"Alice"));
+
+        adder.merge(&remover);
+        assert_eq!(adder.get(&"name"), None);
+
+        // Convergence: merging the other direction agrees.
+        remover.merge(&adder);
+        assert_eq!(remover.get(&"name"), None);
     }
 }

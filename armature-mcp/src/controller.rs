@@ -58,17 +58,20 @@ impl McpController {
 
     /// Handle POST /mcp - JSON-RPC endpoint
     pub async fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let body = String::from_utf8(req.body.clone())
-            .map_err(|e| Error::BadRequest(format!("Invalid UTF-8: {}", e)))?;
-
         // The MCP auth chain is HashMap-typed throughout; convert the request's
         // HeaderMap to a HashMap at this boundary.
         let headers: std::collections::HashMap<String, String> = req.headers.clone().into();
-        let response_json = self.service.handle_json(&body, &headers).await;
 
-        Ok(HttpResponse::ok()
-            .with_header("Content-Type".to_string(), "application/json".to_string())
-            .with_body(response_json.into_bytes()))
+        // Parsed straight out of the request's `Bytes` body: no UTF-8 copy
+        // and no intermediate `String` on the hot path.
+        match self.service.handle_bytes(&req.body, &headers).await {
+            Some(response_json) => Ok(HttpResponse::ok()
+                .with_header("Content-Type".to_string(), "application/json".to_string())
+                .with_body(response_json.into_bytes())),
+            // JSON-RPC 2.0 §4.1: a notification gets no reply at all, so
+            // there is no body to send back.
+            None => Ok(HttpResponse::no_content()),
+        }
     }
 
     /// Authenticate a GET request against the configured [`McpAuthConfig`],
@@ -93,6 +96,7 @@ impl McpController {
         let config = self.service.config();
         let tools = self.service.list_tools();
         let resources = self.service.list_resources();
+        let prompts = self.service.list_prompts();
 
         let info = serde_json::json!({
             "name": config.server_name,
@@ -105,6 +109,7 @@ impl McpController {
             },
             "tools_count": tools.len(),
             "resources_count": resources.len(),
+            "prompts_count": prompts.len(),
             "endpoints": {
                 "jsonrpc": "POST /mcp",
                 "info": "GET /mcp",
@@ -285,14 +290,50 @@ mod tests {
     }
 
     fn get_request(path: &str) -> HttpRequest {
-        HttpRequest::new("GET".to_string(), path.to_string())
+        HttpRequest::new("GET", path.to_string())
     }
 
     fn get_request_with_auth(path: &str, header_value: &str) -> HttpRequest {
         let mut req = get_request(path);
         req.headers
-            .insert("Authorization".to_string(), header_value.to_string());
+            .insert("Authorization", header_value.to_string());
         req
+    }
+
+    fn post_request(body: &str) -> HttpRequest {
+        let mut req = HttpRequest::new("POST", "/mcp".to_string());
+        req.set_body(body.as_bytes().to_vec());
+        req
+    }
+
+    /// JSON-RPC 2.0 §4.1: a notification (no `id`) gets no reply. Over HTTP
+    /// that means an empty 204, not a `-32601` JSON body.
+    #[tokio::test]
+    async fn post_notification_returns_204_with_no_body() {
+        let controller = McpController::new();
+
+        let resp = controller
+            .handle_request(post_request(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 204);
+        assert!(resp.body.is_empty(), "a notification must get no body");
+    }
+
+    #[tokio::test]
+    async fn post_request_with_id_still_returns_a_json_body() {
+        let controller = McpController::new();
+
+        let resp = controller
+            .handle_request(post_request(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert!(body_json(&resp).get("result").is_some());
     }
 
     #[tokio::test]

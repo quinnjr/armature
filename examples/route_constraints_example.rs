@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/users/:id".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let id = req.path_params.get("id").unwrap();
+                let id = req.param("id").unwrap();
                 info!("✓ Valid user ID: {}", id);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/resources/:uuid".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let uuid = req.path_params.get("uuid").unwrap();
+                let uuid = req.param("uuid").unwrap();
                 info!("✓ Valid UUID: {}", uuid);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/users/:name/posts".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let name = req.path_params.get("name").unwrap();
+                let name = req.param("name").unwrap();
                 info!("✓ Valid username: {}", name);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/posts/:page/comments".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let page = req.path_params.get("page").unwrap();
+                let page = req.param("page").unwrap();
                 info!("✓ Valid page number: {}", page);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/products/:status".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let status = req.path_params.get("status").unwrap();
+                let status = req.param("status").unwrap();
                 info!("✓ Valid status: {}", status);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -175,8 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/api/:version/users/:id".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let version = req.path_params.get("version").unwrap();
-                let id = req.path_params.get("id").unwrap();
+                let version = req.param("version").unwrap();
+                let id = req.param("id").unwrap();
                 info!("✓ Valid version: {}, id: {}", version, id);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/notify/:email".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let email = req.path_params.get("email").unwrap();
+                let email = req.param("email").unwrap();
                 info!("✓ Valid email: {}", email);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/codes/:code".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let code = req.path_params.get("code").unwrap();
+                let code = req.param("code").unwrap();
                 info!("✓ Valid code: {}", code);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
@@ -244,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/shipping/:zip".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let zip = req.path_params.get("zip").unwrap();
+                let zip = req.param("zip").unwrap();
                 info!("✓ Valid ZIP code: {}", zip);
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({

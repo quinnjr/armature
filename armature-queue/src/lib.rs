@@ -9,6 +9,17 @@
 //! - 📊 Job progress tracking
 //! - 🎯 Multiple queues
 //! - 👷 Worker pools
+//! - ♻️ Stale-claim reclaim for jobs orphaned by a crashed worker
+//!
+//! ## Delivery semantics
+//!
+//! Delivery is **at-least-once**, so job handlers must be idempotent. A worker
+//! that is SIGKILLed (or whose handler task panics) after its side effects but
+//! before `complete()` is indistinguishable from one that died before them, so
+//! [`Queue::reclaim_stale`] returns the job to its pending queue and it runs
+//! again. [`Worker::start`] runs that reaper in the background on
+//! [`WorkerConfig::visibility_timeout`]; without it such a job would sit in the
+//! `processing` set forever, never retried and never dead-lettered.
 //!
 //! ## Quick Start - Job Creation
 //!

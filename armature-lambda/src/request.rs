@@ -5,6 +5,7 @@ use lambda_http::aws_lambda_events::apigw::ApiGatewayRequestAuthorizer;
 use lambda_http::aws_lambda_events::query_map::QueryMap;
 use lambda_http::{Request, RequestExt};
 use std::collections::HashMap;
+use tracing::warn;
 
 /// Wrapper for Lambda HTTP requests.
 pub struct LambdaRequest {
@@ -14,8 +15,12 @@ pub struct LambdaRequest {
     pub path: String,
     /// Query string.
     pub query_string: Option<String>,
-    /// Headers.
-    pub headers: HashMap<String, String>,
+    /// Headers, in the order they arrived.
+    ///
+    /// A list rather than a map because a request may legitimately carry the
+    /// same field name more than once (`Cookie`, `X-Forwarded-For`, `Via`), and
+    /// a map would keep only the last of them.
+    pub headers: Vec<(String, String)>,
     /// Request body.
     pub body: Bytes,
     /// Path parameters (from API Gateway).
@@ -57,11 +62,19 @@ impl LambdaRequest {
 
         let (parts, body) = request.into_parts();
 
-        // Extract headers
-        let mut headers = HashMap::new();
+        // Extract headers. `HeaderMap::iter` yields one entry per value, so
+        // repeated field names survive into the list intact.
+        let mut headers = Vec::with_capacity(parts.headers.len());
         for (name, value) in parts.headers.iter() {
-            if let Ok(v) = value.to_str() {
-                headers.insert(name.to_string(), v.to_string());
+            match value.to_str() {
+                Ok(v) => headers.push((name.as_str().to_string(), v.to_string())),
+                // The facade hands out `&str`, so a value that is not UTF-8
+                // cannot be represented. Say so instead of dropping it in
+                // silence — an unexplained missing header is very hard to debug.
+                Err(_) => warn!(
+                    header = %name,
+                    "Dropping request header with a non-UTF-8 value"
+                ),
             }
         }
 
@@ -122,12 +135,21 @@ impl LambdaRequest {
         }
     }
 
-    /// Get a header value.
+    /// Get the first value for a header, matched case-insensitively.
     pub fn header(&self, name: &str) -> Option<&str> {
+        self.header_values(name).next()
+    }
+
+    /// Get every value for a header, in arrival order, matched
+    /// case-insensitively. Use this for names that legitimately repeat.
+    pub fn header_values<'a, 'n>(
+        &'a self,
+        name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
         self.headers
-            .get(&name.to_lowercase())
-            .or_else(|| self.headers.get(name))
-            .map(|s| s.as_str())
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 
     /// Get the content type.
@@ -358,6 +380,25 @@ mod tests {
         assert_eq!(
             req.request_context.user_agent.as_deref(),
             Some("test-agent/1.0")
+        );
+    }
+
+    #[test]
+    fn repeated_request_headers_are_all_preserved() {
+        let req = LambdaRequest::from_lambda_request(
+            http::Request::builder()
+                .method("GET")
+                .uri("https://api.example.com/x")
+                .header("cookie", "a=1")
+                .header("cookie", "b=2")
+                .body(Body::Empty)
+                .unwrap(),
+        );
+
+        assert_eq!(req.header("cookie"), Some("a=1"));
+        assert_eq!(
+            req.header_values("Cookie").collect::<Vec<_>>(),
+            ["a=1", "b=2"]
         );
     }
 

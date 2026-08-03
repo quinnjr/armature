@@ -1,3 +1,14 @@
+//! Queue and cron primitive benchmarks.
+//!
+//! Times `armature-queue` job/config construction and serialization, and
+//! `armature-cron` expression parsing and next-occurrence computation. No
+//! broker, scheduler or storage backend is involved - these are the in-process
+//! data structures only.
+//!
+//! ```bash
+//! cargo bench --bench data_benchmarks
+//! ```
+
 #![allow(deprecated)]
 #![allow(clippy::needless_question_mark)]
 

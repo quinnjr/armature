@@ -1,7 +1,7 @@
 //! OpenSearch client implementation.
 
 use crate::{
-    bulk::{BulkOperation, BulkResponse},
+    bulk::{BulkOperation, BulkResponse, bulk_chunk_ranges, bulk_item_error},
     config::OpenSearchConfig,
     document::Document,
     error::{OpenSearchError, Result, error_reason, json_or_error},
@@ -17,6 +17,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The NDJSON lines of a single `_bulk` request body, in the shape the
+/// `opensearch` crate's `bulk()` builder accepts.
+type BulkBody = Vec<opensearch::http::request::JsonBody<Value>>;
 
 /// OpenSearch client for document operations.
 #[derive(Clone)]
@@ -426,6 +430,17 @@ impl OpenSearchClient {
     // =========================================================================
 
     /// Bulk index documents.
+    ///
+    /// The batch is split into as many `_bulk` requests as it takes to keep
+    /// each one under both [`BULK_MAX_DOCS_PER_REQUEST`](crate::BULK_MAX_DOCS_PER_REQUEST)
+    /// and [`BULK_MAX_BYTES_PER_REQUEST`](crate::BULK_MAX_BYTES_PER_REQUEST);
+    /// see those constants for why the client bounds the request rather than
+    /// trusting the caller's batch size.
+    ///
+    /// Consequently the call is **not atomic**: when it fails, the chunks that
+    /// were already accepted stay applied. The returned
+    /// [`OpenSearchError::BulkError`] reports the aggregate counts so the
+    /// caller can tell how much landed.
     pub async fn bulk_index<T: Document>(&self, docs: Vec<(String, T)>) -> Result<usize> {
         if docs.is_empty() {
             return Ok(0);
@@ -434,59 +449,32 @@ impl OpenSearchClient {
         let index = T::index_name();
         debug!("Bulk indexing {} documents in index {}", docs.len(), index);
 
-        // Build body as Vec of BulkOperation bytes
-        let mut body: Vec<opensearch::http::request::JsonBody<Value>> =
-            Vec::with_capacity(docs.len() * 2);
+        // Render every document up front so each chunk's body size is known
+        // before it is sent. The action line's size is folded in with it.
+        let mut lines: Vec<(Value, Value)> = Vec::with_capacity(docs.len());
+        let mut sizes: Vec<usize> = Vec::with_capacity(docs.len());
         for (id, doc) in &docs {
-            body.push(json!({ "index": { "_index": index, "_id": id } }).into());
-            body.push(serde_json::to_value(doc)?.into());
+            let action = json!({ "index": { "_index": index, "_id": id } });
+            let source = serde_json::to_value(doc)?;
+            sizes.push(action.to_string().len() + source.to_string().len());
+            lines.push((action, source));
         }
 
-        let response = self
-            .client
-            .bulk(opensearch::BulkParts::None)
-            .body(body)
-            .send()
-            .await?;
-
-        let status = response.status_code();
-        let result: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(error_reason(&result)));
-        }
-
-        if result["errors"].as_bool().unwrap_or(false) {
-            let items = result["items"].as_array();
-            let mut errors = Vec::new();
-            let mut failed = 0;
-
-            if let Some(items) = items {
-                for item in items {
-                    if let Some(error) = item["index"]["error"].as_object() {
-                        failed += 1;
-                        errors.push(
-                            error
-                                .get("reason")
-                                .and_then(|r| r.as_str())
-                                .unwrap_or("Unknown error")
-                                .to_string(),
-                        );
-                    }
-                }
+        self.send_bulk_chunks(docs.len(), &sizes, |range| {
+            let mut body: BulkBody = Vec::with_capacity(range.len() * 2);
+            for (action, source) in &lines[range] {
+                body.push(action.clone().into());
+                body.push(source.clone().into());
             }
-
-            return Err(OpenSearchError::BulkError {
-                succeeded: docs.len() - failed,
-                failed,
-                errors,
-            });
-        }
-
-        Ok(docs.len())
+            body
+        })
+        .await
     }
 
     /// Bulk delete documents.
+    ///
+    /// Chunked exactly like [`Self::bulk_index`], with the same non-atomic
+    /// failure semantics.
     pub async fn bulk_delete<T: Document>(&self, ids: Vec<String>) -> Result<usize> {
         if ids.is_empty() {
             return Ok(0);
@@ -495,55 +483,95 @@ impl OpenSearchClient {
         let index = T::index_name();
         debug!("Bulk deleting {} documents from index {}", ids.len(), index);
 
-        // Build body as Vec of BulkOperation bytes
-        let mut body: Vec<opensearch::http::request::JsonBody<Value>> =
-            Vec::with_capacity(ids.len());
+        let mut lines: Vec<Value> = Vec::with_capacity(ids.len());
+        let mut sizes: Vec<usize> = Vec::with_capacity(ids.len());
         for id in &ids {
-            body.push(json!({ "delete": { "_index": index, "_id": id } }).into());
+            let action = json!({ "delete": { "_index": index, "_id": id } });
+            sizes.push(action.to_string().len());
+            lines.push(action);
         }
 
-        let response = self
-            .client
-            .bulk(opensearch::BulkParts::None)
-            .body(body)
-            .send()
-            .await?;
+        self.send_bulk_chunks(ids.len(), &sizes, |range| {
+            lines[range].iter().cloned().map(Into::into).collect()
+        })
+        .await
+    }
 
-        let status = response.status_code();
-        let result: Value = response.json().await?;
-
-        if !status.is_success() {
-            return Err(OpenSearchError::Internal(error_reason(&result)));
+    /// Issue one `_bulk` request per chunk of `sizes` and aggregate the
+    /// outcomes into a single success count or [`OpenSearchError::BulkError`].
+    ///
+    /// `build_body` renders the NDJSON lines for one chunk, identified by its
+    /// half-open range over the original document order.
+    async fn send_bulk_chunks(
+        &self,
+        total: usize,
+        sizes: &[usize],
+        build_body: impl Fn(std::ops::Range<usize>) -> BulkBody,
+    ) -> Result<usize> {
+        let chunks = bulk_chunk_ranges(sizes);
+        if chunks.len() > 1 {
+            debug!(
+                "Splitting {} bulk documents across {} _bulk requests",
+                total,
+                chunks.len()
+            );
         }
 
-        if result["errors"].as_bool().unwrap_or(false) {
-            let items = result["items"].as_array();
-            let mut errors = Vec::new();
-            let mut failed = 0;
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+        let mut errors: Vec<String> = Vec::new();
 
-            if let Some(items) = items {
-                for item in items {
-                    if let Some(error) = item["delete"]["error"].as_object() {
-                        failed += 1;
-                        errors.push(
-                            error
-                                .get("reason")
-                                .and_then(|r| r.as_str())
-                                .unwrap_or("Unknown error")
-                                .to_string(),
-                        );
-                    }
-                }
+        for chunk in chunks {
+            let chunk_len = chunk.len();
+
+            let response = self
+                .client
+                .bulk(opensearch::BulkParts::None)
+                .body(build_body(chunk))
+                .send()
+                .await?;
+
+            let status = response.status_code();
+            let result: Value = response.json().await?;
+
+            if !status.is_success() {
+                // A rejected request (413, 429, 503, ...) takes the whole chunk
+                // with it, so every document in it failed. Stop here rather
+                // than pushing the remaining chunks at a cluster that just
+                // refused one, and report what earlier chunks already applied.
+                failed += chunk_len;
+                errors.push(error_reason(&result));
+                return Err(OpenSearchError::BulkError {
+                    succeeded,
+                    failed,
+                    errors,
+                });
             }
 
+            if result["errors"].as_bool().unwrap_or(false) {
+                let mut chunk_failed = 0usize;
+                for item in result["items"].as_array().into_iter().flatten() {
+                    if let Some(reason) = bulk_item_error(item) {
+                        chunk_failed += 1;
+                        errors.push(reason);
+                    }
+                }
+                failed += chunk_failed;
+                succeeded += chunk_len.saturating_sub(chunk_failed);
+            } else {
+                succeeded += chunk_len;
+            }
+        }
+
+        if failed > 0 {
             return Err(OpenSearchError::BulkError {
-                succeeded: ids.len() - failed,
+                succeeded,
                 failed,
                 errors,
             });
         }
 
-        Ok(ids.len())
+        Ok(succeeded)
     }
 
     /// Execute a batch of mixed bulk operations (index/create/update/delete) in a

@@ -209,35 +209,119 @@ pub enum AckMode {
     /// Automatically acknowledge messages after successful processing
     #[default]
     Auto,
-    /// Manually acknowledge messages
+    /// Defer acknowledgment to the consumer's own commit point rather than
+    /// acknowledging each message as it is handled.
+    ///
+    /// Supported **only by the Kafka backend**, where it disables auto-commit
+    /// and commits offsets explicitly after the handler reports success.
+    ///
+    /// [`Message`] carries no delivery tag or receipt handle, so there is no
+    /// surface through which a caller could acknowledge a message themselves.
+    /// On RabbitMQ, SQS, and NATS this mode is therefore *rejected* with
+    /// [`MessagingError::Unsupported`] at subscribe time rather than silently
+    /// behaving as [`AckMode::Auto`] -- a caller who believes they took manual
+    /// control of acknowledgment must not be told everything is fine while the
+    /// backend acknowledges on their behalf.
     Manual,
     /// No acknowledgment required
     None,
 }
 
+/// Reject [`AckMode::Manual`] on a backend that has no way to honor it.
+///
+/// See [`AckMode::Manual`]: there is no manual-ack surface on [`Message`], so
+/// on every backend except Kafka this mode can only be approximated by
+/// [`AckMode::Auto`]. Aliasing silently is the one outcome that must not
+/// happen, so the subscription fails loudly instead.
+#[cfg(any(
+    feature = "aws",
+    feature = "nats",
+    feature = "rabbitmq",
+    feature = "mq-bridge"
+))]
+pub(crate) fn reject_manual_ack(backend: &str, ack_mode: AckMode) -> Result<(), MessagingError> {
+    if ack_mode == AckMode::Manual {
+        return Err(MessagingError::Unsupported(format!(
+            "{backend} cannot honor AckMode::Manual: `Message` exposes no delivery tag or \
+             receipt handle to acknowledge with, so the backend would have to acknowledge on \
+             your behalf. Use AckMode::Auto (acknowledge on handler success), AckMode::None \
+             (never acknowledge), or the Kafka backend, which supports manual offset commits."
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a [`SubscribeOptions::filter`] on a backend that ignores it.
+///
+/// No backend currently applies this field. A caller who sets it and receives
+/// every message anyway has silently lost the narrowing they asked for, which
+/// is worse than being told up front that it is not implemented.
+#[cfg(any(
+    feature = "aws",
+    feature = "nats",
+    feature = "rabbitmq",
+    feature = "kafka",
+    feature = "mq-bridge"
+))]
+pub(crate) fn reject_filter(backend: &str, filter: Option<&String>) -> Result<(), MessagingError> {
+    if let Some(filter) = filter {
+        return Err(MessagingError::Unsupported(format!(
+            "{backend} does not apply SubscribeOptions::filter (requested {filter:?}); the \
+             subscription would receive every message on the topic. Narrow the subscription at \
+             the broker instead (e.g. a NATS wildcard subject, a RabbitMQ binding key, or an \
+             SNS subscription filter policy), or filter inside your MessageHandler."
+        )));
+    }
+    Ok(())
+}
+
 /// Result of processing a message
+///
+/// `DeadLetter` and `Reject` are deliberately distinct and must not be
+/// collapsed by a backend: `DeadLetter` means "preserve this message for
+/// inspection", `Reject` means "discard it". A backend that has no way to
+/// preserve the message should say so rather than silently discarding it,
+/// which would be indistinguishable from `Success`.
 #[derive(Debug, Clone)]
 pub enum ProcessingResult {
     /// Message was processed successfully
     Success,
     /// Message processing failed, should be retried
     Retry,
-    /// Message processing failed, should be dead-lettered
+    /// Message processing failed; preserve it in a dead-letter destination
+    /// rather than discarding it.
+    ///
+    /// How this is realized is backend-specific:
+    /// - **RabbitMQ**: `basic_nack` with `requeue = false`, which routes to the
+    ///   queue's configured dead-letter exchange.
+    /// - **SQS**: the message is intentionally *not* deleted, and its
+    ///   visibility timeout is reset to zero. SQS only moves a message to a
+    ///   dead-letter queue after `maxReceiveCount` redeliveries, so deleting it
+    ///   would prevent it ever reaching the DLQ. This therefore requires a
+    ///   redrive policy on the queue; without one the message is redelivered
+    ///   indefinitely.
     DeadLetter,
-    /// Message should be rejected and discarded
+    /// Message should be rejected and discarded permanently, with no
+    /// dead-letter preservation.
     Reject,
 }
 
 /// Trait for handling received messages
+///
+/// Note there is deliberately no deserialization-failure hook. Every backend
+/// converts a broker delivery into a [`Message`] infallibly -- the payload is
+/// handed over as raw bytes and is never parsed by the framework -- so any
+/// deserialization happens inside your own [`handle`] via
+/// [`Message::parse_json`] (or your own decoder). Decide what a malformed
+/// payload should do by returning the appropriate [`ProcessingResult`] from
+/// `handle`; a hook the framework could never call would only look like it
+/// worked.
+///
+/// [`handle`]: MessageHandler::handle
 #[async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
     /// Handle a received message
     async fn handle(&self, message: Message) -> Result<ProcessingResult, MessagingError>;
-
-    /// Called when a message cannot be deserialized
-    async fn on_deserialize_error(&self, _error: &MessagingError) -> ProcessingResult {
-        ProcessingResult::DeadLetter
-    }
 }
 
 /// Function-based message handler
@@ -318,7 +402,15 @@ pub struct SubscribeOptions {
     pub ack_mode: AckMode,
     /// Whether to start from the beginning (for Kafka)
     pub from_beginning: bool,
-    /// Filter expression (for some brokers)
+    /// Broker-side filter expression.
+    ///
+    /// **Not implemented by any backend.** Setting it causes
+    /// `subscribe_with_options` to fail with
+    /// [`MessagingError::Unsupported`] rather than returning a subscription
+    /// that silently delivers every message on the topic. Narrow the
+    /// subscription at the broker (a NATS wildcard subject, a RabbitMQ binding
+    /// key, an SNS subscription filter policy) or filter inside your
+    /// [`MessageHandler`] instead.
     pub filter: Option<String>,
     /// Maximum concurrent handlers
     pub concurrency: Option<usize>,
@@ -498,6 +590,43 @@ mod tests {
         assert_eq!(opts.routing_key, Some("my.routing.key".to_string()));
         assert_eq!(opts.exchange, Some("my-exchange".to_string()));
         assert_eq!(opts.timeout, Some(Duration::from_secs(5)));
+    }
+
+    /// Silently aliasing `Manual` to `Auto` is the failure mode this guards:
+    /// the caller must be told, not quietly acknowledged on behalf of.
+    #[cfg(any(
+        feature = "aws",
+        feature = "nats",
+        feature = "rabbitmq",
+        feature = "mq-bridge"
+    ))]
+    #[test]
+    fn manual_ack_is_rejected_not_aliased() {
+        assert!(matches!(
+            reject_manual_ack("SQS", AckMode::Manual),
+            Err(MessagingError::Unsupported(_))
+        ));
+        assert!(reject_manual_ack("SQS", AckMode::Auto).is_ok());
+        assert!(reject_manual_ack("SQS", AckMode::None).is_ok());
+    }
+
+    /// An unapplied filter must not yield a subscription that quietly delivers
+    /// the whole topic.
+    #[cfg(any(
+        feature = "aws",
+        feature = "nats",
+        feature = "rabbitmq",
+        feature = "kafka",
+        feature = "mq-bridge"
+    ))]
+    #[test]
+    fn unapplied_filter_is_rejected() {
+        let filter = "priority > 5".to_string();
+        assert!(matches!(
+            reject_filter("Kafka", Some(&filter)),
+            Err(MessagingError::Unsupported(_))
+        ));
+        assert!(reject_filter("Kafka", None).is_ok());
     }
 
     #[test]

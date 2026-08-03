@@ -189,10 +189,20 @@ impl ScriptMiddleware {
         }
     }
 
+    /// Register a `|req|` hook that runs before the handler.
+    ///
+    /// Return a `Response` to short-circuit the request. A hook that raises a
+    /// Rhai error fails the request with 500 - it does not fail open, because
+    /// a broken auth or rate-limit hook that "continues" admits everything.
     pub fn before(&mut self, handler: FnPtr) {
         self.before_fn = Some(handler);
     }
 
+    /// Register a `|req, res|` hook that runs after the handler.
+    ///
+    /// `res` is the full outgoing `Response` (status, headers, cookies, body),
+    /// so the hook can amend it; return a `Response` to replace the outgoing
+    /// one. As with `before`, a Rhai error fails the request with 500.
     pub fn after(&mut self, handler: FnPtr) {
         self.after_fn = Some(handler);
     }

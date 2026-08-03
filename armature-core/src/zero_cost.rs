@@ -1,6 +1,6 @@
 //! Zero-Cost Abstractions for High-Performance HTTP Handling
 //!
-//! This module provides compile-time optimizations that eliminate runtime overhead:
+//! This module moves dispatch decisions to compile time:
 //!
 //! - **Const Generic Extractors**: Combine multiple extractors at compile-time
 //! - **Static Dispatch Middleware**: Middleware without `Box<dyn>` overhead
@@ -13,8 +13,18 @@
 //!
 //! # Performance Impact
 //!
-//! - Extractor chains: No heap allocation, inline extraction
+//! - Extractor chains: Inline extraction, no boxing per extractor
 //! - Static middleware: Compile-time dispatch, no vtable lookups
+//!
+//! Two caveats on "zero cost", both real and both measurable:
+//!
+//! - Every `Extract::extract` bumps a process-global counter
+//!   ([`ZeroCostStats`]). It is a relaxed `fetch_add`, but it is a shared cache
+//!   line and it is not feature-gated, so it is not free under contention.
+//! - "No heap allocation" holds for the extractors that hand back borrowed or
+//!   `Copy` data. [`PathParam`], [`Header`], [`ContentType`], and
+//!   [`Authorization`] each produce an owned `String`, because the value they
+//!   return has to outlive the borrow of the request.
 
 use crate::{Error, HttpRequest, HttpResponse};
 use std::future::Future;
@@ -165,7 +175,7 @@ pub struct RawBody(pub bytes::Bytes);
 impl Extract for RawBody {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("RawBody");
+        EXTRACTOR_STATS.record_extraction();
         Ok(RawBody(req.body_bytes()))
     }
 }
@@ -185,7 +195,7 @@ pub struct JsonBody<T>(pub T);
 impl<T: serde::de::DeserializeOwned> Extract for JsonBody<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("JsonBody");
+        EXTRACTOR_STATS.record_extraction();
         req.json().map(JsonBody)
     }
 }
@@ -205,14 +215,10 @@ pub struct QueryParams<T>(pub T);
 impl<T: serde::de::DeserializeOwned> Extract for QueryParams<T> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("QueryParams");
-        // Re-encode the already-decoded params so reserved characters
-        // (`&`, `=`, `%`, `+`, ...) in keys/values survive the round-trip.
-        let pairs: Vec<(&String, &String)> = req.query_params.iter().collect();
-        let query_string = serde_urlencoded::to_string(&pairs)
-            .map_err(|e| Error::Deserialization(format!("Query encoding error: {}", e)))?;
-
-        serde_urlencoded::from_str(&query_string)
+        EXTRACTOR_STATS.record_extraction();
+        // The raw query string, not the decoded pairs: re-encoding a decoded
+        // pair cannot always reproduce what the client sent.
+        serde_urlencoded::from_str(req.query_string().unwrap_or(""))
             .map(QueryParams)
             .map_err(|e| Error::Deserialization(format!("Query parsing error: {}", e)))
     }
@@ -233,13 +239,12 @@ pub struct PathParam<const INDEX: usize>(pub String);
 impl<const INDEX: usize> Extract for PathParam<INDEX> {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("PathParam");
-        // Get the Nth path parameter
+        EXTRACTOR_STATS.record_extraction();
+        // Get the Nth path parameter, in capture order.
         req.path_params
-            .values()
-            .nth(INDEX)
-            .cloned()
-            .map(PathParam)
+            .get(INDEX)
+            .and_then(|(_, v)| std::str::from_utf8(v).ok())
+            .map(|v| PathParam(v.to_owned()))
             .ok_or_else(|| {
                 Error::RouteNotFound(format!("Path parameter at index {} not found", INDEX))
             })
@@ -267,8 +272,8 @@ impl Header {
     /// Create extractor for a specific header.
     pub fn named(name: impl Into<String>, req: &HttpRequest) -> Self {
         let name = name.into();
-        let value = req.headers.get(&name).cloned();
-        EXTRACTOR_STATS.record_extraction("Header");
+        let value = req.headers.get(&name).map(str::to_owned);
+        EXTRACTOR_STATS.record_extraction();
         Self { name, value }
     }
 
@@ -296,8 +301,10 @@ pub struct ContentType(pub Option<String>);
 impl Extract for ContentType {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("ContentType");
-        Ok(ContentType(req.headers.get("content-type").cloned()))
+        EXTRACTOR_STATS.record_extraction();
+        Ok(ContentType(
+            req.headers.get("content-type").map(str::to_owned),
+        ))
     }
 }
 
@@ -322,8 +329,10 @@ pub struct Authorization(pub Option<String>);
 impl Extract for Authorization {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("Authorization");
-        Ok(Authorization(req.headers.get("authorization").cloned()))
+        EXTRACTOR_STATS.record_extraction();
+        Ok(Authorization(
+            req.headers.get("authorization").map(str::to_owned),
+        ))
     }
 }
 
@@ -346,12 +355,12 @@ impl Authorization {
 
 /// Extract the HTTP method.
 #[derive(Debug, Clone)]
-pub struct Method(pub String);
+pub struct Method(pub crate::Method);
 
 impl Extract for Method {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("Method");
+        EXTRACTOR_STATS.record_extraction();
         Ok(Method(req.method.clone()))
     }
 }
@@ -360,19 +369,21 @@ impl std::ops::Deref for Method {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Extract the request path.
 #[derive(Debug, Clone)]
-pub struct RequestPath(pub String);
+pub struct RequestPath(pub crate::ByteStr);
 
 impl Extract for RequestPath {
     #[inline]
     fn extract(req: &HttpRequest) -> Result<Self, Error> {
-        EXTRACTOR_STATS.record_extraction("RequestPath");
-        Ok(RequestPath(req.path.clone()))
+        EXTRACTOR_STATS.record_extraction();
+        // The path without the query: `RequestPath` names the resource, and the
+        // query is reachable through `QueryParams`.
+        Ok(RequestPath(crate::ByteStr::from(req.path_only())))
     }
 }
 
@@ -380,7 +391,7 @@ impl std::ops::Deref for RequestPath {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -585,7 +596,7 @@ where
         let method = req.method.clone();
         let path = req.path.clone();
 
-        MIDDLEWARE_STATS.record_call("Logging");
+        MIDDLEWARE_STATS.record_call();
 
         Box::pin(async move {
             let start = std::time::Instant::now();
@@ -672,7 +683,7 @@ where
         let inner = self.inner.clone();
         let duration = self.duration;
 
-        MIDDLEWARE_STATS.record_call("Timeout");
+        MIDDLEWARE_STATS.record_call();
 
         Box::pin(async move {
             match tokio::time::timeout(duration, inner.call(req)).await {
@@ -713,17 +724,16 @@ where
     fn call(&self, mut req: HttpRequest) -> Self::Future {
         let inner = self.inner.clone();
 
-        MIDDLEWARE_STATS.record_call("RequestId");
+        MIDDLEWARE_STATS.record_call();
 
         // Generate request ID if not present
         let request_id = req
             .headers
             .get("x-request-id")
-            .cloned()
+            .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        req.headers
-            .insert("x-request-id".to_string(), request_id.clone());
+        req.headers.insert("x-request-id", request_id.as_str());
 
         Box::pin(async move {
             let mut resp = inner.call(req).await?;
@@ -881,11 +891,13 @@ pub struct ZeroCostStats {
 }
 
 impl ZeroCostStats {
-    fn record_extraction(&self, _name: &str) {
+    // These take no name: the counters are single totals, so a name argument
+    // implied a per-extractor breakdown that was never recorded.
+    fn record_extraction(&self) {
         self.extractions.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_call(&self, _name: &str) {
+    fn record_call(&self) {
         self.middleware_calls.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -927,18 +939,16 @@ pub fn middleware_stats() -> &'static ZeroCostStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn create_request() -> HttpRequest {
-        let mut req = HttpRequest::new("GET".to_string(), "/api/users/123".to_string());
+        let mut req = HttpRequest::new("GET", "/api/users/123?page=1&limit=10");
         req.headers
-            .insert("content-type".to_string(), "application/json".to_string());
+            .insert("content-type", "application/json".to_string());
         req.headers
-            .insert("authorization".to_string(), "Bearer token123".to_string());
-        req.body = br#"{"name":"test"}"#.to_vec();
-        req.path_params.insert("id".to_string(), "123".to_string());
-        req.query_params.insert("page".to_string(), "1".to_string());
-        req.query_params
-            .insert("limit".to_string(), "10".to_string());
+            .insert("authorization", "Bearer token123".to_string());
+        req.body = Bytes::from_static(br#"{"name":"test"}"#);
+        req.push_param("id", "123");
         req
     }
 
@@ -995,11 +1005,10 @@ mod tests {
             plus: String,
         }
 
-        let mut req = HttpRequest::new("GET".to_string(), "/search".to_string());
-        req.query_params
-            .insert("q".to_string(), "a&b=c%d".to_string());
-        req.query_params
-            .insert("plus".to_string(), "1+1".to_string());
+        // Percent-encoded on the wire, so the reserved characters survive the
+        // trip: a literal `&`/`=`/`%` in a value, and a literal `+` (which is a
+        // space when unescaped).
+        let req = HttpRequest::new("GET", "/search?q=a%26b%3Dc%25d&plus=1%2B1");
 
         let QueryParams(query) = QueryParams::<Query>::extract(&req).unwrap();
         assert_eq!(query.q, "a&b=c%d");

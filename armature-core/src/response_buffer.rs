@@ -460,19 +460,22 @@ mod tests {
         );
     }
 
+    /// The `capacity` argument no longer reserves body space: `Bytes` is handed
+    /// a finished buffer rather than grown in place, so there is no spare
+    /// capacity to reserve. The constructors are kept for source compatibility
+    /// and must still produce an empty body with the right status.
     #[test]
     fn test_http_response_with_capacity() {
         let response = crate::HttpResponse::with_capacity(200, 1024);
         assert_eq!(response.status, 200);
-        // body.capacity() is at least 1024 (may be more due to allocator)
-        assert!(response.body.capacity() >= 1024);
+        assert!(response.body.is_empty());
     }
 
     #[test]
     fn test_http_response_preallocated() {
         let response = crate::HttpResponse::ok_preallocated();
         assert_eq!(response.status, 200);
-        assert!(response.body.capacity() >= 512);
+        assert!(response.body.is_empty());
     }
 
     #[test]

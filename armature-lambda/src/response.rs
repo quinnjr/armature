@@ -2,14 +2,18 @@
 
 use bytes::Bytes;
 use lambda_http::{Body, Response};
-use std::collections::HashMap;
 
 /// Lambda HTTP response.
 pub struct LambdaResponse {
     /// Status code.
     pub status: u16,
-    /// Response headers.
-    pub headers: HashMap<String, String>,
+    /// Response headers, in emission order.
+    ///
+    /// A list rather than a map because HTTP allows the same field name to
+    /// appear more than once and a handler must be able to use that — most
+    /// importantly to emit several `Set-Cookie` lines, which cannot legally be
+    /// folded into one. A map would silently keep only the last one.
+    pub headers: Vec<(String, String)>,
     /// Response body.
     pub body: Bytes,
     /// Whether body is base64 encoded.
@@ -21,7 +25,7 @@ impl LambdaResponse {
     pub fn new(status: u16, body: impl Into<Bytes>) -> Self {
         Self {
             status,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: body.into(),
             is_base64: false,
         }
@@ -57,15 +61,45 @@ impl LambdaResponse {
         Self::error(500, message)
     }
 
-    /// Add a header.
+    /// Append a header.
+    ///
+    /// Appends rather than replaces, so calling this twice with the same name
+    /// emits two header lines (e.g. two `Set-Cookie`s). Use [`set_header`] to
+    /// replace instead.
+    ///
+    /// [`set_header`]: LambdaResponse::set_header
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
+        self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// Set a header, removing any existing lines with the same name.
+    pub fn set_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+        self.headers.push((name, value.into()));
+        self
+    }
+
+    /// The first value for `name`, matched case-insensitively.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.header_values(name).next()
+    }
+
+    /// Every value for `name`, in emission order, matched case-insensitively.
+    pub fn header_values<'a, 'n>(
+        &'a self,
+        name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
+        self.headers
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 
     /// Set content type.
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
-        self.header("content-type", content_type)
+        self.set_header("content-type", content_type)
     }
 
     /// Mark body as base64 encoded.
@@ -151,6 +185,32 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn duplicate_headers_are_all_emitted() {
+        // Session/auth flows need more than one Set-Cookie line, and these
+        // cannot be folded into a single comma-separated value.
+        let resp = LambdaResponse::ok("x")
+            .header("set-cookie", "a=1")
+            .header("set-cookie", "b=2");
+        let lambda = resp.into_lambda_response();
+        let cookies: Vec<_> = lambda
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies, vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn set_header_replaces_existing_lines() {
+        let resp = LambdaResponse::ok("x")
+            .header("content-type", "text/plain")
+            .set_header("content-type", "application/json");
+        assert_eq!(resp.header_values("content-type").count(), 1);
+        assert_eq!(resp.header_value("content-type"), Some("application/json"));
     }
 
     #[test]

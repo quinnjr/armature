@@ -52,7 +52,7 @@ impl Middleware for ApiKeyMiddleware {
         >,
     ) -> Result<HttpResponse, Error> {
         if let Some(api_key) = req.headers.get("x-api-key")
-            && self.valid_keys.contains(api_key)
+            && self.valid_keys.iter().any(|k| k == api_key)
         {
             println!("✓ Valid API key: {}", api_key);
             return next(req).await;
@@ -93,7 +93,6 @@ impl Middleware for RateLimitMiddleware {
             .headers
             .get("x-forwarded-for")
             .or_else(|| req.headers.get("x-real-ip"))
-            .map(|s| s.as_str())
             .unwrap_or("unknown");
 
         println!(
