@@ -35,7 +35,7 @@
 //!     // Dispatch requests through the router — wire `router.handle(request)`
 //!     // into your HTTP server of choice (e.g. an armature-core `App`, or a
 //!     // raw Hyper/Axum service that forwards each request to it).
-//!     let request = armature_core::HttpRequest::new("GET".to_string(), "/".to_string());
+//!     let request = armature_core::HttpRequest::new("GET", "/".to_string());
 //!     let _response = router.handle(request).await;
 //!     Ok(())
 //! }

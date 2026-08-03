@@ -13,10 +13,19 @@ pub struct FunctionRequest {
     pub url: String,
     /// Request path.
     pub path: String,
-    /// Query string parameters.
-    pub query: HashMap<String, String>,
-    /// Request headers.
-    pub headers: HashMap<String, String>,
+    /// Query string parameters, in wire order.
+    ///
+    /// A list rather than a map: `?tag=a&tag=b` is meaningful and both values
+    /// must reach the handler, in the order the client sent them.
+    #[serde(default)]
+    pub query: Vec<(String, String)>,
+    /// Request headers, in arrival order.
+    ///
+    /// A list rather than a map because a request may legitimately carry the
+    /// same field name more than once (`Cookie`, `X-Forwarded-For`, `Via`), and
+    /// a map would keep only the last of them.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     /// Request body (base64-encoded for serialization).
     #[serde(default, with = "body_serde")]
     pub body: Bytes,
@@ -98,8 +107,8 @@ impl FunctionRequest {
             method: method.into(),
             url: path.clone(),
             path,
-            query: HashMap::new(),
-            headers: HashMap::new(),
+            query: Vec::new(),
+            headers: Vec::new(),
             body: Bytes::new(),
             params: HashMap::new(),
             context: RequestContext::default(),
@@ -119,17 +128,37 @@ impl FunctionRequest {
         serde_json::from_str(json)
     }
 
-    /// Get a header value (case-insensitive).
+    /// Get the first value for a header (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .get(&name.to_lowercase())
-            .or_else(|| self.headers.get(name))
-            .map(|s| s.as_str())
+        self.header_values(name).next()
     }
 
-    /// Get a query parameter.
+    /// Get every value for a header, in arrival order (case-insensitive). Use
+    /// this for names that legitimately repeat, such as `Cookie`.
+    pub fn header_values<'a, 'n>(
+        &'a self,
+        name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
+        self.headers
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Get the first value for a query parameter.
     pub fn query_param(&self, name: &str) -> Option<&str> {
-        self.query.get(name).map(|s| s.as_str())
+        self.query_params(name).next()
+    }
+
+    /// Get every value for a query parameter, in wire order.
+    pub fn query_params<'a, 'n>(
+        &'a self,
+        name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
+        self.query
+            .iter()
+            .filter(move |(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Get a route parameter.
@@ -206,7 +235,7 @@ mod tests {
 
     #[test]
     fn from_json_parses_internal_shape() {
-        let json = r#"{"method":"PUT","url":"/x","path":"/x","query":{},"headers":{}}"#;
+        let json = r#"{"method":"PUT","url":"/x","path":"/x","query":[],"headers":[]}"#;
         let back = FunctionRequest::from_json(json).unwrap();
         assert_eq!(back.method, "PUT");
         assert_eq!(back.path, "/x");
@@ -217,8 +246,25 @@ mod tests {
     fn header_lookup_is_case_insensitive() {
         let mut req = FunctionRequest::new("GET", "/");
         req.headers
-            .insert("content-type".to_string(), "application/json".to_string());
+            .push(("Content-Type".to_string(), "application/json".to_string()));
         assert!(req.is_json());
         assert_eq!(req.content_type(), Some("application/json"));
+    }
+
+    #[test]
+    fn repeated_headers_and_query_keys_are_all_reachable() {
+        let mut req = FunctionRequest::new("GET", "/");
+        req.headers.push(("cookie".to_string(), "a=1".to_string()));
+        req.headers.push(("cookie".to_string(), "b=2".to_string()));
+        req.query.push(("tag".to_string(), "a".to_string()));
+        req.query.push(("tag".to_string(), "b".to_string()));
+
+        assert_eq!(req.header("Cookie"), Some("a=1"));
+        assert_eq!(
+            req.header_values("cookie").collect::<Vec<_>>(),
+            ["a=1", "b=2"]
+        );
+        assert_eq!(req.query_param("tag"), Some("a"));
+        assert_eq!(req.query_params("tag").collect::<Vec<_>>(), ["a", "b"]);
     }
 }

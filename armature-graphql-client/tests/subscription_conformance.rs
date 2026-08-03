@@ -4,6 +4,11 @@
 //!   headers) must actually reach the server on the WebSocket handshake
 //!   request instead of being silently dropped.
 //! - A server `Ping` frame must be answered with a `Pong` frame.
+//! - The client must offer the `graphql-transport-ws` sub-protocol on the
+//!   handshake. Every stub server below rejects an upgrade that lacks it, the
+//!   same way Armature's own GraphQL server (and Apollo, and `graphql-ws`) do,
+//!   so a client that stopped sending the header would fail these tests rather
+//!   than pass against a permissive stub.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +16,50 @@ use armature_graphql_client::{GraphQLClient, GraphQLClientConfig};
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::Request as HandshakeRequest;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    ErrorResponse as HandshakeErrorResponse, Response as HandshakeResponse,
+};
+
+/// The sub-protocol the client is required to offer and the server echoes back.
+const GRAPHQL_TRANSPORT_WS: &str = "graphql-transport-ws";
+
+/// Whether the handshake request offers [`GRAPHQL_TRANSPORT_WS`].
+fn offers_graphql_transport_ws(req: &HandshakeRequest) -> bool {
+    req.headers()
+        .get_all("Sec-WebSocket-Protocol")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|candidate| candidate.trim() == GRAPHQL_TRANSPORT_WS)
+}
+
+/// Fail the handshake with `400` when the sub-protocol is missing, otherwise
+/// echo it back as RFC 6455 requires of a server that accepts one.
+///
+/// `tungstenite`'s client fails the connection if it offered a sub-protocol and
+/// the server answers without one, so echoing is not optional here.
+// The `Result<Response, ErrorResponse>` return shape is dictated by
+// tungstenite's `Callback` trait, not chosen here.
+#[allow(clippy::result_large_err)]
+fn negotiate_sub_protocol(
+    mut resp: HandshakeResponse,
+    offered: bool,
+) -> Result<HandshakeResponse, HandshakeErrorResponse> {
+    if !offered {
+        let mut rejection = HandshakeErrorResponse::new(Some(format!(
+            "handshake must offer the {GRAPHQL_TRANSPORT_WS} sub-protocol"
+        )));
+        *rejection.status_mut() = http::StatusCode::BAD_REQUEST;
+        return Err(rejection);
+    }
+
+    resp.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        http::HeaderValue::from_static(GRAPHQL_TRANSPORT_WS),
+    );
+    Ok(resp)
+}
 
 /// Spawn a minimal graphql-ws test server on an ephemeral port.
 ///
@@ -34,8 +83,7 @@ async fn spawn_test_server(
             // tungstenite's `Callback` trait, not chosen here — there's nothing
             // to box or shrink on our side.
             #[allow(clippy::result_large_err)]
-            let callback = move |req: &tokio_tungstenite::tungstenite::handshake::client::Request,
-                                  resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let callback = move |req: &HandshakeRequest, resp: HandshakeResponse| {
                 let mut captured = headers_out.lock().unwrap();
                 for (name, value) in req.headers() {
                     captured.push((
@@ -43,7 +91,8 @@ async fn spawn_test_server(
                         value.to_str().unwrap_or_default().to_string(),
                     ));
                 }
-                Ok(resp)
+                drop(captured);
+                negotiate_sub_protocol(resp, offers_graphql_transport_ws(req))
             };
 
             let ws_stream = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
@@ -86,6 +135,32 @@ async fn spawn_test_server(
     format!("ws://{addr}")
 }
 
+/// Spawn a server that completes the WebSocket handshake but never sends
+/// `connection_ack` — it closes right after reading `connection_init`.
+async fn spawn_no_ack_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            #[allow(clippy::result_large_err)]
+            let callback = |req: &HandshakeRequest, resp: HandshakeResponse| {
+                negotiate_sub_protocol(resp, offers_graphql_transport_ws(req))
+            };
+            let ws_stream = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (mut write, mut read) = ws_stream.split();
+
+            let _ = read.next().await; // connection_init
+            let _ = write.send(Message::Close(None)).await;
+        }
+    });
+
+    format!("ws://{addr}")
+}
+
 /// Spawn a minimal graphql-ws test server that performs the
 /// `connection_init`/`connection_ack` exchange, reads the client's `subscribe`
 /// message, and then records whether the *next* client message is a
@@ -97,7 +172,11 @@ async fn spawn_unsubscribe_server(complete_id: Arc<Mutex<Option<String>>>) -> St
 
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await {
-            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+            #[allow(clippy::result_large_err)]
+            let callback = |req: &HandshakeRequest, resp: HandshakeResponse| {
+                negotiate_sub_protocol(resp, offers_graphql_transport_ws(req))
+            };
+            let ws_stream = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
                 Ok(s) => s,
                 Err(_) => return,
             };
@@ -242,6 +321,67 @@ async fn subscription_header_reaches_server() {
     assert!(
         has_auth_header,
         "expected Authorization header to reach the WebSocket handshake request, got: {headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn subscription_offers_graphql_transport_ws_sub_protocol() {
+    let captured_headers = Arc::new(Mutex::new(Vec::new()));
+    let pong_received = Arc::new(Mutex::new(false));
+    let ws_url = spawn_test_server(captured_headers.clone(), false, pong_received).await;
+
+    let config = GraphQLClientConfig::builder()
+        .endpoint("http://127.0.0.1:1/graphql")
+        .ws_endpoint(ws_url)
+        .build();
+    let client = GraphQLClient::with_config(config);
+
+    let _subscription = client
+        .subscribe("subscription { messageAdded { id } }")
+        .send()
+        .await
+        .expect("subscription should connect");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let headers = captured_headers.lock().unwrap();
+    let offered = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("sec-websocket-protocol")
+            && value
+                .split(',')
+                .any(|candidate| candidate.trim() == GRAPHQL_TRANSPORT_WS)
+    });
+
+    assert!(
+        offered,
+        "expected the client to offer the {GRAPHQL_TRANSPORT_WS} sub-protocol on the handshake, got: {headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn missing_connection_ack_is_an_error() {
+    let ws_url = spawn_no_ack_server().await;
+
+    let config = GraphQLClientConfig::builder()
+        .endpoint("http://127.0.0.1:1/graphql")
+        .ws_endpoint(ws_url)
+        .build();
+    let client = GraphQLClient::with_config(config);
+
+    // A server that closes without acknowledging must not yield a subscription
+    // that silently never produces events.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client
+            .subscribe("subscription { messageAdded { id } }")
+            .send(),
+    )
+    .await
+    .expect("connecting should not hang when the server never acks");
+
+    assert!(
+        result.is_err(),
+        "expected an error when the server closes without sending connection_ack"
     );
 }
 

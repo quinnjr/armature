@@ -94,7 +94,7 @@ pub use algorithms::{Algorithm, RateLimitAlgorithm};
 pub use config::{RateLimitConfig, RateLimiterBuilder};
 pub use error::{RateLimitError, RateLimitResult};
 pub use extractor::{KeyExtractor, KeyExtractorFn};
-pub use middleware::RateLimitMiddleware;
+pub use middleware::{RateLimitMiddleware, UnkeyedRequestPolicy};
 pub use stores::{MemoryStore, RateLimitStore, StoreType};
 
 #[cfg(feature = "redis")]

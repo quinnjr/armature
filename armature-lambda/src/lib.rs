@@ -2,65 +2,35 @@
 //!
 //! AWS Lambda runtime adapter for Armature applications.
 //!
-//! This crate allows you to deploy Armature applications to AWS Lambda
-//! with API Gateway, ALB, or Lambda Function URLs.
+//! This crate runs an HTTP handler on AWS Lambda behind API Gateway, ALB, or
+//! Lambda Function URLs, translating the incoming event into a
+//! [`LambdaRequest`] and the handler's [`LambdaResponse`] back out.
+//!
+//! ## What this crate does and does not do
+//!
+//! [`LambdaRuntime`] drives any type implementing [`RequestHandler`], which is
+//! stated in this crate's own [`LambdaRequest`]/[`LambdaResponse`] types. It
+//! does **not** convert to or from `armature_core::HttpRequest` /
+//! `HttpResponse`, and there is no blanket implementation for an Armature
+//! `Application` — wiring one up is the application author's job, most easily
+//! via `impl_lambda_handler!` (see its documentation for the exact shape it
+//! expects).
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use armature::prelude::*;
-//! use armature_lambda::LambdaRuntime;
-//!
-//! #[controller("/")]
-//! struct HelloController;
-//!
-//! #[controller_impl]
-//! impl HelloController {
-//!     #[get("/")]
-//!     async fn hello() -> &'static str {
-//!         "Hello from Lambda!"
-//!     }
-//! }
-//!
-//! #[module(controllers: [HelloController])]
-//! struct AppModule;
+//! use armature_lambda::{LambdaRequest, LambdaResponse, LambdaRuntime};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), lambda_runtime::Error> {
 //!     // Initialize tracing for CloudWatch
 //!     armature_lambda::init_tracing();
 //!
-//!     // Create Armature application
-//!     let app = Application::create::<AppModule>();
+//!     let handler = |req: LambdaRequest| async move {
+//!         LambdaResponse::ok(format!("Hello from {}!", req.path))
+//!     };
 //!
-//!     // Run on Lambda
-//!     LambdaRuntime::new(app).run().await
-//! }
-//! ```
-//!
-//! ## With AWS Services
-//!
-//! ```rust,ignore
-//! use armature_lambda::LambdaRuntime;
-//! use armature_aws::{AwsServices, AwsConfig};
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), lambda_runtime::Error> {
-//!     armature_lambda::init_tracing();
-//!
-//!     // Initialize AWS services
-//!     let aws = AwsServices::new(
-//!         AwsConfig::from_env()
-//!             .enable_dynamodb()
-//!             .enable_s3()
-//!             .build()
-//!     ).await?;
-//!
-//!     // Register in DI container
-//!     let app = Application::create::<AppModule>();
-//!     app.container().register(aws);
-//!
-//!     LambdaRuntime::new(app).run().await
+//!     LambdaRuntime::new(handler).run().await
 //! }
 //! ```
 //!
@@ -85,13 +55,18 @@ mod response;
 mod runtime;
 
 pub use error::{LambdaError, Result};
-pub use request::LambdaRequest;
+pub use request::{LambdaRequest, RequestContext};
 pub use response::LambdaResponse;
-pub use runtime::{LambdaConfig, LambdaRuntime};
+pub use runtime::{LambdaConfig, LambdaRuntime, RequestHandler};
 
 // Re-export lambda types
 pub use lambda_http;
 pub use lambda_runtime;
+
+// Re-exported so `impl_lambda_handler!` can name the attribute macro through
+// `$crate`. Without this the macro would only expand in crates that happen to
+// depend on `async-trait` themselves and under that exact name.
+pub use async_trait;
 
 /// Initialize tracing for Lambda/CloudWatch.
 ///

@@ -6,9 +6,10 @@
 //!
 //! - **Event Bus** - Publish/subscribe event system
 //! - **Event Handlers** - Trait-based event handling: implement [`EventHandler<E>`] for your
-//!   handler type, then register it with [`EventBus::subscribe`] by wrapping it in
-//!   [`TypedEventHandler::new`]
-//! - **Type-safe** - Strong typing with compile-time safety
+//!   handler type and pass it straight to [`EventBus::subscribe`]
+//! - **Type-safe** - [`EventBus::subscribe`] requires the handler to implement
+//!   [`EventHandler<E>`] for the event type it is registered under, so a mismatched
+//!   registration fails to compile instead of silently never firing
 //! - **Async** - Full async/await support
 //! - **Flexible** - Sync and async handler execution
 //!
@@ -52,7 +53,7 @@
 //!     let bus = EventBus::new();
 //!
 //!     // Subscribe handler
-//!     bus.subscribe::<UserCreatedEvent, _>(TypedEventHandler::new(EmailHandler));
+//!     bus.subscribe::<UserCreatedEvent, _>(EmailHandler);
 //!
 //!     // Publish event
 //!     let event = UserCreatedEvent {
@@ -70,9 +71,9 @@
 //!
 //! ```rust,ignore
 //! // Subscribe multiple handlers
-//! bus.subscribe::<UserCreatedEvent, _>(TypedEventHandler::new(EmailHandler));
-//! bus.subscribe::<UserCreatedEvent, _>(TypedEventHandler::new(AnalyticsHandler));
-//! bus.subscribe::<UserCreatedEvent, _>(TypedEventHandler::new(AuditHandler));
+//! bus.subscribe::<UserCreatedEvent, _>(EmailHandler);
+//! bus.subscribe::<UserCreatedEvent, _>(AnalyticsHandler);
+//! bus.subscribe::<UserCreatedEvent, _>(AuditHandler);
 //!
 //! // All handlers will be invoked
 //! bus.publish(event).await?;
@@ -96,18 +97,23 @@
 //!     .build();
 //!
 //! match bus.publish(event).await {
-//!     Ok(()) => println!("All handlers succeeded"),
+//!     Ok(report) if report.all_succeeded() => println!("All handlers succeeded"),
+//!     Ok(report) => eprintln!("{} handler(s) failed", report.handlers_failed),
 //!     Err(EventBusError::HandlersFailed(errors)) => {
 //!         eprintln!("Some handlers failed: {:?}", errors);
 //!     }
 //!     Err(e) => eprintln!("Publish error: {}", e),
 //! }
 //! ```
+//!
+//! With the default `continue_on_error(true)`, a handler error never becomes an
+//! `Err`; the only way to observe it is [`bus::PublishReport::handlers_failed`] on
+//! the returned report.
 
 pub mod bus;
 pub mod event;
 
-pub use bus::{EventBus, EventBusBuilder, EventBusConfig, EventBusError};
+pub use bus::{EventBus, EventBusBuilder, EventBusConfig, EventBusError, PublishReport};
 pub use event::{
     DomainEvent, DynEventHandler, Event, EventHandler, EventHandlerError, EventMetadata,
     TypedEventHandler,

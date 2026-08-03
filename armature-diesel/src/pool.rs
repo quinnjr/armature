@@ -4,6 +4,11 @@ use crate::{DieselConfig, DieselError, DieselResult};
 use armature_log::{debug, info};
 use std::sync::Arc;
 
+// Only the deadpool constructors emit this warning, and only when there is a
+// deadpool pool to construct.
+#[cfg(all(feature = "deadpool", any(feature = "postgres", feature = "mysql")))]
+use armature_log::warn;
+
 #[cfg(feature = "postgres")]
 use diesel_async::AsyncPgConnection;
 
@@ -84,6 +89,42 @@ where
     manager_config
 }
 
+/// Report the [`DieselConfig`] pool-lifecycle fields that the deadpool
+/// backends cannot act on.
+///
+/// deadpool creates connections lazily and runs no background reaper, so it
+/// has no `min_idle`, `max_lifetime` or `idle_timeout` knob to map these onto.
+/// Only bb8 (`PgPoolBb8`) honors them. Since the default feature set is
+/// `postgres` + `deadpool`, silently dropping them is how a caller ends up
+/// believing connections are being recycled on age when nothing is recycling
+/// them; say so out loud instead, once, at pool construction.
+///
+/// Only values the caller actually changed are reported -- the defaults are
+/// equally inert here, and warning about them would fire on every pool.
+#[cfg(all(feature = "deadpool", any(feature = "postgres", feature = "mysql")))]
+fn warn_ignored_deadpool_settings(config: &DieselConfig, pool: &str) {
+    let mut ignored: Vec<String> = Vec::new();
+
+    if let Some(min_idle) = config.min_idle {
+        ignored.push(format!("min_idle = {min_idle}"));
+    }
+    if config.max_lifetime != crate::config::default_max_lifetime() {
+        ignored.push(format!("max_lifetime = {:?}", config.max_lifetime));
+    }
+    if config.idle_timeout != crate::config::default_idle_timeout() {
+        ignored.push(format!("idle_timeout = {:?}", config.idle_timeout));
+    }
+
+    if !ignored.is_empty() {
+        warn!(
+            "{pool} ignores DieselConfig {}: deadpool creates connections lazily and runs no \
+             background reaper, so it has no equivalent setting. Use the bb8 pool (the `bb8` \
+             feature, `PgPoolBb8`) if you need connection lifecycle limits.",
+            ignored.join(", ")
+        );
+    }
+}
+
 // ============================================================================
 // PostgreSQL Pool
 // ============================================================================
@@ -120,6 +161,8 @@ impl PgPool {
         // deadpool has no direct `min_idle` / `max_lifetime` / `idle_timeout`
         // knobs (it lazily creates connections and has no background reaper);
         // those fields are only honored on the bb8 backend (`PgPoolBb8`).
+        warn_ignored_deadpool_settings(&config, "PgPool");
+
         // `wait_timeout` bounds how long `pool.get()` will wait for a
         // connection to free up once the pool is saturated (max_size
         // connections all checked out); without it, `get()` can block
@@ -270,6 +313,8 @@ impl MysqlPool {
         // without adding `mysql_async` as a direct dependency of this crate.
         // deadpool also has no `min_idle` / `max_lifetime` / `idle_timeout`
         // knobs (see the PostgreSQL deadpool path above for details).
+        warn_ignored_deadpool_settings(&config, "MysqlPool");
+
         // See the PostgreSQL deadpool path above: `wait_timeout` bounds how
         // long `pool.get()` waits for a connection once the pool is
         // saturated. Reuse `connect_timeout` since there is no separate

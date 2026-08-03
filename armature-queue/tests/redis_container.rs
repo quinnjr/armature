@@ -204,6 +204,7 @@ async fn worker_happy_path_no_orphans() {
         poll_interval: Duration::from_millis(10),
         job_timeout: Duration::from_secs(5),
         log_execution: false,
+        ..Default::default()
     };
     let mut worker = Worker::with_config(queue.clone(), config);
 
@@ -511,6 +512,7 @@ async fn stop_with_timeout_drains_in_flight_job_before_returning() {
         poll_interval: Duration::from_millis(10),
         job_timeout: Duration::from_secs(10),
         log_execution: false,
+        ..Default::default()
     };
     let mut worker = Worker::with_config(queue.clone(), config);
 
@@ -571,6 +573,7 @@ async fn stop_with_timeout_force_aborts_after_grace_period_elapses() {
         poll_interval: Duration::from_millis(10),
         job_timeout: Duration::from_secs(30),
         log_execution: false,
+        ..Default::default()
     };
     let mut worker = Worker::with_config(queue.clone(), config);
 
@@ -635,6 +638,7 @@ async fn stop_with_timeout_drains_multiple_concurrent_jobs_before_returning() {
         poll_interval: Duration::from_millis(10),
         job_timeout: Duration::from_secs(10),
         log_execution: false,
+        ..Default::default()
     };
     let mut worker = Worker::with_config(queue.clone(), config);
 

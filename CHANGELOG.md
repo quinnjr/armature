@@ -13,6 +13,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`armature-h1` `0.1.0` (new crate):** a zero-allocation HTTP/1.1 server layer.
+  See [`armature-h1/CHANGELOG.md`](armature-h1/CHANGELOG.md).
+
+### Changed
+
+- **`armature-framework` `0.4.0` → `0.5.0`.** The facade re-exports
+  `MethodExtractor` (renamed from `extractors::Method` to stop colliding with
+  the re-exported `Method` enum), so its prelude changed with `armature-core`
+  0.8. The four project templates pin the new minor.
+
+### Fixed
+
+- **Workspace-wide — conformance audit remediation.** A project-wide audit of
+  claim-versus-implementation found 27 Critical and 71 Warning issues; all are
+  resolved across 49 crates. The recurring shape was a control that looked
+  implemented and was not: CORS reflecting any origin once credentials were
+  enabled, a default rate limiter that could never derive a key and so allowed
+  everything, `#[body_limit(512kb)]` meaning 512 bytes, `ProcessingResult::DeadLetter`
+  deleting the message instead of dead-lettering it, and a job queue that wrote
+  an in-flight claim nothing ever read back. Each affected crate carries the
+  detail in its own `CHANGELOG.md`; crates with breaking changes took a minor
+  bump.
+
+### Changed
+
+- **Workspace-wide — `armature-core` `0.7.0` → `0.8.0`:** the request and response
+  types are now `Bytes`-backed and the serve path stops doing work no handler
+  asked for. This is a breaking change that every crate depending on
+  `armature-core` had to be migrated onto; each carries its own changelog entry,
+  and the full list of API changes is in
+  [`armature-core/CHANGELOG.md`](armature-core/CHANGELOG.md).
+
 - **`armature-graphql-macros` `0.1.0` (new crate):** `#[resolver]` attribute macro, re-exported from `armature-graphql`. Lets a single `impl` block mix `#[query]`/`#[mutation]`/`#[subscription]`-tagged methods — mirroring NestJS's `@Resolver()`/`@Query()`/`@Mutation()`/`@Subscription()` — and splits them at compile time into the separate `<Type>Query`/`<Type>Mutation`/`<Type>Subscription` wrapper types `async-graphql` needs, each still driven by `async-graphql`'s real `#[Object]`/`#[Subscription]` macros.
 - **`armature-graphql` `0.3.0` → `0.4.0`:** GraphQL subscriptions over WebSocket (new `websocket` feature) — drives `async-graphql`'s `graphql-ws`/`graphql-transport-ws` protocol over a caller-supplied `tokio_tungstenite::WebSocketStream`, with a `WebSocketConfig` (keep-alive timeout, per-connection subscription cap, `connection_init` auth hook) for abuse-resistance. Static SDL analyzer (`sdl-export` feature) extended to recognize `#[resolver]`'s markers and to fully parse `#[derive(Interface)]` field arguments/descriptions/deprecation.
   - **Breaking:** the old `#[macro_export] macro_rules! resolver!` in `decorators.rs` is removed, superseded by the `#[resolver]` attribute macro (different invocation syntax — an attribute, not a declarative macro call). No in-tree consumer used it.

@@ -305,7 +305,7 @@ impl<'a> ParsedRequest<'a> {
 
         for (name, value) in &self.headers {
             if let Ok(v) = std::str::from_utf8(value) {
-                req.headers.insert(name.to_string(), v.to_string());
+                req.headers.insert(name, v);
             }
         }
 
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(result.requests[0].path, "/");
         assert_eq!(result.requests[1].method, "POST");
         assert_eq!(result.requests[1].path, "/api");
-        assert_eq!(result.requests[1].body, b"test");
+        assert_eq!(result.requests[1].body, Bytes::from_static(b"test"));
     }
 
     #[test]
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(http_req.path, "/api/data");
         assert_eq!(
             http_req.headers.get("Content-Type"),
-            Some(&"application/json".to_string())
+            Some("application/json")
         );
         assert_eq!(http_req.body_ref(), b"{\"key\":\"val\"}");
     }

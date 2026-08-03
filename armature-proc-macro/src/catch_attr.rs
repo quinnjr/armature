@@ -63,38 +63,70 @@ impl Parse for CatchArgs {
         // Parse comma-separated items
         let items = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
 
+        // Anything unrecognized is rejected rather than dropped: a mistyped
+        // `priorty = 100` silently leaving the filter at priority 0 changes the
+        // order filters are consulted in, which is invisible at compile time.
         for item in items {
             match item {
                 Meta::Path(path) => {
                     // This is an error type like NotFound
-                    if let Some(ident) = path.get_ident() {
-                        error_types.push(ident.clone());
-                    }
+                    let Some(ident) = path.get_ident() else {
+                        return Err(syn::Error::new_spanned(
+                            &path,
+                            "expected a bare error type name (e.g. `NotFound`)",
+                        ));
+                    };
+                    error_types.push(ident.clone());
                 }
                 Meta::NameValue(nv) => {
                     // This is a key=value like priority = 100
-                    if let Some(ident) = nv.path.get_ident() {
-                        let key = ident.to_string();
-                        match key.as_str() {
-                            "priority" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value
-                                    && let Lit::Int(lit_int) = &expr_lit.lit
-                                {
-                                    priority = Some(lit_int.base10_parse()?);
-                                }
+                    let Some(ident) = nv.path.get_ident() else {
+                        return Err(syn::Error::new_spanned(
+                            &nv.path,
+                            "unknown catch option (expected `priority` or `name`)",
+                        ));
+                    };
+                    match ident.to_string().as_str() {
+                        "priority" => {
+                            if let syn::Expr::Lit(expr_lit) = &nv.value
+                                && let Lit::Int(lit_int) = &expr_lit.lit
+                            {
+                                priority = Some(lit_int.base10_parse()?);
+                            } else {
+                                return Err(syn::Error::new_spanned(
+                                    &nv.value,
+                                    "priority must be an integer literal",
+                                ));
                             }
-                            "name" => {
-                                if let syn::Expr::Lit(expr_lit) = &nv.value
-                                    && let Lit::Str(lit_str) = &expr_lit.lit
-                                {
-                                    name = Some(lit_str.value());
-                                }
+                        }
+                        "name" => {
+                            if let syn::Expr::Lit(expr_lit) = &nv.value
+                                && let Lit::Str(lit_str) = &expr_lit.lit
+                            {
+                                name = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(
+                                    &nv.value,
+                                    "name must be a string literal",
+                                ));
                             }
-                            _ => {}
+                        }
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.path,
+                                format!(
+                                    "unknown catch option `{other}` (expected `priority` or `name`)"
+                                ),
+                            ));
                         }
                     }
                 }
-                _ => {}
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "expected an error type name, `priority = N` or `name = \"...\"`",
+                    ));
+                }
             }
         }
 
@@ -233,4 +265,39 @@ pub fn catch_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn documented_forms_parse() {
+        let args: CatchArgs = syn::parse_str("NotFound, RouteNotFound").expect("must parse");
+        assert_eq!(args.error_types.len(), 2);
+
+        let args: CatchArgs =
+            syn::parse_str("Validation, priority = 100, name = \"custom\"").expect("must parse");
+        assert_eq!(args.priority, Some(100));
+        assert_eq!(args.name.as_deref(), Some("custom"));
+
+        let args: CatchArgs = syn::parse_str("").expect("must parse");
+        assert!(args.error_types.is_empty());
+    }
+
+    #[test]
+    fn unknown_or_ill_typed_options_are_rejected() {
+        // Each of these used to be dropped, leaving the filter at priority 0 —
+        // silently reordering which filter answers an error.
+        for src in [
+            "Validation, priorty = 100",
+            "NotFound, priority = \"high\"",
+            "NotFound, name = 5",
+        ] {
+            assert!(
+                syn::parse_str::<CatchArgs>(src).is_err(),
+                "`{src}` must be a compile error, not a silently ignored option"
+            );
+        }
+    }
 }

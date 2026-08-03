@@ -30,8 +30,13 @@ pub enum TranslationSource {
 pub struct MessageBundle {
     /// Messages keyed by message ID
     messages: HashMap<String, String>,
-    /// Plural messages keyed by (message_id, category)
-    plurals: HashMap<(String, PluralCategory), String>,
+    /// Plural messages: message ID -> category -> message.
+    ///
+    /// Nested rather than keyed by `(String, PluralCategory)` so a lookup can
+    /// borrow the key instead of allocating a fresh tuple on every probe —
+    /// `get_plural` runs on the request path and probes twice (the requested
+    /// category, then `Other`).
+    plurals: HashMap<String, HashMap<PluralCategory, String>>,
 }
 
 impl MessageBundle {
@@ -55,7 +60,11 @@ impl MessageBundle {
                     for (form, msg) in obj {
                         if let serde_json::Value::String(s) = msg {
                             if let Ok(category) = PluralCategory::parse(&form) {
-                                bundle.plurals.insert((key.clone(), category), s);
+                                bundle
+                                    .plurals
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .insert(category, s);
                             } else {
                                 // Nested key
                                 bundle.messages.insert(format!("{}.{}", key, form), s);
@@ -118,7 +127,10 @@ impl MessageBundle {
         category: PluralCategory,
         message: impl Into<String>,
     ) {
-        self.plurals.insert((key.into(), category), message.into());
+        self.plurals
+            .entry(key.into())
+            .or_default()
+            .insert(category, message.into());
     }
 
     /// Get a message.
@@ -128,15 +140,11 @@ impl MessageBundle {
 
     /// Get a plural form.
     pub fn get_plural(&self, key: &str, category: PluralCategory) -> Option<&str> {
-        self.plurals
-            .get(&(key.to_string(), category))
+        let forms = self.plurals.get(key)?;
+        forms
+            .get(&category)
+            .or_else(|| forms.get(&PluralCategory::Other))
             .map(|s| s.as_str())
-            .or_else(|| {
-                // Fallback to "other" category
-                self.plurals
-                    .get(&(key.to_string(), PluralCategory::Other))
-                    .map(|s| s.as_str())
-            })
     }
 
     /// Check if bundle has a message.
@@ -175,22 +183,71 @@ impl Messages {
         Ok(())
     }
 
-    /// Get a bundle for a locale.
+    /// Get the most specific bundle for a locale.
+    ///
+    /// Prefer [`Messages::lookup`] / [`Messages::lookup_plural`] for message
+    /// resolution: this returns a single bundle, so a caller that reads a key
+    /// straight off it will miss keys that only exist in the language-only
+    /// bundle.
     pub fn get_bundle(&self, locale: &Locale) -> Option<&MessageBundle> {
-        // Try exact match first
-        if let Some(bundle) = self.bundles.get(&locale.tag()) {
-            return Some(bundle);
-        }
+        self.bundle_chain(locale).into_iter().flatten().next()
+    }
 
-        // Try language-only fallback
-        if locale.region.is_some() {
-            let lang_only = locale.language_only();
-            if let Some(bundle) = self.bundles.get(&lang_only.tag()) {
-                return Some(bundle);
-            }
-        }
+    /// The bundles to consult for `locale`, most specific first: the exact
+    /// tag, then the language-only tag when the locale carries a region.
+    ///
+    /// Returned as a fixed-size array rather than a `Vec` to keep the request
+    /// path free of heap allocation.
+    fn bundle_chain(&self, locale: &Locale) -> [Option<&MessageBundle>; 2] {
+        let exact = self.bundles.get(locale.tag().as_str());
 
-        None
+        // Only worth a second probe when stripping the region actually yields
+        // a different tag.
+        let lang_only = if locale.region.is_some() {
+            self.bundles.get(Self::language_only_tag(locale).as_str())
+        } else {
+            None
+        };
+
+        [exact, lang_only]
+    }
+
+    /// Build the region-stripped tag for `locale`.
+    ///
+    /// Equivalent to `locale.language_only().tag()` but without cloning the
+    /// whole `Locale` first.
+    fn language_only_tag(locale: &Locale) -> String {
+        let mut tag = locale.language.clone();
+        if let Some(ref script) = locale.script {
+            tag.push('-');
+            tag.push_str(script);
+        }
+        tag
+    }
+
+    /// Look up a single message, walking the locale's bundle chain per KEY.
+    ///
+    /// Walking per key (rather than picking one bundle and reading it) is what
+    /// makes a partially translated regional bundle work: a key present in
+    /// `fr` but absent from `fr-CA` still resolves for an `fr-CA` request.
+    pub fn lookup(&self, key: &str, locale: &Locale) -> Option<&str> {
+        self.bundle_chain(locale)
+            .into_iter()
+            .flatten()
+            .find_map(|bundle| bundle.get(key))
+    }
+
+    /// Look up a plural form, walking the locale's bundle chain per key.
+    pub fn lookup_plural(
+        &self,
+        key: &str,
+        locale: &Locale,
+        category: PluralCategory,
+    ) -> Option<&str> {
+        self.bundle_chain(locale)
+            .into_iter()
+            .flatten()
+            .find_map(|bundle| bundle.get_plural(key, category))
     }
 
     /// Load from a directory.
@@ -291,25 +348,20 @@ impl I18n {
     pub fn t(&self, key: &str, locale: &Locale) -> String {
         let messages = self.messages.read();
 
-        // Try exact locale
-        if let Some(bundle) = messages.get_bundle(locale)
-            && let Some(msg) = bundle.get(key)
-        {
+        // Each step resolves the key across the whole locale chain, so a
+        // regional bundle that is missing the key still falls through to its
+        // language-only bundle instead of terminating the search.
+        if let Some(msg) = messages.lookup(key, locale) {
             return msg.to_string();
         }
 
-        // Try fallback locale
         if let Some(ref fallback) = self.fallback_locale
-            && let Some(bundle) = messages.get_bundle(fallback)
-            && let Some(msg) = bundle.get(key)
+            && let Some(msg) = messages.lookup(key, fallback)
         {
             return msg.to_string();
         }
 
-        // Try default locale
-        if let Some(bundle) = messages.get_bundle(&self.default_locale)
-            && let Some(msg) = bundle.get(key)
-        {
+        if let Some(msg) = messages.lookup(key, &self.default_locale) {
             return msg.to_string();
         }
 
@@ -353,19 +405,13 @@ impl I18n {
 
         // Try to get plural form
         let msg = messages
-            .get_bundle(locale)
-            .and_then(|b| b.get_plural(key, category))
+            .lookup_plural(key, locale, category)
             .or_else(|| {
                 self.fallback_locale
                     .as_ref()
-                    .and_then(|fb| messages.get_bundle(fb))
-                    .and_then(|b| b.get_plural(key, category))
+                    .and_then(|fb| messages.lookup_plural(key, fb, category))
             })
-            .or_else(|| {
-                messages
-                    .get_bundle(&self.default_locale)
-                    .and_then(|b| b.get_plural(key, category))
-            })
+            .or_else(|| messages.lookup_plural(key, &self.default_locale, category))
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}[{}]", key, category));
 
@@ -374,13 +420,18 @@ impl I18n {
     }
 
     /// Check if a message exists.
+    ///
+    /// Walks exactly the same chain as [`I18n::t`], so `has` never reports
+    /// false for a key that `t` would resolve.
     pub fn has(&self, key: &str, locale: &Locale) -> bool {
         let messages = self.messages.read();
 
-        messages
-            .get_bundle(locale)
-            .map(|b| b.has(key))
-            .unwrap_or(false)
+        messages.lookup(key, locale).is_some()
+            || self
+                .fallback_locale
+                .as_ref()
+                .is_some_and(|fb| messages.lookup(key, fb).is_some())
+            || messages.lookup(key, &self.default_locale).is_some()
     }
 }
 
@@ -495,6 +546,40 @@ mod tests {
         let i18n = I18n::new();
         i18n.add_source(&Locale::de(), &mem).unwrap();
         assert_eq!(i18n.t("hello", &Locale::de()), "Hallo!");
+    }
+
+    #[test]
+    fn test_regional_bundle_falls_back_per_key() {
+        // Regression: the fallback chain used to be applied per BUNDLE, so a
+        // key missing from `fr-CA` was never looked up in `fr` once the
+        // `fr-CA` bundle existed -- it jumped straight to the English default.
+        let i18n = create_test_i18n();
+
+        let mut fr_ca = MessageBundle::new();
+        fr_ca.add("hello", "Allo!");
+        let fr_ca_locale = Locale::new("fr", Some("CA"));
+        i18n.add_bundle(&fr_ca_locale, fr_ca);
+
+        assert_eq!(i18n.t("hello", &fr_ca_locale), "Allo!");
+        assert_eq!(i18n.t("greeting", &fr_ca_locale), "Bonjour, {name}!");
+        assert_eq!(i18n.t_plural("items", 2, &fr_ca_locale), "2 articles");
+    }
+
+    #[test]
+    fn test_has_follows_the_same_chain_as_t() {
+        // Regression: `has` only consulted the requested locale's bundle, so
+        // it reported false for keys `t` resolves through the fallback chain.
+        let i18n = create_test_i18n();
+
+        let fr_ca = Locale::new("fr", Some("CA"));
+        assert!(i18n.has("greeting", &fr_ca));
+
+        // `de` has no bundle at all; `t` still resolves via the fallback.
+        let de = Locale::de();
+        assert_eq!(i18n.t("hello", &de), "Hello!");
+        assert!(i18n.has("hello", &de));
+
+        assert!(!i18n.has("unknown.key", &Locale::en()));
     }
 
     #[test]

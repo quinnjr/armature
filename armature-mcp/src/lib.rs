@@ -9,7 +9,8 @@
 //! - 🔧 **Tool Discovery** - Auto-register tools with `#[mcp]` attribute
 //! - 📦 **Resource Exposure** - Share data with AI clients
 //! - 🔌 **Auto Endpoint** - `/mcp` endpoint automatically added
-//! - 📡 **JSON-RPC 2.0** - Full MCP protocol compliance
+//! - 📡 **JSON-RPC 2.0** - Single-request MCP protocol support (batching is
+//!   deliberately unsupported; see [Protocol scope](#protocol-scope))
 //!
 //! # Quick Start
 //!
@@ -78,7 +79,20 @@
 //! - `tools/call` - Invoke a tool
 //! - `resources/list` - List available resources
 //! - `resources/read` - Read a resource
+//! - `prompts/list` - List available prompts
+//! - `prompts/get` - Render a prompt
 //! - `ping` - Health check
+//! - `notifications/initialized`, `notifications/cancelled` - accepted no-ops
+//!
+//! # Protocol scope
+//!
+//! - **Notifications**: a request without an `id` is a JSON-RPC notification.
+//!   Per JSON-RPC 2.0 §4.1 the server never replies to one: the method is
+//!   dispatched for its side effects and `POST /mcp` answers `204 No Content`
+//!   with an empty body.
+//! - **Batching**: JSON-RPC batches (a top-level JSON array) are **not**
+//!   supported. Such a payload is rejected with `-32600 Invalid Request`.
+//!   Send one request per HTTP POST.
 //!
 //! # Example Request
 //!
@@ -117,6 +131,7 @@
 pub mod auth;
 pub mod controller;
 pub mod error;
+pub mod prompt;
 pub mod resource;
 pub mod service;
 pub mod tool;
@@ -135,6 +150,7 @@ pub use auth::{
 };
 pub use controller::{McpController, McpRouterExt};
 pub use error::{McpError, Result};
+pub use prompt::{McpPromptEntry, McpPromptProvider, McpPromptRegistry, PromptHandlerFnPtr};
 pub use resource::{McpResourceEntry, McpResourceProvider, McpResourceRegistry};
 pub use service::{MCP_PROTOCOL_VERSION, McpConfig, McpService};
 pub use tool::{McpToolEntry, McpToolProvider, McpToolRegistry, ToolHandlerFn, ToolHandlerFnPtr};
@@ -145,11 +161,13 @@ pub mod prelude {
     pub use crate::auth::{ApiTokenAuth, JwtAuth, McpAuthConfig, McpAuthContext, OAuth2Auth};
     pub use crate::controller::{McpController, McpRouterExt};
     pub use crate::error::{McpError, Result};
+    pub use crate::prompt::{McpPromptEntry, McpPromptProvider, McpPromptRegistry};
     pub use crate::resource::{McpResourceEntry, McpResourceProvider, McpResourceRegistry};
     pub use crate::service::{McpConfig, McpService};
     pub use crate::tool::{McpToolEntry, McpToolProvider, McpToolRegistry};
     pub use crate::types::{
-        ContentItem, ResourceContent, ResourceDefinition, ToolCallResult, ToolDefinition,
+        ContentItem, PromptDefinition, PromptGetResult, PromptMessage, ResourceContent,
+        ResourceDefinition, ToolCallResult, ToolDefinition,
     };
-    pub use crate::{register_mcp_resource, register_mcp_tool};
+    pub use crate::{register_mcp_prompt, register_mcp_resource, register_mcp_tool};
 }

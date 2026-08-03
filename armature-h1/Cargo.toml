@@ -1,0 +1,65 @@
+[package]
+name = "armature-h1"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Zero-allocation thread-per-core HTTP/1.1 server for the Armature framework"
+keywords = ["http", "server", "http1", "performance", "async"]
+categories = ["web-programming::http-server", "asynchronous", "network-programming"]
+readme = "README.md"
+# The fuzz crate is its own workspace and depends on hyper for the differential
+# target; neither belongs in the published package.
+exclude = ["fuzz/"]
+
+[dependencies]
+bytes = "1.12"
+httparse = "1.10"
+memchr = "2.8"
+smallvec = { version = "1.15", features = ["union", "const_generics"] }
+httpdate = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+socket2 = { version = "0.6", features = ["all"] }
+core_affinity = "0.8"
+
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:tokio-rustls"]
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros", "test-util"] }
+# Self-signed certificates for the TLS dispatch tests. Dev-only: the crate itself
+# never generates certificates.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+
+# `required-features` gates a whole target, so the TLS tests live in their own
+# one. Folded back into `dispatch`, they would take the plaintext h2c cases —
+# which touch no TLS — out of every default-feature build, CI's included.
+[[test]]
+name = "tls_dispatch"
+required-features = ["tls"]
+
+# Explicit bench targets, matching the root package's `autobenches = false`
+# convention: a stray file under benches/ should not silently become a target.
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "write"
+harness = false
+
+[[bench]]
+name = "e2e"
+harness = false

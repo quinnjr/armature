@@ -31,14 +31,30 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Add a header to the request.
+    ///
+    /// A header whose name or value is not valid HTTP (e.g. a bearer token
+    /// with a stray newline) cannot be sent, so it is dropped — but loudly.
+    /// Silently dropping it meant an `Authorization` header could vanish and
+    /// the request go out unauthenticated with no diagnostic anywhere.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
         let value = value.into();
-        if let (Ok(name), Ok(value)) = (
+        match (
             HeaderName::try_from(name.as_str()),
             HeaderValue::try_from(value.as_str()),
         ) {
-            self.headers.insert(name, value);
+            (Ok(parsed_name), Ok(parsed_value)) => {
+                self.headers.insert(parsed_name, parsed_value);
+            }
+            _ => {
+                // The value is deliberately not logged: this path is hit by
+                // credentials (bearer tokens, API keys) often enough that
+                // echoing it would leak secrets into the logs.
+                tracing::warn!(
+                    name = %name,
+                    "skipping malformed request header"
+                );
+            }
         }
         self
     }
@@ -301,6 +317,34 @@ mod tests {
         assert!(
             saw_needle.load(Ordering::SeqCst),
             "expected a tracing::warn! about the malformed default header"
+        );
+    }
+
+    /// Regression test: `RequestBuilder::header` used to drop an unparseable
+    /// header with no diagnostic, so `bearer_auth` with a token containing a
+    /// stray newline stripped `Authorization` and the request went out
+    /// unauthenticated and silently.
+    #[test]
+    fn malformed_request_header_is_warned_not_silently_dropped() {
+        let saw_needle = Arc::new(AtomicBool::new(false));
+        let subscriber = RecordingSubscriber {
+            saw_needle: saw_needle.clone(),
+            needle: "malformed request header",
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let client = HttpClient::new(HttpClientConfig::default());
+        let builder = client
+            .get("http://127.0.0.1:1/unreachable")
+            .bearer_auth("tok\nen");
+
+        assert!(
+            builder.headers.get("authorization").is_none(),
+            "an invalid header value must not be sent"
+        );
+        assert!(
+            saw_needle.load(Ordering::SeqCst),
+            "expected a tracing::warn! about the malformed request header"
         );
     }
 }

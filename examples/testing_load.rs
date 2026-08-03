@@ -2,7 +2,23 @@
 #![allow(clippy::needless_question_mark)]
 //! Load Testing Example
 //!
-//! Demonstrates performance testing and load generation.
+//! Drives `armature_testing::load` against synthetic workloads - `sleep`s
+//! standing in for I/O - so the runner itself can be demonstrated without a
+//! live server. The numbers printed describe the sleeps, not any real system.
+//!
+//! The "real API" section at the end is a template: its HTTP call is commented
+//! out because this example has no server to talk to, and adding a `reqwest`
+//! dependency to demonstrate one line of client code is not worth it. Uncomment
+//! it and point it at your own server to use it.
+//!
+//! Each section asserts on the stats it produced, so a regression that broke
+//! request accounting - the wrong number of requests, failures miscounted,
+//! quantiles out of order - fails this example rather than printing a plausible
+//! wrong table.
+//!
+//! ```bash
+//! cargo run --example testing_load
+//! ```
 
 use armature_testing::load::*;
 use std::sync::Arc;
@@ -28,6 +44,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = basic_runner.run().await?;
     stats.print();
 
+    // Every request was accounted for, and none of them failed: a workload
+    // that only sleeps has nothing to fail on.
+    assert_eq!(
+        stats.total_requests, 100,
+        "all 100 requests must be counted"
+    );
+    assert_eq!(stats.successful, 100);
+    assert_eq!(stats.failed, 0);
+    // Quantiles must be ordered, whatever the machine's timing noise.
+    assert!(stats.min_response_time <= stats.median_response_time);
+    assert!(stats.median_response_time <= stats.p95_response_time);
+    assert!(stats.p95_response_time <= stats.p99_response_time);
+    assert!(stats.p99_response_time <= stats.max_response_time);
+
     // 2. Duration-based load test
     println!("\n2. Duration-Based Load Test (5 concurrent, 3 seconds):");
     println!("   Starting duration-based test...");
@@ -43,6 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stats = duration_runner.run().await?;
     stats.print();
+
+    // A duration-based run has no request target, but it must have run for
+    // roughly the configured window and completed at least one request.
+    assert!(stats.total_requests > 0, "duration-based run must do work");
+    assert!(stats.duration >= Duration::from_secs(3));
 
     // 3. Load test with failures
     println!("\n3. Load Test with Some Failures:");
@@ -70,6 +105,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = failure_runner.run().await?;
     stats.print();
 
+    // Exactly one request in five is made to fail, so of 50 requests exactly
+    // 10 must be counted as failures and 40 as successes. This is the
+    // assertion that catches failure accounting silently reporting zero.
+    assert_eq!(stats.total_requests, 50);
+    assert_eq!(
+        stats.failed, 10,
+        "20% of 50 requests must be recorded failed"
+    );
+    assert_eq!(stats.successful, 40);
+
     // 4. Stress test (gradually increasing load)
     println!("\n4. Stress Test (1 → 20 concurrent, step by 5, 2 seconds per step):");
     println!("   Starting stress test...");
@@ -86,6 +131,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let stress_results = stress_runner.run().await?;
+
+    // 1, 6, 11, 16 - stepping by 5 from 1 up to (not past) 20.
+    assert!(
+        !stress_results.is_empty(),
+        "a stress test must produce at least one step"
+    );
+    let concurrencies: Vec<_> = stress_results.iter().map(|(c, _)| *c).collect();
+    assert!(
+        concurrencies.windows(2).all(|w| w[0] < w[1]),
+        "each step must raise concurrency: {concurrencies:?}"
+    );
+    assert!(
+        concurrencies.iter().all(|c| *c <= 20),
+        "no step may exceed the configured maximum: {concurrencies:?}"
+    );
 
     // Print stress test summary
     println!("\nStress Test Summary:");

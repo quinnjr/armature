@@ -57,34 +57,104 @@ impl CompressionAlgorithm {
         }
     }
 
-    /// Select the best algorithm based on Accept-Encoding header
+    /// Parse an `Accept-Encoding` header into `(token, qvalue)` pairs.
+    ///
+    /// RFC 9110 §12.4.2: a missing `;q=` means `q=1`, and an unparsable qvalue
+    /// is treated as 1 rather than dropping the entry, matching how browsers
+    /// and other servers behave with malformed headers.
+    fn parse_accept_encoding(accept_encoding: &str) -> Vec<(String, f32)> {
+        accept_encoding
+            .split(',')
+            .filter_map(|entry| {
+                let mut parts = entry.split(';');
+                let token = parts.next()?.trim().to_ascii_lowercase();
+                if token.is_empty() {
+                    return None;
+                }
+                let q = parts
+                    .find_map(|p| {
+                        let p = p.trim();
+                        let rest = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q="))?;
+                        rest.trim().parse::<f32>().ok()
+                    })
+                    .unwrap_or(1.0);
+                Some((token, q))
+            })
+            .collect()
+    }
+
+    /// The qvalue a client assigned to `token`, honouring a `*` wildcard.
+    ///
+    /// Returns `None` when the client neither named the token nor covered it
+    /// with `*` — which is different from naming it with `q=0` (explicitly
+    /// unacceptable) and different again from `q>0` (acceptable).
+    fn qvalue_for(entries: &[(String, f32)], token: &str) -> Option<f32> {
+        entries
+            .iter()
+            .find(|(name, _)| name == token)
+            .or_else(|| entries.iter().find(|(name, _)| name == "*"))
+            .map(|(_, q)| *q)
+    }
+
+    /// Whether a client advertising `accept_encoding` will accept `self`.
+    ///
+    /// `None`/`Auto` mean "send it uncompressed", which is `identity`; a client
+    /// may reject that too, with `identity;q=0`.
+    pub fn is_accepted_by(&self, accept_encoding: &str) -> bool {
+        let entries = Self::parse_accept_encoding(accept_encoding);
+        let token = match self.encoding_name() {
+            Some(name) => name,
+            // No Content-Encoding on the wire is `identity`, which is
+            // acceptable by default unless explicitly refused.
+            None => return Self::qvalue_for(&entries, "identity").unwrap_or(1.0) > 0.0,
+        };
+        Self::qvalue_for(&entries, token).is_some_and(|q| q > 0.0)
+    }
+
+    /// Select the best algorithm based on `Accept-Encoding`.
+    ///
+    /// Follows RFC 9110 §12.5.3: `;q=0` means "not acceptable" and excludes a
+    /// coding outright, a `*` covers codings the client did not name, and among
+    /// acceptable codings the highest qvalue wins. Ties are broken by the
+    /// server's own preference, br > zstd > gzip, which is what the qvalue
+    /// rules leave to the server.
     #[cfg_attr(
         not(any(feature = "gzip", feature = "brotli", feature = "zstd")),
-        allow(unused_variables)
+        allow(unused_variables, unused_mut)
     )]
     pub fn select_from_accept_encoding(accept_encoding: &str) -> Self {
-        let encodings: Vec<&str> = accept_encoding
-            .split(',')
-            .map(|s| s.split(';').next().unwrap_or("").trim())
-            .collect();
+        let entries = Self::parse_accept_encoding(accept_encoding);
 
-        // Priority: br > zstd > gzip
-        #[cfg(feature = "brotli")]
-        if encodings.contains(&"br") {
-            return Self::Brotli;
+        // Server preference order, most preferred first. Only used to break
+        // ties between codings the client rated equally.
+        let candidates: &[Self] = &[
+            #[cfg(feature = "brotli")]
+            Self::Brotli,
+            #[cfg(feature = "zstd")]
+            Self::Zstd,
+            #[cfg(feature = "gzip")]
+            Self::Gzip,
+        ];
+
+        let mut best: Option<(Self, f32)> = None;
+        for candidate in candidates {
+            let Some(name) = candidate.encoding_name() else {
+                continue;
+            };
+            let Some(q) = Self::qvalue_for(&entries, name) else {
+                continue;
+            };
+            if q <= 0.0 {
+                continue;
+            }
+            // Strictly greater, so an equal qvalue leaves the earlier (more
+            // preferred) candidate in place.
+            if best.is_none_or(|(_, best_q)| q > best_q) {
+                best = Some((*candidate, q));
+            }
         }
 
-        #[cfg(feature = "zstd")]
-        if encodings.contains(&"zstd") {
-            return Self::Zstd;
-        }
-
-        #[cfg(feature = "gzip")]
-        if encodings.contains(&"gzip") {
-            return Self::Gzip;
-        }
-
-        Self::None
+        best.map(|(algo, _)| algo).unwrap_or(Self::None)
     }
 
     /// Get the minimum compression level for this algorithm
@@ -294,6 +364,77 @@ mod tests {
         // Test no match
         let algo = CompressionAlgorithm::select_from_accept_encoding("deflate");
         assert_eq!(algo, CompressionAlgorithm::None);
+    }
+
+    /// RFC 9110 §12.5.3: `q=0` means "not acceptable". Against the pre-fix
+    /// code, which stripped qvalues and then ignored them, `br;q=0, gzip`
+    /// selected Brotli - a coding the client had explicitly refused.
+    #[cfg(all(feature = "gzip", feature = "brotli"))]
+    #[test]
+    fn test_q_zero_excludes_a_coding() {
+        assert_eq!(
+            CompressionAlgorithm::select_from_accept_encoding("br;q=0, gzip"),
+            CompressionAlgorithm::Gzip
+        );
+    }
+
+    /// Every acceptable coding refused leaves nothing to compress with.
+    #[cfg(all(feature = "gzip", feature = "brotli"))]
+    #[test]
+    fn test_all_q_zero_selects_none() {
+        assert_eq!(
+            CompressionAlgorithm::select_from_accept_encoding("br;q=0, gzip;q=0"),
+            CompressionAlgorithm::None
+        );
+    }
+
+    /// The highest qvalue wins even when it is not the server's first choice.
+    #[cfg(all(feature = "gzip", feature = "brotli"))]
+    #[test]
+    fn test_highest_q_wins_over_server_preference() {
+        assert_eq!(
+            CompressionAlgorithm::select_from_accept_encoding("br;q=0.1, gzip;q=0.9"),
+            CompressionAlgorithm::Gzip
+        );
+        // Equal qvalues fall back to the server's own br > gzip preference.
+        assert_eq!(
+            CompressionAlgorithm::select_from_accept_encoding("br;q=0.5, gzip;q=0.5"),
+            CompressionAlgorithm::Brotli
+        );
+    }
+
+    /// A `*` covers codings the client did not name explicitly.
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn test_wildcard_is_honoured() {
+        // Which coding wins depends on the enabled features; what matters is
+        // that a bare `*` does not resolve to "no compression".
+        assert_ne!(
+            CompressionAlgorithm::select_from_accept_encoding("*"),
+            CompressionAlgorithm::None
+        );
+        // An explicit entry still beats the wildcard for the coding it names.
+        assert_eq!(
+            CompressionAlgorithm::select_from_accept_encoding("gzip;q=0, *;q=0"),
+            CompressionAlgorithm::None
+        );
+    }
+
+    /// `identity;q=0` means the client will not take an uncompressed response.
+    #[test]
+    fn test_identity_q_zero_is_not_accepted() {
+        assert!(!CompressionAlgorithm::None.is_accepted_by("gzip, identity;q=0"));
+        assert!(CompressionAlgorithm::None.is_accepted_by("gzip"));
+    }
+
+    /// A configured algorithm must be checked against what the client accepts.
+    #[cfg(all(feature = "gzip", feature = "brotli"))]
+    #[test]
+    fn test_is_accepted_by() {
+        assert!(CompressionAlgorithm::Gzip.is_accepted_by("gzip, deflate"));
+        assert!(!CompressionAlgorithm::Gzip.is_accepted_by("br"));
+        assert!(!CompressionAlgorithm::Gzip.is_accepted_by("gzip;q=0"));
+        assert!(CompressionAlgorithm::Brotli.is_accepted_by("*"));
     }
 
     #[cfg(feature = "gzip")]

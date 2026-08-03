@@ -29,6 +29,7 @@
 //! ```
 
 use crate::{Error, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -737,7 +738,7 @@ impl HttpRequest {
         self.headers
             .get("Accept")
             .or_else(|| self.headers.get("accept"))
-            .map(|h| Accept::parse(h))
+            .map(Accept::parse)
             .unwrap_or_default()
     }
 
@@ -746,7 +747,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Language")
             .or_else(|| self.headers.get("accept-language"))
-            .map(|h| AcceptLanguage::parse(h))
+            .map(AcceptLanguage::parse)
             .unwrap_or_default()
     }
 
@@ -755,7 +756,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Encoding")
             .or_else(|| self.headers.get("accept-encoding"))
-            .map(|h| AcceptEncoding::parse(h))
+            .map(AcceptEncoding::parse)
             .unwrap_or_default()
     }
 
@@ -764,7 +765,7 @@ impl HttpRequest {
         self.headers
             .get("Accept-Charset")
             .or_else(|| self.headers.get("accept-charset"))
-            .map(|h| AcceptCharset::parse(h))
+            .map(AcceptCharset::parse)
             .unwrap_or_default()
     }
 
@@ -940,7 +941,7 @@ where
                 let value = f();
                 let body =
                     serde_json::to_vec(&value).map_err(|e| Error::Serialization(e.to_string()))?;
-                response.body = body;
+                response.body = Bytes::from(body);
                 response
                     .headers
                     .insert("Content-Type".to_string(), "application/json".to_string());
@@ -948,7 +949,7 @@ where
         } else if best.matches(&MediaType::html()) {
             if let Some(f) = self.html_fn {
                 let html = f();
-                response.body = html.into_bytes();
+                response.body = Bytes::from(html.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "text/html; charset=utf-8".to_string(),
@@ -957,7 +958,7 @@ where
         } else if best.matches(&MediaType::plain_text()) {
             if let Some(f) = self.text_fn {
                 let text = f();
-                response.body = text.into_bytes();
+                response.body = Bytes::from(text.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "text/plain; charset=utf-8".to_string(),
@@ -966,7 +967,7 @@ where
         } else if best.matches(&MediaType::xml()) {
             if let Some(f) = self.xml_fn {
                 let xml = f();
-                response.body = xml.into_bytes();
+                response.body = Bytes::from(xml.into_bytes());
                 response.headers.insert(
                     "Content-Type".to_string(),
                     "application/xml; charset=utf-8".to_string(),
@@ -1025,7 +1026,7 @@ pub fn respond_with<T: Serialize>(request: &HttpRequest, data: &T) -> Result<Htt
             "<!DOCTYPE html><html><body><pre>{}</pre></body></html>",
             html_escape(&json)
         );
-        response.body = html.into_bytes();
+        response.body = Bytes::from(html.into_bytes());
         response.headers.insert(
             "Content-Type".to_string(),
             "text/html; charset=utf-8".to_string(),
@@ -1033,7 +1034,7 @@ pub fn respond_with<T: Serialize>(request: &HttpRequest, data: &T) -> Result<Htt
     } else {
         // Default to JSON
         response.body =
-            serde_json::to_vec(data).map_err(|e| Error::Serialization(e.to_string()))?;
+            Bytes::from(serde_json::to_vec(data).map_err(|e| Error::Serialization(e.to_string()))?);
         response
             .headers
             .insert("Content-Type".to_string(), "application/json".to_string());
@@ -1075,7 +1076,7 @@ mod tests {
         let mt = MediaType::parse("text/html; charset=utf-8").unwrap();
         assert_eq!(mt.type_, "text");
         assert_eq!(mt.subtype, "html");
-        assert_eq!(mt.params.get("charset"), Some(&"utf-8".to_string()));
+        assert_eq!(mt.params.get("charset").map(String::as_str), Some("utf-8"));
     }
 
     #[test]
@@ -1208,10 +1209,10 @@ mod tests {
 
     #[test]
     fn test_http_request_accept() {
-        let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
+        let mut request = HttpRequest::new("GET", "/".to_string());
         request
             .headers
-            .insert("Accept".to_string(), "application/json".to_string());
+            .insert("Accept", "application/json".to_string());
 
         let accept = request.accept();
         assert!(accept.accepts(&MediaType::json()));
@@ -1219,11 +1220,10 @@ mod tests {
 
     #[test]
     fn test_http_request_prefers_json() {
-        let mut request = HttpRequest::new("GET".to_string(), "/".to_string());
-        request.headers.insert(
-            "Accept".to_string(),
-            "application/json, text/html;q=0.9".to_string(),
-        );
+        let mut request = HttpRequest::new("GET", "/".to_string());
+        request
+            .headers
+            .insert("Accept", "application/json, text/html;q=0.9".to_string());
 
         assert!(request.prefers_json());
         assert!(!request.prefers_html());

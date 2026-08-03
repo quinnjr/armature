@@ -25,6 +25,7 @@
 //! [`armature_core::websocket::handle_websocket`].
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use armature_core::Error as ArmatureError;
@@ -40,6 +41,16 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
 pub use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
 pub use async_graphql::http::WebSocketProtocols as Protocols;
+
+/// Hard upper bound on how many operation IDs a single connection may have
+/// in flight, applied even when [`WebSocketConfig::max_subscriptions`] is
+/// `None`.
+///
+/// Without it, a `None` cap would let a client grow the per-connection
+/// tracking set forever by sending a fresh id each time, turning "no
+/// configured cap" into an unbounded memory leak for the life of the
+/// connection.
+pub const MAX_TRACKED_OPERATIONS: usize = 10_000;
 
 /// Select a `graphql-ws`/`graphql-transport-ws` sub-protocol from the value
 /// of an incoming `Sec-WebSocket-Protocol` request header.
@@ -85,19 +96,25 @@ pub struct WebSocketConfig {
     /// dropped. Applies to both sub-protocols.
     pub keepalive_timeout: Option<Duration>,
 
-    /// Reject `subscribe`/`start` messages once this many subscriptions are
-    /// open on this connection. `None` means unbounded, which is not
+    /// Reject `subscribe`/`start` messages once this many operations are open
+    /// on this connection. `None` means "no configured cap", which is not
     /// recommended for internet-facing servers: a single client could
     /// otherwise open unbounded concurrent subscriptions and exhaust server
-    /// memory, CPU, or task capacity.
+    /// memory, CPU, or task capacity. Even with `None`,
+    /// [`MAX_TRACKED_OPERATIONS`] still applies as a hard backstop.
     ///
-    /// Subscription IDs are tracked from the client's perspective (a `start`
-    /// increments the count, an explicit `stop` decrements it); a
-    /// subscription that completes on its own without the client sending
-    /// `stop` is not decremented until the connection ends. When the cap is
-    /// hit, an over-limit `start` message is silently dropped: the client
-    /// simply never receives `next`/`error`/`complete` for that id. This is
-    /// a deliberate, non-chatty mitigation, not a protocol error.
+    /// This counts *every* operation the transport delivers, not just
+    /// subscriptions: the `graphql-transport-ws` protocol carries queries and
+    /// mutations as `subscribe` messages too, so they consume a slot for as
+    /// long as they run. Slots are released when the client sends `stop`, and
+    /// when the server emits `complete` for the id — which is what returns
+    /// the slot for a query or mutation, since those finish on their own
+    /// without the client ever sending `stop`.
+    ///
+    /// When the cap is hit, an over-limit `start` message is silently
+    /// dropped: the client simply never receives `next`/`error`/`complete`
+    /// for that id. This is a deliberate, non-chatty mitigation, not a
+    /// protocol error.
     pub max_subscriptions: Option<usize>,
 
     /// Called with the client's `connection_init` payload before any
@@ -161,6 +178,32 @@ impl WebSocketConfig {
     }
 }
 
+/// Lock the per-connection operation set, recovering from a poisoned mutex.
+///
+/// Nothing under this lock can panic, so poisoning can only be collateral
+/// damage from an unrelated panic; dropping the whole connection over it would
+/// be a worse outcome than continuing with the (still consistent) set.
+fn lock_operations(
+    operations: &Mutex<HashSet<String>>,
+) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    operations.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Extract the operation id from an outgoing `complete` message.
+///
+/// Returns `None` for any other message type or for a payload that does not
+/// parse. Both sub-protocols spell the server-side termination message
+/// `complete`, so this covers `graphql-ws` and `graphql-transport-ws` alike.
+/// A `None` from a parse failure is safe: the id simply stays tracked until
+/// the client's `stop` or the end of the connection.
+fn completed_operation_id(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("type")?.as_str()? != "complete" {
+        return None;
+    }
+    Some(value.get("id")?.as_str()?.to_string())
+}
+
 /// Drive a GraphQL-over-WebSocket session to completion on an already
 /// upgraded connection.
 ///
@@ -192,28 +235,35 @@ where
 {
     let (mut sink, stream) = ws_stream.split();
 
-    let max_subscriptions = config.max_subscriptions;
-    let mut open_subscriptions: HashSet<String> = HashSet::new();
+    // An unconfigured cap still gets the hard backstop, so the tracking set is
+    // bounded on every configuration.
+    let cap = config.max_subscriptions.unwrap_or(MAX_TRACKED_OPERATIONS);
 
+    // Shared because both halves of the session mutate it: the inbound filter
+    // claims a slot on `start` and releases it on `stop`, while the outbound
+    // loop releases it when the server emits `complete` for an id.
+    let open_operations: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    let inbound_operations = Arc::clone(&open_operations);
     let input = stream.filter_map(move |frame| {
         let result = match frame {
             Ok(WsFrame::Text(text)) => match ClientMessage::from_bytes(text.as_bytes()) {
                 Ok(ClientMessage::Start { id, payload }) => {
-                    let at_cap = max_subscriptions.is_some_and(|max| {
-                        !open_subscriptions.contains(&id) && open_subscriptions.len() >= max
-                    });
-                    if at_cap {
+                    let mut open = lock_operations(&inbound_operations);
+                    if !open.contains(&id) && open.len() >= cap {
+                        drop(open);
                         warn!(
                             "graphql-ws: dropping subscribe id={id} - max_subscriptions cap reached"
                         );
                         None
                     } else {
-                        open_subscriptions.insert(id.clone());
+                        open.insert(id.clone());
+                        drop(open);
                         Some(Ok(ClientMessage::Start { id, payload }))
                     }
                 }
                 Ok(ClientMessage::Stop { id }) => {
-                    open_subscriptions.remove(&id);
+                    lock_operations(&inbound_operations).remove(&id);
                     Some(Ok(ClientMessage::Stop { id }))
                 }
                 Ok(other) => Some(Ok(other)),
@@ -251,7 +301,21 @@ where
 
     while let Some(message) = gql_ws.next().await {
         let (frame, is_close) = match message {
-            http::WsMessage::Text(text) => (WsFrame::Text(text.into()), false),
+            http::WsMessage::Text(text) => {
+                // A server-side `complete` is the only signal that a query or
+                // mutation (which the transport also delivers as `subscribe`)
+                // has finished; without releasing the slot here, N short-lived
+                // queries would permanently exhaust a cap of N.
+                //
+                // The substring check is a prefilter: parsing every outgoing
+                // `next` payload would tax high-throughput subscriptions.
+                if text.contains("complete")
+                    && let Some(id) = completed_operation_id(&text)
+                {
+                    lock_operations(&open_operations).remove(&id);
+                }
+                (WsFrame::Text(text.into()), false)
+            }
             http::WsMessage::Close(code, reason) => (
                 WsFrame::Close(Some(CloseFrame {
                     code: code.into(),
@@ -294,6 +358,12 @@ mod tests {
     impl SubscriptionRoot {
         async fn counter(&self) -> impl async_graphql::futures_util::Stream<Item = i32> {
             async_graphql::futures_util::stream::iter(0..3)
+        }
+
+        /// Never yields and never completes, so a test can hold a slot open
+        /// for the whole connection without racing against its own `complete`.
+        async fn forever(&self) -> impl async_graphql::futures_util::Stream<Item = i32> {
+            async_graphql::futures_util::stream::pending::<i32>()
         }
     }
 
@@ -546,12 +616,14 @@ mod tests {
             .unwrap();
         client.next().await.unwrap().unwrap(); // connection_ack
 
+        // `forever` never completes, so this slot stays claimed for the rest
+        // of the connection and the cap check below cannot race a `complete`.
         client
             .send(WsFrame::Text(
                 serde_json::json!({
                     "id": "sub-1",
                     "type": "subscribe",
-                    "payload": {"query": "subscription { counter }"}
+                    "payload": {"query": "subscription { forever }"}
                 })
                 .to_string()
                 .into(),
@@ -560,7 +632,9 @@ mod tests {
             .unwrap();
 
         // Sent while sub-1 is already open and the cap is 1; this subscribe
-        // should be silently dropped and never produce output.
+        // should be silently dropped and never produce output. Inbound
+        // messages are processed in order, so sub-1 has claimed its slot
+        // before sub-2 is examined regardless of timing.
         client
             .send(WsFrame::Text(
                 serde_json::json!({
@@ -574,21 +648,84 @@ mod tests {
             .await
             .unwrap();
 
-        let mut saw_sub2 = false;
-        loop {
-            let msg = client.next().await.unwrap().unwrap();
-            let text = msg.into_text().unwrap();
-            if text.contains("\"id\":\"sub-2\"") {
-                saw_sub2 = true;
+        // Nothing should ever arrive for sub-2, so wait out a window rather
+        // than for a terminating frame that will never come.
+        let saw_sub2 = tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some(Ok(msg)) = client.next().await {
+                if let Ok(text) = msg.into_text()
+                    && text.contains("\"id\":\"sub-2\"")
+                {
+                    return true;
+                }
             }
-            if text.contains("complete") {
-                break;
-            }
-        }
+            false
+        })
+        .await
+        .unwrap_or(false);
+
         assert!(
             !saw_sub2,
             "over-limit subscription should never produce output"
         );
+
+        drop(client);
+        // `forever` never ends, so the session would outlive the test waiting
+        // on it; nothing above depends on how the task finishes.
+        serve.abort();
+    }
+
+    #[tokio::test]
+    async fn completed_operation_frees_a_subscription_slot() {
+        let (server, mut client) = websocket_pair().await;
+
+        // The transport delivers queries as `subscribe` too, so a cap of 1
+        // must not be permanently consumed by a single finished query.
+        let config = WebSocketConfig::default().with_max_subscriptions(1);
+        let serve = tokio::spawn(serve_graphql_websocket(
+            server,
+            test_schema(),
+            Protocols::GraphQLWS,
+            config,
+        ));
+
+        client
+            .send(WsFrame::Text(
+                serde_json::json!({"type": "connection_init"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        client.next().await.unwrap().unwrap(); // connection_ack
+
+        for id in ["q-1", "q-2"] {
+            client
+                .send(WsFrame::Text(
+                    serde_json::json!({
+                        "id": id,
+                        "type": "subscribe",
+                        "payload": {"query": "query { hello }"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            // Drain this operation's `next` and `complete` before issuing the
+            // next one; the server releases the slot as it emits `complete`.
+            let next = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("query result should arrive - the slot was never released")
+                .unwrap()
+                .unwrap();
+            let text = next.into_text().unwrap();
+            assert!(text.contains("\"hello\":\"world\""));
+            assert!(text.contains(&format!("\"id\":\"{id}\"")));
+
+            let complete = client.next().await.unwrap().unwrap();
+            assert!(complete.into_text().unwrap().contains("complete"));
+        }
 
         drop(client);
         let _ = serve.await;

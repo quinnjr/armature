@@ -47,10 +47,13 @@ impl LambdaConfig {
     }
 }
 
-/// Lambda runtime for Armature applications.
+/// Lambda runtime driver.
 ///
-/// This wraps an Armature application and runs it on the Lambda runtime,
-/// translating API Gateway/ALB requests to Armature requests.
+/// Wraps any [`RequestHandler`] and runs it on the Lambda runtime, translating
+/// API Gateway / ALB / Function URL events into [`LambdaRequest`] and the
+/// handler's [`LambdaResponse`] back into a Lambda response. It does not know
+/// about `armature_core`'s request and response types; see
+/// `impl_lambda_handler!` for connecting an application to it.
 pub struct LambdaRuntime<App> {
     app: Arc<App>,
     config: LambdaConfig,
@@ -95,9 +98,11 @@ where
     }
 }
 
-/// Request handler trait for Armature applications.
+/// The contract [`LambdaRuntime`] drives.
 ///
-/// This is automatically implemented for Armature Application types.
+/// Implemented here for any `Fn(LambdaRequest) -> Future<Output = LambdaResponse>`.
+/// Other types implement it themselves, or via `impl_lambda_handler!`; there
+/// is no blanket implementation for an Armature `Application`.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync {
     /// Handle an HTTP request.
@@ -151,19 +156,44 @@ pub(crate) fn strip_base_path(path: &str, base_path: &str) -> String {
     }
 }
 
-/// Macro to implement RequestHandler for Armature applications.
+/// Implement [`RequestHandler`] for a type that already exposes an inherent
+/// async `handle_request` method.
 ///
-/// Usage:
+/// This macro knows nothing about `armature_core::Application`; there is no
+/// conversion in this crate between `armature_core`'s `HttpRequest`/
+/// `HttpResponse` and the Lambda event types. What it targets is a
+/// **user-supplied** shape:
+///
 /// ```rust,ignore
-/// use armature_lambda::impl_request_handler;
-///
-/// impl_request_handler!(MyApplication);
+/// impl MyApp {
+///     async fn handle_request(
+///         &self,
+///         request: armature_lambda::LambdaRequest,
+///     ) -> Result<MyResponse, MyError> { /* ... */ }
+/// }
 /// ```
+///
+/// where `MyResponse` has the fields
+/// - `status: u16`,
+/// - `body: impl Into<bytes::Bytes>`,
+/// - `headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>`,
+///
+/// and `MyError: std::fmt::Display`. Given that, expand the macro once per type:
+///
+/// ```rust,ignore
+/// use armature_lambda::impl_lambda_handler;
+///
+/// impl_lambda_handler!(MyApp);
+/// ```
+///
+/// If your application is an Armature `Application`, write that
+/// `handle_request` adapter yourself — the macro only removes the trait
+/// boilerplate around it.
 #[macro_export]
-macro_rules! impl_request_handler {
+macro_rules! impl_lambda_handler {
     ($app_type:ty) => {
-        #[async_trait::async_trait]
-        impl $crate::runtime::RequestHandler for $app_type {
+        #[$crate::async_trait::async_trait]
+        impl $crate::RequestHandler for $app_type {
             async fn handle(&self, request: $crate::LambdaRequest) -> $crate::LambdaResponse {
                 // Forward the full request so the application handler has
                 // access to headers, query string, path parameters, stage
@@ -220,7 +250,7 @@ mod tests {
     }
 
     // A minimal response/error/app trio mirroring the shape the
-    // `impl_request_handler!` macro expects from an Armature application.
+    // `impl_lambda_handler!` macro documents.
     struct MockResponse {
         status: u16,
         body: Vec<u8>,
@@ -240,7 +270,7 @@ mod tests {
     struct Captured {
         method: Option<String>,
         path: Option<String>,
-        headers: HashMap<String, String>,
+        headers: Vec<(String, String)>,
         query_string: Option<String>,
         path_parameters: HashMap<String, String>,
         claims: HashMap<String, String>,
@@ -272,11 +302,14 @@ mod tests {
         }
     }
 
-    impl_request_handler!(MockApp);
+    impl_lambda_handler!(MockApp);
 
     fn sample_request() -> LambdaRequest {
-        let mut headers = HashMap::new();
-        headers.insert("x-custom".to_string(), "value".to_string());
+        let headers = vec![
+            ("x-custom".to_string(), "value".to_string()),
+            ("cookie".to_string(), "a=1".to_string()),
+            ("cookie".to_string(), "b=2".to_string()),
+        ];
         let mut path_parameters = HashMap::new();
         path_parameters.insert("id".to_string(), "42".to_string());
         let mut claims = HashMap::new();
@@ -308,10 +341,7 @@ mod tests {
         // Response mapping is preserved.
         assert_eq!(response.status, 201);
         assert_eq!(&response.body[..], b"ok");
-        assert_eq!(
-            response.headers.get("x-app").map(String::as_str),
-            Some("yes")
-        );
+        assert_eq!(response.header_value("x-app"), Some("yes"));
 
         // The app received every part of the request, not just method/path/body.
         let captured = app.captured.lock().unwrap();
@@ -319,8 +349,22 @@ mod tests {
         assert_eq!(captured.path.as_deref(), Some("/users/42"));
         assert_eq!(captured.query_string.as_deref(), Some("page=2"));
         assert_eq!(
-            captured.headers.get("x-custom").map(String::as_str),
+            captured
+                .headers
+                .iter()
+                .find(|(name, _)| name == "x-custom")
+                .map(|(_, value)| value.as_str()),
             Some("value")
+        );
+        // Repeated names survive the hand-off rather than collapsing.
+        assert_eq!(
+            captured
+                .headers
+                .iter()
+                .filter(|(name, _)| name == "cookie")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a=1", "b=2"]
         );
         assert_eq!(
             captured.path_parameters.get("id").map(String::as_str),
@@ -330,6 +374,6 @@ mod tests {
             captured.claims.get("sub").map(String::as_str),
             Some("user-1")
         );
-        assert_eq!(captured.body, b"payload");
+        assert_eq!(captured.body, b"payload".to_vec());
     }
 }

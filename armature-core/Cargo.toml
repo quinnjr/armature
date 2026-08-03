@@ -1,6 +1,6 @@
 [package]
 name = "armature-core"
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -15,6 +15,11 @@ categories = ["web-programming::http-server", "asynchronous"]
 armature-log = { path = "../armature-log", version = "0" }
 inventory = "0.3"
 dependency-injector = "2.1.0"
+matchit = "0.9"  # High-performance router (same as Axum)
+# The HTTP/1.1 layer. armature-core adopts its Bytes-backed types (Method,
+# ByteStr, HeaderId) as canonical rather than defining a parallel set; the
+# serve-path swap onto it is Plan 4, not this one.
+armature-h1 = { path = "../armature-h1", version = "0.1" }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
 hyper = { version = "1.10", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
@@ -97,4 +102,9 @@ io-uring = ["dep:io-uring"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "router"
+harness = false
 

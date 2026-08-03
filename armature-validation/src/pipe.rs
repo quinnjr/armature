@@ -87,8 +87,8 @@ mod tests {
         };
 
         let json = serde_json::to_vec(&valid_dto).unwrap();
-        let mut req = HttpRequest::new("POST".to_string(), "/test".to_string());
-        req.body = json;
+        let mut req = HttpRequest::new("POST", "/test".to_string());
+        req.body = armature_core::Bytes::from(json);
 
         let result: Result<TestDto, Error> = ValidationPipe::parse(&req);
         assert!(result.is_ok());

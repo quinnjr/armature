@@ -46,6 +46,7 @@
 //! ```
 
 use bumpalo::Bump;
+use bytes::Bytes;
 use std::cell::RefCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -510,18 +511,41 @@ impl<'a> ArenaRequest<'a> {
         let mut req = crate::HttpRequest::new(self.method.to_string(), self.path.to_string());
 
         for (k, v) in self.headers.iter() {
-            req.headers.insert(k.to_string(), v.to_string());
+            // `as_str` on both halves: `ArenaStr` derefs to `str`, and the
+            // header map takes anything that can become a value without an
+            // intermediate `String`.
+            req.headers.insert(k.as_str(), v.as_str());
         }
 
-        for (k, v) in self.path_params.iter() {
-            req.path_params.insert(k.to_string(), v.to_string());
+        // Names are interned: the arena request owns its names, and a request
+        // param name has to be `&'static str`. The interner is hard-capped
+        // (see [`crate::param_intern`]), so a name that came in off the wire
+        // rather than from a route pattern cannot grow the process.
+        req.path_params = self
+            .path_params
+            .iter()
+            .map(|(k, v)| {
+                (
+                    crate::param_intern::intern(k.as_str()),
+                    Bytes::copy_from_slice(v.as_str().as_bytes()),
+                )
+            })
+            .collect();
+
+        // The query lives in the target now, so it has to be re-encoded onto
+        // the path rather than handed over as a map.
+        if !self.query_params.is_empty() {
+            let pairs: Vec<(&str, &str)> = self
+                .query_params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            if let Ok(query) = serde_urlencoded::to_string(&pairs) {
+                req.path = crate::ByteStr::from(format!("{}?{}", self.path.as_str(), query));
+            }
         }
 
-        for (k, v) in self.query_params.iter() {
-            req.query_params.insert(k.to_string(), v.to_string());
-        }
-
-        req.body = self.body.to_vec();
+        req.body = Bytes::copy_from_slice(self.body);
         req
     }
 }
@@ -723,10 +747,7 @@ mod tests {
             let http_request = request.to_http_request();
             assert_eq!(http_request.method, "GET");
             assert_eq!(http_request.path, "/test");
-            assert_eq!(
-                http_request.headers.get("Accept"),
-                Some(&"application/json".to_string())
-            );
+            assert_eq!(http_request.headers.get("Accept"), Some("application/json"));
         });
         reset_arena();
     }

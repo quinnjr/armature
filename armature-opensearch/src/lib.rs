@@ -66,7 +66,8 @@ mod query;
 mod search;
 
 pub use bulk::{
-    BulkItem, BulkItemError, BulkItemResult, BulkItemStatus, BulkOperation, BulkResponse,
+    BULK_MAX_BYTES_PER_REQUEST, BULK_MAX_DOCS_PER_REQUEST, BulkItem, BulkItemError, BulkItemResult,
+    BulkItemStatus, BulkOperation, BulkResponse,
 };
 pub use client::OpenSearchClient;
 pub use config::{OpenSearchConfig, TlsConfig};

@@ -151,12 +151,10 @@ fn test_verify_http_request() {
     let body = "test body";
     let signature = signer.sign("POST", "/api/test", body, timestamp);
 
-    let mut request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
-    request.body = body.as_bytes().to_vec();
-    request.headers.insert("X-Signature".to_string(), signature);
-    request
-        .headers
-        .insert("X-Timestamp".to_string(), timestamp.to_string());
+    let mut request = HttpRequest::new("POST", "/api/test".to_string());
+    request.body = armature_core::Bytes::copy_from_slice(body.as_bytes());
+    request.headers.insert("X-Signature", signature);
+    request.headers.insert("X-Timestamp", timestamp.to_string());
 
     let result = verifier.verify_request(&request);
     assert!(result.is_ok());
@@ -167,7 +165,7 @@ fn test_verify_http_request() {
 fn test_verify_request_missing_signature() {
     let verifier = RequestVerifier::new("secret");
 
-    let request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
+    let request = HttpRequest::new("POST", "/api/test".to_string());
 
     let result = verifier.verify_request(&request);
     assert!(matches!(result, Err(SigningError::MissingSignature)));
@@ -177,10 +175,10 @@ fn test_verify_request_missing_signature() {
 fn test_verify_request_missing_timestamp() {
     let verifier = RequestVerifier::new("secret");
 
-    let mut request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
+    let mut request = HttpRequest::new("POST", "/api/test".to_string());
     request
         .headers
-        .insert("X-Signature".to_string(), "signature".to_string());
+        .insert("X-Signature", "signature".to_string());
 
     let result = verifier.verify_request(&request);
     assert!(matches!(result, Err(SigningError::MissingTimestamp)));
@@ -190,13 +188,13 @@ fn test_verify_request_missing_timestamp() {
 fn test_verify_request_invalid_timestamp() {
     let verifier = RequestVerifier::new("secret");
 
-    let mut request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
+    let mut request = HttpRequest::new("POST", "/api/test".to_string());
     request
         .headers
-        .insert("X-Signature".to_string(), "signature".to_string());
+        .insert("X-Signature", "signature".to_string());
     request
         .headers
-        .insert("X-Timestamp".to_string(), "not-a-number".to_string());
+        .insert("X-Timestamp", "not-a-number".to_string());
 
     let result = verifier.verify_request(&request);
     assert!(matches!(result, Err(SigningError::InvalidTimestamp)));

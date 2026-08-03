@@ -5,7 +5,11 @@
 //! ## Features
 //!
 //! - **Aggregates** - Event-sourced aggregate roots
-//! - **Event Store** - Persistent event storage
+//! - **Event Store** - A pluggable [`EventStore`] trait, with an in-memory
+//!   implementation ([`InMemoryEventStore`]) provided for tests and local
+//!   development. **No durable store ships in this crate**: `InMemoryEventStore`
+//!   keeps everything in process memory and loses it on exit, so persistence
+//!   means implementing [`EventStore`] against your own database.
 //! - **Snapshots** - Aggregate snapshots for performance
 //! - **Repository** - Load/save aggregates
 //! - **Optimistic Concurrency** - Version-based conflict detection
@@ -104,25 +108,28 @@
 //!
 //! ## Snapshots
 //!
-//! `with_snapshots` only configures the snapshot *frequency* on the repository;
-//! it does not by itself cause snapshots to be taken. The base [`AggregateRepository::save`]
-//! method's internal snapshot step is a deliberate no-op (a generic `Aggregate` has
-//! no serde bound, so it cannot be serialized). To actually persist periodic
-//! snapshots, the aggregate must implement `Serialize + DeserializeOwned` and you
-//! must call [`AggregateRepository::save_with_snapshot`] instead of `save`:
+//! [`AggregateRepository::with_snapshots`] requires `A: Serialize` and captures the
+//! serializer up front, so the ordinary [`AggregateRepository::save`] persists a
+//! snapshot whenever the aggregate's version is a multiple of the configured
+//! frequency. Configuring a frequency and then getting no snapshots is not a
+//! reachable state.
 //!
 //! ```rust,ignore
-//! // Aggregate must derive Serialize + DeserializeOwned for snapshotting to work.
+//! // Aggregate must derive Serialize (plus Deserialize to read snapshots back).
 //! #[derive(Serialize, Deserialize)]
 //! struct UserAggregate { /* ... */ }
 //!
-//! // Enable snapshots every 10 events.
+//! // Enable snapshots every 10 versions.
 //! let repo = AggregateRepository::<UserAggregate, _>::with_snapshots(store, 10);
 //!
-//! // Use `save_with_snapshot` (not `save`) so a real snapshot is persisted
-//! // whenever the aggregate's version is a multiple of the configured frequency.
-//! repo.save_with_snapshot(&mut user).await?;
+//! // Plain `save` persists the snapshot when version % 10 == 0.
+//! repo.save(&mut user).await?;
 //! ```
+//!
+//! [`AggregateRepository::save_with_snapshot`] remains as an alias of `save` for
+//! existing callers.
+//!
+//! A repository built with [`AggregateRepository::new`] never snapshots.
 //!
 //! Snapshot-aware reads use [`AggregateRepository::load_snapshotted`], which seeds
 //! the aggregate from the latest snapshot (if any) and replays only the events

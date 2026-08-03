@@ -22,6 +22,19 @@ use async_trait::async_trait;
 /// PostgreSQL schema provider trait
 ///
 /// Users implement this trait with their PostgreSQL client.
+///
+/// # Security
+///
+/// A schema name cannot be a bind parameter — `SET search_path`, `CREATE
+/// SCHEMA` and `DROP SCHEMA` all take a bare identifier — so every
+/// implementation of this trait necessarily interpolates `schema_name` into
+/// SQL text. **Implementors must treat `schema_name` as untrusted and validate
+/// it before interpolation**, or quote it as an identifier. Names that arrive
+/// via [`Tenant::with_schema`] are already checked to be plain unquoted
+/// identifiers; names built any other way (e.g. by
+/// [`SchemaConfig::schema_name`], which formats an unvalidated tenant id into a
+/// pattern) are not. [`crate::is_valid_schema_name`] performs the same check
+/// and is the intended guard for those paths.
 #[async_trait]
 pub trait SchemaProvider: Send + Sync {
     /// Connection type
@@ -80,7 +93,7 @@ impl<P: SchemaProvider> SchemaManager<P> {
     ///
     /// ```rust,ignore
     /// let tenant = Tenant::new("tenant-1", "acme")
-    ///     .with_schema("acme_schema");
+    ///     .with_schema("acme_schema")?;
     ///
     /// manager.set_search_path(&tenant, &mut conn).await?;
     /// ```
@@ -283,7 +296,9 @@ mod tests {
         let provider = MockSchemaProvider::new();
         let manager = SchemaManager::new(provider);
 
-        let tenant = Tenant::new("tenant-1", "acme").with_schema("acme_schema");
+        let tenant = Tenant::new("tenant-1", "acme")
+            .with_schema("acme_schema")
+            .unwrap();
 
         let mut conn = ();
         manager.set_search_path(&tenant, &mut conn).await.unwrap();
@@ -311,7 +326,9 @@ mod tests {
         let provider = MockSchemaProvider::new();
         let manager = SchemaManager::new(provider);
 
-        let tenant = Tenant::new("tenant-1", "acme").with_schema("tenant_acme");
+        let tenant = Tenant::new("tenant-1", "acme")
+            .with_schema("tenant_acme")
+            .unwrap();
 
         let mut conn = ();
         let exists = manager.schema_exists(&tenant, &mut conn).await.unwrap();

@@ -275,6 +275,12 @@ impl MessageBroker for NatsBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // Core NATS pub/sub has no acknowledgment at all, and this backend has
+        // never read `ack_mode`. Rejecting up front is the only way a caller
+        // asking for manual acknowledgment learns they will not get it.
+        crate::reject_manual_ack("NATS", options.ack_mode)?;
+        crate::reject_filter("NATS", options.filter.as_ref())?;
+
         // Bounds how many per-message handler invocations may run
         // concurrently (see `consume_messages`). Defaults to 1, which
         // reproduces the previous strictly-sequential dispatch. Note this

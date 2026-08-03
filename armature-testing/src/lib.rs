@@ -7,7 +7,8 @@
 //! - 🧪 **TestApp** - Integration test builder
 //! - 📡 **TestClient** - HTTP test client
 //! - 🎭 **MockService** - Service mocking
-//! - 👁️ **Spy** - Method call tracking
+//! - 👁️ **Spy** - Manual call recording (see [`Spy`] - it records what you tell
+//!   it to; it does not intercept calls to the value it wraps)
 //! - ✅ **Assertions** - Fluent test assertions
 //! - 🗄️ **Integration Helpers** - Database setup/teardown
 //! - 🐳 **Docker Containers** - Docker-based testing
@@ -188,7 +189,7 @@ pub mod integration;
 pub mod load;
 
 pub use assertions::{assert_header, assert_json, assert_status};
-pub use mock::{MockController, MockProvider, MockService};
+pub use mock::{MockController, MockProvider, MockService, Spy};
 pub use test_app::{TestApp, TestAppBuilder};
 pub use test_client::{TestClient, TestResponse};
 pub use test_container::TestContainer;

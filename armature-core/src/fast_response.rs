@@ -415,7 +415,7 @@ impl FastResponse {
                 resp = resp.with_bytes_body(b);
             }
             FastBody::Owned(v) => {
-                resp.body = v;
+                resp.body = Bytes::from(v);
             }
         }
         resp

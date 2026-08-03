@@ -22,7 +22,7 @@ impl Middleware for StampMiddleware {
 
 fn request() -> HttpRequest {
     HttpRequest::from_parts(
-        "GET".to_string(),
+        "GET",
         "/users".to_string(),
         HashMap::new(),
         vec![],
@@ -125,7 +125,7 @@ impl Middleware for OrderMiddleware {
             Some(prev) => format!("{},{}", prev, self.0),
             None => self.0.to_string(),
         };
-        req.headers.insert("X-Order".to_string(), order);
+        req.headers.insert("X-Order", order);
         next(req).await
     }
 }
@@ -139,7 +139,7 @@ struct OrderedController;
 impl OrderedController {
     #[get("/thing")]
     async fn thing(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let order = req.headers.get("X-Order").cloned().unwrap_or_default();
+        let order = req.headers.get("X-Order").unwrap_or_default().to_owned();
         Ok(HttpResponse::ok().with_header("X-Order".to_string(), order))
     }
 }
@@ -174,4 +174,28 @@ async fn controller_struct_middleware_preserves_declaration_order() {
         2,
         "middleware must not be rebuilt per request"
     );
+}
+
+// ---------------------------------------------------------------------------
+// As with `#[guard()]`, the no-argument forms must re-emit the handler
+// untouched rather than re-prefixing its own attributes and visibility.
+// ---------------------------------------------------------------------------
+
+#[middleware()]
+#[inline]
+pub async fn unwrapped(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[use_middleware()]
+pub async fn also_unwrapped(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let _ = &req;
+    Ok(HttpResponse::ok())
+}
+
+#[tokio::test]
+async fn empty_middleware_lists_leave_the_handler_intact() {
+    assert_eq!(unwrapped(request()).await.unwrap().status, 200);
+    assert_eq!(also_unwrapped(request()).await.unwrap().status, 200);
 }

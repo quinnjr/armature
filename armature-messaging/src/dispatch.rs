@@ -60,7 +60,17 @@ pub(crate) async fn spawn_bounded<F>(
         .await
         .expect("semaphore is not closed");
 
-    tasks.lock().await.spawn(async move {
+    let mut tasks = tasks.lock().await;
+
+    // Reap finished tasks before adding another. A `JoinSet` retains every
+    // completed entry until it is joined, and the only other drain is
+    // `drain_with_timeout`, which runs solely from `Subscription::unsubscribe`.
+    // Without this, a long-lived subscription accumulates one entry per message
+    // handled for its entire lifetime -- the semaphore bounds how many handlers
+    // run at once, not how large the set grows.
+    while tasks.try_join_next().is_some() {}
+
+    tasks.spawn(async move {
         fut.await;
         drop(permit);
     });
@@ -140,6 +150,33 @@ mod tests {
         drain_with_timeout(&tasks, Duration::from_secs(5), "test").await;
         assert_eq!(counter.load(Ordering::SeqCst), 3);
         assert_eq!(tasks.lock().await.len(), 0);
+    }
+
+    /// A subscription handles far more messages over its lifetime than it ever
+    /// runs concurrently. The `JoinSet` must not retain an entry per message
+    /// until `unsubscribe`, so spawning many short tasks through a narrow
+    /// semaphore has to leave the set near-empty rather than near-`n`.
+    #[tokio::test]
+    async fn spawn_bounded_reaps_completed_tasks() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let tasks = Arc::new(Mutex::new(JoinSet::new()));
+
+        for _ in 0..200 {
+            spawn_bounded(&semaphore, &tasks, async {}).await;
+            // Let the just-spawned task actually run to completion, so the next
+            // call has something to reap.
+            tokio::task::yield_now().await;
+        }
+
+        // A couple of entries may legitimately still be in flight; the failure
+        // this guards against is unbounded growth toward 200.
+        let outstanding = tasks.lock().await.len();
+        assert!(
+            outstanding < 10,
+            "JoinSet retained {outstanding} completed tasks instead of reaping them"
+        );
+
+        drain_with_timeout(&tasks, Duration::from_secs(5), "test").await;
     }
 
     #[tokio::test]

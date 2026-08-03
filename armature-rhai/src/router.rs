@@ -165,7 +165,9 @@ impl ScriptRouter {
             Some((route, params)) => {
                 // Make captured path params visible to the script as
                 // `request.param("id")` before dispatching.
-                request.path_params.extend(params);
+                for (name, value) in params {
+                    request.push_param(&name, value);
+                }
                 let handler = ScriptHandler::new(self.engine.clone(), &route.script_path);
                 match handler.handle(request.clone()).await {
                     Ok(resp) => resp,
@@ -195,8 +197,10 @@ impl ScriptRouter {
     /// values, so the caller can insert them into `request.path_params`
     /// before dispatching to the handler.
     fn find_route(&self, request: &HttpRequest) -> Option<(&Route, HashMap<String, String>)> {
-        let method_str = &request.method;
-        let path = &request.path;
+        let method_str = request.method_str();
+        // `request.path` is the raw request target and still carries the
+        // query string; patterns are matched against the routing path only.
+        let path = request.path_only();
 
         for route in &self.routes {
             // Check method if specified
@@ -443,12 +447,12 @@ mod tests {
     #[test]
     fn test_pattern_matching_captures_named_params() {
         let params = ScriptRouter::match_pattern("/users/:id", "/users/123").unwrap();
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get("id").map(String::as_str), Some("123"));
 
         let params =
             ScriptRouter::match_pattern("/users/:id/posts/:post_id", "/users/1/posts/2").unwrap();
-        assert_eq!(params.get("id"), Some(&"1".to_string()));
-        assert_eq!(params.get("post_id"), Some(&"2".to_string()));
+        assert_eq!(params.get("id").map(String::as_str), Some("1"));
+        assert_eq!(params.get("post_id").map(String::as_str), Some("2"));
     }
 
     #[test]
@@ -462,7 +466,7 @@ mod tests {
         assert!(ScriptRouter::match_pattern("/api/*", "/api/v1/users").is_some());
 
         let params = ScriptRouter::match_pattern("/api/*", "/api/v1/users").unwrap();
-        assert_eq!(params.get("*"), Some(&"v1/users".to_string()));
+        assert_eq!(params.get("*").map(String::as_str), Some("v1/users"));
     }
 
     #[tokio::test]
@@ -477,7 +481,7 @@ mod tests {
         let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
         let router = ScriptRouter::new(engine).get("/users/:id", "user.rhai");
 
-        let request = HttpRequest::new("GET".to_string(), "/users/42".to_string());
+        let request = HttpRequest::new("GET", "/users/42".to_string());
         let response = router.handle(request).await;
 
         assert_eq!(
@@ -485,6 +489,48 @@ mod tests {
             "script must be able to read the :id param"
         );
         assert_eq!(response.body_ref(), b"42");
+    }
+
+    #[tokio::test]
+    async fn test_static_route_matches_with_query_string() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("users.rhai"), r#"response.body("ok")"#).unwrap();
+
+        let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
+        let router = ScriptRouter::new(engine).get("/users", "users.rhai");
+
+        let response = router
+            .handle(HttpRequest::new("GET", "/users?a=1".to_string()))
+            .await;
+
+        assert_eq!(
+            response.status, 200,
+            "a query string must not affect route matching"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_route_param_excludes_query_string() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("user.rhai"),
+            r#"response.body(request.param("id"))"#,
+        )
+        .unwrap();
+
+        let engine = RhaiEngine::new().scripts_dir(temp.path()).build().unwrap();
+        let router = ScriptRouter::new(engine).get("/users/:id", "user.rhai");
+
+        let response = router
+            .handle(HttpRequest::new("GET", "/users/42?a=1".to_string()))
+            .await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body_ref(),
+            b"42",
+            "the captured param must not swallow the query string"
+        );
     }
 
     #[tokio::test]
@@ -496,7 +542,7 @@ mod tests {
         let router = ScriptRouter::new(engine).get("/api/*", "api.rhai");
 
         let response = router
-            .handle(HttpRequest::new("GET".to_string(), "/apix".to_string()))
+            .handle(HttpRequest::new("GET", "/apix".to_string()))
             .await;
 
         assert_eq!(

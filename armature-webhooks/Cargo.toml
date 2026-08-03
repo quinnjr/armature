@@ -1,6 +1,6 @@
 [package]
 name = "armature-webhooks"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -21,6 +21,9 @@ tracing = "0.1"
 # Async runtime
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
+# Fan-out clones the serialized payload once per endpoint; `Bytes` makes that a
+# refcount bump instead of a full copy of the body per subscriber.
+bytes = "1.12"
 
 # HTTP client for outgoing webhooks
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

@@ -2,10 +2,22 @@
 
 use crate::error::{CacheError, CacheResult};
 use crate::traits::CacheStore;
-use futures::future::{join_all, try_join_all};
+use futures::StreamExt;
+use futures::future::join_all;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Default cap on how many warm-up factories [`ParallelCacheOps::warm_cache`]
+/// runs at once.
+///
+/// The factory is a user-supplied loader — typically a database query — so an
+/// unbounded fan-out would turn a 10,000-key warm-up into 10,000 simultaneous
+/// queries: precisely the stampede that
+/// [`CacheManager::get_or_set`](crate::manager::CacheManager::get_or_set)'s
+/// single-flight exists to prevent. Use
+/// [`ParallelCacheOps::warm_cache_with_concurrency`] to pick a different limit.
+pub const DEFAULT_WARM_CONCURRENCY: usize = 32;
 
 /// Parallel batch operations for cache stores.
 ///
@@ -304,6 +316,13 @@ impl ParallelCacheOps {
 
     /// Cache warming: preload multiple keys into cache.
     ///
+    /// # Concurrency
+    ///
+    /// At most [`DEFAULT_WARM_CONCURRENCY`] factories run at a time. The
+    /// factory is the caller's loader (usually a DB fetch), so warming a large
+    /// key set without a bound would fire one query per key simultaneously.
+    /// Use [`Self::warm_cache_with_concurrency`] to choose the limit.
+    ///
     /// # Type Parameters
     ///
     /// * `T` - The type to serialize
@@ -346,20 +365,46 @@ impl ParallelCacheOps {
         F: Fn(&str) -> Fut,
         Fut: std::future::Future<Output = CacheResult<T>>,
     {
-        let mut futures = Vec::new();
+        Self::warm_cache_with_concurrency(store, keys, ttl, DEFAULT_WARM_CONCURRENCY, factory).await
+    }
 
-        for key in keys {
-            let fut = async {
-                let value = factory(key).await?;
-                let json = serde_json::to_string(&value)
-                    .map_err(|e| CacheError::Serialization(e.to_string()))?;
-                store.set_json(key, json, ttl).await?;
-                Ok::<(), CacheError>(())
-            };
-            futures.push(fut);
+    /// Cache warming with an explicit cap on concurrent factory invocations.
+    ///
+    /// `max_concurrent` is the number of factories (and their follow-up
+    /// writes) allowed to be in flight at once; `0` is treated as `1`. See
+    /// [`DEFAULT_WARM_CONCURRENCY`] for why the fan-out is bounded at all.
+    ///
+    /// The first error aborts the warm-up: keys already written stay written,
+    /// and the remaining ones are not attempted.
+    pub async fn warm_cache_with_concurrency<S, T, F, Fut>(
+        store: &S,
+        keys: &[&str],
+        ttl: Option<Duration>,
+        max_concurrent: usize,
+        factory: F,
+    ) -> CacheResult<()>
+    where
+        S: CacheStore,
+        T: Serialize,
+        F: Fn(&str) -> Fut,
+        Fut: std::future::Future<Output = CacheResult<T>>,
+    {
+        let limit = max_concurrent.max(1);
+        let factory = &factory;
+
+        let mut warmed = futures::stream::iter(keys.iter().map(|key| async move {
+            let value = factory(key).await?;
+            let json = serde_json::to_string(&value)
+                .map_err(|e| CacheError::Serialization(e.to_string()))?;
+            store.set_json(key, json, ttl).await?;
+            Ok::<(), CacheError>(())
+        }))
+        .buffer_unordered(limit);
+
+        while let Some(result) = warmed.next().await {
+            result?;
         }
 
-        try_join_all(futures).await?;
         Ok(())
     }
 }
@@ -424,8 +469,169 @@ pub async fn get_many_as_map<S: CacheStore, T: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_parallel_ops_exist() {
-        // Ensure the module compiles - this test validates the module is correctly defined
+    use super::*;
+    use crate::tiered::InMemoryCache;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Tracks how many factory invocations are in flight simultaneously.
+    #[derive(Default)]
+    struct ConcurrencyProbe {
+        current: AtomicUsize,
+        peak: AtomicUsize,
+        total: AtomicUsize,
+    }
+
+    impl ConcurrencyProbe {
+        fn enter(&self) {
+            let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.total.fetch_add(1, Ordering::SeqCst);
+            self.peak.fetch_max(current, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.current.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Regression: `warm_cache` used to `try_join_all` one future per key with
+    /// no limit, so warming N keys ran N user factories (documented as DB
+    /// fetches) simultaneously. The fan-out must now be bounded.
+    #[tokio::test]
+    async fn test_warm_cache_bounds_factory_concurrency() {
+        let cache = InMemoryCache::new();
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let keys: Vec<String> = (0..64).map(|i| format!("k{i}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+
+        const LIMIT: usize = 4;
+
+        ParallelCacheOps::warm_cache_with_concurrency(
+            &cache,
+            &key_refs,
+            None,
+            LIMIT,
+            |key: &str| {
+                let probe = probe.clone();
+                let key = key.to_string();
+                async move {
+                    probe.enter();
+                    // Suspend so the other buffered futures get a chance to run
+                    // and the peak reflects real overlap.
+                    for _ in 0..3 {
+                        tokio::task::yield_now().await;
+                    }
+                    probe.leave();
+                    Ok::<String, CacheError>(format!("value-for-{key}"))
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probe.total.load(Ordering::SeqCst), 64);
+        assert!(
+            probe.peak.load(Ordering::SeqCst) <= LIMIT,
+            "warm_cache ran {} factories at once, limit was {LIMIT}",
+            probe.peak.load(Ordering::SeqCst)
+        );
+
+        // Every key was still warmed.
+        assert_eq!(
+            cache.get_json("k0").await.unwrap(),
+            Some("\"value-for-k0\"".to_string())
+        );
+        assert_eq!(
+            cache.get_json("k63").await.unwrap(),
+            Some("\"value-for-k63\"".to_string())
+        );
+    }
+
+    /// The default entry point applies [`DEFAULT_WARM_CONCURRENCY`] rather
+    /// than fanning out over every key.
+    #[tokio::test]
+    async fn test_warm_cache_default_limit_applies() {
+        let cache = InMemoryCache::new();
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let keys: Vec<String> = (0..DEFAULT_WARM_CONCURRENCY * 4)
+            .map(|i| format!("k{i}"))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+
+        ParallelCacheOps::warm_cache(&cache, &key_refs, None, |_key: &str| {
+            let probe = probe.clone();
+            async move {
+                probe.enter();
+                for _ in 0..3 {
+                    tokio::task::yield_now().await;
+                }
+                probe.leave();
+                Ok::<u32, CacheError>(1)
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(probe.peak.load(Ordering::SeqCst) <= DEFAULT_WARM_CONCURRENCY);
+        assert_eq!(
+            probe.total.load(Ordering::SeqCst),
+            DEFAULT_WARM_CONCURRENCY * 4
+        );
+    }
+
+    /// A concurrency limit of 0 is clamped to 1 rather than deadlocking or
+    /// silently doing nothing.
+    #[tokio::test]
+    async fn test_warm_cache_zero_concurrency_is_clamped_to_one() {
+        let cache = InMemoryCache::new();
+        let probe = Arc::new(ConcurrencyProbe::default());
+
+        ParallelCacheOps::warm_cache_with_concurrency(
+            &cache,
+            &["a", "b", "c"],
+            None,
+            0,
+            |_key: &str| {
+                let probe = probe.clone();
+                async move {
+                    probe.enter();
+                    tokio::task::yield_now().await;
+                    probe.leave();
+                    Ok::<u32, CacheError>(7)
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probe.peak.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.total.load(Ordering::SeqCst), 3);
+        assert_eq!(cache.get_json("c").await.unwrap(), Some("7".to_string()));
+    }
+
+    /// A factory failure aborts the warm-up and surfaces the error.
+    #[tokio::test]
+    async fn test_warm_cache_propagates_factory_error() {
+        let cache = InMemoryCache::new();
+
+        let result = ParallelCacheOps::warm_cache_with_concurrency(
+            &cache,
+            &["a", "b"],
+            None,
+            1,
+            |key: &str| {
+                let fails = key == "b";
+                async move {
+                    if fails {
+                        Err(CacheError::Other("factory failed".to_string()))
+                    } else {
+                        Ok(1_u32)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 }

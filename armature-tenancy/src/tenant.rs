@@ -2,8 +2,29 @@
 //!
 //! Provides tenant information and request-scoped tenant context.
 
+use crate::resolver::TenantError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Maximum length of a PostgreSQL identifier (`NAMEDATALEN - 1`).
+const MAX_IDENTIFIER_LEN: usize = 63;
+
+/// Whether `name` is safe to interpolate into SQL as a bare schema identifier.
+///
+/// Exposed so that [`crate::schema::SchemaProvider`] implementations can
+/// re-check any schema name they did not obtain from [`Tenant::with_schema`]
+/// (for instance one built by [`crate::schema::SchemaConfig::schema_name`] from
+/// an unvalidated tenant id).
+pub fn is_valid_schema_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_IDENTIFIER_LEN {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    first_ok && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Tenant information
 ///
@@ -80,10 +101,47 @@ impl Tenant {
         self
     }
 
-    /// Set schema name
-    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
-        self.schema = Some(schema.into());
-        self
+    /// Set schema name.
+    ///
+    /// The schema name ends up interpolated into SQL (`SET search_path TO
+    /// <schema>`) by [`crate::schema::SchemaProvider`] implementations, because
+    /// a schema selector cannot be a bind parameter. It is therefore validated
+    /// here — at the only place it enters a [`Tenant`] — so that a
+    /// tenant-controlled value can never carry SQL out of the identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TenantError::Invalid`] unless `schema` is a plain unquoted SQL
+    /// identifier: `[A-Za-z_][A-Za-z0-9_]*`, at most 63 bytes (PostgreSQL
+    /// truncates identifiers beyond `NAMEDATALEN - 1`, which would silently
+    /// alias two distinct tenants onto one schema).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use armature_tenancy::Tenant;
+    ///
+    /// let tenant = Tenant::new("tenant-123", "acme")
+    ///     .with_schema("tenant_acme")
+    ///     .unwrap();
+    /// assert_eq!(tenant.schema.as_deref(), Some("tenant_acme"));
+    ///
+    /// assert!(
+    ///     Tenant::new("tenant-123", "acme")
+    ///         .with_schema("public; DROP TABLE users --")
+    ///         .is_err()
+    /// );
+    /// ```
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Result<Self, TenantError> {
+        let schema = schema.into();
+        if !is_valid_schema_name(&schema) {
+            return Err(TenantError::Invalid(format!(
+                "Invalid schema name: {:?} (expected an unquoted SQL identifier)",
+                schema
+            )));
+        }
+        self.schema = Some(schema);
+        Ok(self)
     }
 
     /// Set active status
@@ -196,6 +254,7 @@ mod tests {
             .with_domain("acme.example.com")
             .with_database("acme_db")
             .with_schema("acme_schema")
+            .unwrap()
             .with_metadata("plan", "premium");
 
         assert_eq!(tenant.domain, Some("acme.example.com".to_string()));
@@ -229,6 +288,38 @@ mod tests {
             "cache keys for distinct (id, key) pairs must never collide, \
              even when id contains ':'"
         );
+    }
+
+    #[test]
+    fn test_with_schema_rejects_sql_injection() {
+        let too_long = "a".repeat(64);
+        for bad in [
+            "public; DROP TABLE users --",
+            "public\"",
+            "pg_catalog, public",
+            "1tenant",
+            "",
+            "tenant acme",
+            "tenant-acme",
+            too_long.as_str(),
+        ] {
+            let result = Tenant::new("tenant-1", "acme").with_schema(bad);
+            assert!(
+                matches!(result, Err(TenantError::Invalid(_))),
+                "schema {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_schema_accepts_plain_identifiers() {
+        let max_len = "a".repeat(63);
+        for good in ["public", "_private", "tenant_acme_1", max_len.as_str()] {
+            let tenant = Tenant::new("tenant-1", "acme")
+                .with_schema(good)
+                .unwrap_or_else(|e| panic!("schema {good:?} must be accepted: {e}"));
+            assert_eq!(tenant.schema.as_deref(), Some(good));
+        }
     }
 
     #[test]

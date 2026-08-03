@@ -71,8 +71,26 @@ impl McpToolEntry {
     /// [`McpToolRegistry::list_tools_page`], which parse each entry at most
     /// once and cache the result (see `McpToolRegistry::definitions`).
     pub fn to_definition(&self) -> ToolDefinition {
-        let schema: Value = serde_json::from_str(self.input_schema)
-            .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
+        let schema: Value = serde_json::from_str(self.input_schema).unwrap_or_else(|e| {
+            // A schema that does not parse is a bug in the `#[mcp]` macro
+            // expansion or in the literal passed to `register_mcp_tool!`.
+            // Falling back to a permissive `{"type":"object"}` keeps the
+            // server serving, but it silently tells every client "this tool
+            // accepts any object" — so make the substitution loud rather
+            // than shipping the bug downstream unnoticed.
+            tracing::error!(
+                tool = self.name,
+                error = %e,
+                schema = self.input_schema,
+                "MCP tool has a malformed input_schema; advertising a permissive object schema instead"
+            );
+            debug_assert!(
+                false,
+                "MCP tool `{}` has a malformed input_schema: {e}",
+                self.name
+            );
+            serde_json::json!({"type": "object"})
+        });
 
         ToolDefinition {
             name: self.name.to_string(),

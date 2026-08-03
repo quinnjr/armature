@@ -9,6 +9,7 @@ use armature_core::HttpRequest;
 use armature_core::arena::{
     ArenaMap, ArenaRequest, ArenaStr, ArenaVec, RequestScope, reset_arena, with_arena,
 };
+use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -146,23 +147,30 @@ fn bench_map_allocation(c: &mut Criterion) {
 fn bench_request_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("request_create");
 
-    // Standard HttpRequest with typical data
+    // Standard HttpRequest with typical data.
+    //
+    // The query arrives inline in the target, as it does on the serve path.
+    // Calling `push_query_param` twice instead would percent-encode each pair
+    // and rebuild the whole target string per call - work the arena arm's
+    // bump-append `add_query_param` never does, and work no real request pays -
+    // so the two arms would not be measuring the same thing.
     group.bench_function("http_request/typical", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST".to_string(), "/api/v1/users/123".to_string());
+            let mut req = HttpRequest::new(
+                "POST",
+                "/api/v1/users/123?include=profile&fields=name,email",
+            );
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer token123".to_string());
+                .insert("Authorization", "Bearer token123".to_string());
+            req.headers.insert("Accept", "application/json".to_string());
             req.headers
-                .insert("Accept".to_string(), "application/json".to_string());
-            req.headers
-                .insert("User-Agent".to_string(), "TestClient/1.0".to_string());
-            req.path_params.insert("id".to_string(), "123".to_string());
-            req.query_params
-                .insert("include".to_string(), "profile".to_string());
-            req.query_params
-                .insert("fields".to_string(), "name,email".to_string());
+                .insert("User-Agent", "TestClient/1.0".to_string());
+            req.push_param("id", "123");
+            // Same observation as the arena arm below, so neither arm is
+            // charged for reading more of the request than the other.
+            let _ = black_box(req.method_str().len());
             black_box(req)
         })
     });
@@ -188,13 +196,14 @@ fn bench_request_creation(c: &mut Criterion) {
     // HttpRequest with many headers
     group.bench_function("http_request/many_headers", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("GET".to_string(), "/api/data".to_string());
+            let mut req = HttpRequest::new("GET", "/api/data");
             for i in 0..20 {
                 req.headers.insert(
                     format!("X-Custom-Header-{}", i),
                     format!("value-{}-with-some-content", i),
                 );
             }
+            let _ = black_box(req.headers.len());
             black_box(req)
         })
     });
@@ -231,21 +240,25 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("heap/full_cycle", |b| {
         b.iter(|| {
-            // Create request
-            let mut req = HttpRequest::new("POST".to_string(), "/api/users".to_string());
+            // Create request. Query inline in the target, matching the arena
+            // arm and the real serve path (see the note in
+            // `bench_request_creation`).
+            let mut req = HttpRequest::new("POST", "/api/users?page=1");
             req.headers
-                .insert("Content-Type".to_string(), "application/json".to_string());
+                .insert("Content-Type", "application/json".to_string());
             req.headers
-                .insert("Authorization".to_string(), "Bearer xyz".to_string());
-            req.query_params.insert("page".to_string(), "1".to_string());
-            req.body = b"{\"name\":\"John\"}".to_vec();
+                .insert("Authorization", "Bearer xyz".to_string());
+            req.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
-            // "Process" request
-            let _method = req.method.clone();
-            let _path = req.path.clone();
-            let _ct = req.headers.get("Content-Type").cloned();
+            // "Process" request. Read the same three things as the arena arm,
+            // and observe only their lengths: cloning the method and path here
+            // while the arena arm borrowed `&str` charged this arm for two
+            // copies the comparison was not about.
+            let method = req.method_str();
+            let path = req.path_only();
+            let ct = req.headers.get("Content-Type");
 
-            // Request dropped here - multiple deallocations
+            let _ = black_box((method.len(), path.len(), ct.map(str::len)));
             black_box(req)
         })
     });
@@ -278,10 +291,11 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.bench_function("heap/100_requests", |b| {
         b.iter(|| {
             for i in 0..100 {
-                let mut req = HttpRequest::new("GET".to_string(), format!("/api/item/{}", i));
-                req.headers
-                    .insert("Accept".to_string(), "application/json".to_string());
-                req.query_params.insert("v".to_string(), "1".to_string());
+                // Query inline in the target, matching the arena arm's
+                // bump-append `add_query_param`.
+                let mut req = HttpRequest::new("GET", format!("/api/item/{}?v=1", i));
+                req.headers.insert("Accept", "application/json".to_string());
+                let _ = black_box(req.method_str().len());
                 black_box(&req);
             }
         })

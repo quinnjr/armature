@@ -108,10 +108,18 @@ impl QueryBus {
     {
         let type_id = TypeId::of::<Q>();
 
-        let handler = self
-            .handlers
-            .get(&type_id)
-            .ok_or(QueryError::HandlerNotFound)?;
+        // Clone the handler out and drop the map guard before awaiting. A
+        // `Ref` from `DashMap::get` holds that shard's read lock, so holding it
+        // across the handler future would block any concurrent `register` that
+        // lands on the same shard for the whole duration of the handler — and a
+        // handler that re-entrantly calls `register` would deadlock on itself.
+        let handler = {
+            let entry = self
+                .handlers
+                .get(&type_id)
+                .ok_or(QueryError::HandlerNotFound)?;
+            Arc::clone(entry.value())
+        };
 
         let boxed_query: Box<dyn Any + Send> = Box::new(query);
         let result = handler.handle_dyn(boxed_query).await?;
@@ -221,5 +229,42 @@ mod tests {
 
         let count = bus.execute(CountUsersQuery).await.unwrap();
         assert_eq!(count, 7);
+    }
+
+    struct ReentrantRegisterHandler {
+        bus: Arc<std::sync::OnceLock<Arc<QueryBus>>>,
+    }
+
+    #[async_trait]
+    impl QueryHandler<CountUsersQuery> for ReentrantRegisterHandler {
+        async fn handle(&self, _query: CountUsersQuery) -> Result<usize, QueryError> {
+            // Registering under the *same* query type guarantees the same
+            // DashMap shard as the entry `execute` looked up. If `execute` were
+            // still holding that shard's read guard, this write would block
+            // forever.
+            let bus = self.bus.get().expect("bus wired before execute").clone();
+            bus.register::<CountUsersQuery, _>(CountUsersHandler);
+            Ok(3)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handler_can_register_while_running() {
+        let cell = Arc::new(std::sync::OnceLock::new());
+        let bus = Arc::new(QueryBus::new());
+        // The cell was just created, so this always succeeds; the error variant
+        // carries the un-stored `Arc` and is not `Debug`.
+        let _ = cell.set(bus.clone());
+
+        bus.register::<CountUsersQuery, _>(ReentrantRegisterHandler { bus: cell });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bus.execute(CountUsersQuery),
+        )
+        .await
+        .expect("execute must not hold a map guard across the handler await");
+
+        assert_eq!(result.unwrap(), 3);
     }
 }

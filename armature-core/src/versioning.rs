@@ -261,7 +261,7 @@ impl VersioningStrategy {
                 ApiVersion::from_str(header_value).ok()
             }
             Self::QueryParam { param_name } => {
-                let param_value = request.query_params.get(param_name)?;
+                let param_value = request.query_param(param_name)?;
                 ApiVersion::from_str(param_value).ok()
             }
             Self::MediaType { vendor_prefix } => {
@@ -456,7 +456,7 @@ impl VersionedRequest for HttpRequest {
     }
 
     fn query_version(&self, param_name: &str) -> Option<ApiVersion> {
-        let value = self.query_params.get(param_name)?;
+        let value = self.query_param(param_name)?;
         ApiVersion::from_str(value).ok()
     }
 }
@@ -784,7 +784,7 @@ mod tests {
     fn test_url_path_versioning() {
         let strategy = VersioningStrategy::url_path();
 
-        let mut request = HttpRequest::new("GET".to_string(), "/v1/users".to_string());
+        let mut request = HttpRequest::new("GET", "/v1/users".to_string());
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V1));
 
         request.path = "/v2/users".to_string();
@@ -798,7 +798,7 @@ mod tests {
     fn test_header_versioning() {
         let strategy = VersioningStrategy::header();
 
-        let mut request = HttpRequest::new("GET".to_string(), "/users".to_string());
+        let mut request = HttpRequest::new("GET", "/users".to_string());
         request.headers.insert("X-API-Version".to_string(), "1".to_string());
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V1));
 
@@ -811,8 +811,8 @@ mod tests {
     fn test_query_param_versioning() {
         let strategy = VersioningStrategy::query_param();
 
-        let mut request = HttpRequest::new("GET".to_string(), "/users".to_string());
-        request.query_params.insert("api-version".to_string(), "1".to_string());
+        let mut request = HttpRequest::new("GET", "/users".to_string());
+        request.push_query_param("api-version", "1");
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V1));
     }
 
@@ -820,7 +820,7 @@ mod tests {
     fn test_media_type_versioning() {
         let strategy = VersioningStrategy::media_type("vnd.myapi");
 
-        let mut request = HttpRequest::new("GET".to_string(), "/users".to_string());
+        let mut request = HttpRequest::new("GET", "/users".to_string());
         request.headers.insert("Accept".to_string(), "application/vnd.myapi.v1+json".to_string());
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V1));
 
@@ -833,7 +833,7 @@ mod tests {
         let strategy = VersioningStrategy::default_combined();
 
         // URL path takes precedence
-        let mut request = HttpRequest::new("GET".to_string(), "/v1/users".to_string());
+        let mut request = HttpRequest::new("GET", "/v1/users".to_string());
         request.headers.insert("X-API-Version".to_string(), "2".to_string());
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V1));
 
@@ -843,7 +843,7 @@ mod tests {
 
         // Falls back to query param
         request.headers.clear();
-        request.query_params.insert("api-version".to_string(), "3".to_string());
+        request.push_query_param("api-version", "3");
         assert_eq!(strategy.extract_version(&request), Some(ApiVersion::V3));
     }
 

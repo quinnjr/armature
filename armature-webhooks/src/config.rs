@@ -26,6 +26,25 @@ pub struct WebhookConfig {
 
     /// Default signing algorithm
     pub signing_algorithm: SigningAlgorithm,
+
+    /// Maximum number of endpoint deliveries a single
+    /// [`dispatch`](crate::WebhookClient::dispatch) runs concurrently.
+    ///
+    /// Fan-out used to be unbounded: an account with 5,000 subscribed
+    /// endpoints opened 5,000 sockets at once, which exhausts file descriptors
+    /// and ephemeral ports on the sender long before it inconveniences any
+    /// receiver. A value of `0` is treated as `1`.
+    pub max_concurrent_deliveries: usize,
+
+    /// Maximum number of response bytes recorded on a
+    /// [`WebhookDelivery`](crate::WebhookDelivery), per attempt.
+    ///
+    /// The response body of a webhook is diagnostic only, but it is written
+    /// into a delivery record that is often persisted. Reading it in full let
+    /// a hostile or merely broken receiver stream an unbounded body back and
+    /// exhaust the sender's memory, so the read stops at this many bytes and
+    /// the rest of the body is discarded unread.
+    pub max_response_body_size: usize,
 }
 
 impl Default for WebhookConfig {
@@ -38,6 +57,8 @@ impl Default for WebhookConfig {
             max_payload_size: 1024 * 1024, // 1MB
             timestamp_tolerance: 300,      // 5 minutes
             signing_algorithm: SigningAlgorithm::HmacSha256,
+            max_concurrent_deliveries: 32,
+            max_response_body_size: 8 * 1024, // 8 KiB
         }
     }
 }
@@ -119,6 +140,18 @@ impl WebhookConfigBuilder {
     /// Set the signing algorithm
     pub fn signing_algorithm(mut self, algorithm: SigningAlgorithm) -> Self {
         self.config.signing_algorithm = algorithm;
+        self
+    }
+
+    /// Set the maximum number of concurrent deliveries per dispatch
+    pub fn max_concurrent_deliveries(mut self, max: usize) -> Self {
+        self.config.max_concurrent_deliveries = max;
+        self
+    }
+
+    /// Set the maximum number of response bytes recorded per attempt
+    pub fn max_response_body_size(mut self, size: usize) -> Self {
+        self.config.max_response_body_size = size;
         self
     }
 

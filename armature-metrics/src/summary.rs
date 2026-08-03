@@ -81,6 +81,15 @@ struct SummaryState {
     count: u64,
     /// Cumulative sum of every observation ever recorded.
     sum: f64,
+    /// Reusable buffer for quantile computation.
+    ///
+    /// Quantiles need the values in a slice they can reorder, and reordering
+    /// them under the lock would hold it across an O(n) select or an O(n log n)
+    /// sort. Taking this buffer out of the state, filling it, releasing the
+    /// lock and putting it back keeps the lock held only for the copy, while
+    /// reusing one allocation instead of allocating up to `max_size` f64s on
+    /// every single `quantile`/`collect` call.
+    scratch: Vec<f64>,
 }
 
 /// A summary metric.
@@ -133,6 +142,7 @@ impl Summary {
                 observations: VecDeque::new(),
                 count: 0,
                 sum: 0.0,
+                scratch: Vec::new(),
             })),
         })
     }
@@ -162,11 +172,16 @@ impl Summary {
     /// Returns `None` when no observations are within the window.
     pub fn quantile(&self, q: f64) -> Option<f64> {
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        self.trim(&mut state, now);
-        let mut values: Vec<f64> = state.observations.iter().map(|(_, v)| *v).collect();
-        drop(state);
+        let mut values = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.trim(&mut state, now);
+            let mut values = std::mem::take(&mut state.scratch);
+            values.clear();
+            values.extend(state.observations.iter().map(|(_, v)| *v));
+            values
+        };
         if values.is_empty() {
+            self.return_scratch(values);
             return None;
         }
         // Single quantile: an O(n) partial-sort (`select_nth_unstable_by`) puts
@@ -180,7 +195,20 @@ impl Summary {
         let (_, nth, _) = values.select_nth_unstable_by(idx, |a, b| {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         });
-        Some(*nth)
+        let result = *nth;
+        self.return_scratch(values);
+        Some(result)
+    }
+
+    /// Hand the scratch buffer back so its allocation is reused next call.
+    ///
+    /// Keeps whichever buffer has the larger capacity, so a concurrent caller
+    /// that grew its own copy does not shrink the shared one back down.
+    fn return_scratch(&self, buffer: Vec<f64>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if buffer.capacity() > state.scratch.capacity() {
+            state.scratch = buffer;
+        }
     }
 
     /// Drop observations older than `max_age` and enforce the size bound.
@@ -218,9 +246,14 @@ impl Collector for Summary {
         let (count, sum, mut values) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.trim(&mut state, now);
-            let values: Vec<f64> = state.observations.iter().map(|(_, v)| *v).collect();
+            let mut values = std::mem::take(&mut state.scratch);
+            values.clear();
+            values.extend(state.observations.iter().map(|(_, v)| *v));
             (state.count, state.sum, values)
         };
+        // A full sort here rather than repeated selects: `self.quantiles` is
+        // usually 3+ entries, and one O(n log n) sort beats one O(n) select per
+        // quantile past two of them.
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut quantiles = Vec::with_capacity(self.quantiles.len());
@@ -235,6 +268,7 @@ impl Collector for Summary {
             quantile.set_value(value);
             quantiles.push(quantile);
         }
+        self.return_scratch(values);
 
         let mut summary = proto::Summary::default();
         summary.set_sample_count(count);

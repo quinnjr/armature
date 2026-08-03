@@ -220,28 +220,40 @@ impl ConfigManager {
     /// that were produced when loading structured config files (JSON/TOML).
     fn resolve(&self, key: &str) -> Option<serde_json::Value> {
         let config = self.config.read().unwrap();
+        Self::lookup(&config, key).cloned()
+    }
 
+    /// Borrow the value for `key` out of an already-locked map.
+    ///
+    /// Traversal is by reference and clones nothing: the previous version
+    /// cloned the *entire* subtree at every level of a dotted path, so
+    /// `get("database.host")` deep-copied the whole `database` object (and
+    /// then every intermediate object beneath it) to read one string.
+    /// Callers that only need a bool ([`ConfigManager::has`]) now clone
+    /// nothing at all.
+    fn lookup<'a>(
+        config: &'a HashMap<String, serde_json::Value>,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
         // Exact flat-key match wins (this is how `set` and env vars store keys).
         if let Some(value) = config.get(key) {
-            return Some(value.clone());
+            return Some(value);
         }
 
         // Fall back to dot-path traversal into nested objects.
-        if key.contains('.') {
-            let mut parts = key.split('.');
-            let first = parts.next().unwrap();
-            let mut current = config.get(first)?.clone();
-            for part in parts {
-                let next = match &current {
-                    serde_json::Value::Object(map) => map.get(part)?.clone(),
-                    _ => return None,
-                };
-                current = next;
-            }
-            return Some(current);
+        if !key.contains('.') {
+            return None;
         }
 
-        None
+        let mut parts = key.split('.');
+        let mut current = config.get(parts.next()?)?;
+        for part in parts {
+            current = match current {
+                serde_json::Value::Object(map) => map.get(part)?,
+                _ => return None,
+            };
+        }
+        Some(current)
     }
 
     /// Get a configuration value
@@ -324,8 +336,11 @@ impl ConfigManager {
     /// Check if a key exists.
     ///
     /// Matches both flat keys and dotted paths into nested config objects.
+    ///
+    /// Answers from a borrow; nothing is cloned.
     pub fn has(&self, key: &str) -> bool {
-        self.resolve(key).is_some()
+        let config = self.config.read().unwrap();
+        Self::lookup(&config, key).is_some()
     }
 
     /// Remove a key from the configuration

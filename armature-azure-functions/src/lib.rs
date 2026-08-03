@@ -4,65 +4,38 @@
 //!
 //! Azure Functions runtime adapter for Armature applications.
 //!
-//! This crate allows you to deploy Armature applications to Azure Functions
-//! with HTTP triggers.
+//! This crate runs an HTTP handler as an Azure Functions custom handler,
+//! translating each HTTP trigger invocation into a [`FunctionRequest`] and the
+//! handler's [`FunctionResponse`] back out.
+//!
+//! ## What this crate does and does not do
+//!
+//! [`AzureFunctionsRuntime`] drives any type implementing [`RequestHandler`],
+//! which is stated in this crate's own [`FunctionRequest`]/[`FunctionResponse`]
+//! types. It does **not** convert to or from `armature_core::HttpRequest` /
+//! `HttpResponse`, and there is no blanket implementation for an Armature
+//! `Application` — wiring one up is the application author's job, most easily
+//! via `impl_azure_function_handler!` (see its documentation for the exact
+//! shape it expects).
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use armature::prelude::*;
-//! use armature_azure_functions::{AzureFunctionsRuntime, init_tracing};
-//!
-//! #[controller("/")]
-//! struct HelloController;
-//!
-//! #[controller_impl]
-//! impl HelloController {
-//!     #[get("/")]
-//!     async fn hello() -> &'static str {
-//!         "Hello from Azure Functions!"
-//!     }
-//! }
-//!
-//! #[module(controllers: [HelloController])]
-//! struct AppModule;
+//! use armature_azure_functions::{
+//!     AzureFunctionsRuntime, FunctionRequest, FunctionResponse, init_tracing,
+//! };
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Initialize tracing for Application Insights
 //!     init_tracing();
 //!
-//!     // Create Armature application
-//!     let app = Application::create::<AppModule>();
+//!     let handler = |req: FunctionRequest| async move {
+//!         FunctionResponse::with_body(200, format!("Hello from {}!", req.path))
+//!     };
 //!
-//!     // Run on Azure Functions
-//!     AzureFunctionsRuntime::new(app).run().await
-//! }
-//! ```
-//!
-//! ## With Azure Services
-//!
-//! ```rust,ignore
-//! use armature_azure_functions::{AzureFunctionsRuntime, init_tracing};
-//! use armature_azure::{AzureServices, AzureConfig};
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     init_tracing();
-//!
-//!     // Initialize Azure services
-//!     let azure = AzureServices::new(
-//!         AzureConfig::from_env()
-//!             .enable_cosmos()
-//!             .enable_blob()
-//!             .build()
-//!     ).await?;
-//!
-//!     // Register in DI container
-//!     let app = Application::create::<AppModule>();
-//!     app.container().register(azure);
-//!
-//!     AzureFunctionsRuntime::new(app).run().await
+//!     AzureFunctionsRuntime::new(handler).run().await?;
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -102,9 +75,14 @@ mod runtime;
 
 pub use config::FunctionConfig;
 pub use error::{AzureFunctionsError, Result};
-pub use request::FunctionRequest;
+pub use request::{FunctionRequest, RequestContext, RetryContext, TraceContext};
 pub use response::FunctionResponse;
-pub use runtime::{AzureFunctionsRuntime, RuntimeConfig};
+pub use runtime::{AzureFunctionsRuntime, RequestHandler, RuntimeConfig};
+
+// Re-exported so `impl_azure_function_handler!` can name the attribute macro
+// through `$crate`. Without this the macro would only expand in crates that
+// happen to depend on `async-trait` themselves and under that exact name.
+pub use async_trait;
 
 /// Initialize tracing for Azure Application Insights.
 ///

@@ -21,6 +21,22 @@ use crate::{
 /// A cached response entry, along with the time it was inserted.
 type CacheEntry = (Instant, GraphQLResponse<Value>);
 
+/// The GraphQL-over-WebSocket sub-protocol this client speaks.
+///
+/// Offering it on the handshake is mandatory: the `graphql-transport-ws` spec
+/// requires it, and real servers — including Armature's own
+/// (`armature_graphql::websocket::select_protocol`), Apollo Server, and
+/// `graphql-ws` — reject an upgrade whose `Sec-WebSocket-Protocol` header is
+/// missing or unrecognised.
+const GRAPHQL_TRANSPORT_WS: &str = "graphql-transport-ws";
+
+/// How many frames may arrive before `connection_ack` before the client gives
+/// up. Frames that carry no `connection_ack` (WebSocket-level Ping/Pong,
+/// binary frames, protocol-level `ping`/`pong`) are skipped, so this bound is
+/// what stops a hostile server from stalling the handshake forever by
+/// streaming them.
+const MAX_FRAMES_BEFORE_ACK: usize = 16;
+
 /// GraphQL client.
 #[derive(Clone)]
 pub struct GraphQLClient {
@@ -261,7 +277,8 @@ impl GraphQLClient {
             .parse()
             .map_err(|e: http::uri::InvalidUri| GraphQLError::InvalidUrl(e.to_string()))?;
 
-        let mut builder = tokio_tungstenite::tungstenite::client::ClientRequestBuilder::new(uri);
+        let mut builder = tokio_tungstenite::tungstenite::client::ClientRequestBuilder::new(uri)
+            .with_sub_protocol(GRAPHQL_TRANSPORT_WS);
         for (name, value) in &self.config.default_headers {
             builder = builder.with_header(name.clone(), value.clone());
         }
@@ -270,9 +287,31 @@ impl GraphQLClient {
         }
 
         // Connect to WebSocket
-        let (ws_stream, _) = tokio_tungstenite::connect_async(builder)
+        let (ws_stream, handshake) = tokio_tungstenite::connect_async(builder)
             .await
             .map_err(|e| GraphQLError::WebSocket(e.to_string()))?;
+
+        // tungstenite already fails the handshake when a server that we offered
+        // a sub-protocol to answers with none or with one we never offered.
+        // Re-check the negotiated value anyway so a mismatch surfaces as a
+        // GraphQL-level error naming the protocol, not an opaque transport one.
+        let negotiated = handshake
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok());
+        match negotiated {
+            Some(protocol) if protocol.trim() == GRAPHQL_TRANSPORT_WS => {}
+            Some(protocol) => {
+                return Err(GraphQLError::WebSocket(format!(
+                    "server negotiated sub-protocol {protocol:?}, expected {GRAPHQL_TRANSPORT_WS:?}"
+                )));
+            }
+            None => {
+                return Err(GraphQLError::WebSocket(format!(
+                    "server did not negotiate the {GRAPHQL_TRANSPORT_WS:?} sub-protocol"
+                )));
+            }
+        }
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -288,22 +327,47 @@ impl GraphQLClient {
             .await
             .map_err(|e| GraphQLError::WebSocket(e.to_string()))?;
 
-        // Wait for connection_ack
-        if let Some(msg) = read.next().await {
-            let msg = msg.map_err(|e| GraphQLError::WebSocket(e.to_string()))?;
-            if let Message::Text(text) = msg {
-                let server_msg: ServerMessage = serde_json::from_str(&text)?;
-                match server_msg {
+        // Wait for connection_ack. The spec forbids sending `subscribe` before
+        // the ack, so every path out of this loop that isn't an ack must be an
+        // error: falling through would leave the caller holding a subscription
+        // that silently never yields.
+        let mut acknowledged = false;
+        for _ in 0..MAX_FRAMES_BEFORE_ACK {
+            let Some(msg) = read.next().await else {
+                return Err(GraphQLError::WebSocket(
+                    "connection ended before connection_ack".to_string(),
+                ));
+            };
+            match msg.map_err(|e| GraphQLError::WebSocket(e.to_string()))? {
+                Message::Text(text) => match serde_json::from_str::<ServerMessage>(&text)? {
                     ServerMessage::ConnectionAck { .. } => {
                         debug!("WebSocket connection acknowledged");
+                        acknowledged = true;
+                        break;
                     }
+                    // Keep-alive traffic is legal before the ack; anything else
+                    // (next/error/complete) is a protocol violation.
+                    ServerMessage::Ping { .. } | ServerMessage::Pong { .. } => continue,
                     _ => {
                         return Err(GraphQLError::WebSocket(
                             "Expected connection_ack".to_string(),
                         ));
                     }
+                },
+                Message::Close(_) => {
+                    return Err(GraphQLError::WebSocket(
+                        "server closed the connection before connection_ack".to_string(),
+                    ));
                 }
+                // Binary and WebSocket-level control frames carry no
+                // graphql-transport-ws message; keep waiting for the ack.
+                _ => continue,
             }
+        }
+        if !acknowledged {
+            return Err(GraphQLError::WebSocket(format!(
+                "no connection_ack within the first {MAX_FRAMES_BEFORE_ACK} frames"
+            )));
         }
 
         // Send subscribe message
@@ -336,15 +400,24 @@ impl GraphQLClient {
 
         // Build the unsubscribe action: send a graphql-ws `complete` for this
         // subscription's id so the server stops producing events when the client
-        // unsubscribes or drops the stream. Runs on the current runtime because
-        // it may be invoked from a synchronous `Drop`.
+        // unsubscribes or drops the stream.
+        //
+        // Delivery is best-effort. Sending needs a runtime, but this may be
+        // invoked from a synchronous `Drop` on a non-runtime thread or while a
+        // runtime is shutting down; `tokio::spawn` would panic there, so probe
+        // for a handle first and skip the send when there is none. A skipped
+        // `complete` costs the server nothing beyond noticing the closed socket.
         let unsubscribe: Arc<dyn Fn() + Send + Sync> = {
             let write = write.clone();
             let id = subscription_id.clone();
             Arc::new(move || {
+                let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                    debug!("No tokio runtime available; skipping graphql-ws `complete`");
+                    return;
+                };
                 let write = write.clone();
                 let id = id.clone();
-                tokio::spawn(async move {
+                handle.spawn(async move {
                     let Ok(complete) = serde_json::to_string(&ClientMessage::Complete { id })
                     else {
                         return;

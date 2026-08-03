@@ -579,6 +579,13 @@ impl Default for StaticAssetsConfig {
 #[derive(Clone)]
 pub struct StaticAssetServer {
     config: StaticAssetsConfig,
+    /// The realpath of `config.root_dir`, resolved once at construction.
+    ///
+    /// The traversal check needs a canonical root to compare against, but
+    /// `canonicalize` is a blocking `realpath(3)`; doing it per request put a
+    /// syscall that can touch every component of the root path on the executor
+    /// thread. The root does not move while the server lives.
+    canonical_root: PathBuf,
     /// Bounded in-memory cache of already-compressed (or raw) file bodies,
     /// shared across clones. `None` when caching is disabled
     /// (`cache_capacity == 0`).
@@ -588,17 +595,23 @@ pub struct StaticAssetServer {
 impl StaticAssetServer {
     /// Create a new static asset server
     pub fn new(config: StaticAssetsConfig) -> Result<Self, Error> {
-        if !config.root_dir.exists() {
-            return Err(Error::Internal(format!(
+        // Blocking, but this runs once at startup rather than per request, and
+        // it doubles as the existence check the root directory needs.
+        let canonical_root = config.root_dir.canonicalize().map_err(|_| {
+            Error::Internal(format!(
                 "Static assets directory not found: {:?}",
                 config.root_dir
-            )));
-        }
+            ))
+        })?;
 
         let cache = NonZeroUsize::new(config.cache_capacity)
             .map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
 
-        Ok(Self { config, cache })
+        Ok(Self {
+            config,
+            canonical_root,
+            cache,
+        })
     }
 
     /// Look up a cached body for this `(path, mtime, encoding)` key.
@@ -647,25 +660,31 @@ impl StaticAssetServer {
 
     /// Serve a static file
     pub async fn serve(&self, req: &HttpRequest) -> Result<HttpResponse, Error> {
-        let path = self.resolve_path(&req.path)?;
+        // `path_only`, not `path`: the raw target includes the query string, and
+        // `/static/app.js?v=2` names no file on disk.
+        let path = self.resolve_path(req.path_only()).await?;
 
-        // Check if path exists
-        if !path.exists() {
+        // One stat answers both "does it exist" and "is it a directory"; the
+        // blocking `Path::exists`/`Path::is_dir` pair asked the kernel the same
+        // question twice, on the executor thread.
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
             // Try fallback for SPA
             if let Some(ref fallback) = self.config.fallback {
                 let fallback_path = self.config.root_dir.join(fallback);
-                if fallback_path.exists() {
+                if tokio::fs::metadata(&fallback_path).await.is_ok() {
                     return self.serve_file(&fallback_path, req).await;
                 }
             }
             return Err(Error::NotFound(format!("File not found: {}", req.path)));
-        }
+        };
 
         // If directory, try index files
-        if path.is_dir() {
+        if metadata.is_dir() {
             for index_file in &self.config.index_files {
                 let index_path = path.join(index_file);
-                if index_path.exists() && index_path.is_file() {
+                if let Ok(index_meta) = tokio::fs::metadata(&index_path).await
+                    && index_meta.is_file()
+                {
                     return self.serve_file(&index_path, req).await;
                 }
             }
@@ -821,11 +840,9 @@ impl StaticAssetServer {
             return None;
         }
 
-        // Parse Accept-Encoding header
-        let accept_encoding = req
-            .headers
-            .get("Accept-Encoding")
-            .or_else(|| req.headers.get("accept-encoding"))?;
+        // Parse Accept-Encoding header. One lookup: header names intern
+        // case-insensitively, so the lowercased retry was always redundant.
+        let accept_encoding = req.headers.get("Accept-Encoding")?;
 
         let encodings: Vec<&str> = accept_encoding
             .split(',')
@@ -866,13 +883,16 @@ impl StaticAssetServer {
             algo.file_extension()
         ));
 
-        if compressed_path.exists() {
-            let content = tokio::fs::read(&compressed_path).await.map_err(|e| {
-                Error::Internal(format!("Failed to read pre-compressed file: {}", e))
-            })?;
-            Ok(Some(content))
-        } else {
-            Ok(None)
+        // Just attempt the read: a probe followed by a read is two syscalls to
+        // learn one thing, and the blocking `Path::exists` half ran on the
+        // executor thread. A missing sidecar is the expected case, not an error.
+        match tokio::fs::read(&compressed_path).await {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Internal(format!(
+                "Failed to read pre-compressed file: {}",
+                e
+            ))),
         }
     }
 
@@ -916,24 +936,21 @@ impl StaticAssetServer {
     }
 
     /// Resolve request path to file system path
-    fn resolve_path(&self, request_path: &str) -> Result<PathBuf, Error> {
-        // Remove leading slash and query string
-        let clean_path = request_path
-            .trim_start_matches('/')
-            .split('?')
-            .next()
-            .unwrap_or("");
+    ///
+    /// `request_path` must already have its query stripped — callers pass
+    /// [`HttpRequest::path_only`], since the raw target carries `?v=2`-style
+    /// cache busters that are not part of any filename.
+    async fn resolve_path(&self, request_path: &str) -> Result<PathBuf, Error> {
+        // Remove leading slash
+        let clean_path = request_path.trim_start_matches('/');
 
         // Build full path
         let full_path = self.config.root_dir.join(clean_path);
 
-        // Security: prevent directory traversal
-        let canonical_root =
-            self.config.root_dir.canonicalize().map_err(|_| {
-                Error::Internal("Failed to canonicalize root directory".to_string())
-            })?;
-
-        let canonical_path = match full_path.canonicalize() {
+        // Security: prevent directory traversal. The root's realpath was
+        // resolved at construction; only the request-derived half has to be
+        // resolved here, and off the executor thread.
+        let canonical_path = match tokio::fs::canonicalize(&full_path).await {
             Ok(p) => p,
             Err(_) => {
                 // File doesn't exist, but path might be valid for fallback
@@ -941,7 +958,7 @@ impl StaticAssetServer {
             }
         };
 
-        if !canonical_path.starts_with(&canonical_root) {
+        if !canonical_path.starts_with(&self.canonical_root) {
             return Err(Error::Forbidden(
                 "Access denied: path traversal attempt".to_string(),
             ));
@@ -1170,7 +1187,21 @@ mod tests {
     }
 
     fn get_req(path: &str) -> HttpRequest {
-        HttpRequest::new("GET".to_string(), path.to_string())
+        HttpRequest::new("GET", path.to_string())
+    }
+
+    #[tokio::test]
+    async fn cache_busting_query_string_still_resolves_the_file() {
+        let dir = TempDir::new();
+        dir.write("app.js", b"console.log(1)");
+
+        let server = StaticAssetServer::new(StaticAssetsConfig::new(dir.path.clone())).unwrap();
+
+        // `HttpRequest::path` is the raw target, so the query has to come off
+        // before it reaches the filesystem — there is no file named `app.js?v=2`.
+        let resp = server.serve(&get_req("/app.js?v=2")).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body_ref(), b"console.log(1)");
     }
 
     #[tokio::test]
@@ -1203,8 +1234,7 @@ mod tests {
 
         // Conditional request with matching ETag yields 304 Not Modified.
         let mut cond = get_req("/data.js");
-        cond.headers
-            .insert("If-None-Match".to_string(), etag1.clone());
+        cond.headers.insert("If-None-Match", etag1.clone());
         let resp304 = server.serve(&cond).await.unwrap();
         assert_eq!(resp304.status, 304);
         assert_eq!(resp304.headers.get("ETag"), Some(&etag1));
@@ -1219,8 +1249,7 @@ mod tests {
         let server = StaticAssetServer::new(config).unwrap();
 
         let mut req = get_req("/app.js");
-        req.headers
-            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+        req.headers.insert("Accept-Encoding", "gzip".to_string());
 
         let resp1 = server.serve(&req).await.unwrap();
         assert_eq!(resp1.status, 200);
@@ -1303,8 +1332,7 @@ mod tests {
         let server = StaticAssetServer::new(config).unwrap();
 
         let mut req = get_req("/app.js");
-        req.headers
-            .insert("Accept-Encoding".to_string(), "zstd".to_string());
+        req.headers.insert("Accept-Encoding", "zstd".to_string());
 
         let resp1 = server.serve(&req).await.unwrap();
         assert_eq!(resp1.status, 200);

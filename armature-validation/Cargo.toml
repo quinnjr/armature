@@ -1,6 +1,6 @@
 [package]
 name = "armature-validation"
-version = "0.1.3"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,6 +18,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.12"
 once_cell = "1.21"
+# `IsUrl` parses rather than pattern-matches: a regex that "looks like a URL"
+# both rejects valid URLs (`https://a`) and accepts invalid ones (`https://!!`).
+url = "2.5"
 async-trait = "0.1"
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 

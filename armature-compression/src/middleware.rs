@@ -49,17 +49,28 @@ impl CompressionMiddleware {
         &self.config
     }
 
-    /// Determine the compression algorithm to use for a request
+    /// Determine the compression algorithm to use for a request.
+    ///
+    /// `Accept-Encoding` is authoritative in both modes. A configured
+    /// algorithm expresses which coding the server *prefers*, not permission to
+    /// send a coding the client never advertised: a client asking only for `br`
+    /// must not be handed gzip it may be unable to decode. When the configured
+    /// algorithm is not acceptable to this client, the response goes out
+    /// uncompressed rather than mis-encoded.
     fn select_algorithm(&self, accept_encoding: Option<&str>) -> CompressionAlgorithm {
+        // No Accept-Encoding at all: RFC 9110 §12.5.3 says any coding is then
+        // acceptable, but sending one to a client that never advertised
+        // support is the riskier read, so stay uncompressed.
+        let Some(encoding) = accept_encoding else {
+            return CompressionAlgorithm::None;
+        };
+
         match self.config.algorithm {
             CompressionAlgorithm::Auto => {
-                if let Some(encoding) = accept_encoding {
-                    CompressionAlgorithm::select_from_accept_encoding(encoding)
-                } else {
-                    CompressionAlgorithm::None
-                }
+                CompressionAlgorithm::select_from_accept_encoding(encoding)
             }
-            algo => algo,
+            algo if algo.is_accepted_by(encoding) => algo,
+            _ => CompressionAlgorithm::None,
         }
     }
 
@@ -166,11 +177,8 @@ impl Middleware for CompressionMiddleware {
         >,
     ) -> Result<HttpResponse, Error> {
         // Get Accept-Encoding header before passing request
-        let accept_encoding = req
-            .headers
-            .get("Accept-Encoding")
-            .or_else(|| req.headers.get("accept-encoding"))
-            .cloned();
+        // One lookup: header names intern case-insensitively.
+        let accept_encoding = req.headers.get("Accept-Encoding").map(str::to_owned);
 
         // Call the next handler
         let response = next(req).await?;
@@ -228,7 +236,7 @@ mod tests {
 
         // Empty body should not compress
         let mut response = create_response("", "application/json");
-        response.body = Vec::new();
+        response.body = armature_core::Bytes::new();
         assert!(!middleware.should_compress(&response));
     }
 
@@ -274,10 +282,28 @@ mod tests {
         let config = CompressionConfig::builder().gzip().build();
         let middleware = CompressionMiddleware::with_config(config);
 
-        // Should always use gzip regardless of Accept-Encoding
+        // The configured algorithm is used when the client accepts it...
+        assert_eq!(
+            middleware.select_algorithm(Some("gzip, deflate")),
+            CompressionAlgorithm::Gzip
+        );
+        // ...and when a wildcard covers it.
+        assert_eq!(
+            middleware.select_algorithm(Some("*")),
+            CompressionAlgorithm::Gzip
+        );
+
+        // A client that advertises only `br` must not receive gzip. The
+        // previous behaviour returned Gzip here, sending a coding the client
+        // never said it could decode.
         assert_eq!(
             middleware.select_algorithm(Some("br")),
-            CompressionAlgorithm::Gzip
+            CompressionAlgorithm::None
+        );
+        // An explicit refusal is honoured too.
+        assert_eq!(
+            middleware.select_algorithm(Some("gzip;q=0")),
+            CompressionAlgorithm::None
         );
     }
 
@@ -314,9 +340,9 @@ mod tests {
     #[cfg(feature = "gzip")]
     #[test]
     fn test_compress_json_body_bytes() {
-        // Responses built with `with_json` store their payload in `body_bytes`
-        // (the legacy `body` Vec is cleared). Verify such responses are actually
-        // compressed rather than silently skipped.
+        // Responses built with `with_json` set the body from a serialized
+        // buffer. Verify such responses are actually compressed rather than
+        // silently skipped.
         let middleware = CompressionMiddleware::with_config(
             CompressionConfig::builder().gzip().min_size(10).build(),
         );
@@ -326,9 +352,8 @@ mod tests {
         let payload: Vec<String> = vec!["armature".to_string(); 100];
         let response = HttpResponse::new(200).with_json(&payload).unwrap();
 
-        // Sanity: payload lives in body_bytes, not the legacy Vec, and exceeds min_size.
+        // Sanity: the payload landed in the body and exceeds min_size.
         assert!(response.has_bytes_body());
-        assert!(response.body.is_empty());
         assert!(response.body_len() > 10);
 
         let original_len = response.body_len();
@@ -367,9 +392,8 @@ mod tests {
             CompressionConfig::builder().gzip().min_size(10).build(),
         );
 
-        let mut req = HttpRequest::new("GET".to_string(), "/data".to_string());
-        req.headers
-            .insert("Accept-Encoding".to_string(), "gzip".to_string());
+        let mut req = HttpRequest::new("GET", "/data".to_string());
+        req.headers.insert("Accept-Encoding", "gzip");
 
         let body = "Hello, World! ".repeat(100);
         let next = next_returning(create_response(&body, "text/plain"));
@@ -406,7 +430,7 @@ mod tests {
         let middleware =
             CompressionMiddleware::with_config(CompressionConfig::builder().min_size(10).build());
 
-        let req = HttpRequest::new("GET".to_string(), "/data".to_string());
+        let req = HttpRequest::new("GET", "/data".to_string());
         let body = "Hello, World! ".repeat(100);
         let next = next_returning(create_response(&body, "text/plain"));
 

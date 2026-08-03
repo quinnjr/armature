@@ -22,23 +22,42 @@ impl ConfigValidator {
         Ok(())
     }
 
-    /// Validate that a number is within range
-    pub fn in_range<T: PartialOrd>(value: T, min: T, max: T, field: &str) -> Result<()> {
+    /// Validate that a number is within range.
+    ///
+    /// `T: Display` so the message names the actual bounds and the offending
+    /// value; without it the error read literally "must be between min and
+    /// max", which tells the operator nothing about what to change.
+    pub fn in_range<T: PartialOrd + std::fmt::Display>(
+        value: T,
+        min: T,
+        max: T,
+        field: &str,
+    ) -> Result<()> {
         if value < min || value > max {
             return Err(ConfigError::ValidationError(format!(
-                "{} must be between min and max",
-                field
+                "{field} must be between {min} and {max} (got {value})"
             )));
         }
         Ok(())
     }
 
-    /// Validate that a value is in a list of allowed values
-    pub fn one_of<T: PartialEq>(value: &T, allowed: &[T], field: &str) -> Result<()> {
+    /// Validate that a value is in a list of allowed values.
+    ///
+    /// `T: Display` so the message lists the allowed values rather than merely
+    /// asserting that some exist.
+    pub fn one_of<T: PartialEq + std::fmt::Display>(
+        value: &T,
+        allowed: &[T],
+        field: &str,
+    ) -> Result<()> {
         if !allowed.contains(value) {
+            let allowed = allowed
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(ConfigError::ValidationError(format!(
-                "{} must be one of the allowed values",
-                field
+                "{field} must be one of [{allowed}] (got {value})"
             )));
         }
         Ok(())

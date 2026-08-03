@@ -117,12 +117,22 @@ impl HttpMetrics {
         })
     }
 
-    /// Record a request
-    pub fn record_request(&self, method: &str, path: &str, status: u16, duration: f64) {
+    /// Record a request.
+    ///
+    /// `route` is an `http.route` value in the OTel sense: the low-cardinality
+    /// route *template* (`/users/{id}`), or at minimum the query-less request
+    /// path. Passing a raw request target mints one time series per distinct
+    /// URL, which is exactly the unbounded-cardinality failure the metrics
+    /// pipeline is least able to absorb.
+    ///
+    /// Attribute names follow OTel semantic conventions 1.0 and later
+    /// (`http.request.method`, `http.route`, `http.response.status_code`); the
+    /// pre-1.0 `http.method`/`http.status_code` spellings are retired.
+    pub fn record_request(&self, method: &str, route: &str, status: u16, duration: f64) {
         let attributes = vec![
-            KeyValue::new("http.method", method.to_string()),
-            KeyValue::new("http.route", path.to_string()),
-            KeyValue::new("http.status_code", status.to_string()),
+            KeyValue::new("http.request.method", method.to_string()),
+            KeyValue::new("http.route", route.to_string()),
+            KeyValue::new("http.response.status_code", status as i64),
         ];
 
         self.request_count.add(1, &attributes);

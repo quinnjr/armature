@@ -134,16 +134,54 @@ impl From<tungstenite::Message> for Message {
     }
 }
 
-impl From<Message> for tungstenite::Message {
-    fn from(msg: Message) -> Self {
-        match msg.message_type {
-            MessageType::Text => tungstenite::Message::Text(
-                String::from_utf8_lossy(&msg.payload).into_owned().into(),
-            ),
-            MessageType::Binary => tungstenite::Message::Binary(msg.payload.to_vec().into()),
-            MessageType::Ping => tungstenite::Message::Ping(msg.payload.to_vec().into()),
-            MessageType::Pong => tungstenite::Message::Pong(msg.payload.to_vec().into()),
+/// A [`Message`] that cannot be put on the wire as-is.
+///
+/// Only one thing can go wrong: a text message whose payload is not valid
+/// UTF-8. RFC 6455 §5.6 requires text frames to carry UTF-8, and the payload is
+/// `Bytes`, so nothing stops a caller constructing `Message { message_type:
+/// Text, payload: <arbitrary bytes> }`.
+#[derive(Debug, Clone)]
+pub struct InvalidTextPayload {
+    /// Byte offset at which decoding failed.
+    pub valid_up_to: usize,
+}
+
+impl std::fmt::Display for InvalidTextPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "text message payload is not valid UTF-8 (valid up to byte {})",
+            self.valid_up_to
+        )
+    }
+}
+
+impl std::error::Error for InvalidTextPayload {}
+
+impl TryFrom<Message> for tungstenite::Message {
+    type Error = InvalidTextPayload;
+
+    /// Convert without copying the payload.
+    ///
+    /// Binary/Ping/Pong hand `msg.payload` straight through: both sides are
+    /// `Bytes`, so this is a refcount bump rather than the full memcpy a
+    /// `to_vec()` cost - once per recipient on a broadcast.
+    ///
+    /// Text is checked rather than lossily converted. `from_utf8_lossy` would
+    /// substitute U+FFFD for every invalid byte, silently delivering corrupted
+    /// text the peer has no way to detect; an error lets the caller decide.
+    fn try_from(msg: Message) -> Result<Self, Self::Error> {
+        Ok(match msg.message_type {
+            MessageType::Text => {
+                let text = std::str::from_utf8(&msg.payload).map_err(|e| InvalidTextPayload {
+                    valid_up_to: e.valid_up_to(),
+                })?;
+                tungstenite::Message::Text(text.to_owned().into())
+            }
+            MessageType::Binary => tungstenite::Message::Binary(msg.payload),
+            MessageType::Ping => tungstenite::Message::Ping(msg.payload),
+            MessageType::Pong => tungstenite::Message::Pong(msg.payload),
             MessageType::Close => tungstenite::Message::Close(None),
-        }
+        })
     }
 }

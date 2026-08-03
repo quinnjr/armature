@@ -108,10 +108,18 @@ impl CommandBus {
     {
         let type_id = TypeId::of::<C>();
 
-        let handler = self
-            .handlers
-            .get(&type_id)
-            .ok_or(CommandError::HandlerNotFound)?;
+        // Clone the handler out and drop the map guard before awaiting. A
+        // `Ref` from `DashMap::get` holds that shard's read lock, so holding it
+        // across the handler future would block any concurrent `register` that
+        // lands on the same shard for the whole duration of the handler — and a
+        // handler that re-entrantly calls `register` would deadlock on itself.
+        let handler = {
+            let entry = self
+                .handlers
+                .get(&type_id)
+                .ok_or(CommandError::HandlerNotFound)?;
+            Arc::clone(entry.value())
+        };
 
         let boxed_command: Box<dyn Any + Send> = Box::new(command);
         let result = handler.handle_dyn(boxed_command).await?;
@@ -213,5 +221,44 @@ mod tests {
 
         let another_result = bus.execute(AnotherCommand { value: 42 }).await.unwrap();
         assert_eq!(another_result, 42);
+    }
+
+    struct ReentrantRegisterHandler {
+        bus: Arc<std::sync::OnceLock<Arc<CommandBus>>>,
+    }
+
+    #[async_trait]
+    impl CommandHandler<CreateUserCommand> for ReentrantRegisterHandler {
+        async fn handle(&self, command: CreateUserCommand) -> Result<String, CommandError> {
+            // Registering under the *same* command type guarantees the same
+            // DashMap shard as the entry `execute` looked up. If `execute` were
+            // still holding that shard's read guard, this write would block
+            // forever.
+            let bus = self.bus.get().expect("bus wired before execute").clone();
+            bus.register::<CreateUserCommand, _>(CreateUserHandler);
+            Ok(format!("user-{}", command.email))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handler_can_register_while_running() {
+        let cell = Arc::new(std::sync::OnceLock::new());
+        let bus = Arc::new(CommandBus::new());
+        // The cell was just created, so this always succeeds; the error variant
+        // carries the un-stored `Arc` and is not `Debug`.
+        let _ = cell.set(bus.clone());
+
+        bus.register::<CreateUserCommand, _>(ReentrantRegisterHandler { bus: cell });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bus.execute(CreateUserCommand {
+                email: "dana@example.com".to_string(),
+            }),
+        )
+        .await
+        .expect("execute must not hold a map guard across the handler await");
+
+        assert_eq!(result.unwrap(), "user-dana@example.com");
     }
 }

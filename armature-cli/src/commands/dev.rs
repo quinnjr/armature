@@ -53,21 +53,24 @@ async fn run_with_cargo_watch(
     cargo_args: &[String],
     project_root: &Path,
 ) -> CliResult<()> {
-    let mut args = vec![
+    // cargo-watch takes the command to run as a single `-x` string, so extra
+    // cargo arguments have to be folded into it rather than appended to the
+    // cargo-watch invocation itself.
+    let exec = if cargo_args.is_empty() {
+        "run".to_string()
+    } else {
+        format!("run {}", cargo_args.join(" "))
+    };
+
+    let args = vec![
         "watch".to_string(),
         "-x".to_string(),
-        "run".to_string(),
+        exec,
         "-w".to_string(),
         "src".to_string(),
         "-c".to_string(), // Clear screen
         "-q".to_string(), // Quiet cargo-watch output
     ];
-
-    // Add any additional cargo arguments
-    for arg in cargo_args {
-        args.push("--".to_string());
-        args.push(arg.clone());
-    }
 
     println!(
         "  {} Starting server on http://{}:{}",

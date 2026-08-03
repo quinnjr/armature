@@ -174,11 +174,18 @@ fn make_handler(
             Box::pin(async move {
                 // Run on a blocking thread since Rhai is synchronous
                 tokio::task::spawn_blocking(move || {
+                    // Built once and cloned per script call. Rebuilding it per
+                    // guard/middleware hop re-derived every header, re-parsed
+                    // the query and re-copied the whole body - up to seven
+                    // times for a single request. The clone still duplicates
+                    // the maps (Rhai needs owned args) but the body is `Bytes`,
+                    // so it is a refcount bump rather than a memcpy.
+                    let req_binding = RequestBinding::from_request(&req);
+
                     // 1. Run guards
                     for guard in &guards {
                         if let Some(ref check) = guard.handler {
-                            let req_binding = RequestBinding::from_request(&req);
-                            match check.call::<bool>(&engine, &ast, (req_binding,)) {
+                            match check.call::<bool>(&engine, &ast, (req_binding.clone(),)) {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     return Ok(HttpResponse::new(403).with_body(
@@ -196,10 +203,8 @@ fn make_handler(
                     }
 
                     // 2. Run before middleware
-                    let current_req = req;
                     for (name, mw_fn) in &before_mw {
-                        let req_binding = RequestBinding::from_request(&current_req);
-                        match mw_fn.call::<Dynamic>(&engine, &ast, (req_binding,)) {
+                        match mw_fn.call::<Dynamic>(&engine, &ast, (req_binding.clone(),)) {
                             Ok(val) => {
                                 // If middleware returns a ResponseBinding, short-circuit
                                 if val.is::<ResponseBinding>() {
@@ -209,14 +214,23 @@ fn make_handler(
                                 // Otherwise continue (middleware may have logged, etc.)
                             }
                             Err(e) => {
+                                // A before-middleware exists to decide whether a
+                                // request may proceed. Logging the failure and
+                                // continuing means a broken auth or rate-limit
+                                // hook admits every request - fail closed
+                                // instead, the same way a guard error does.
                                 error!(middleware = %name, error = %e, "Before middleware error");
+                                return Ok(HttpResponse::new(500).with_body(
+                                    format!("Internal Server Error: middleware `{name}` failed")
+                                        .into_bytes(),
+                                ));
                             }
                         }
                     }
 
                     // 3. Call the handler
-                    let req_binding = RequestBinding::from_request(&current_req);
-                    let result = handler_fn.call::<Dynamic>(&engine, &ast, (req_binding, ctx));
+                    let result =
+                        handler_fn.call::<Dynamic>(&engine, &ast, (req_binding.clone(), ctx));
 
                     let response = match result {
                         Ok(val) => dynamic_to_response(val),
@@ -228,11 +242,22 @@ fn make_handler(
                     };
 
                     // 4. Run after middleware
+                    //
+                    // The hook receives the full outgoing response, not just its
+                    // status code: with only a status an after-hook cannot read
+                    // or amend headers, cookies or body, which is most of what
+                    // an after-hook is for. This matches what
+                    // `armature_rhai::ScriptMiddleware::call_after` already
+                    // hands its scripts.
                     let mut final_response = response;
                     for (name, mw_fn) in &after_mw {
-                        let req_binding = RequestBinding::from_request(&current_req);
-                        let resp_status = Dynamic::from(final_response.status as i64);
-                        match mw_fn.call::<Dynamic>(&engine, &ast, (req_binding, resp_status)) {
+                        let resp_binding =
+                            Dynamic::from(ResponseBinding::from_http_response(&final_response));
+                        match mw_fn.call::<Dynamic>(
+                            &engine,
+                            &ast,
+                            (req_binding.clone(), resp_binding),
+                        ) {
                             Ok(val) => {
                                 if val.is::<ResponseBinding>() {
                                     let resp: ResponseBinding = val.cast();
@@ -240,7 +265,16 @@ fn make_handler(
                                 }
                             }
                             Err(e) => {
+                                // An after-hook that fails has produced no
+                                // response of its own; serving the handler's
+                                // response as though the hook had run would
+                                // hide, for example, a security header the hook
+                                // was responsible for adding.
                                 error!(middleware = %name, error = %e, "After middleware error");
+                                return Ok(HttpResponse::new(500).with_body(
+                                    format!("Internal Server Error: middleware `{name}` failed")
+                                        .into_bytes(),
+                                ));
                             }
                         }
                     }

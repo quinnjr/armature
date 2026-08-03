@@ -93,16 +93,14 @@ impl FixedWindow {
         self
     }
 
-    /// Evict the single least-recently-started window to make room for a new key.
+    /// Reclaim a batch of the least-recently-started windows to make room for
+    /// new keys. See [`super::evict_oldest_batch`] for why this is batched.
     fn evict_oldest(&self) {
-        if let Some(oldest) = self
-            .windows
-            .iter()
-            .min_by_key(|e| e.value().window_start)
-            .map(|e| e.key().clone())
-        {
-            self.windows.remove(&oldest);
-        }
+        super::evict_oldest_batch(
+            &self.windows,
+            super::eviction_batch_size(self.max_keys),
+            |state| Some(state.window_start),
+        );
     }
 
     /// Try to record a request

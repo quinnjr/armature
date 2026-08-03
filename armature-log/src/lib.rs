@@ -778,10 +778,15 @@ fn write_pretty<W: Write>(
 
     // Target
     if module_path && !target.is_empty() {
+        // The brackets belong to the format, not to the absence of color:
+        // dropping them when colors are on made the colored output disagree
+        // with the documented `[my_app]` shape - and colors are on by default
+        // in `preset_development()`, so the documented shape was the one
+        // almost nobody saw.
         #[cfg(feature = "color")]
         if color {
             use colored::Colorize;
-            let _ = write!(w, "{} ", target.dimmed());
+            let _ = write!(w, "{} ", format!("[{}]", target).dimmed());
         } else {
             let _ = write!(w, "[{}] ", target);
         }

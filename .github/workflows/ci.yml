@@ -311,6 +311,11 @@ jobs:
           # coverage job; minimal is skipped.
           - crate: armature-core
             minimal: ""
+          # armature-h1 gates its rustls acceptor and ALPN/h2c dispatch behind
+          # the `tls` feature, which no root feature reaches. `default = []`,
+          # so minimal is skipped as identical to the plain default build.
+          - crate: armature-h1
+            minimal: ""
           # The crates below have feature-gated surfaces that are reachable
           # only via --all-features, since none of them are pulled into the
           # root `full`/`full-with-saml` feature: armature-siem's `http`
@@ -487,6 +492,39 @@ jobs:
         run: cargo run --example distributed_locks_example --features full-with-saml
 
   # ============================================================================
+  # OUT-OF-WORKSPACE CRATES
+  #
+  # armature-fuzz, benches/comparison_servers/* and benchmarks/comparison each
+  # declare their own `[workspace]`, so a workspace-wide `cargo check` never
+  # touches them and they can reference an API that no longer exists — all
+  # three had accumulated exactly that. Each is checked from its own manifest
+  # here. The `http-benchmark` bin lives in the root package but no job built
+  # it either, so it is checked alongside them.
+  #
+  # armature-fuzz is `cargo check`ed on nightly rather than fuzzed: this only
+  # needs to prove the targets still compile against armature-core. Actually
+  # running them is what the fuzz-smoke job below is for.
+  # ============================================================================
+
+  out-of-workspace-checks:
+    name: Out-of-Workspace Crate Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check armature-fuzz targets
+        run: cargo check --manifest-path armature-fuzz/Cargo.toml --all-targets
+      - name: cargo check hyper h1 baseline server
+        run: >-
+          cargo check --manifest-path
+          benches/comparison_servers/hyper_h1_server/Cargo.toml
+      - name: cargo check benchmarks/comparison bins
+        run: cargo check --manifest-path benchmarks/comparison/Cargo.toml --bins
+      - name: cargo check http-benchmark bin
+        run: cargo check --bin http-benchmark
+
+  # ============================================================================
   # TEMPLATE BUILDS
   #
   # templates/{api-full,api-minimal,microservice,graphql-api} are excluded
@@ -524,6 +562,39 @@ jobs:
           armature-core = { path = "../../armature-core" }
           EOF
       - name: cargo check --all-features
+        working-directory: templates/${{ matrix.template }}
+        run: cargo check --all-features
+
+  # ============================================================================
+  # TEMPLATE RESOLUTION AGAINST CRATES.IO
+  #
+  # `template-builds` above patches both armature deps to the in-repo source,
+  # so it proves the template source matches THIS tree — never that the
+  # published version pair a real user resolves actually works together. When
+  # armature-core publishes a breaking 0.x minor ahead of a matching facade
+  # release, that job stays green while `cargo new` from the template fails
+  # for everyone.
+  #
+  # This job resolves the committed version requirements against crates.io
+  # with no patching. It is `continue-on-error` on purpose: it legitimately
+  # fails in the window between bumping the in-repo version and publishing it,
+  # and blocking every PR on the state of the registry is worse than a
+  # visible-but-non-fatal signal.
+  # ============================================================================
+
+  template-crates-io-resolution:
+    name: Template Resolves From crates.io (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [api-full, api-minimal, microservice, graphql-api]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --all-features (no [patch.crates-io])
         working-directory: templates/${{ matrix.template }}
         run: cargo check --all-features
 
@@ -601,6 +672,85 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Run security audit
         run: cargo audit
+
+  # ============================================================================
+  # FUZZ SMOKE (armature-h1)
+  #
+  # 60 seconds per target is not a fuzzing campaign — it is a regression gate.
+  # The corpus is not cached, so each run rediscovers coverage from scratch; what
+  # it reliably catches is a parser or framing change that panics or diverges on
+  # inputs a minute of libFuzzer reaches, which is the class of defect code
+  # review misses.
+  #
+  # `framing_differential` compares our accept/reject verdict and body length
+  # against hyper's; a body-length disagreement between two hops is request
+  # smuggling by definition, so that target failing is a security failure, not a
+  # flake. hyper is a dependency of the fuzz crate only, never of armature-h1.
+  #
+  # Scoped at the step level rather than the job level: `paths:` is a
+  # workflow-level filter, and a job-level `if:` cannot see the diff. On pushes,
+  # schedules, and PRs into main/release/**, every target runs unconditionally.
+  # ============================================================================
+
+  fuzz-smoke:
+    name: Fuzz Smoke (armature-h1)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_head, chunked, framing_differential]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: scope
+        name: Decide whether this PR touches the fuzzed surface
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" != "pull_request" ] || [ "$BASE_REF" = "main" ] \
+            || [[ "$BASE_REF" == release/* ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          if git diff --name-only "$merge_base"...HEAD \
+            | grep -qE '^(armature-h1/|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      # cargo-fuzz requires nightly: -Z sanitizer=address and the coverage
+      # instrumentation libFuzzer needs are nightly-only.
+      - uses: dtolnay/rust-toolchain@nightly
+        if: steps.scope.outputs.run == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true'
+        with:
+          workspaces: armature-h1/fuzz
+      - name: Install cargo-fuzz
+        if: steps.scope.outputs.run == 'true'
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }} for 60s
+        if: steps.scope.outputs.run == 'true'
+        working-directory: armature-h1
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- \
+            -max_total_time=60 -print_final_stats=1
+      # A crash file is the reproducer. Without it the log line naming the input
+      # is all that survives the runner, and re-finding it costs another run.
+      - name: Upload crash artifacts
+        if: failure() && steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: armature-h1/fuzz/artifacts/
+          if-no-files-found: ignore
 
   # ============================================================================
   # MSRV

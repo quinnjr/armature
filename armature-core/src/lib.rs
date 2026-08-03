@@ -23,22 +23,22 @@
 //! ### HTTP Request Handling
 //!
 //! ```
-//! use armature_core::HttpRequest;
+//! use armature_core::{Bytes, HttpRequest};
 //!
 //! // Create an HTTP request
-//! let request = HttpRequest::new("GET".to_string(), "/api/users".to_string());
+//! let request = HttpRequest::new("GET", "/api/users");
 //!
 //! assert_eq!(request.method, "GET");
 //! assert_eq!(request.path, "/api/users");
 //!
 //! // Access path and query parameters
-//! let mut post = HttpRequest::new("POST".to_string(), "/api/users/123".to_string());
-//! post.path_params.insert("id".to_string(), "123".to_string());
-//! post.query_params.insert("format".to_string(), "json".to_string());
-//! post.body = b"{\"name\":\"John\"}".to_vec();
+//! let mut post = HttpRequest::new("POST", "/api/users/123");
+//! post.push_param("id", "123");
+//! post.push_query_param("format", "json");
+//! post.body = Bytes::from_static(b"{\"name\":\"John\"}");
 //!
-//! assert_eq!(post.param("id"), Some(&"123".to_string()));
-//! assert_eq!(post.query("format"), Some(&"json".to_string()));
+//! assert_eq!(post.param("id"), Some("123"));
+//! assert_eq!(post.query_param("format"), Some("json"));
 //! ```
 //!
 //! ### HTTP Response Builder
@@ -169,7 +169,9 @@ pub mod middleware;
 pub mod module;
 pub mod numa;
 pub mod pagination;
+pub mod param_intern;
 pub mod pipeline;
+pub mod query;
 pub mod read_buffer;
 pub mod read_state;
 pub mod resilience;
@@ -208,7 +210,17 @@ pub mod micro;
 
 // Re-export commonly used types
 pub use application::*;
+/// The `Bytes`-backed string, method, and header-name types, re-exported from
+/// `armature-h1` so downstream crates need not depend on it directly.
+pub use armature_h1::header as header_id;
+pub use armature_h1::{ByteStr, HeaderId, Method};
+pub use http::{RouteParams, RouteParamsExt};
+pub use query::QueryView;
+// Re-exported because `HttpRequest.body`/`HttpResponse.body` are `Bytes`:
+// downstream crates need to name the type without taking their own `bytes`
+// dependency, and a version skew between theirs and ours would not compile.
 pub use body_limits::*;
+pub use bytes::Bytes;
 pub use connection::{
     Connection, ConnectionConfig, ConnectionEvent, ConnectionPool, ConnectionRecycler,
     ConnectionState, ConnectionStats, PoolHandle, Recyclable, RecyclableConnection, RecyclePool,
@@ -219,7 +231,7 @@ pub use container::*;
 pub use error::*;
 pub use extensions::Extensions;
 pub use extractors::{
-    Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers, Method, Path,
+    Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers, MethodExtractor, Path,
     PathParams, Query, RawBody, State,
 };
 pub use form::*;

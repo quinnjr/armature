@@ -4,7 +4,9 @@ use crate::{
     Result, WebhookConfig, WebhookDelivery, WebhookDeliveryStatus, WebhookEndpoint, WebhookError,
     WebhookPayload, WebhookRegistry, WebhookSignature,
 };
+use bytes::Bytes;
 use chrono::Utc;
+use futures::stream::StreamExt;
 use reqwest::Client;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -64,7 +66,7 @@ impl WebhookClient {
         let mut delivery = WebhookDelivery::new(payload, url);
         delivery.status = WebhookDeliveryStatus::InProgress;
 
-        let body = delivery.payload.to_bytes()?;
+        let body = Bytes::from(delivery.payload.to_bytes()?);
 
         // Check payload size
         if body.len() > self.config.max_payload_size {
@@ -112,7 +114,7 @@ impl WebhookClient {
         endpoint: &WebhookEndpoint,
         payload: WebhookPayload,
     ) -> Result<WebhookDelivery> {
-        let body = payload.to_bytes()?;
+        let body = Bytes::from(payload.to_bytes()?);
         self.send_to_endpoint_with_body(endpoint, payload, body)
             .await
     }
@@ -122,11 +124,16 @@ impl WebhookClient {
     /// This lets callers that dispatch the same payload to many endpoints
     /// serialize the body once and share it, only re-doing the (cheap,
     /// per-endpoint) HMAC signing for each endpoint.
+    ///
+    /// The body is a [`Bytes`] rather than a `Vec<u8>` precisely so that
+    /// sharing it is a refcount bump: with a `Vec` the "shared" body was
+    /// deep-copied once per endpoint, so a 1 MiB payload fanned out to 5,000
+    /// subscribers allocated 5 GiB.
     pub async fn send_to_endpoint_with_body(
         &self,
         endpoint: &WebhookEndpoint,
         payload: WebhookPayload,
-        body: Vec<u8>,
+        body: Bytes,
     ) -> Result<WebhookDelivery> {
         let mut delivery = WebhookDelivery::new(payload, &endpoint.url);
         delivery.status = WebhookDeliveryStatus::InProgress;
@@ -191,6 +198,13 @@ impl WebhookClient {
     /// failed, into the returned `Vec`. The overall `Err` case is reserved
     /// for fatal errors that occur before any delivery is attempted (e.g. no
     /// registry configured).
+    ///
+    /// At most [`WebhookConfig::max_concurrent_deliveries`] deliveries are in
+    /// flight at a time. The previous `join_all` started every one of them at
+    /// once, so an account with thousands of subscribed endpoints opened
+    /// thousands of sockets simultaneously and ran the sender out of file
+    /// descriptors. Results are still returned in registry order, not
+    /// completion order.
     pub async fn dispatch(&self, payload: WebhookPayload) -> Result<Vec<WebhookDelivery>> {
         let registry = self.registry.as_ref().ok_or_else(|| {
             WebhookError::ConfigError("No registry configured for dispatch".to_string())
@@ -198,30 +212,45 @@ impl WebhookClient {
 
         let endpoints = registry.get_endpoints_for_event(&payload.event);
 
-        // Serialize the payload once and share the bytes across all endpoints.
-        let body = payload.to_bytes()?;
+        // Serialize the payload once and share the bytes across all endpoints;
+        // `Bytes::clone` is a refcount bump, not a copy of the body.
+        let body = Bytes::from(payload.to_bytes()?);
+        let concurrency = self.config.max_concurrent_deliveries.max(1);
 
-        let futures = endpoints.iter().map(|endpoint| {
-            self.send_to_endpoint_with_body(endpoint, payload.clone(), body.clone())
-        });
-
-        let deliveries = futures::future::join_all(futures).await;
+        // Each task carries its endpoint index so the out-of-order completions
+        // from `buffer_unordered` can be put back in registry order.
+        let completed: Vec<(usize, Result<WebhookDelivery>)> =
+            futures::stream::iter(endpoints.iter().enumerate().map(|(index, endpoint)| {
+                let payload = payload.clone();
+                let body = body.clone();
+                async move {
+                    (
+                        index,
+                        self.send_to_endpoint_with_body(endpoint, payload, body)
+                            .await,
+                    )
+                }
+            }))
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
 
         // Aggregate partial progress: a failure delivering to one endpoint
         // must not drop the results of the others.
-        let mut results = Vec::with_capacity(deliveries.len());
-        for (endpoint, delivery_result) in endpoints.iter().zip(deliveries) {
-            match delivery_result {
-                Ok(delivery) => results.push(delivery),
+        let mut slots: Vec<Option<WebhookDelivery>> = (0..endpoints.len()).map(|_| None).collect();
+        for (index, delivery_result) in completed {
+            slots[index] = Some(match delivery_result {
+                Ok(delivery) => delivery,
                 Err(e) => {
-                    let mut delivery = WebhookDelivery::new(payload.clone(), endpoint.url.clone());
+                    let mut delivery =
+                        WebhookDelivery::new(payload.clone(), endpoints[index].url.clone());
                     delivery.mark_failed(e.to_string(), None);
-                    results.push(delivery);
+                    delivery
                 }
-            }
+            });
         }
 
-        Ok(results)
+        Ok(slots.into_iter().flatten().collect())
     }
 
     /// Execute a request with retry policy
@@ -248,7 +277,7 @@ impl WebhookClient {
             match request.send().await {
                 Ok(response) => {
                     let status = response.status();
-                    let body = response.text().await.ok();
+                    let body = self.read_capped_body(response).await;
 
                     if status.is_success() {
                         info!(
@@ -306,6 +335,53 @@ impl WebhookClient {
                 }
             }
         }
+    }
+
+    /// Read at most [`WebhookConfig::max_response_body_size`] bytes of a
+    /// response body, for the record kept on the delivery.
+    ///
+    /// This reads chunk by chunk and stops at the cap rather than calling
+    /// `response.text()`, which buffers the whole body first: the receiver of a
+    /// webhook is by definition a third party, and one that answers a delivery
+    /// with a multi-gigabyte body — hostile or merely misconfigured — could
+    /// otherwise take the sender's process down. Whatever is left of the body
+    /// is dropped unread, which closes the connection instead of draining it.
+    ///
+    /// Returns `None` only when nothing at all could be read, matching the
+    /// previous `response.text().await.ok()`. Truncation can land mid-codepoint,
+    /// so the bytes are decoded lossily; this string is diagnostic, never
+    /// something to parse.
+    async fn read_capped_body(&self, mut response: reqwest::Response) -> Option<String> {
+        let cap = self.config.max_response_body_size;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut failed = false;
+
+        while buf.len() < cap {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let take = (cap - buf.len()).min(chunk.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                    if take < chunk.len() {
+                        warn!(
+                            "Webhook response body exceeded {} bytes; recording a truncated copy",
+                            cap
+                        );
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    debug!("Failed to read webhook response body: {}", e);
+                    failed = true;
+                    break;
+                }
+            }
+        }
+
+        if failed && buf.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&buf).into_owned())
     }
 
     /// Determine if a status code should be retried
@@ -434,6 +510,125 @@ mod tests {
                 .iter()
                 .all(|d| d.status == WebhookDeliveryStatus::Succeeded)
         );
+    }
+
+    /// `buffer_unordered` completes deliveries out of order, so the
+    /// aggregation step has to re-key each result by its endpoint index. The
+    /// old `zip` of completion order against registry order would attribute
+    /// the slow endpoint's outcome to the fast one.
+    #[tokio::test]
+    async fn test_dispatch_pairs_each_result_with_its_own_endpoint() {
+        let slow_ok = MockServer::start().await;
+        let fast_bad = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(150)))
+            .mount(&slow_ok)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&fast_bad)
+            .await;
+
+        let registry = Arc::new(WebhookRegistry::new());
+        registry.register(
+            WebhookEndpoint::builder(format!("{}/hook", slow_ok.uri()))
+                .events(vec!["order.created"])
+                .build(),
+        );
+        registry.register(
+            WebhookEndpoint::builder(format!("{}/hook", fast_bad.uri()))
+                .events(vec!["order.created"])
+                .build(),
+        );
+
+        let config = WebhookConfig::builder()
+            .max_concurrent_deliveries(4)
+            .no_retries()
+            .build();
+        let client = WebhookClient::with_registry(config, registry);
+
+        let deliveries = client
+            .dispatch(WebhookPayload::new("order.created"))
+            .await
+            .unwrap();
+
+        assert_eq!(deliveries.len(), 2);
+        for delivery in deliveries {
+            if delivery.endpoint_url.starts_with(&slow_ok.uri()) {
+                assert_eq!(delivery.last_status_code, Some(200));
+            } else {
+                assert_eq!(delivery.last_status_code, Some(400));
+            }
+        }
+    }
+
+    /// A concurrency limit throttles the fan-out; it must not drop endpoints.
+    #[tokio::test]
+    async fn test_dispatch_delivers_to_every_endpoint_with_a_limit_of_one() {
+        let registry = Arc::new(WebhookRegistry::new());
+        let mut servers = Vec::new();
+
+        for _ in 0..3 {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/hook"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+            registry.register(
+                WebhookEndpoint::builder(format!("{}/hook", server.uri()))
+                    .events(vec!["order.created"])
+                    .build(),
+            );
+            servers.push(server);
+        }
+
+        let config = WebhookConfig::builder()
+            .max_concurrent_deliveries(1)
+            .build();
+        let client = WebhookClient::with_registry(config, registry);
+
+        let deliveries = client
+            .dispatch(WebhookPayload::new("order.created"))
+            .await
+            .unwrap();
+
+        assert_eq!(deliveries.len(), 3);
+        assert!(
+            deliveries
+                .iter()
+                .all(|d| d.status == WebhookDeliveryStatus::Succeeded)
+        );
+    }
+
+    /// A hostile receiver must not be able to make the sender buffer its whole
+    /// response body.
+    #[tokio::test]
+    async fn test_response_body_read_stops_at_the_configured_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(200_000)))
+            .mount(&server)
+            .await;
+
+        let config = WebhookConfig::builder().max_response_body_size(64).build();
+        let client = WebhookClient::new(config);
+
+        let response = client
+            .http_client
+            .post(format!("{}/hook", server.uri()))
+            .send()
+            .await
+            .unwrap();
+
+        let body = client.read_capped_body(response).await.unwrap();
+        assert_eq!(body.len(), 64, "response body was not capped at the read");
     }
 
     #[tokio::test]

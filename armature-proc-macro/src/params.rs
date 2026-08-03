@@ -210,14 +210,9 @@ pub fn query_derive_impl(input: TokenStream) -> TokenStream {
             where
                 Self: serde::de::DeserializeOwned,
             {
-                // Re-encode the already-decoded pairs with proper percent-encoding
-                // before handing the string to `serde_urlencoded`. Building the
-                // string by hand would corrupt any value containing '&', '=' or '%'.
-                let pairs: Vec<(&String, &String)> = request.query_params.iter().collect();
-                let query_string = serde_urlencoded::to_string(&pairs)
-                    .map_err(|e| armature_core::Error::Validation(format!("Invalid query parameters: {}", e)))?;
-
-                serde_urlencoded::from_str(&query_string)
+                // The raw query string, not the decoded pairs: re-encoding a
+                // decoded pair cannot always reproduce what the client sent.
+                serde_urlencoded::from_str(request.query_string().unwrap_or(""))
                     .map_err(|e| armature_core::Error::Validation(format!("Invalid query parameters: {}", e)))
             }
 

@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{Attribute, Data, DeriveInput, Field, Fields, Ident, LitStr, parse_macro_input};
+use syn::{Attribute, Data, DeriveInput, Field, Fields, Ident, LitStr, Token, parse_macro_input};
 
 /// `#[derive(Model)]` — emit field-wise `Debug` + `Clone` impls plus a
 /// `Default`-bounded `new()`.
@@ -94,20 +94,28 @@ pub fn derive_model_impl(input: TokenStream) -> TokenStream {
 }
 
 /// Does this field carry `#[api(skip)]`?
-fn has_api_skip(field: &Field) -> bool {
+///
+/// Every unrecognized shape is an error rather than a silent `false`: the
+/// documented use of this attribute is redacting secrets from `to_json`, so
+/// `#[api(skipp)]` or `#[api(skip = true)]` quietly leaving the field in the
+/// payload is the worst possible failure mode.
+fn has_api_skip(field: &Field) -> syn::Result<bool> {
     let mut skip = false;
     for attr in &field.attrs {
         if attr.path().is_ident("api") {
-            // Ignore parse errors from unrelated `api(..)` shapes.
-            let _ = attr.parse_nested_meta(|meta| {
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("skip") {
+                    if meta.input.peek(Token![=]) {
+                        return Err(meta.error("`api(skip)` is a flag and takes no value"));
+                    }
                     skip = true;
+                    return Ok(());
                 }
-                Ok(())
-            });
+                Err(meta.error("unknown `api` option; expected `skip`"))
+            })?;
         }
     }
-    skip
+    Ok(skip)
 }
 
 /// Extract a field-level `#[serde(rename = "...")]` value, if present.
@@ -263,8 +271,10 @@ pub fn derive_api_model_impl(input: TokenStream) -> TokenStream {
         && let Fields::Named(named) = &s.fields
     {
         for field in &named.named {
-            if has_api_skip(field) {
-                skip_fields.push(field);
+            match has_api_skip(field) {
+                Ok(true) => skip_fields.push(field),
+                Ok(false) => {}
+                Err(e) => return e.to_compile_error().into(),
             }
         }
     }
@@ -385,4 +395,56 @@ pub fn derive_resource_impl(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build the first named field of a one-field struct, so attribute shapes
+    /// can be exercised without going through the derive entry point (which
+    /// needs a real `proc_macro::TokenStream`).
+    fn field_of(src: &str) -> Field {
+        let item: syn::ItemStruct = syn::parse_str(src).expect("test struct must parse");
+        match item.fields {
+            Fields::Named(named) => named
+                .named
+                .into_iter()
+                .next()
+                .expect("test struct must have a field"),
+            _ => panic!("test struct must have named fields"),
+        }
+    }
+
+    #[test]
+    fn api_skip_is_recognized() {
+        let field = field_of("struct S { #[api(skip)] password: String }");
+        assert!(has_api_skip(&field).expect("`api(skip)` must parse"));
+    }
+
+    #[test]
+    fn field_without_api_attr_is_not_skipped() {
+        let field = field_of("struct S { password: String }");
+        assert!(!has_api_skip(&field).expect("a plain field must parse"));
+    }
+
+    #[test]
+    fn misspelled_api_option_is_rejected() {
+        for src in [
+            "struct S { #[api(skipp)] password: String }",
+            "struct S { #[api(exclude)] password: String }",
+        ] {
+            let field = field_of(src);
+            assert!(
+                has_api_skip(&field).is_err(),
+                "a misspelled option must be a compile error, not a silently unskipped field: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_skip_with_a_value_is_rejected() {
+        let field = field_of("struct S { #[api(skip = true)] password: String }");
+        assert!(has_api_skip(&field).is_err());
+    }
 }

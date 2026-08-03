@@ -187,3 +187,93 @@ impl std::fmt::Debug for ControllerRegistration {
             .finish()
     }
 }
+
+impl From<HttpMethod> for crate::Method {
+    #[inline]
+    fn from(m: HttpMethod) -> Self {
+        match m {
+            HttpMethod::GET => crate::Method::Get,
+            HttpMethod::POST => crate::Method::Post,
+            HttpMethod::PUT => crate::Method::Put,
+            HttpMethod::DELETE => crate::Method::Delete,
+            HttpMethod::PATCH => crate::Method::Patch,
+            HttpMethod::HEAD => crate::Method::Head,
+            HttpMethod::OPTIONS => crate::Method::Options,
+            HttpMethod::QUERY => crate::Method::Query,
+            // Deliberately exhaustive with no catch-all. `HttpMethod` is
+            // #[non_exhaustive] for downstream crates, but this match is inside
+            // the defining crate, so a variant added later fails to compile here
+            // rather than silently mapping onto something wrong.
+        }
+    }
+}
+
+/// The method has no `HttpMethod` counterpart, so it is not routable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnroutableMethod(pub String);
+
+impl std::fmt::Display for UnroutableMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "method `{}` has no HttpMethod counterpart", self.0)
+    }
+}
+
+impl std::error::Error for UnroutableMethod {}
+
+impl TryFrom<&crate::Method> for HttpMethod {
+    type Error = UnroutableMethod;
+
+    #[inline]
+    fn try_from(m: &crate::Method) -> Result<Self, Self::Error> {
+        match m {
+            crate::Method::Get => Ok(HttpMethod::GET),
+            crate::Method::Post => Ok(HttpMethod::POST),
+            crate::Method::Put => Ok(HttpMethod::PUT),
+            crate::Method::Delete => Ok(HttpMethod::DELETE),
+            crate::Method::Patch => Ok(HttpMethod::PATCH),
+            crate::Method::Head => Ok(HttpMethod::HEAD),
+            crate::Method::Options => Ok(HttpMethod::OPTIONS),
+            crate::Method::Query => Ok(HttpMethod::QUERY),
+            crate::Method::Connect => Err(UnroutableMethod("CONNECT".into())),
+            crate::Method::Trace => Err(UnroutableMethod("TRACE".into())),
+            crate::Method::Other(t) => Err(UnroutableMethod(t.into_owned())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod method_conversion_tests {
+    use super::HttpMethod;
+    use crate::Method;
+
+    #[test]
+    fn every_http_method_round_trips_through_method() {
+        for m in [
+            HttpMethod::GET,
+            HttpMethod::POST,
+            HttpMethod::PUT,
+            HttpMethod::DELETE,
+            HttpMethod::PATCH,
+            HttpMethod::HEAD,
+            HttpMethod::OPTIONS,
+            HttpMethod::QUERY,
+        ] {
+            let converted = Method::from(m.clone());
+            assert_eq!(
+                HttpMethod::try_from(&converted).ok(),
+                Some(m.clone()),
+                "{m:?} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn methods_with_no_http_method_counterpart_fail_conversion() {
+        // CONNECT, TRACE, and Other exist in armature-h1 because the wire has
+        // them; HttpMethod is the *routable* set, which is deliberately smaller.
+        // A router that silently mapped CONNECT onto GET would be a security bug.
+        assert!(HttpMethod::try_from(&Method::Connect).is_err());
+        assert!(HttpMethod::try_from(&Method::Trace).is_err());
+        assert!(HttpMethod::try_from(&Method::from("PURGE")).is_err());
+    }
+}

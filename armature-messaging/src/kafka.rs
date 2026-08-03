@@ -205,6 +205,11 @@ impl MessageBroker for KafkaBroker {
         handler: Arc<dyn MessageHandler>,
         options: SubscribeOptions,
     ) -> Result<Self::Subscription, MessagingError> {
+        // Kafka honors `ack_mode` (see `derive_enable_auto_commit`) but has no
+        // notion of a broker-side subscription filter, so a `filter` would be
+        // silently dropped and the consumer would receive the whole topic.
+        crate::reject_filter("Kafka", options.filter.as_ref())?;
+
         // Bounds how many per-message handler invocations may run
         // concurrently (see `consume_messages`). Defaults to 1, which
         // reproduces the previous strictly-sequential dispatch.

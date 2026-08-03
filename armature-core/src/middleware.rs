@@ -264,11 +264,10 @@ impl Middleware for RequestIdMiddleware {
         let request_id = req
             .headers
             .get("x-request-id")
-            .cloned()
+            .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        req.headers
-            .insert("x-request-id".to_string(), request_id.clone());
+        req.headers.insert("x-request-id", request_id.as_str());
 
         let mut response = next(req).await?;
         response
@@ -584,13 +583,14 @@ impl Middleware for LoggingMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_middleware_chain() {
         let mut chain = MiddlewareChain::new();
         chain.use_middleware(LoggerMiddleware::new());
 
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let handler = Arc::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok()) })
@@ -607,7 +607,7 @@ mod tests {
         // With no middleware registered, apply() must still invoke the handler
         // and return its response unchanged.
         let chain = MiddlewareChain::new();
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let handler = Arc::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok().with_body(b"direct".to_vec())) })
@@ -616,13 +616,13 @@ mod tests {
 
         let response = chain.apply(req, handler).await.unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, b"direct");
+        assert_eq!(response.body, Bytes::from_static(b"direct"));
     }
 
     #[tokio::test]
     async fn test_cors_middleware() {
         let cors = CorsMiddleware::new().allow_origin("https://example.com");
-        let req = HttpRequest::new("GET".to_string(), "/api".to_string());
+        let req = HttpRequest::new("GET", "/api".to_string());
 
         let result = cors
             .handle(
@@ -642,8 +642,8 @@ mod tests {
     #[tokio::test]
     async fn test_body_size_limit() {
         let middleware = BodySizeLimitMiddleware::new(10);
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
-        req.body = vec![0; 20]; // 20 bytes, exceeds limit
+        let mut req = HttpRequest::new("POST", "/api".to_string());
+        req.body = Bytes::from(vec![0; 20]); // 20 bytes, exceeds limit
 
         let result = middleware
             .handle(
@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_id_middleware() {
         let middleware = RequestIdMiddleware;
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let result = middleware
             .handle(
@@ -675,7 +675,7 @@ mod tests {
     #[tokio::test]
     async fn test_security_headers_middleware() {
         let middleware = SecurityHeadersMiddleware::new();
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let result = middleware
             .handle(
@@ -695,7 +695,7 @@ mod tests {
         use crate::timeout::TimeoutMiddleware;
 
         let middleware = TimeoutMiddleware::new(5);
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let result = middleware
             .handle(
@@ -732,7 +732,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware() {
         let middleware = CompressionMiddleware::new();
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let result = middleware
             .handle(
@@ -762,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware_gzips_large_body() {
         let middleware = CompressionMiddleware::new().with_min_size(16);
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("accept-encoding", "gzip");
 
         let original = vec![b'z'; 4096];
@@ -806,7 +806,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware_handles_bytes_backed_body_above_offload_threshold() {
         let middleware = CompressionMiddleware::new().with_min_size(16);
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("accept-encoding", "gzip");
 
         let original: Vec<u8> = (0..(crate::micro::GZIP_OFFLOAD_THRESHOLD * 4))
@@ -840,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware_respects_min_size() {
         let middleware = CompressionMiddleware::new().with_min_size(1024);
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("accept-encoding", "gzip");
 
         let small = b"tiny".to_vec();
@@ -854,7 +854,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.headers.get("Content-Encoding").is_none());
+        assert!(
+            response
+                .headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(response.body_ref(), b"tiny");
     }
 
@@ -862,7 +868,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware_skips_without_accept_encoding() {
         let middleware = CompressionMiddleware::new().with_min_size(16);
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let original = vec![b'q'; 4096];
         let expected = original.clone();
@@ -876,7 +882,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.headers.get("Content-Encoding").is_none());
+        assert!(
+            response
+                .headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(response.body_ref(), expected.as_slice());
     }
 
@@ -886,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_middleware_merges_vary_with_existing_value() {
         let middleware = CompressionMiddleware::new().with_min_size(16);
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("accept-encoding", "gzip");
 
         let original = vec![b'z'; 4096];
@@ -926,7 +938,7 @@ mod tests {
     async fn test_compression_middleware_offloads_large_body_and_round_trips() {
         let threshold = crate::micro::GZIP_OFFLOAD_THRESHOLD;
         let middleware = CompressionMiddleware::new().with_min_size(16);
-        let mut req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let mut req = HttpRequest::new("GET", "/test".to_string());
         req.headers.insert("accept-encoding", "gzip");
 
         // Well past the offload threshold, non-repeating so it does not trivially
@@ -961,7 +973,7 @@ mod tests {
         chain.use_middleware(RequestIdMiddleware);
         chain.use_middleware(SecurityHeadersMiddleware::new());
 
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
 
         let handler = Arc::new(|_req: HttpRequest| {
             Box::pin(async { Ok(HttpResponse::ok()) })
@@ -980,13 +992,10 @@ mod tests {
     async fn test_cors_preflight() {
         let cors = CorsMiddleware::new().allow_origin("https://example.com");
 
-        let mut req = HttpRequest::new("OPTIONS".to_string(), "/api".to_string());
+        let mut req = HttpRequest::new("OPTIONS", "/api".to_string());
+        req.headers.insert("Origin", "https://example.com");
         req.headers
-            .insert("Origin".to_string(), "https://example.com".to_string());
-        req.headers.insert(
-            "Access-Control-Request-Method".to_string(),
-            "POST".to_string(),
-        );
+            .insert("Access-Control-Request-Method", "POST".to_string());
 
         let result = cors
             .handle(
@@ -1008,8 +1017,8 @@ mod tests {
     #[tokio::test]
     async fn test_body_size_within_limit() {
         let middleware = BodySizeLimitMiddleware::new(100);
-        let mut req = HttpRequest::new("POST".to_string(), "/api".to_string());
-        req.body = vec![0; 50]; // 50 bytes, within limit
+        let mut req = HttpRequest::new("POST", "/api".to_string());
+        req.body = Bytes::from(vec![0; 50]); // 50 bytes, within limit
 
         let result = middleware
             .handle(

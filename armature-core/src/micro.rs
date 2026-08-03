@@ -49,6 +49,7 @@
 use crate::handler::{BoxedHandler, IntoHandler};
 use crate::route_cache::OptimizedRouter;
 use crate::{DEFAULT_MAX_BODY_SIZE, Error, HttpMethod, HttpRequest, HttpResponse, Router};
+use bytes::Bytes;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -303,7 +304,7 @@ impl BuiltApp {
                 match router.route(req).await {
                     Ok(response) => Ok(response),
                     Err(Error::RouteNotFound(_)) if default_service.is_some() => {
-                        let req = HttpRequest::new("GET".to_string(), "/404".to_string());
+                        let req = HttpRequest::new("GET", "/404".to_string());
                         default_service.unwrap().call(req).await
                     }
                     Err(e) => Err(e),
@@ -798,7 +799,7 @@ impl Middleware for Cors {
         };
 
         Box::pin(async move {
-            let request_origin = req.headers.get("origin").cloned();
+            let request_origin = req.headers.get("origin").map(str::to_owned);
 
             if is_preflight {
                 let mut response = HttpResponse::no_content();
@@ -1018,39 +1019,18 @@ pub(crate) async fn gzip_encode_offloaded(
 /// (`Compress` here and `CompressionMiddleware` in `middleware.rs`) so the
 /// body-storage handling below only has to be correct in one place.
 ///
-/// `HttpResponse` stores its body in one of two places: the legacy `pub
-/// body: Vec<u8>` field, or the zero-copy `body_bytes: Option<Bytes>`
-/// storage set by `with_bytes_body`/`with_static_body` (used by static-file
-/// serving, `FastResponse`, and `ResponseBuilder::build()`) — whichever is
-/// set, `body_ref()`/`body_len()` resolve through `body_bytes` first, and
-/// `with_body` clears `body_bytes` back to `None`. A naive
-/// `std::mem::take(&mut response.body)` therefore only ever sees the *legacy*
-/// field: for a `body_bytes`-backed response that field is already empty
-/// (`with_bytes_body`/`with_static_body` clear it), so the real content
-/// would never be read, gzip would happily encode zero bytes, and
-/// `with_body(compressed)` would then wipe out `body_bytes` and discard the
-/// actual content permanently. This reads through whichever storage is
-/// actually populated instead.
-///
-/// On the offload-failed path, a `body_bytes`-backed response needs no
-/// explicit restoration: `body_bytes()` only *clones* the `Arc`-backed
-/// `Bytes` handle (an O(1) refcount bump) to get an owned `Vec<u8>` for
-/// [`gzip_encode_offloaded`] (which needs ownership to move/share the
-/// buffer across the `spawn_blocking` boundary — this copy is unavoidable
-/// given that contract, but no worse than the copy encoding itself would
-/// perform), so `response`'s own `body_bytes` field is never touched and
-/// still holds the untouched original the whole time.
+/// The `to_vec` below is deliberate: [`gzip_encode_offloaded`] needs an owned
+/// buffer to move across the `spawn_blocking` boundary, and taking a copy
+/// leaves `response` holding the original, so the failure path has nothing to
+/// restore.
 pub(crate) async fn apply_gzip_offload(
     mut response: HttpResponse,
     level: CompressionLevel,
 ) -> HttpResponse {
     let had_content_length = response.headers.contains_key("Content-Length");
-    let was_bytes_backed = response.has_bytes_body();
-    let original: Vec<u8> = if was_bytes_backed {
-        response.body_bytes().to_vec()
-    } else {
-        std::mem::take(&mut response.body)
-    };
+    // A copy, so `response` still holds the original body: nothing to restore
+    // if the encode fails.
+    let original: Vec<u8> = response.body.to_vec();
 
     match gzip_encode_offloaded(original, level).await {
         Ok(compressed) => {
@@ -1065,15 +1045,10 @@ pub(crate) async fn apply_gzip_offload(
                 );
             }
         }
-        Err(original) => {
-            // Encoding failed, or the offload task did not complete
-            // normally. If the body was legacy-`Vec`-backed we took it out
-            // via `mem::take` above, so it must be restored explicitly; if
-            // it was `body_bytes`-backed, `response` was never mutated
-            // (see doc comment) and already holds the original untouched.
-            if !was_bytes_backed {
-                response.body = original;
-            }
+        Err(_original) => {
+            // Encoding failed, or the offload task did not complete normally.
+            // `response` was never mutated, so it already holds the original
+            // body; the copy handed to the encoder is simply dropped.
         }
     }
 
@@ -1232,8 +1207,10 @@ async fn handle_micro_request(
 ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
     use http_body_util::{BodyExt, Limited};
 
-    // Convert hyper request to our HttpRequest
-    let method = req.method().to_string();
+    // Convert hyper request to our HttpRequest. `Method::from` matches the
+    // token against the well-known set, so the common case is a unit variant
+    // rather than a per-request `String`.
+    let method = crate::Method::from(req.method().as_str());
     let path = req
         .uri()
         .path_and_query()
@@ -1242,11 +1219,13 @@ async fn handle_micro_request(
 
     let mut http_req = HttpRequest::new(method.clone(), path.clone());
 
-    // Copy headers
+    // Copy headers. One copy per value, because hyper's `HeaderValue` owns its
+    // own buffer and cannot be projected into our `Bytes`; the name goes in as
+    // a `&str`, so it costs nothing for a well-known header.
     for (name, value) in req.headers() {
-        if let Ok(v) = value.to_str() {
-            http_req.headers.insert(name.to_string(), v.to_string());
-        }
+        http_req
+            .headers
+            .insert(name.as_str(), Bytes::copy_from_slice(value.as_bytes()));
     }
 
     // Fast-path rejection: if the client declares a Content-Length larger
@@ -1274,7 +1253,7 @@ async fn handle_micro_request(
     // otherwise be buffered into a `Vec<u8>` with no cap at all.
     let limited = Limited::new(req.into_body(), app.max_body_size);
     let body_bytes = match limited.collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
+        Ok(collected) => collected.to_bytes(),
         Err(err) if err.is::<http_body_util::LengthLimitError>() => {
             tracing::warn!(
                 method = %method,
@@ -1297,6 +1276,7 @@ async fn handle_micro_request(
             return Ok(to_hyper_response(HttpResponse::new(400)));
         }
     };
+    // Hyper already handed back `Bytes`, so this is a refcount move, not a copy.
     http_req.body = body_bytes;
 
     // Handle request
@@ -1392,7 +1372,7 @@ mod tests {
     async fn test_built_app_handle() {
         let app = App::new().route("/test", get(test_handler)).build();
 
-        let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+        let req = HttpRequest::new("GET", "/test".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
     }
@@ -1428,13 +1408,13 @@ mod tests {
             .build();
 
         // Scoped route triggers the scope middleware
-        let req = HttpRequest::new("GET".to_string(), "/admin/users".to_string());
+        let req = HttpRequest::new("GET", "/admin/users".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Routes outside the scope do not
-        let req = HttpRequest::new("GET".to_string(), "/public".to_string());
+        let req = HttpRequest::new("GET", "/public".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1461,7 +1441,7 @@ mod tests {
             )
             .build();
 
-        let req = HttpRequest::new("GET".to_string(), "/api/v1/users".to_string());
+        let req = HttpRequest::new("GET", "/api/v1/users".to_string());
         let response = app.handle(req).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(parent_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1471,34 +1451,34 @@ mod tests {
     #[tokio::test]
     async fn test_built_app_dispatches_catch_all() {
         async fn files(req: HttpRequest) -> Result<HttpResponse, Error> {
-            let p = req.path_params.get("path").cloned().unwrap_or_default();
+            let p = req.param("path").map(str::to_owned).unwrap_or_default();
             Ok(HttpResponse::ok().with_body(p.into_bytes()))
         }
 
         // The optimized serve-path router resolves catch-all params.
         let app = App::new().route("/files/*path", get(files)).build();
-        let req = HttpRequest::new("GET".to_string(), "/files/docs/readme.md".to_string());
+        let req = HttpRequest::new("GET", "/files/docs/readme.md".to_string());
         let resp = app.handle(req).await.unwrap();
-        assert_eq!(resp.body, b"docs/readme.md");
+        assert_eq!(resp.body, Bytes::from_static(b"docs/readme.md"));
     }
 
     #[tokio::test]
     async fn test_built_app_query_method_and_unknown_method() {
         async fn echo(req: HttpRequest) -> Result<HttpResponse, Error> {
-            Ok(HttpResponse::ok().with_body(req.body.clone()))
+            Ok(HttpResponse::ok().with_bytes_body(req.body.clone()))
         }
 
         let app = App::new().route("/search", query(echo)).build();
 
         // QUERY carries its query in the body and routes on method+path.
-        let mut req = HttpRequest::new("QUERY".to_string(), "/search".to_string());
-        req.body = b"name=john".to_vec();
+        let mut req = HttpRequest::new("QUERY", "/search".to_string());
+        req.body = Bytes::from_static(b"name=john");
         let resp = app.handle(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
         // Unknown method must not fall through to a GET handler.
         let app2 = App::new().route("/search", get(echo)).build();
-        let req = HttpRequest::new("PROPFIND".to_string(), "/search".to_string());
+        let req = HttpRequest::new("PROPFIND", "/search".to_string());
         let err = app2.handle(req).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
@@ -1548,7 +1528,7 @@ mod tests {
         Box::new(move |_req: HttpRequest| {
             Box::pin(async move {
                 let mut resp = HttpResponse::ok();
-                resp.body = body;
+                resp.body = Bytes::from(body);
                 Ok(resp)
             })
         })
@@ -1568,7 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_gzips_when_accepted() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip, deflate, br");
 
         let original = vec![b'a'; 8192];
@@ -1592,12 +1572,17 @@ mod tests {
     #[tokio::test]
     async fn test_compress_skips_without_accept_encoding() {
         let mw = Compress::default();
-        let req = HttpRequest::new("GET".into(), "/".into());
+        let req = HttpRequest::new("GET", "/");
 
         let original = vec![b'b'; 8192];
         let resp = mw.call(req, body_next(original.clone())).await.unwrap();
 
-        assert!(resp.headers.get("Content-Encoding").is_none());
+        assert!(
+            resp.headers
+                .get("Content-Encoding")
+                .map(String::as_str)
+                .is_none()
+        );
         assert_eq!(resp.body_ref(), original.as_slice());
         assert_eq!(
             resp.headers.get("Vary").map(String::as_str),
@@ -1611,14 +1596,14 @@ mod tests {
     #[tokio::test]
     async fn test_compress_merges_vary_with_existing_value() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         let original = vec![b'c'; 8192];
         let next: Next = Box::new(move |_req: HttpRequest| {
             Box::pin(async move {
                 let mut resp = HttpResponse::ok();
-                resp.body = original;
+                resp.body = Bytes::from(original);
                 resp.headers
                     .insert("Vary".to_string(), "Origin".to_string());
                 Ok(resp)
@@ -1647,7 +1632,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_offloads_large_body_and_round_trips() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         // Well above the offload threshold; non-repeating so it does not trivially
@@ -1680,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn test_compress_handles_bytes_backed_body_above_offload_threshold() {
         let mw = Compress::new(CompressionLevel::Best);
-        let mut req = HttpRequest::new("GET".into(), "/".into());
+        let mut req = HttpRequest::new("GET", "/");
         req.headers.insert("accept-encoding", "gzip");
 
         let original: Vec<u8> = (0..(GZIP_OFFLOAD_THRESHOLD * 4))

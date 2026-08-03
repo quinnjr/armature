@@ -14,20 +14,49 @@ pub struct DieselConfig {
     pub pool_size: usize,
 
     /// Minimum number of idle connections to maintain.
+    ///
+    /// # Backend support
+    ///
+    /// Honored **only by the `bb8` pool** (`PgPoolBb8`). The `deadpool` pools
+    /// (`PgPool`, `MysqlPool`) -- which the default feature set selects --
+    /// ignore it: deadpool creates connections lazily on demand and exposes no
+    /// minimum-idle knob, so there is nothing to map this onto. Setting it on a
+    /// deadpool pool logs a warning at pool construction and otherwise has no
+    /// effect.
     #[serde(default)]
     pub min_idle: Option<usize>,
 
     /// Connection timeout duration.
+    ///
+    /// Honored by every pool backend. On the `deadpool` pools it bounds both
+    /// connection establishment and how long `get()` waits for a connection to
+    /// free up once the pool is saturated.
     #[serde(default = "default_connect_timeout")]
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
 
-    /// Maximum lifetime of a connection.
+    /// Maximum lifetime of a connection. [`Duration::ZERO`] disables the limit.
+    ///
+    /// # Backend support
+    ///
+    /// Honored **only by the `bb8` pool** (`PgPoolBb8`). The `deadpool` pools
+    /// (`PgPool`, `MysqlPool`) ignore it: deadpool runs no background reaper
+    /// and never retires a connection on age. Setting it to anything other than
+    /// the default on a deadpool pool logs a warning at pool construction and
+    /// otherwise has no effect.
     #[serde(default = "default_max_lifetime")]
     #[serde(with = "humantime_serde")]
     pub max_lifetime: Duration,
 
-    /// Idle timeout for connections.
+    /// Idle timeout for connections. [`Duration::ZERO`] disables the limit.
+    ///
+    /// # Backend support
+    ///
+    /// Honored **only by the `bb8` pool** (`PgPoolBb8`). The `deadpool` pools
+    /// (`PgPool`, `MysqlPool`) ignore it, for the same reason as
+    /// `max_lifetime`: there is no reaper to close an idle connection.
+    /// Setting it to anything other than the default on a deadpool pool logs a
+    /// warning at pool construction and otherwise has no effect.
     #[serde(default = "default_idle_timeout")]
     #[serde(with = "humantime_serde")]
     pub idle_timeout: Duration,
@@ -53,11 +82,14 @@ fn default_connect_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_max_lifetime() -> Duration {
+/// `pub(crate)` so the pool constructors can tell a caller-set value from an
+/// untouched default and only warn about the former.
+pub(crate) fn default_max_lifetime() -> Duration {
     Duration::from_secs(30 * 60) // 30 minutes
 }
 
-fn default_idle_timeout() -> Duration {
+/// See [`default_max_lifetime`] for why this is visible to the crate.
+pub(crate) fn default_idle_timeout() -> Duration {
     Duration::from_secs(10 * 60) // 10 minutes
 }
 
@@ -131,6 +163,9 @@ impl DieselConfig {
     }
 
     /// Set the minimum idle connections.
+    ///
+    /// Only the `bb8` pool honors this; see [the `min_idle`
+    /// field](field@Self::min_idle) for the per-backend caveat.
     pub fn min_idle(mut self, min: usize) -> Self {
         self.min_idle = Some(min);
         self
@@ -143,12 +178,18 @@ impl DieselConfig {
     }
 
     /// Set the maximum connection lifetime.
+    ///
+    /// Only the `bb8` pool honors this; see [the `max_lifetime`
+    /// field](field@Self::max_lifetime) for the per-backend caveat.
     pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
         self.max_lifetime = lifetime;
         self
     }
 
     /// Set the idle timeout.
+    ///
+    /// Only the `bb8` pool honors this; see [the `idle_timeout`
+    /// field](field@Self::idle_timeout) for the per-backend caveat.
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = timeout;
         self

@@ -254,7 +254,7 @@ fn test_default_registry() {
 async fn test_metrics_handler() {
     use armature_core::HttpRequest;
 
-    let request = HttpRequest::new("GET".to_string(), "/metrics".to_string());
+    let request = HttpRequest::new("GET", "/metrics".to_string());
     let response = metrics_handler(request).await.unwrap();
 
     assert_eq!(response.status, 200);

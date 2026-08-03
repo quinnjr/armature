@@ -1,8 +1,22 @@
+//! Core type micro-benchmarks.
+//!
+//! Times the primitives every request touches - `HttpRequest`/`HttpResponse`
+//! construction, JSON body encode/decode, header map operations, middleware
+//! construction, `Route`/`Router` setup and DI container resolution - in
+//! isolation, with no server, socket or runtime in the path. For end-to-end
+//! request cost see `internal_overhead_benchmarks.rs`; for cross-framework HTTP
+//! numbers see `benches/comparison_servers/`.
+//!
+//! ```bash
+//! cargo bench --bench core_benchmarks
+//! ```
+
 #![allow(deprecated)]
 #![allow(clippy::needless_question_mark)]
 
 use armature_core::handler::from_legacy_handler;
 use armature_core::*;
+use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -10,10 +24,10 @@ use std::hint::black_box;
 fn bench_http_request_creation(c: &mut Criterion) {
     c.bench_function("http_request_new", |b| {
         b.iter(|| {
-            HttpRequest::new(
-                black_box("GET".to_string()),
-                black_box("/api/users".to_string()),
-            )
+            // `&'static str`, not `String`: allocating the inputs inside the
+            // timed loop charges construction for two heap allocations the
+            // serve path does not make.
+            HttpRequest::new(black_box("GET"), black_box("/api/users"))
         })
     });
 }
@@ -47,8 +61,8 @@ fn bench_json_parsing(c: &mut Criterion) {
     }
 
     let json_data = br#"{"id":123,"name":"John Doe","email":"john@example.com","active":true}"#;
-    let mut request = HttpRequest::new("POST".to_string(), "/api/test".to_string());
-    request.body = json_data.to_vec();
+    let mut request = HttpRequest::new("POST", "/api/test".to_string());
+    request.body = Bytes::copy_from_slice(json_data);
 
     c.bench_function("json_parse", |b| {
         b.iter(|| {
@@ -59,8 +73,8 @@ fn bench_json_parsing(c: &mut Criterion) {
 
 fn bench_form_parsing(c: &mut Criterion) {
     let form_data = b"name=John+Doe&email=john%40example.com&age=30&city=New+York";
-    let mut request = HttpRequest::new("POST".to_string(), "/api/form".to_string());
-    request.body = form_data.to_vec();
+    let mut request = HttpRequest::new("POST", "/api/form".to_string());
+    request.body = Bytes::copy_from_slice(form_data);
 
     c.bench_function("form_parse_map", |b| {
         b.iter(|| {
@@ -76,15 +90,22 @@ fn bench_middleware_operations(c: &mut Criterion) {
 
     group.bench_function("cors_creation", |b| b.iter(CorsMiddleware::new));
 
-    group.bench_function("request_id_generation", |b| {
+    group.finish();
+}
+
+/// UUID v4 generation plus its hyphenated string form.
+///
+/// This is what a request-id middleware pays per request, but it measures
+/// `Uuid`, not middleware. It used to sit in the `middleware` group above,
+/// where the name implied Armature was being timed rather than the `uuid`
+/// crate.
+fn bench_uuid_generation(c: &mut Criterion) {
+    c.bench_function("uuid_v4_to_string", |b| {
         b.iter(|| {
-            // Simulate request ID generation
             let id = uuid::Uuid::new_v4().to_string();
             black_box(id);
         })
     });
-
-    group.finish();
 }
 
 fn bench_routing(c: &mut Criterion) {
@@ -182,6 +203,7 @@ criterion_group!(
     bench_json_parsing,
     bench_form_parsing,
     bench_middleware_operations,
+    bench_uuid_generation,
     bench_routing,
     bench_status_code_operations,
     bench_error_handling,

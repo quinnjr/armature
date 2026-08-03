@@ -2,10 +2,11 @@
 
 use crate::AuditEvent;
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 
 /// Audit log storage backend trait
@@ -131,22 +132,46 @@ impl AuditBackend for FileBackend {
         Ok(())
     }
 
+    /// Read up to `limit` events, newest first.
+    ///
+    /// Streams the file a line at a time and keeps only the last `limit`
+    /// parsed events in a ring buffer, so peak memory is bounded by `limit`
+    /// rather than by the file. Audit logs are append-only and unbounded by
+    /// design — slurping one into a `String` to then discard all but the tail
+    /// is an out-of-memory waiting for a long-lived deployment.
+    ///
+    /// Corruption is counted over the whole file, not only over the returned
+    /// window: an unparseable record is itself a security-relevant event and
+    /// must not go unreported just because it fell outside the tail.
     async fn read(&self, limit: usize) -> Result<Vec<AuditEvent>, AuditBackendError> {
         // Ensure buffered data is on disk before reading.
         self.flush().await?;
 
-        let content = match tokio::fs::read_to_string(&self.path).await {
-            Ok(content) => content,
+        let file = match tokio::fs::File::open(&self.path).await {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
 
         let mut corrupt = 0usize;
-        let events: Vec<AuditEvent> = content
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| match serde_json::from_str::<AuditEvent>(line) {
-                Ok(event) => Some(event),
+        let mut window: VecDeque<AuditEvent> = VecDeque::with_capacity(limit.min(1024));
+        let mut lines = BufReader::new(file).lines();
+
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<AuditEvent>(&line) {
+                Ok(event) => {
+                    if limit == 0 {
+                        continue;
+                    }
+                    if window.len() == limit {
+                        window.pop_front();
+                    }
+                    window.push_back(event);
+                }
                 Err(e) => {
                     // Surface corruption instead of silently discarding it — a
                     // silently-dropped audit record is itself a security event.
@@ -156,12 +181,9 @@ impl AuditBackend for FileBackend {
                         error = %e,
                         "skipping unparseable audit log line"
                     );
-                    None
                 }
-            })
-            .rev()
-            .take(limit)
-            .collect();
+            }
+        }
 
         if corrupt > 0 {
             tracing::warn!(
@@ -171,7 +193,8 @@ impl AuditBackend for FileBackend {
             );
         }
 
-        Ok(events)
+        // Newest first, matching the previous `.rev().take(limit)` ordering.
+        Ok(window.into_iter().rev().collect())
     }
 
     async fn delete_before(

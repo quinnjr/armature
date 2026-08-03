@@ -30,6 +30,7 @@ use crate::handler::BoxedHandler;
 use crate::route_constraint::RouteConstraints;
 use crate::routing::Router;
 use crate::{Error, HttpMethod, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use lru::LruCache;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -80,7 +81,7 @@ impl RouteKey {
             .unwrap_or(&req.path);
 
         Some(Self {
-            method: HttpMethod::from_str(&req.method)?,
+            method: HttpMethod::try_from(&req.method).ok()?,
             path: path.to_string(),
         })
     }
@@ -108,8 +109,8 @@ impl Hash for RouteKey {
 pub struct CachedRoute {
     /// Index into the route table
     pub route_index: usize,
-    /// Pre-extracted path parameters (name, segment_index)
-    pub param_indices: Vec<(String, usize)>,
+    /// Pre-extracted path parameters (interned name, segment_index)
+    pub param_indices: Vec<(&'static str, usize)>,
     /// Is this a static route (no params)?
     pub is_static: bool,
     /// Segment index of a catch-all parameter, if any.
@@ -131,7 +132,10 @@ impl CachedRoute {
     }
 
     /// Create a cached entry for a parameterized route.
-    pub fn with_params(route_index: usize, param_indices: Vec<(String, usize)>) -> Self {
+    ///
+    /// Names must already be interned via [`crate::param_intern::intern`];
+    /// taking them pre-interned is what keeps that lock off the request path.
+    pub fn with_params(route_index: usize, param_indices: Vec<(&'static str, usize)>) -> Self {
         Self {
             route_index,
             param_indices,
@@ -154,23 +158,23 @@ impl CachedRoute {
 
     /// Extract parameters from a path using cached indices.
     #[inline]
-    pub fn extract_params(&self, path: &str) -> HashMap<String, String> {
+    pub fn extract_params(&self, path: &str) -> crate::RouteParams {
+        let mut params = crate::RouteParams::new();
         if self.is_static {
-            return HashMap::new();
+            return params;
         }
 
         let segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut params = HashMap::with_capacity(self.param_indices.len());
 
-        for (name, idx) in &self.param_indices {
-            if self.catch_all_index == Some(*idx) {
+        for &(name, idx) in &self.param_indices {
+            if self.catch_all_index == Some(idx) {
                 // Catch-all: join all remaining segments
-                if let Some(rest) = segments.get(*idx..) {
-                    params.insert(name.clone(), rest.join("/"));
+                if let Some(rest) = segments.get(idx..) {
+                    params.push((name, Bytes::from(rest.join("/"))));
                 }
-            } else if let Some(value) = segments.get(*idx) {
-                params.insert(name.clone(), (*value).to_string());
+            } else if let Some(value) = segments.get(idx) {
+                params.push((name, Bytes::copy_from_slice(value.as_bytes())));
             }
         }
 
@@ -365,8 +369,12 @@ pub struct CompiledRoute {
     pub pattern: String,
     /// Parsed segments
     pub segments: Vec<RouteSegment>,
-    /// Parameter indices (name, segment_index)
-    pub param_indices: Vec<(String, usize)>,
+    /// Parameter indices (interned name, segment_index).
+    ///
+    /// Names are interned once here, at compile time, so the match path only
+    /// copies a `&'static str` instead of taking the interner's global lock
+    /// once per captured parameter per request.
+    pub param_indices: Vec<(&'static str, usize)>,
     /// Is this a static route?
     pub is_static: bool,
     /// Has catch-all segment?
@@ -395,12 +403,12 @@ impl CompiledRoute {
         for (idx, part) in pattern.split('/').filter(|s| !s.is_empty()).enumerate() {
             if let Some(name) = part.strip_prefix(':') {
                 segments.push(RouteSegment::Param(name.to_string()));
-                param_indices.push((name.to_string(), idx));
+                param_indices.push((crate::param_intern::intern(name), idx));
                 is_static = false;
             } else if let Some(name) = part.strip_prefix('*') {
                 let name = if name.is_empty() { "*" } else { name };
                 segments.push(RouteSegment::CatchAll(name.to_string()));
-                param_indices.push((name.to_string(), idx));
+                param_indices.push((crate::param_intern::intern(name), idx));
                 is_static = false;
                 has_catch_all = true;
             } else {
@@ -454,27 +462,27 @@ impl CompiledRoute {
     }
 
     /// Extract parameters from a matching path.
-    pub fn extract_params(&self, path: &str) -> HashMap<String, String> {
+    pub fn extract_params(&self, path: &str) -> crate::RouteParams {
+        let mut params = crate::RouteParams::new();
         if self.is_static {
-            return HashMap::new();
+            return params;
         }
 
         let path_segments: SmallVec<[&str; INLINE_PATH_SEGMENTS]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut params = HashMap::with_capacity(self.param_indices.len());
 
-        for (name, idx) in &self.param_indices {
-            if let Some(segment) = self.segments.get(*idx) {
+        for &(name, idx) in &self.param_indices {
+            if let Some(segment) = self.segments.get(idx) {
                 match segment {
                     RouteSegment::Param(_) => {
-                        if let Some(value) = path_segments.get(*idx) {
-                            params.insert(name.clone(), (*value).to_string());
+                        if let Some(value) = path_segments.get(idx) {
+                            params.push((name, Bytes::copy_from_slice(value.as_bytes())));
                         }
                     }
                     RouteSegment::CatchAll(_) => {
                         // Join remaining segments
-                        let remaining: String = path_segments[*idx..].join("/");
-                        params.insert(name.clone(), remaining);
+                        let remaining: String = path_segments[idx..].join("/");
+                        params.push((name, Bytes::from(remaining)));
                     }
                     _ => {}
                 }
@@ -616,19 +624,12 @@ impl OptimizedRouter {
     pub async fn route(&self, mut request: HttpRequest) -> Result<HttpResponse, Error> {
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
 
-        // Parse query parameters from path
-        let (path, query_string) = request
-            .path
-            .split_once('?')
-            .map(|(p, q)| (p, Some(q)))
-            .unwrap_or((&request.path, None));
-
-        if let Some(query) = query_string {
-            request.query_params = crate::simd_parser::parse_query_string_decoded(query);
-        }
+        // Match on the path alone; the query is parsed on demand by
+        // `HttpRequest::query`, and only if a handler asks for it.
+        let path = request.path_only();
 
         // Unknown HTTP methods must not fall back to GET handlers.
-        let Some(method) = HttpMethod::from_str(&request.method) else {
+        let Ok(method) = HttpMethod::try_from(&request.method) else {
             return Err(Error::RouteNotFound(format!("{} {}", request.method, path)));
         };
 
@@ -839,6 +840,7 @@ impl RouterStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RouteParamsExt;
 
     #[test]
     fn test_route_key_equality() {
@@ -861,19 +863,19 @@ mod tests {
 
     #[test]
     fn test_cached_route_with_params() {
-        let cached = CachedRoute::with_params(0, vec![("id".to_string(), 1)]);
+        let cached = CachedRoute::with_params(0, vec![(crate::param_intern::intern("id"), 1)]);
         assert!(!cached.is_static);
 
         let params = cached.extract_params("/users/123");
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get_str("id"), Some("123"));
     }
 
     #[test]
     fn test_route_key_from_request_unknown_method() {
-        let req = HttpRequest::new("PROPFIND".to_string(), "/health".to_string());
+        let req = HttpRequest::new("PROPFIND", "/health".to_string());
         assert!(RouteKey::from_request(&req).is_none());
 
-        let req = HttpRequest::new("GET".to_string(), "/health?x=1".to_string());
+        let req = HttpRequest::new("GET", "/health?x=1".to_string());
         let key = RouteKey::from_request(&req).unwrap();
         assert_eq!(key, RouteKey::new(HttpMethod::GET, "/health"));
     }
@@ -885,10 +887,10 @@ mod tests {
         assert_eq!(cached.catch_all_index, Some(1));
 
         let params = cached.extract_params("/files/docs/readme.md");
-        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs/readme.md"));
 
         let params = cached.extract_params("/files/docs");
-        assert_eq!(params.get("path"), Some(&"docs".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs"));
     }
 
     #[tokio::test]
@@ -904,16 +906,13 @@ mod tests {
 
         // Known method hits the static fast path.
         let ok = router
-            .route(HttpRequest::new("GET".to_string(), "/health".to_string()))
+            .route(HttpRequest::new("GET", "/health".to_string()))
             .await;
         assert!(ok.is_ok());
 
         // Unknown method must not fall back to the GET handler.
         let err = router
-            .route(HttpRequest::new(
-                "PROPFIND".to_string(),
-                "/health".to_string(),
-            ))
+            .route(HttpRequest::new("PROPFIND", "/health".to_string()))
             .await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
@@ -925,32 +924,26 @@ mod tests {
             HttpMethod::GET,
             "/files/*path",
             crate::handler::handler(|req: HttpRequest| async move {
-                let path = req.path_params.get("path").cloned().unwrap_or_default();
+                let path = req.param("path").map(str::to_owned).unwrap_or_default();
                 let mut response = HttpResponse::ok();
-                response.body = path.into_bytes();
+                response.body = Bytes::from(path.into_bytes());
                 Ok::<_, Error>(response)
             }),
         );
 
         // First request: pattern match populates the cache.
         let first = router
-            .route(HttpRequest::new(
-                "GET".to_string(),
-                "/files/docs/readme.md".to_string(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
-        assert_eq!(first.body, b"docs/readme.md");
+        assert_eq!(first.body, Bytes::from_static(b"docs/readme.md"));
 
         // Second request: served from the cache, must yield the same params.
         let second = router
-            .route(HttpRequest::new(
-                "GET".to_string(),
-                "/files/docs/readme.md".to_string(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md".to_string()))
             .await
             .unwrap();
-        assert_eq!(second.body, b"docs/readme.md");
+        assert_eq!(second.body, Bytes::from_static(b"docs/readme.md"));
         assert!(router.stats().cache_hits() > 0);
     }
 
@@ -961,21 +954,21 @@ mod tests {
             HttpMethod::GET,
             "/search",
             crate::handler::handler(|req: HttpRequest| async move {
-                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                let q = req.query_param("q").unwrap_or_default().to_owned();
                 let mut response = HttpResponse::ok();
-                response.body = q.into_bytes();
+                response.body = Bytes::from(q.into_bytes());
                 Ok::<_, Error>(response)
             }),
         );
 
         let response = router
             .route(HttpRequest::new(
-                "GET".to_string(),
+                "GET",
                 "/search?q=hello%20world".to_string(),
             ))
             .await
             .unwrap();
-        assert_eq!(response.body, b"hello world");
+        assert_eq!(response.body, Bytes::from_static(b"hello world"));
     }
 
     #[test]
@@ -1043,7 +1036,7 @@ mod tests {
         assert!(!compiled.matches("/users/123/extra"));
 
         let params = compiled.extract_params("/users/123");
-        assert_eq!(params.get("id"), Some(&"123".to_string()));
+        assert_eq!(params.get_str("id"), Some("123"));
     }
 
     #[test]
@@ -1055,8 +1048,8 @@ mod tests {
         assert!(compiled.matches("/users/123/posts/456"));
 
         let params = compiled.extract_params("/users/123/posts/456");
-        assert_eq!(params.get("user_id"), Some(&"123".to_string()));
-        assert_eq!(params.get("post_id"), Some(&"456".to_string()));
+        assert_eq!(params.get_str("user_id"), Some("123"));
+        assert_eq!(params.get_str("post_id"), Some("456"));
     }
 
     #[test]
@@ -1069,7 +1062,7 @@ mod tests {
         assert!(compiled.matches("/files/docs/readme.md"));
 
         let params = compiled.extract_params("/files/docs/readme.md");
-        assert_eq!(params.get("path"), Some(&"docs/readme.md".to_string()));
+        assert_eq!(params.get_str("path"), Some("docs/readme.md"));
     }
 
     #[test]
@@ -1105,9 +1098,9 @@ mod tests {
             HttpMethod::GET,
             "/users/:id",
             |req: HttpRequest| async move {
-                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                let id = req.param("id").map(str::to_owned).unwrap_or_default();
                 let mut r = HttpResponse::ok();
-                r.body = id.into_bytes();
+                r.body = Bytes::from(id.into_bytes());
                 Ok::<_, Error>(r)
             },
         ));
@@ -1115,19 +1108,16 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         // Static route → O(1) static fast path.
-        let resp = opt
-            .route(HttpRequest::new("GET".into(), "/health".into()))
-            .await
-            .unwrap();
+        let resp = opt.route(HttpRequest::new("GET", "/health")).await.unwrap();
         assert_eq!(resp.status, 200);
         assert!(opt.stats().static_hits() >= 1);
 
         // Param route → pattern match, params extracted onto the request.
         let resp = opt
-            .route(HttpRequest::new("GET".into(), "/users/42".into()))
+            .route(HttpRequest::new("GET", "/users/42"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"42");
+        assert_eq!(resp.body, Bytes::from_static(b"42"));
     }
 
     #[tokio::test]
@@ -1137,9 +1127,9 @@ mod tests {
             HttpMethod::GET,
             "/files/*path",
             |req: HttpRequest| async move {
-                let p = req.path_params.get("path").cloned().unwrap_or_default();
+                let p = req.param("path").map(str::to_owned).unwrap_or_default();
                 let mut r = HttpResponse::ok();
-                r.body = p.into_bytes();
+                r.body = Bytes::from(p.into_bytes());
                 Ok::<_, Error>(r)
             },
         ));
@@ -1148,13 +1138,10 @@ mod tests {
 
         // Catch-all returns the full joined remainder, not a single segment.
         let resp = opt
-            .route(HttpRequest::new(
-                "GET".into(),
-                "/files/docs/readme.md".into(),
-            ))
+            .route(HttpRequest::new("GET", "/files/docs/readme.md"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"docs/readme.md");
+        assert_eq!(resp.body, Bytes::from_static(b"docs/readme.md"));
     }
 
     #[tokio::test]
@@ -1172,21 +1159,15 @@ mod tests {
         let opt = OptimizedRouter::from_router(&router);
 
         // Valid param passes.
-        let ok = opt
-            .route(HttpRequest::new("GET".into(), "/users/123".into()))
-            .await;
+        let ok = opt.route(HttpRequest::new("GET", "/users/123")).await;
         assert!(ok.is_ok());
 
         // Invalid param → same BadRequest as the linear router.
-        let err = opt
-            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("GET", "/users/abc")).await;
         assert!(matches!(err, Err(Error::BadRequest(_))));
 
         // Cached path must re-validate constraints identically.
-        let err_again = opt
-            .route(HttpRequest::new("GET".into(), "/users/abc".into()))
-            .await;
+        let err_again = opt.route(HttpRequest::new("GET", "/users/abc")).await;
         assert!(matches!(err_again, Err(Error::BadRequest(_))));
     }
 
@@ -1200,9 +1181,7 @@ mod tests {
         ));
         let opt = OptimizedRouter::from_router(&router);
 
-        let err = opt
-            .route(HttpRequest::new("PROPFIND".into(), "/health".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("PROPFIND", "/health")).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
 
@@ -1212,20 +1191,20 @@ mod tests {
         router.add_route(crate::routing::Route::new(
             HttpMethod::QUERY,
             "/search",
-            |req: HttpRequest| async move { Ok::<_, Error>(HttpResponse::ok().with_body(req.body)) },
+            |req: HttpRequest| async move {
+                Ok::<_, Error>(HttpResponse::ok().with_bytes_body(req.body))
+            },
         ));
         let opt = OptimizedRouter::from_router(&router);
 
         // QUERY carries its query in the body; routing matches on method+path.
-        let mut req = HttpRequest::new("QUERY".into(), "/search".into());
-        req.body = b"name=john".to_vec();
+        let mut req = HttpRequest::new("QUERY", "/search");
+        req.body = Bytes::from_static(b"name=john");
         let resp = opt.route(req).await.unwrap();
         assert_eq!(resp.into_body_bytes().as_ref(), b"name=john");
 
         // GET to the same path must NOT reach the QUERY handler.
-        let err = opt
-            .route(HttpRequest::new("GET".into(), "/search".into()))
-            .await;
+        let err = opt.route(HttpRequest::new("GET", "/search")).await;
         assert!(matches!(err, Err(Error::RouteNotFound(_))));
     }
 
@@ -1239,7 +1218,7 @@ mod tests {
             HttpMethod::GET,
             "/users/:id",
             |req: HttpRequest| async move {
-                let id = req.path_params.get("id").cloned().unwrap_or_default();
+                let id = req.param("id").map(str::to_owned).unwrap_or_default();
                 Ok::<_, Error>(HttpResponse::ok().with_body(format!("param:{id}").into_bytes()))
             },
         ));
@@ -1254,19 +1233,97 @@ mod tests {
         // Reference: what the linear router does for /users/me.
         let linear = router
             .clone()
-            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me"))
             .await
             .unwrap();
 
         let opt = OptimizedRouter::from_router(&router);
         let optimized = opt
-            .route(HttpRequest::new("GET".into(), "/users/me".into()))
+            .route(HttpRequest::new("GET", "/users/me"))
             .await
             .unwrap();
 
         // Identical: both select the earlier-registered :id route.
         assert_eq!(optimized.body, linear.body);
-        assert_eq!(optimized.body, b"param:me");
+        assert_eq!(optimized.body, Bytes::from_static(b"param:me"));
+    }
+
+    /// The linear `Router` and the compiled `OptimizedRouter` are independent
+    /// matchers over the same route table, and they have silently drifted apart
+    /// before (trailing slashes, zero-segment catch-alls). Drive a fixed matrix
+    /// of targets through both and require identical outcomes.
+    #[tokio::test]
+    async fn test_from_router_agrees_with_linear_router_on_a_target_matrix() {
+        let patterns = [
+            (HttpMethod::GET, "/health"),
+            (HttpMethod::GET, "/users/:id"),
+            (HttpMethod::GET, "/users/:id/posts/:post"),
+            (HttpMethod::GET, "/files/*path"),
+            (HttpMethod::POST, "/users"),
+        ];
+
+        let mut router = crate::routing::Router::new();
+        for (method, pattern) in patterns {
+            // The body identifies which route answered and with which captures,
+            // so a disagreement about *which* route matched is caught too, not
+            // just a disagreement about whether anything matched.
+            let label = pattern.to_string();
+            router.add_route(crate::routing::Route::new(
+                method,
+                pattern,
+                move |req: HttpRequest| {
+                    let label = label.clone();
+                    async move {
+                        let mut captures: Vec<String> = req
+                            .path_params
+                            .iter()
+                            .map(|(k, v)| format!("{k}={}", String::from_utf8_lossy(v)))
+                            .collect();
+                        captures.sort();
+                        let body = format!("{label} {}", captures.join(","));
+                        Ok::<_, Error>(HttpResponse::ok().with_body(body.into_bytes()))
+                    }
+                },
+            ));
+        }
+
+        let opt = OptimizedRouter::from_router(&router);
+
+        let targets = [
+            ("GET", "/health"),
+            ("GET", "/health/"),
+            ("GET", "/health/extra"),
+            ("GET", "/users"),
+            ("GET", "/users/42"),
+            ("GET", "/users/42/"),
+            ("GET", "/users/42?x=1"),
+            ("GET", "/users/42/posts/7"),
+            ("GET", "/users/42/posts"),
+            ("GET", "/files"),
+            ("GET", "/files/"),
+            ("GET", "/files/a"),
+            ("GET", "/files/a/b/c.txt"),
+            ("GET", "/"),
+            ("GET", "/nope"),
+            ("POST", "/users"),
+            ("POST", "/users/42"),
+            ("POST", "/health"),
+            ("PROPFIND", "/health"),
+        ];
+
+        for (method, target) in targets {
+            let linear = router.route(HttpRequest::new(method, target)).await;
+            let compiled = opt.route(HttpRequest::new(method, target)).await;
+            match (linear, compiled) {
+                (Ok(a), Ok(b)) => assert_eq!(a.body, b.body, "{method} {target}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!(
+                    "{method} {target}: linear matched={}, compiled matched={}",
+                    a.is_ok(),
+                    b.is_ok()
+                ),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1276,20 +1333,17 @@ mod tests {
             HttpMethod::GET,
             "/search",
             |req: HttpRequest| async move {
-                let q = req.query_params.get("q").cloned().unwrap_or_default();
+                let q = req.query_param("q").unwrap_or_default().to_owned();
                 Ok::<_, Error>(HttpResponse::ok().with_body(q.into_bytes()))
             },
         ));
         let opt = OptimizedRouter::from_router(&router);
 
         let resp = opt
-            .route(HttpRequest::new(
-                "GET".into(),
-                "/search?q=hello%20world".into(),
-            ))
+            .route(HttpRequest::new("GET", "/search?q=hello%20world"))
             .await
             .unwrap();
-        assert_eq!(resp.body, b"hello world");
+        assert_eq!(resp.body, Bytes::from_static(b"hello world"));
     }
 
     #[test]

@@ -1,0 +1,45 @@
+[package]
+name = "armature-h1-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Its own workspace root: the fuzz crate pulls hyper for the differential target,
+# which must never reach armature-h1's dependency graph.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1.12"
+armature-h1 = { path = ".." }
+
+# The differential target compares our framing decisions against hyper's. hyper is
+# a dependency of the FUZZ crate only — never of armature-h1 itself.
+hyper = { version = "1.10", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1.52", features = ["rt", "io-util", "macros", "time"] }
+
+[[bin]]
+name = "parse_head"
+path = "fuzz_targets/parse_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunked"
+path = "fuzz_targets/chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framing_differential"
+path = "fuzz_targets/framing_differential.rs"
+test = false
+doc = false
+bench = false

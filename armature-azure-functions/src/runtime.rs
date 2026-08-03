@@ -1,7 +1,6 @@
 //! Azure Functions runtime for Armature applications.
-
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{FunctionConfig, FunctionRequest, FunctionResponse};
 
@@ -73,10 +72,28 @@ where
         self
     }
 
-    /// Handle a function request.
-    ///
-    /// This is called for each HTTP trigger invocation.
+    /// Handle a function request, starting the configured timeout now.
     pub async fn handle(&self, request: FunctionRequest) -> FunctionResponse
+    where
+        App: RequestHandler,
+    {
+        self.handle_with_deadline(request, deadline_from_config(&self.config))
+            .await
+    }
+
+    /// Handle a function request against an already-established deadline.
+    ///
+    /// The HTTP entry point spends part of the request budget reading the body,
+    /// so it establishes one deadline up front and passes it here. Restarting
+    /// the timeout at this point would hand the invocation a second full budget
+    /// and let a request outlive twice the configured `timeout_seconds`.
+    ///
+    /// `None` means no deadline (a configured timeout of 0).
+    pub async fn handle_with_deadline(
+        &self,
+        request: FunctionRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> FunctionResponse
     where
         App: RequestHandler,
     {
@@ -107,27 +124,21 @@ where
             );
         }
 
-        // Handle request, applying the configured request timeout. A value of 0
-        // disables the timeout.
-        let timeout_seconds = self.config.function.timeout_seconds;
-        let response = if timeout_seconds == 0 {
-            self.app.handle(request).await
-        } else {
-            let path = request.path.clone();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_seconds),
-                self.app.handle(request),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(_elapsed) => {
-                    error!(
-                        path = %path,
-                        timeout_seconds,
-                        "Azure Function request timed out"
-                    );
-                    FunctionResponse::error(504, "Gateway Timeout")
+        // Handle the request against the deadline, whatever is left of it.
+        let response = match deadline {
+            None => self.app.handle(request).await,
+            Some(deadline) => {
+                let path = request.path.clone();
+                match tokio::time::timeout_at(deadline, self.app.handle(request)).await {
+                    Ok(response) => response,
+                    Err(_elapsed) => {
+                        error!(
+                            path = %path,
+                            timeout_seconds = self.config.function.timeout_seconds,
+                            "Azure Function request timed out"
+                        );
+                        FunctionResponse::error(504, "Gateway Timeout")
+                    }
                 }
             }
         };
@@ -232,20 +243,21 @@ where
     // Content-Length cannot OOM the process before any size check fires.
     // `Limited` caps buffered bytes at `max_request_size + 1`; the extra byte
     // lets the post-collect check below distinguish an at-limit body from an
-    // over-limit one exactly. Ingestion is wrapped in the configured request
-    // timeout (0 disables, matching the handler-timeout semantics) so a
-    // slow-loris upload cannot stall forever.
+    // over-limit one exactly.
+    //
+    // The deadline is established once, here, and reused for the handler call
+    // below: body ingestion and handling share a single `timeout_seconds`
+    // budget rather than getting one each. `None` means no timeout (a
+    // configured value of 0).
     let timeout_seconds = config.function.timeout_seconds;
+    let deadline = deadline_from_config(&config);
     let collect_fut = Limited::new(body, max_request_size + 1).collect();
-    let collect_result = if timeout_seconds == 0 {
-        collect_fut.await
-    } else {
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), collect_fut)
-            .await
-        {
+    let collect_result = match deadline {
+        None => collect_fut.await,
+        Some(deadline) => match tokio::time::timeout_at(deadline, collect_fut).await {
             Ok(result) => result,
             Err(_elapsed) => return Ok(request_timeout_response(timeout_seconds)),
-        }
+        },
     };
 
     let body_bytes = match collect_result {
@@ -270,25 +282,23 @@ where
         return Ok(oversize_response(body_bytes.len(), max_request_size));
     }
 
-    let mut headers = std::collections::HashMap::new();
+    // `HeaderMap::iter` yields one entry per value, so repeated field names
+    // (`Cookie`, `X-Forwarded-For`) survive into the list intact.
+    let mut headers = Vec::with_capacity(parts.headers.len());
     for (name, value) in parts.headers.iter() {
-        if let Ok(v) = value.to_str() {
-            headers.insert(name.to_string(), v.to_string());
+        match value.to_str() {
+            Ok(v) => headers.push((name.as_str().to_string(), v.to_string())),
+            // The facade hands out `&str`, so a value that is not UTF-8 cannot
+            // be represented. Say so instead of dropping it in silence — an
+            // unexplained missing header is very hard to debug.
+            Err(_) => warn!(
+                header = %name,
+                "Dropping request header with a non-UTF-8 value"
+            ),
         }
     }
 
-    let mut query = std::collections::HashMap::new();
-    if let Some(q) = parts.uri.query() {
-        for pair in q.split('&') {
-            let mut parts = pair.splitn(2, '=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                query.insert(
-                    urlencoding::decode(key).unwrap_or_default().to_string(),
-                    urlencoding::decode(value).unwrap_or_default().to_string(),
-                );
-            }
-        }
-    }
+    let query = parse_query(parts.uri.query().unwrap_or(""));
 
     let function_request = FunctionRequest {
         method: parts.method.to_string(),
@@ -305,9 +315,11 @@ where
         },
     };
 
-    // Handle request
+    // Handle the request on the remainder of the deadline established above.
     let runtime = AzureFunctionsRuntime { app, config };
-    let response = runtime.handle(function_request).await;
+    let response = runtime
+        .handle_with_deadline(function_request, deadline)
+        .await;
 
     // Convert FunctionResponse to hyper response
     let mut builder = hyper::Response::builder().status(response.status_code);
@@ -337,6 +349,65 @@ where
                 )))
                 .unwrap()
         }))
+}
+
+/// Turn the configured request timeout into a single absolute deadline.
+///
+/// Returns `None` when the timeout is disabled (`timeout_seconds == 0`). Every
+/// stage of an invocation measures against the one deadline this produces, so
+/// the total time a request can occupy is the configured value, not a multiple
+/// of it.
+fn deadline_from_config(config: &RuntimeConfig) -> Option<tokio::time::Instant> {
+    match config.function.timeout_seconds {
+        0 => None,
+        seconds => Some(tokio::time::Instant::now() + std::time::Duration::from_secs(seconds)),
+    }
+}
+
+/// Parse a raw query string into ordered key/value pairs.
+///
+/// Wire order and repeated keys are both preserved, matching
+/// `armature_core`'s own query view: `?tag=a&tag=b` is meaningful and a handler
+/// must be able to see both values in the order sent. A pair with no `=` keeps
+/// its key with an empty value (`?flag` is a query parameter, not noise); a
+/// pair with an empty key is dropped, since there is nothing to look it up by.
+fn parse_query(raw: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = match pair.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => (pair, ""),
+        };
+        if raw_key.is_empty() {
+            continue;
+        }
+        out.push((decode_component(raw_key), decode_component(raw_value)));
+    }
+    out
+}
+
+/// Percent-decode one query component.
+///
+/// A component whose escapes decode to bytes that are not UTF-8 is passed
+/// through verbatim rather than replaced with an empty string, so the handler
+/// sees what the client actually sent and can decide for itself. The failure is
+/// reported at `warn` — the same channel the rest of the runtime uses for
+/// malformed input it chooses not to reject outright.
+fn decode_component(raw: &str) -> String {
+    match urlencoding::decode(raw) {
+        Ok(decoded) => decoded.into_owned(),
+        Err(err) => {
+            warn!(
+                component = %raw,
+                error = %err,
+                "Query component did not percent-decode; passing it through verbatim"
+            );
+            raw.to_string()
+        }
+    }
 }
 
 /// Build a `413 Payload Too Large` response for an oversize request body.
@@ -419,7 +490,12 @@ fn bad_request_response() -> hyper::Response<http_body_util::Full<bytes::Bytes>>
         })
 }
 
-/// Request handler trait for Armature applications.
+/// The contract [`AzureFunctionsRuntime`] drives.
+///
+/// Implemented here for any
+/// `Fn(FunctionRequest) -> Future<Output = FunctionResponse>`. Other types
+/// implement it themselves, or via `impl_azure_function_handler!`; there is
+/// no blanket implementation for an Armature `Application`.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync {
     /// Handle an HTTP request.
@@ -438,17 +514,46 @@ where
     }
 }
 
-/// Macro to implement RequestHandler for Armature applications.
+/// Implement [`RequestHandler`] for a type that already exposes an inherent
+/// async `handle_request` method.
+///
+/// This macro knows nothing about `armature_core::Application`; there is no
+/// conversion in this crate between `armature_core`'s `HttpRequest`/
+/// `HttpResponse` and the Azure Functions types. What it targets is a
+/// **user-supplied** shape:
+///
+/// ```rust,ignore
+/// impl MyApp {
+///     async fn handle_request(
+///         &self,
+///         request: armature_azure_functions::FunctionRequest,
+///     ) -> Result<MyResponse, MyError> { /* ... */ }
+/// }
+/// ```
+///
+/// where `MyResponse` has the fields
+/// - `status: u16`,
+/// - `body: impl Into<String>`,
+/// - `headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>`,
+///
+/// and `MyError: std::fmt::Display`. Given that, expand the macro once per type:
+///
+/// ```rust,ignore
+/// use armature_azure_functions::impl_azure_function_handler;
+///
+/// impl_azure_function_handler!(MyApp);
+/// ```
+///
+/// The whole [`FunctionRequest`] is forwarded — headers, query string, route
+/// parameters and invocation context included — so the application can see
+/// `Authorization`, cookies and the query, not just the method, path and body.
 #[macro_export]
-macro_rules! impl_request_handler {
+macro_rules! impl_azure_function_handler {
     ($app_type:ty) => {
-        #[async_trait::async_trait]
-        impl $crate::runtime::RequestHandler for $app_type {
+        #[$crate::async_trait::async_trait]
+        impl $crate::RequestHandler for $app_type {
             async fn handle(&self, request: $crate::FunctionRequest) -> $crate::FunctionResponse {
-                match self
-                    .handle_request(request.http_method(), &request.path, request.body)
-                    .await
-                {
+                match self.handle_request(request).await {
                     Ok(response) => {
                         let mut func_response =
                             $crate::FunctionResponse::with_body(response.status, response.body);
@@ -678,6 +783,243 @@ mod tests {
 
         let resp = handle_http_request(app, config, req).await.unwrap();
         assert_eq!(resp.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn headers_and_query_reach_the_handler() {
+        // Regression guard: the conversion used to forward only method, path
+        // and body, so an application could never see Authorization, cookies or
+        // any query string.
+        let app = Arc::new(|req: FunctionRequest| async move {
+            let tags = req.query_params("tag").collect::<Vec<_>>().join(",");
+            let cookies = req.header_values("cookie").collect::<Vec<_>>().join(",");
+            FunctionResponse::with_body(
+                200,
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    req.authorization().unwrap_or("-"),
+                    req.query_param("q").unwrap_or("-"),
+                    tags,
+                    cookies,
+                    // A bare key keeps its key with an empty value.
+                    req.query_param("flag").map_or("absent", |_| "present"),
+                ),
+            )
+        });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/x?q=hello%20world&tag=a&tag=b&flag")
+            .header("authorization", "Bearer token")
+            .header("cookie", "a=1")
+            .header("cookie", "b=2")
+            .body(Full::new(bytes::Bytes::new()))
+            .unwrap();
+
+        let resp = handle_http_request(app, RuntimeConfig::default(), req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            &body_bytes(resp).await[..],
+            b"Bearer token|hello world|a,b|a=1,b=2|present"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_response_headers_are_all_emitted() {
+        // A handler must be able to set two cookies in one response.
+        let app = Arc::new(|_req: FunctionRequest| async move {
+            FunctionResponse::ok()
+                .header("set-cookie", "session=abc")
+                .header("set-cookie", "csrf=xyz")
+        });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::new()))
+            .unwrap();
+
+        let resp = handle_http_request(app, RuntimeConfig::default(), req)
+            .await
+            .unwrap();
+        let cookies: Vec<_> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies, vec!["session=abc", "csrf=xyz"]);
+    }
+
+    #[test]
+    fn query_parsing_keeps_order_bare_keys_and_repeats() {
+        let parsed = parse_query("flag&tag=a&empty=&tag=b&=novalue&q=x%20y");
+        assert_eq!(
+            parsed,
+            vec![
+                ("flag".to_string(), String::new()),
+                ("tag".to_string(), "a".to_string()),
+                ("empty".to_string(), String::new()),
+                ("tag".to_string(), "b".to_string()),
+                ("q".to_string(), "x y".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_component_that_does_not_decode_is_passed_through() {
+        // %FF alone is not valid UTF-8; the raw text is preserved rather than
+        // collapsing the value to an empty string.
+        let parsed = parse_query("bad=%FF");
+        assert_eq!(parsed, vec![("bad".to_string(), "%FF".to_string())]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ingestion_and_handling_share_one_timeout_budget() {
+        // The handler alone sleeps past the configured budget, and body
+        // ingestion has already consumed part of it, so the invocation must
+        // still be cut off at the single deadline rather than being granted a
+        // fresh one per stage.
+        let app = Arc::new(|_req: FunctionRequest| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            FunctionResponse::ok()
+        });
+        let mut config = RuntimeConfig::default();
+        config.function.timeout_seconds = 2;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Full::new(bytes::Bytes::from_static(b"x")))
+            .unwrap();
+
+        let start = tokio::time::Instant::now();
+        let resp = handle_http_request(app, config, req).await.unwrap();
+        assert_eq!(resp.status(), 504);
+        // Comfortably under the 4s two-budgets-serially behavior this guards.
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    // A minimal response/error/app trio mirroring the shape the
+    // `impl_azure_function_handler!` macro documents.
+    struct MockResponse {
+        status: u16,
+        body: String,
+        headers: Vec<(String, String)>,
+    }
+
+    #[derive(Debug)]
+    struct MockError(String);
+
+    impl std::fmt::Display for MockError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    #[derive(Default)]
+    struct Captured {
+        method: Option<String>,
+        path: Option<String>,
+        headers: Vec<(String, String)>,
+        query: Vec<(String, String)>,
+        params: std::collections::HashMap<String, String>,
+        invocation_id: Option<String>,
+        body: Vec<u8>,
+    }
+
+    struct MockApp {
+        captured: std::sync::Mutex<Captured>,
+    }
+
+    impl MockApp {
+        async fn handle_request(
+            &self,
+            request: FunctionRequest,
+        ) -> std::result::Result<MockResponse, MockError> {
+            let mut captured = self.captured.lock().unwrap();
+            captured.method = Some(request.method.clone());
+            captured.path = Some(request.path.clone());
+            captured.headers = request.headers.clone();
+            captured.query = request.query.clone();
+            captured.params = request.params.clone();
+            captured.invocation_id = request.context.invocation_id.clone();
+            captured.body = request.body.to_vec();
+            Ok(MockResponse {
+                status: 201,
+                body: "ok".to_string(),
+                headers: vec![("x-app".to_string(), "yes".to_string())],
+            })
+        }
+    }
+
+    impl_azure_function_handler!(MockApp);
+
+    #[tokio::test]
+    async fn macro_forwards_full_request_to_app() {
+        let mut request = FunctionRequest::new("POST", "/users/42");
+        request
+            .headers
+            .push(("authorization".to_string(), "Bearer token".to_string()));
+        request
+            .headers
+            .push(("x-custom".to_string(), "value".to_string()));
+        request.query.push(("page".to_string(), "2".to_string()));
+        request.query.push(("tag".to_string(), "a".to_string()));
+        request.query.push(("tag".to_string(), "b".to_string()));
+        request.params.insert("id".to_string(), "42".to_string());
+        request.context.invocation_id = Some("inv-1".to_string());
+        request.body = bytes::Bytes::from_static(b"payload");
+
+        let app = MockApp {
+            captured: std::sync::Mutex::new(Captured::default()),
+        };
+
+        let response = RequestHandler::handle(&app, request).await;
+
+        // Response mapping is preserved.
+        assert_eq!(response.status_code, 201);
+        assert_eq!(response.body, "ok");
+        assert_eq!(response.header_value("x-app"), Some("yes"));
+
+        // The app received every part of the request, not just method/path/body.
+        let captured = app.captured.lock().unwrap();
+        assert_eq!(captured.method.as_deref(), Some("POST"));
+        assert_eq!(captured.path.as_deref(), Some("/users/42"));
+        assert_eq!(captured.body, b"payload".to_vec());
+        assert_eq!(
+            captured
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer token")
+        );
+        assert_eq!(
+            captured
+                .headers
+                .iter()
+                .find(|(name, _)| name == "x-custom")
+                .map(|(_, value)| value.as_str()),
+            Some("value")
+        );
+        assert_eq!(
+            captured
+                .query
+                .iter()
+                .filter(|(key, _)| key == "tag")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            captured.query.iter().find(|(key, _)| key == "page"),
+            Some(&("page".to_string(), "2".to_string()))
+        );
+        assert_eq!(captured.params.get("id").map(String::as_str), Some("42"));
+        assert_eq!(captured.invocation_id.as_deref(), Some("inv-1"));
     }
 
     #[tokio::test]

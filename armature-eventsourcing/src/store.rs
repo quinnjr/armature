@@ -9,9 +9,23 @@ use std::sync::Arc;
 /// Event store trait
 ///
 /// Implement this trait to provide custom event storage (e.g., PostgreSQL, EventStoreDB).
+/// No durable implementation ships with this crate; [`InMemoryEventStore`] is
+/// provided for tests and local development only.
+///
+/// # Version invariant
+///
+/// Versions are positions in an aggregate's event log, not opaque tokens: version
+/// `n` means "`n` events have been applied". This holds only because
+/// [`crate::Aggregate::version`] advances by exactly one per applied event, and
+/// both methods below depend on it.
 #[async_trait]
 pub trait EventStore: Send + Sync {
     /// Save events for an aggregate
+    ///
+    /// `expected_version` is the number of events already stored for
+    /// `aggregate_id` as of the caller's last read. Implementations must reject
+    /// the write with [`EventStoreError::VersionConflict`] when the stored event
+    /// count differs, which is what makes optimistic concurrency work.
     async fn save_events(
         &self,
         aggregate_id: &str,
@@ -20,6 +34,10 @@ pub trait EventStore: Send + Sync {
     ) -> Result<(), EventStoreError>;
 
     /// Load events for an aggregate
+    ///
+    /// `from_version` is a count of leading events to skip, so passing a
+    /// snapshot's version yields exactly the events recorded after that snapshot.
+    /// `None` replays the full log.
     async fn load_events(
         &self,
         aggregate_id: &str,
@@ -34,6 +52,9 @@ pub trait EventStore: Send + Sync {
 }
 
 /// In-memory event store (for testing/development)
+///
+/// Backed by in-process `DashMap`s: everything it holds is lost when the process
+/// exits. It is not a durable store and must not be used in production.
 #[derive(Clone)]
 pub struct InMemoryEventStore {
     /// Events indexed by aggregate ID

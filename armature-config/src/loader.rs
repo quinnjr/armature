@@ -82,20 +82,24 @@ impl ConfigLoader {
             .map_err(|e| ConfigError::ParseError(format!("TOML to JSON conversion error: {}", e)))
     }
 
+    /// Parse `.env` content with `dotenvy`, the same parser
+    /// `ConfigManager::load_dotenv` uses.
+    ///
+    /// The hand-rolled parser this replaces disagreed with `dotenvy` on the
+    /// same file: it did not understand `export KEY=value`, escape sequences,
+    /// inline `#` comments, or multi-line values, and its
+    /// `trim_matches('"')` stripped *every* leading and trailing quote rather
+    /// than one matched pair (so `""quoted""` and `"a"b"` came out wrong).
+    /// Two parsers for one file format meant `FileFormat::Env` and
+    /// `load_dotenv` could produce different configuration from identical
+    /// bytes.
     fn parse_env(&self, content: &str) -> Result<Value> {
         let mut map = serde_json::Map::new();
 
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            if let Some((key, value)) = line.split_once('=') {
-                let key = key.trim();
-                let value = value.trim().trim_matches('"').trim_matches('\'');
-                map.insert(key.to_string(), Value::String(value.to_string()));
-            }
+        for item in dotenvy::from_read_iter(content.as_bytes()) {
+            let (key, value) =
+                item.map_err(|e| ConfigError::ParseError(format!(".env parse error: {}", e)))?;
+            map.insert(key, Value::String(value));
         }
 
         Ok(Value::Object(map))
@@ -130,15 +134,36 @@ mod tests {
     #[test]
     fn test_parse_env() {
         let loader = ConfigLoader::new(FileFormat::Env);
-        let env = r#"
-            KEY=value
-            NUMBER=42
-            # Comment
-            QUOTED="quoted value"
-        "#;
+        let env = concat!(
+            "KEY=value\n",
+            "NUMBER=42\n",
+            "# Comment\n",
+            "QUOTED=\"quoted value\"\n",
+            // `export` prefixes, inline comments and escapes: all understood by
+            // `dotenvy`, none understood by the hand-rolled parser this
+            // replaced. The value is quoted because a bare value may not
+            // contain spaces — the old parser accepted it, `dotenvy` rejects
+            // the whole file for it, and real `.env` consumers agree with
+            // `dotenvy`.
+            "export EXPORTED=\"exported value\"\n",
+            "INLINE=kept # trailing comment\n",
+        );
 
         let result = loader.parse(env).unwrap();
-        assert!(result.is_object());
+        let obj = result.as_object().expect("env parses to an object");
+        assert_eq!(obj.get("KEY").and_then(Value::as_str), Some("value"));
+        assert_eq!(obj.get("NUMBER").and_then(Value::as_str), Some("42"));
+        assert!(!obj.contains_key("# Comment"));
+        assert_eq!(
+            obj.get("QUOTED").and_then(Value::as_str),
+            Some("quoted value"),
+            "one matched pair of quotes is stripped, not every quote"
+        );
+        assert_eq!(
+            obj.get("EXPORTED").and_then(Value::as_str),
+            Some("exported value")
+        );
+        assert_eq!(obj.get("INLINE").and_then(Value::as_str), Some("kept"));
     }
 
     #[test]

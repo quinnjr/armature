@@ -4,7 +4,7 @@ use armature_core::*;
 
 #[test]
 fn test_http_request_creation() {
-    let req = HttpRequest::new("GET".to_string(), "/test".to_string());
+    let req = HttpRequest::new("GET", "/test".to_string());
     assert_eq!(req.method, "GET");
     assert_eq!(req.path, "/test");
     assert!(req.headers.is_empty());
@@ -94,4 +94,25 @@ fn test_application_creation() {
     let app = Application::new(container, router);
     // Application should be created successfully
     let _ = app;
+}
+
+/// The serve path hands the router a request whose target still carries the
+/// query string; nothing parses it until a handler asks.
+#[tokio::test]
+async fn a_request_with_a_query_string_routes_and_reads_it_lazily() {
+    use armature_core::{Error, HttpRequest, HttpResponse, Router};
+
+    let mut router = Router::new();
+    router.get("/s", |req: HttpRequest| async move {
+        let mut r = HttpResponse::new(200);
+        // The query is read here, inside the handler — not parsed before dispatch.
+        r.body = bytes::Bytes::from(req.query_param("q").unwrap_or("none").to_owned());
+        Ok::<_, Error>(r)
+    });
+
+    let resp = router
+        .route(HttpRequest::new("GET", "/s?q=hello%20world"))
+        .await
+        .unwrap();
+    assert_eq!(resp.body_slice(), b"hello world");
 }

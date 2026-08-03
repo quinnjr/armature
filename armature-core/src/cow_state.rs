@@ -561,7 +561,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for AtomicState<T> {
 ///
 /// // Get or compute
 /// let users = cache.get_or_compute(|| {
-///     db.query("SELECT * FROM users")
+///     db.query_param("SELECT * FROM users")
 /// });
 /// ```
 pub struct CachedValue<T> {

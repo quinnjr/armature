@@ -4,6 +4,7 @@
 
 use crate::{CollabError, CollabResult, ReplicaId, VectorClock};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 /// Sync message types
@@ -119,6 +120,23 @@ pub enum SyncState {
 }
 
 /// Operation buffer for handling out-of-order operations
+///
+/// # Memory
+///
+/// `max_size` bounds the *pending* queue only. It does **not** bound the total
+/// memory this buffer holds: [`applied`](Self::mark_applied) records the id of
+/// every operation ever applied, because that set is what makes duplicate
+/// delivery a no-op and what decides whether a causal dependency is satisfied.
+/// Operation ids are opaque `Uuid`s with no ordering, and [`PendingOp`] carries
+/// no causal coordinates, so there is no watermark below which an id is
+/// provably safe to forget: a long-lived session's applied set grows without
+/// limit at 16 bytes plus hashtable overhead per operation.
+///
+/// [`with_applied_limit`](Self::with_applied_limit) trades that unbounded
+/// growth for a finite deduplication window, when a caller can accept the
+/// consequences described there. It is off by default because forgetting an id
+/// too early re-applies a redelivered operation, and only the caller knows
+/// whether its operations are idempotent.
 #[derive(Debug, Default)]
 pub struct OperationBuffer {
     /// Pending operations (waiting for dependencies)
@@ -127,12 +145,22 @@ pub struct OperationBuffer {
     ///
     /// A peer ack does NOT mean the op has been applied locally, so this set
     /// must never be used to decide whether a causal dependency is satisfied.
-    acked: std::collections::HashSet<Uuid>,
+    acked: HashSet<Uuid>,
     /// Operation IDs that have been *applied locally* (returned from
     /// [`ready`](Self::ready) or marked via [`mark_applied`](Self::mark_applied)).
     /// Causal dependencies are satisfied only from this set.
-    applied: std::collections::HashSet<Uuid>,
-    /// Maximum buffer size
+    ///
+    /// Unbounded unless `applied_limit` is set — see the type-level docs.
+    applied: HashSet<Uuid>,
+    /// Insertion order of `applied`, maintained only while `applied_limit` is
+    /// set so the default (unbounded) configuration pays nothing for it.
+    applied_order: VecDeque<Uuid>,
+    /// Optional bound on `applied`; `None` keeps every id forever.
+    applied_limit: Option<usize>,
+    /// Maximum number of *pending* operations.
+    ///
+    /// This is not a bound on the buffer's total memory — see the type-level
+    /// docs for why `applied` is unbounded by default.
     max_size: usize,
 }
 
@@ -150,13 +178,101 @@ pub struct PendingOp {
 }
 
 impl OperationBuffer {
-    /// Create a new operation buffer
+    /// Create a new operation buffer.
+    ///
+    /// `max_size` bounds the pending queue only; the applied-id set is
+    /// unbounded. See the type-level docs and
+    /// [`with_applied_limit`](Self::with_applied_limit).
     pub fn new(max_size: usize) -> Self {
         Self {
             pending: Vec::new(),
-            acked: std::collections::HashSet::new(),
-            applied: std::collections::HashSet::new(),
+            acked: HashSet::new(),
+            applied: HashSet::new(),
+            applied_order: VecDeque::new(),
+            applied_limit: None,
             max_size,
+        }
+    }
+
+    /// Bound the applied-id set to `limit` entries, oldest evicted first.
+    ///
+    /// # What this trades away
+    ///
+    /// The applied set is what makes a redelivered operation a no-op. Once an
+    /// id is evicted, a peer that resends that operation — after a reconnect,
+    /// say — will have it released from [`ready`](Self::ready) a second time,
+    /// and an operation whose application is not idempotent will be applied
+    /// twice. Set this only when either the operations are idempotent (most
+    /// state-based CRDT merges are) or the transport cannot redeliver beyond
+    /// `limit` operations of history.
+    ///
+    /// Ids that are still named as dependencies by a pending operation are
+    /// never evicted, regardless of age, so bounding the set cannot deadlock
+    /// the pending queue.
+    ///
+    /// Intended to be chained onto [`new`](Self::new). Calling it later is
+    /// supported but the eviction order of ids applied before the call is
+    /// unspecified.
+    pub fn with_applied_limit(mut self, limit: usize) -> Self {
+        self.applied_limit = Some(limit.max(1));
+        if self.applied_order.len() != self.applied.len() {
+            self.applied_order = self.applied.iter().copied().collect();
+        }
+        self.trim_applied();
+        self
+    }
+
+    /// Number of operation ids currently retained as applied.
+    ///
+    /// Exposed so a long-lived session can observe the growth described in the
+    /// type-level docs rather than discovering it as memory pressure.
+    pub fn applied_count(&self) -> usize {
+        self.applied.len()
+    }
+
+    /// Record an id as applied locally, maintaining the eviction order.
+    fn record_applied(&mut self, id: Uuid) {
+        if self.applied.insert(id) && self.applied_limit.is_some() {
+            self.applied_order.push_back(id);
+            self.trim_applied();
+        }
+    }
+
+    /// Evict the oldest applied ids down to `applied_limit`, skipping any id a
+    /// pending operation still depends on.
+    fn trim_applied(&mut self) {
+        let Some(limit) = self.applied_limit else {
+            return;
+        };
+        if self.applied.len() <= limit {
+            return;
+        }
+
+        let needed: HashSet<Uuid> = self
+            .pending
+            .iter()
+            .flat_map(|op| op.deps.iter().copied())
+            .collect();
+
+        let mut excess = self.applied.len() - limit;
+        let mut retained = Vec::new();
+        while excess > 0 {
+            let Some(id) = self.applied_order.pop_front() else {
+                break;
+            };
+            if needed.contains(&id) {
+                // Still load-bearing for a buffered op: keep it, but let it
+                // age out on a later pass once that op has been released.
+                retained.push(id);
+            } else {
+                self.applied.remove(&id);
+                excess -= 1;
+            }
+        }
+        // Put the retained ids back at the front, oldest first, so they remain
+        // the next candidates for eviction.
+        for id in retained.into_iter().rev() {
+            self.applied_order.push_front(id);
         }
     }
 
@@ -193,34 +309,78 @@ impl OperationBuffer {
     /// A dependency is satisfied only when the dep op has been **applied
     /// locally** (`applied` set) — a peer ack is not sufficient, as that would
     /// let an op be released before the op it causally depends on has actually
-    /// been applied here. The scan loops to a fixpoint so a chain buffered in
+    /// been applied here. The scan runs to a fixpoint so a chain buffered in
     /// reverse order (`B` added before its dep `A`) is fully released in a
     /// single call rather than one op per call.
+    ///
+    /// Released operations come back in dependency order: an operation always
+    /// appears after every buffered operation it waited on.
+    ///
+    /// # Cost
+    ///
+    /// Linear in the number of buffered operations plus their dependency
+    /// edges. The previous implementation re-scanned the whole queue once per
+    /// fixpoint pass and used `Vec::remove` (an O(n) shift) per released
+    /// operation, so a reverse-ordered chain of length n — the case the
+    /// fixpoint exists for — cost O(n^3), with n up to `max_size` (10,000 in
+    /// [`SyncProtocol`]).
     pub fn ready(&mut self) -> Vec<PendingOp> {
-        let mut ready = Vec::new();
+        let n = self.pending.len();
+        if n == 0 {
+            return Vec::new();
+        }
 
-        loop {
-            let mut released_this_pass = false;
-            let mut i = 0;
-            while i < self.pending.len() {
-                let deps_satisfied = self.pending[i]
-                    .deps
-                    .iter()
-                    .all(|dep| self.applied.contains(dep));
-
-                if deps_satisfied {
-                    let op = self.pending.remove(i);
-                    self.applied.insert(op.id);
-                    ready.push(op);
-                    released_this_pass = true;
-                } else {
-                    i += 1;
+        // Build, once: how many dependencies each buffered op is still waiting
+        // on, and which ops are waiting on each id. Deps already in `applied`
+        // are not counted, and a dep that names an op nobody buffered simply
+        // never gets decremented — that op stays pending, as before.
+        let mut unmet = vec![0usize; n];
+        let mut dependants: HashMap<Uuid, Vec<usize>> = HashMap::new();
+        for (i, op) in self.pending.iter().enumerate() {
+            for dep in &op.deps {
+                if !self.applied.contains(dep) {
+                    unmet[i] += 1;
+                    dependants.entry(*dep).or_default().push(i);
                 }
             }
-            if !released_this_pass {
-                break;
+        }
+
+        let mut queue: VecDeque<usize> = (0..n).filter(|i| unmet[*i] == 0).collect();
+        let mut order = Vec::new();
+        while let Some(i) = queue.pop_front() {
+            let id = self.pending[i].id;
+            order.push(i);
+            self.record_applied(id);
+
+            if let Some(waiting) = dependants.get(&id) {
+                for &j in waiting {
+                    // Guarded rather than unconditional: two buffered ops may
+                    // share an id (a redelivery buffered before the first copy
+                    // was released), and decrementing past zero would release
+                    // the dependant twice.
+                    if unmet[j] > 0 {
+                        unmet[j] -= 1;
+                        if unmet[j] == 0 {
+                            queue.push_back(j);
+                        }
+                    }
+                }
             }
         }
+
+        // Take the released ops out by index instead of removing them one at a
+        // time: `Vec::remove` shifts the tail on every call, and `swap_remove`
+        // would scramble the order of the ops left behind.
+        let mut slots: Vec<Option<PendingOp>> = self.pending.drain(..).map(Some).collect();
+        let mut ready = Vec::with_capacity(order.len());
+        for i in order {
+            ready.push(
+                slots[i]
+                    .take()
+                    .expect("each index is enqueued at most once"),
+            );
+        }
+        self.pending = slots.into_iter().flatten().collect();
 
         ready
     }
@@ -237,7 +397,7 @@ impl OperationBuffer {
     /// eligible. Use this for dependencies applied outside this buffer (e.g.
     /// prior to it being constructed or via a state-based sync).
     pub fn mark_applied(&mut self, op_id: Uuid) {
-        self.applied.insert(op_id);
+        self.record_applied(op_id);
     }
 
     /// Get pending count
@@ -246,11 +406,17 @@ impl OperationBuffer {
     }
 
     /// Clear old acknowledgments
+    ///
+    /// This touches the peer-ack set only. It does **not** shrink the
+    /// applied-id set — see the type-level docs and
+    /// [`with_applied_limit`](Self::with_applied_limit), which is the knob for
+    /// that, because dropping an applied id has correctness consequences a
+    /// blind GC pass cannot reason about.
     pub fn gc(&mut self, keep_count: usize) {
         if self.acked.len() > keep_count * 2 {
             // Keep only recent acks - this is a simplification
             // In production, you'd want a more sophisticated GC
-            let to_keep: std::collections::HashSet<_> = self
+            let to_keep: HashSet<_> = self
                 .pending
                 .iter()
                 .flat_map(|op| op.deps.iter())
@@ -612,6 +778,125 @@ mod tests {
         assert_eq!(ready[0].id, a, "dep must be released before dependent");
         assert_eq!(ready[1].id, b);
         assert_eq!(buffer.pending_count(), 0);
+    }
+
+    /// A long chain buffered in strictly reverse dependency order is the case
+    /// the old `ready()` cost O(n^3) on. The rewritten worklist must release
+    /// exactly the same set, in a dep-before-dependent order, in one call.
+    #[test]
+    fn test_ready_releases_long_reverse_ordered_chain() {
+        const CHAIN: usize = 500;
+
+        let mut buffer = OperationBuffer::new(10_000);
+        let now = chrono::Utc::now();
+        let ids: Vec<Uuid> = (0..CHAIN).map(|_| Uuid::new_v4()).collect();
+
+        // op[k] depends on op[k - 1]; added last-to-first, so every add sits in
+        // front of the dependency it is waiting on.
+        for k in (0..CHAIN).rev() {
+            buffer.add(PendingOp {
+                id: ids[k],
+                data: vec![],
+                deps: if k == 0 { vec![] } else { vec![ids[k - 1]] },
+                received_at: now,
+            });
+        }
+        assert_eq!(buffer.pending_count(), CHAIN);
+
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), CHAIN, "chain not fully released");
+        assert_eq!(buffer.pending_count(), 0);
+
+        // Same result set, and the causal order is preserved end to end.
+        let released: Vec<Uuid> = ready.iter().map(|op| op.id).collect();
+        assert_eq!(released, ids, "ops released out of dependency order");
+    }
+
+    /// An op whose dependency was never buffered stays pending, and the ops
+    /// that *are* satisfiable are still released around it.
+    #[test]
+    fn test_ready_leaves_ops_with_unbuffered_deps_pending() {
+        let mut buffer = OperationBuffer::new(100);
+        let now = chrono::Utc::now();
+        let missing = Uuid::new_v4();
+        let stuck = Uuid::new_v4();
+        let free = Uuid::new_v4();
+
+        buffer.add(PendingOp {
+            id: stuck,
+            data: vec![],
+            deps: vec![missing],
+            received_at: now,
+        });
+        buffer.add(PendingOp {
+            id: free,
+            data: vec![],
+            deps: vec![],
+            received_at: now,
+        });
+
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, free);
+        assert!(buffer.contains(&stuck));
+        assert_eq!(buffer.pending_count(), 1);
+
+        // Once the missing dep is applied elsewhere, the stuck op is released.
+        buffer.mark_applied(missing);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, stuck);
+    }
+
+    /// `max_size` bounds the pending queue only; the applied set is what grows.
+    #[test]
+    fn test_applied_set_is_unbounded_by_default() {
+        let mut buffer = OperationBuffer::new(4);
+        for _ in 0..50 {
+            buffer.add(PendingOp {
+                id: Uuid::new_v4(),
+                data: vec![],
+                deps: vec![],
+                received_at: chrono::Utc::now(),
+            });
+            buffer.ready();
+        }
+        assert!(buffer.pending_count() <= 4);
+        assert_eq!(buffer.applied_count(), 50);
+    }
+
+    /// The opt-in bound evicts oldest-first but never an id a pending op still
+    /// depends on, so bounding the set cannot deadlock the queue.
+    #[test]
+    fn test_applied_limit_evicts_oldest_but_keeps_live_deps() {
+        let mut buffer = OperationBuffer::new(100).with_applied_limit(3);
+        let now = chrono::Utc::now();
+
+        let live_dep = Uuid::new_v4();
+        buffer.mark_applied(live_dep);
+
+        // A pending op still names `live_dep`, so it must survive eviction.
+        let waiting = Uuid::new_v4();
+        let blocker = Uuid::new_v4();
+        buffer.add(PendingOp {
+            id: waiting,
+            data: vec![],
+            deps: vec![live_dep, blocker],
+            received_at: now,
+        });
+
+        for _ in 0..10 {
+            buffer.mark_applied(Uuid::new_v4());
+        }
+
+        assert!(buffer.applied_count() <= 4, "applied set was not bounded");
+
+        // The still-referenced dep survived, so releasing `waiting` only needs
+        // its other dependency.
+        buffer.mark_applied(blocker);
+        let ready = buffer.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, waiting);
     }
 
     /// Operation messages carry real deps through to the buffer.

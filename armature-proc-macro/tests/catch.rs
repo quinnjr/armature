@@ -9,7 +9,7 @@ use armature_core::{Error, HttpRequest, HttpResponse};
 use armature_proc_macro::catch;
 
 fn ctx() -> ExceptionContext {
-    ExceptionContext::from_request(HttpRequest::new("GET".to_string(), "/x".to_string()))
+    ExceptionContext::from_request(HttpRequest::new("GET", "/x".to_string()))
 }
 
 // Catch specific error types.

@@ -6,7 +6,7 @@ Service discovery for the Armature framework.
 
 - **Service Registration** - Register services on startup
 - **Service Discovery** - Find other services
-- **Health Checks** - Automatic health monitoring
+- **Health Checks** - On-demand probing via `ServiceDiscovery::health_check`
 - **Load Balancing** - Client-side load balancing (round-robin, random, or first)
 - **Multiple Backends** - Consul, etcd, or in-memory (for testing)
 
@@ -67,11 +67,20 @@ returned.
 
 ```rust
 use armature_discovery::EtcdDiscovery;
+use std::time::Duration;
 
-let etcd = EtcdDiscovery::new("http://localhost:2379", "/services")?;
+let etcd = EtcdDiscovery::new("http://localhost:2379", "/services")?
+    .with_lease_ttl(Duration::from_secs(10)); // optional; defaults to 30s
 etcd.register(&service).await?;
 let instances = etcd.discover("api").await?;
 ```
+
+`register` writes both of its keys in a single etcd transaction, attached to a
+lease that a background task keeps alive. If the registering process dies the
+lease expires and etcd drops the registration, so a crashed instance stops
+being discoverable within roughly one TTL. The lease covers liveness only —
+`discover` does not filter on health, and nothing probes instances in the
+background.
 
 ### In-Memory
 

@@ -288,7 +288,7 @@ fn authorize_and_resolve_model(
             render::render_unauthorized(&inst.config),
         )));
     }
-    let model_name = req.param("model").cloned().unwrap_or_default();
+    let model_name = req.param("model").map(str::to_owned).unwrap_or_default();
     match inst.get_model(&model_name) {
         Some(m) => Ok(m.clone()),
         None => Err(Box::new(html_response(
@@ -300,23 +300,23 @@ fn authorize_and_resolve_model(
 
 /// Build [`ListParams`] from the request's query string.
 fn list_params_from_request(req: &HttpRequest) -> ListParams {
-    let get = |k: &str| req.query_params.get(k).cloned();
+    let get = |k: &str| req.query_param(k);
     let mut filters = HashMap::new();
-    for (k, v) in req.query_params.iter() {
+    for (k, v) in req.query().iter() {
         if let Some(field) = k.strip_prefix("filter.") {
-            filters.insert(field.to_string(), v.clone());
+            filters.insert(field.to_string(), v.to_owned());
         }
     }
     ListParams {
         page: get("page").and_then(|p| p.parse().ok()),
         per_page: get("per_page").and_then(|p| p.parse().ok()),
-        sort: get("sort"),
-        order: match get("order").as_deref() {
+        sort: get("sort").map(str::to_owned),
+        order: match get("order") {
             Some("desc") | Some("DESC") => Some(SortOrder::Desc),
             Some("asc") | Some("ASC") => Some(SortOrder::Asc),
             _ => None,
         },
-        search: get("search"),
+        search: get("search").map(str::to_owned),
         filters,
     }
 }
@@ -443,9 +443,7 @@ async fn handle_list(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<HttpR
     // CSV export of the current query (honoring search/filters/ordering). A
     // `limit` of 0 tells the data source to return every matching row rather
     // than a single page.
-    if inst.config.enable_export
-        && req.query_params.get("export").map(String::as_str) == Some("csv")
-    {
+    if inst.config.enable_export && req.query_param("export") == Some("csv") {
         let query = DataQuery {
             offset: 0,
             limit: 0,
@@ -490,7 +488,7 @@ async fn handle_detail(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<Htt
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
 
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
@@ -554,7 +552,7 @@ async fn handle_edit_form(
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     match inst.data_source.get(&model, &id).await {
         Some(record) => {
             let view = EditView::new(&model, id).with_data(record);
@@ -572,7 +570,7 @@ async fn handle_update_submit(
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     if !model.can_edit {
         return Ok(html_response(
             403,
@@ -597,7 +595,7 @@ async fn handle_delete(inst: Arc<AdminInstance>, req: HttpRequest) -> Result<Htt
         Ok(m) => m,
         Err(resp) => return Ok(*resp),
     };
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     if !model.can_delete {
         return Ok(html_response(
             403,
@@ -772,7 +770,7 @@ mod tests {
             .route(req("GET", "/admin/user"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(
             body.contains("Alice"),
             "list body should contain seeded rows"
@@ -805,7 +803,7 @@ mod tests {
             .route(req("GET", "/admin/user?per_page=3"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let row_count = body.matches("<tr>").count() - 1; // minus header row
         assert_eq!(row_count, 3, "per_page=3 must return 3 rows");
 
@@ -814,7 +812,7 @@ mod tests {
             .route(req("GET", "/admin/user?per_page=1000"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let row_count = body.matches("<tr>").count() - 1;
         assert_eq!(
             row_count, 5,
@@ -894,7 +892,7 @@ mod tests {
         // Render the list page and pull the search input's `name` straight out of
         // the emitted HTML, exactly as a browser would submit it.
         let resp = router.route(req("GET", "/admin/user")).await.unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         let form = body
             .split("admin-search")
             .nth(1)
@@ -912,7 +910,7 @@ mod tests {
         // Submit that param and assert real filtering occurs.
         let path = format!("/admin/user?{param}=Alice");
         let resp = router.route(req("GET", &path)).await.unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"), "search must keep the matching row");
         assert!(
             !body.contains("Bob"),
@@ -946,7 +944,7 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(ct.contains("text/csv"), "export must be served as CSV");
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(
             !body.contains("<table"),
             "CSV export must not re-render HTML"
@@ -961,7 +959,7 @@ mod tests {
             .route(req("GET", "/admin/user?export=csv&search=Alice"))
             .await
             .unwrap();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"));
         assert!(
             !body.contains("Bob"),
@@ -987,7 +985,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("Alice"), "edit form should prefill values");
         assert!(body.contains("<form"), "edit form should render a form");
     }
