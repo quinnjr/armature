@@ -9,6 +9,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `Tenant::with_schema` validates the identifier and returns a `Result`. It was forwarded verbatim to `SET search_path`, which is how tenant isolation gets bypassed.
+- Path-based tenant resolution matches `path_only()`; any request carrying a query string previously failed to resolve.
+
 ### Changed — `0.3.0` → `0.3.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

@@ -9,6 +9,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `From<Message> for tungstenite::Message` becomes `TryFrom`. A hand-built Text frame with a non-UTF-8 payload was lossily converted, silently corrupting it with replacement characters.
+- Room broadcast iterates the member map directly and passes payloads through without a per-recipient copy.
+
 ### Changed
 
 - **Breaking:** `From<Message> for tungstenite::Message` is now `TryFrom`, with the new `InvalidTextPayload` error. A text message whose payload is not valid UTF-8 was converted with `from_utf8_lossy`, silently replacing invalid bytes with U+FFFD; it is now rejected and the single message is dropped with an error log rather than corrupting the stream.

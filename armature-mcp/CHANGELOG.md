@@ -9,6 +9,12 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `handle_request`/`handle_json` return `Option`, and the controller answers 204. The server replied to JSON-RPC notifications, which §4.1 forbids, so a conformant client sending `notifications/initialized` received a `-32601` error.
+- `prompts/list` and `prompts/get` are implemented. The server advertised the prompts capability whenever it was enabled and then answered both with method-not-found.
+- A malformed tool `input_schema` is surfaced rather than silently replaced with a permissive stand-in.
+
 ### Changed — `0.1.5` → `0.1.6`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

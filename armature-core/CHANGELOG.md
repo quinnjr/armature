@@ -10,6 +10,36 @@ Changes at or before `0.6.0` are recorded in the workspace
 
 ## [Unreleased]
 
+### Fixed
+
+- Catch-all routes match zero remaining segments again, and a trailing slash no
+  longer changes the outcome. `matchit` requires a catch-all to consume at least
+  one segment and treats a trailing slash as significant, so `Router` had begun
+  answering differently from `OptimizedRouter` — an invariant AGENTS.md states
+  and `route_cache`'s precedence test exists to enforce. A differential test now
+  drives a pattern/target matrix through both routers and compares which handler
+  answered.
+- Route-parameter names are interned once at registration. Every captured
+  parameter on every request took a process-global mutex, and the comment
+  claiming the compiled router already interned at registration was false.
+- `interceptor::cache_key` folded the query in twice — once raw via the target,
+  once sorted — defeating the canonicalization it documents, so `?a=1&b=2` and
+  `?b=2&a=1` were separate entries. `CacheKey::from_request` could also collide
+  `?a=1%26b%3D2` with `?a=1&b=2` and serve one request another's body.
+- `clone_response` shares the cached body instead of copying it on every hit.
+- `HeaderMap` by-name lookups no longer allocate a `HeaderId::Other` per call for
+  a custom name, which had made them strictly worse than the `HashMap` they
+  replaced.
+- Static assets resolve against `path_only()`, so a cache-busting `?v=2` no
+  longer 404s, and the serve path no longer makes blocking `canonicalize`,
+  `exists` and `is_dir` syscalls on the async executor.
+- `param_intern` is hard-capped. `push_param` and `from_parts` let
+  request-derived names reach an interner whose own documentation forbids
+  exactly that.
+- `RouteConstraints::validate` rejects a non-UTF-8 parameter rather than
+  skipping the constraint, and `simd_parser` reports truncated input instead of
+  fabricating a `GET /`.
+
 ### Breaking — `0.7.0` → `0.8.0`
 
 The request and response types are now backed by `Bytes` rather than owned

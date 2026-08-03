@@ -9,6 +9,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `impl_request_handler!` is renamed `impl_lambda_handler!`, and `RequestHandler`/`async_trait` are exported so its `$crate` paths resolve. The documented integration path did not compile: the macro called a private free function that was never a method on `Application`.
+- **Breaking:** request and response headers preserve duplicates, so a handler can emit two `Set-Cookie` lines — previously impossible.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

@@ -9,6 +9,10 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `#[api(...)]` rejects an unrecognized option instead of ignoring it. `#[api(skipp)]` left the field serialized, and the documented use for the attribute is redacting a password.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

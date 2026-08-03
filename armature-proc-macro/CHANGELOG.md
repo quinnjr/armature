@@ -9,6 +9,12 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** attribute macros reject what they used to discard. `#[body_limit(512kb)]` meant 512 *bytes* (rustc lexes it as a suffixed integer and the suffix was dropped), `#[timeout(hours = 2)]` meant two seconds, and unknown `#[module]`/`#[catch]` keys registered nothing — all silently.
+- The parameter extractors work through `#[routes]`. `#[body]`, `#[param("id")]`, `#[query("page")]` and `#[header]` were documented but unreachable: route attributes were stripped before the extraction codegen could run, so a handler written as documented failed to compile.
+- A handler carrying several route attributes registers all of them; every one after the first was dropped without a diagnostic.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

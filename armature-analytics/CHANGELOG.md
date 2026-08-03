@@ -9,6 +9,10 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Endpoint keys are normalized from `path_only()`. The raw target defeated the id-detection, so `/users/123?ref=x` was tracked verbatim — an attacker-influenceable key that silently evicted real endpoints from the capped table — and with `include_query_params` the query was appended twice.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

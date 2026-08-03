@@ -11,6 +11,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- The Prometheus `path` label is taken from `path_only()`. The raw target went in, so `/login?token=…` became a label value and every unique query burned a cardinality slot.
+- `Summary::quantile` reuses a scratch buffer instead of cloning the whole observation window per call.
+
+### Fixed
+
 - The Prometheus path label is taken from `HttpRequest::path_only`, not the raw request target. `/login?token=SECRET` was published as a label value on `/metrics`, and every distinct query string burned a slot against the cardinality cap.
 
 ### Changed

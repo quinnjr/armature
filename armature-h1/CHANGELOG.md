@@ -7,6 +7,25 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ## [Unreleased]
 
+### Fixed
+
+- Every deadline in `Limits` is now enforced against something that polls it.
+  `body_timeout` was armed and never awaited, so it had no effect at all — and
+  its test passed by reaching the idle timeout instead. `write_timeout` now
+  covers every flush of a streamed body rather than only the final write.
+- Handler-supplied header and trailer values containing CR, LF or NUL are
+  rejected, and `HeaderId::Other` names are re-validated as tokens. Response
+  splitting is request smuggling run backwards, and the framing checks now
+  consult what was actually emitted so a dropped `Content-Length` cannot leave a
+  response undelimited.
+- `Transfer-Encoding` on an HTTP/1.0 request is rejected (the TE-downgrade
+  smuggling vector), and `#` is rejected in the request target — RFC 9110 §7.1
+  puts a fragment outside it, and no RFC 9112 §3.2 form admits one.
+- `Response::upgrade`, `BufPool` and `Limits::max_pipeline_depth` are removed.
+  Each was public API that did nothing: the callback was only ever dropped
+  unrun, the pool had no call sites while the README documented its
+  observability, and the pipeline cap was never read.
+
 ### Added — `0.1.0` (new crate)
 
 A zero-allocation HTTP/1.1 server layer. The steady-state request path — parse,

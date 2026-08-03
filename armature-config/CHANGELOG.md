@@ -11,6 +11,12 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Breaking:** `__` in an environment variable maps to `.`, so an env var can finally satisfy the dotted lookups the docs demonstrate.
+- **Breaking:** `FileFormat::Env` delegates to `dotenvy`. The hand-rolled parser disagreed with the crate's other `.env` path on the same file — no `export`, no escapes, no inline comments — and stripped every quote rather than one matched pair.
+- Source precedence is documented and pinned by a test; `in_range`/`one_of` interpolate the bounds they rejected against.
+
+### Fixed
+
 - Environment variables map `__` to the path separator `.` (`APP__DATABASE__URL` → `database.url`). Keys were only lowercased, so no environment variable could satisfy the dotted lookups the docs demonstrate.
 - `FileFormat::Env` parses through `dotenvy`, the same parser `load_dotenv` uses. The hand-rolled parser it replaces understood neither `export` prefixes, escapes, inline comments nor multi-line values, and stripped every quote rather than one matched pair — so the two paths disagreed on the same file.
 - `ConfigValidator::in_range` and `one_of` interpolate the bounds and the offending value; the messages read literally "must be between min and max". Both gained a `T: Display` bound.

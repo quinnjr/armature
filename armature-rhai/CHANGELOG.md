@@ -11,6 +11,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Breaking:** the script-visible query map is first-wins, matching `QueryView::get`; it was last-wins, so `?tag=a&tag=b` read differently from Rust and Rhai.
+- Routes match `path_only()`. Any request with a query string 404'd, and a parameterized route captured the query into the parameter.
+
+### Fixed
+
 - `ScriptRouter::find_route` matched patterns against the raw request target, so any request carrying a query string 404'd (`/users?a=1`) or captured the query into a path param (`/users/42?a=1` gave `id == "42?a=1"`). Matching is now against `HttpRequest::path_only`.
 - `request.path` in scripts is the routing path, not the raw target — it no longer carries the query string.
 

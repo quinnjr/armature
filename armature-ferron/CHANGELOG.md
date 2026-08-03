@@ -9,6 +9,10 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Backend health checks run concurrently, so one backend hitting its timeout no longer delays every subsequent check or pushes the loop past its tick interval.
+
 ### Changed
 
 - Background health checks run all backends concurrently via `JoinSet`. Serially, one backend hitting `config.timeout` delayed every check behind it and could push a sweep past the tick interval.

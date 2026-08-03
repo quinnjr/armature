@@ -1,6 +1,6 @@
 [package]
 name = "armature-mcp"
-version = "0.1.6"
+version = "0.2.0"
 edition.workspace = true
 # Inherits the workspace MSRV (1.94.1). This crate's own floor is 1.91 — the
 # `register_mcp_tool!` macro expands to an `inventory::submit!` `static` whose

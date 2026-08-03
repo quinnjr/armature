@@ -9,6 +9,13 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `impl_request_handler!` is renamed `impl_azure_function_handler!` and its `$crate` paths resolve; the documented path did not compile.
+- **Breaking:** the whole `FunctionRequest` is forwarded. Only method, path and body reached the application, so a handler never saw `Authorization`, `Content-Type` or any query string.
+- **Breaking:** headers and query preserve duplicates and wire order, and a valueless key survives.
+- The configured request timeout is applied once rather than twice serially, halving an effective budget that was double what was configured.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

@@ -9,6 +9,12 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** unimplemented subcommands exit non-zero and are hidden. `armature deploy` reported success having deployed nothing, and `armature serve` as a container start-command exited cleanly with no server.
+- Generated scaffolds compile against the current API; the pipe, exception-filter and ten test templates targeted removed types, and no non-ignored test compiled generated output.
+- `armature dev -- <args>` passes arguments through to `cargo run` instead of emitting a `--` before each one and dropping them, which also made behaviour depend on whether `cargo-watch` happened to be installed.
+
 ### Changed — `0.4.0` → `0.4.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

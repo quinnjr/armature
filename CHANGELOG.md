@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`armature-h1` `0.1.0` (new crate):** a zero-allocation HTTP/1.1 server layer.
   See [`armature-h1/CHANGELOG.md`](armature-h1/CHANGELOG.md).
 
+### Fixed
+
+- **Workspace-wide — conformance audit remediation.** A project-wide audit of
+  claim-versus-implementation found 27 Critical and 71 Warning issues; all are
+  resolved across 49 crates. The recurring shape was a control that looked
+  implemented and was not: CORS reflecting any origin once credentials were
+  enabled, a default rate limiter that could never derive a key and so allowed
+  everything, `#[body_limit(512kb)]` meaning 512 bytes, `ProcessingResult::DeadLetter`
+  deleting the message instead of dead-lettering it, and a job queue that wrote
+  an in-flight claim nothing ever read back. Each affected crate carries the
+  detail in its own `CHANGELOG.md`; crates with breaking changes took a minor
+  bump.
+
 ### Changed
 
 - **Workspace-wide — `armature-core` `0.7.0` → `0.8.0`:** the request and response

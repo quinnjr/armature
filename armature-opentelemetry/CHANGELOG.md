@@ -11,6 +11,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Breaking:** span and metric attributes use stable semantic conventions (`http.request.method`, `url.path`, `http.response.status_code`); dashboards keyed on the retired pre-1.0 names need updating.
+- `http.route` no longer carries the raw target. Every distinct URL — query string included — minted a new metric time series, which is unbounded cardinality on a low-cardinality attribute.
+
+### Fixed
+
 - `http.route` is the query-less path rather than the raw request target. OTel defines `http.route` as a low-cardinality route template, so every distinct URL was minting its own time series.
 
 ### Changed

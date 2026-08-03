@@ -9,6 +9,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Breaking:** `Spy` is exported and requires `T: Clone`. It was advertised as a feature but unreachable outside the crate, and its manual-recording contract is now documented rather than implied to intercept.
+- Load-test workers accumulate timings locally instead of contending on one mutex per completed request — the measurement path inflated the latencies it recorded — and the percentile ranks use one convention.
+
 ### Added
 
 - `Spy` is exported. It was listed as a crate feature but `mod mock` was private, so it was unreachable. Its docs now state plainly that it is a manual recorder: `inner()` returns the wrapped value untouched and calls made through it are not intercepted.
