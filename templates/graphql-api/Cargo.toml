@@ -13,7 +13,7 @@ rust-version = "1.94.1"
 # unrelated, unmaintained crate) — `package = "armature-framework"` fetches
 # the right crate while keeping the local import name `armature`, matching
 # this crate's `[lib] name = "armature"`.
-armature = { package = "armature-framework", version = "0.4", features = ["graphql", "validation"] }
+armature = { package = "armature-framework", version = "0.5", features = ["graphql", "validation"] }
 # Both requirements pin the exact minor. 0.x minors are breaking under
 # Cargo's caret rules and this project treats them that way, so a bare "0"
 # would let a user resolve armature-core 0.9 against armature-framework 0.4
@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.5", features = ["serde"] }
 
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }

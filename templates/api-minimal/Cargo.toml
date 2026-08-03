@@ -11,7 +11,7 @@ rust-version = "1.94.1"
 # Published on crates.io as "armature-framework" (the name "armature" is
 # already taken by an unrelated crate); the `package` key re-aliases it to
 # `armature` so `use armature::...` in this crate's source keeps working.
-armature = { version = "0.4", package = "armature-framework" }
+armature = { version = "0.5", package = "armature-framework" }
 # Both requirements pin the exact minor. 0.x minors are breaking under
 # Cargo's caret rules and this project treats them that way, so a bare "0"
 # would let a user resolve armature-core 0.9 against armature-framework 0.4

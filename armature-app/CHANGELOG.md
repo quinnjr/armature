@@ -11,6 +11,8 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Breaking — `0.2.0` → `0.3.0`.** The crate inherits `[workspace.package] version`, which moves with it.
+
 - **Breaking:** the after-middleware hook receives the response rather than just its status, matching the design document, and a middleware that raises a Rhai error now yields a 500 instead of passing the request through — a failing auth or rate-limit hook failed open.
 - The request binding is built once per request and shares a `Bytes` body; it was rebuilt for every guard, middleware and handler, copying the whole body each time.
 

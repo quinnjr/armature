@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`armature-h1` `0.1.0` (new crate):** a zero-allocation HTTP/1.1 server layer.
   See [`armature-h1/CHANGELOG.md`](armature-h1/CHANGELOG.md).
 
+### Changed
+
+- **`armature-framework` `0.4.0` → `0.5.0`.** The facade re-exports
+  `MethodExtractor` (renamed from `extractors::Method` to stop colliding with
+  the re-exported `Method` enum), so its prelude changed with `armature-core`
+  0.8. The four project templates pin the new minor.
+
 ### Fixed
 
 - **Workspace-wide — conformance audit remediation.** A project-wide audit of
