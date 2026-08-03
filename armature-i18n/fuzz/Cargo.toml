@@ -1,0 +1,30 @@
+[package]
+name = "armature-i18n-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Its own workspace root: `libfuzzer-sys` links a sanitizer runtime and builds
+# only on nightly, so a plain `cargo build` at the repo root must not reach it.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+armature-i18n = { path = ".." }
+
+[[bin]]
+name = "accept_language"
+path = "fuzz_targets/accept_language.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "locale_tag"
+path = "fuzz_targets/locale_tag.rs"
+test = false
+doc = false
+bench = false
