@@ -5,6 +5,8 @@ import DocsOverview from '../../components/docs/DocsOverview.astro';
 import ProfilingGuide from '../../components/docs/ProfilingGuide.astro';
 import { docs, docFile, getDoc } from '../../lib/docs';
 import { renderDocMarkdown } from '../../lib/markdown';
+import { docDescription, lastModified } from '../../lib/docmeta';
+import { techArticleSchema } from '../../lib/seo';
 import { url } from '../../lib/url';
 
 export function getStaticPaths() {
@@ -22,9 +24,39 @@ if (doc.hasComponent && !WIRED_COMPONENTS.has(doc.id)) {
 }
 const file = docFile(doc);
 const html = doc.hasComponent ? null : file ? renderDocMarkdown(file) : null;
+
+// The canonical for the overview is /docs, so its schema and trail must agree.
+const path = doc.id === 'readme' ? '/docs' : `/docs/${doc.id}`;
+const description = docDescription(doc);
+const dateModified = lastModified(file) ?? undefined;
+const site = Astro.site;
+
+// A placeholder page has no content to rank and nothing for an answer engine to
+// quote; indexing it competes with the pages that do. `follow` keeps its links
+// crawlable.
+const isPlaceholder = !doc.hasComponent && html === null;
+
+const schemas = isPlaceholder
+  ? []
+  : [techArticleSchema({ title: doc.title, description, path, dateModified, section: doc.category }, site)];
+
+const breadcrumbs = [
+  { name: 'Home', path: '/' },
+  { name: 'Documentation', path: '/docs' },
+  ...(doc.id === 'readme' ? [] : [{ name: doc.title, path }]),
+];
 ---
 
-<BaseLayout title={`${doc.title} - Documentation - Armature`} canonicalPath={doc.id === 'readme' ? '/docs' : undefined}>
+<BaseLayout
+  title={`${doc.title} - Armature Rust Framework Docs`}
+  description={description}
+  canonicalPath={doc.id === 'readme' ? '/docs' : undefined}
+  breadcrumbs={breadcrumbs}
+  schemas={schemas}
+  dateModified={dateModified}
+  noindex={isPlaceholder}
+  ogType="article"
+>
   <DocsShell activeId={doc.id}>
     {doc.id === 'readme' && <DocsOverview />}
     {doc.id === 'profiling-guide' && <ProfilingGuide />}
