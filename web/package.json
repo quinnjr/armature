@@ -34,7 +34,7 @@
     "@astrojs/sitemap": "^3.6.0",
     "@fortawesome/free-brands-svg-icons": "^7.1.0",
     "@fortawesome/free-solid-svg-icons": "^7.1.0",
-    "astro": "^5.16.0",
+    "astro": "^7.1.6",
     "marked": "^18.0.0",
     "sanitize-html": "^2.17.6",
     "tailswatch": "^1.7.0"
