@@ -9,10 +9,27 @@ static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$").unwrap()
 });
 
-static URL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap());
-
+/// RFC 9562 UUID string form.
+///
+/// Case-insensitive: §4 defines the hex digits as case-insensitive on input,
+/// so an uppercase UUID is valid and must not be rejected. The version nibble
+/// is constrained to 1-8 and the variant nibble to the RFC 9562 variant
+/// (`8`/`9`/`a`/`b`); the nil and max UUIDs are permitted explicitly, since
+/// neither carries a valid version/variant.
 static UUID_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+    Regex::new(
+        r"(?i)^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+    )
+    .unwrap()
+});
+
+/// Characters permitted in a hostname or IP-literal host.
+///
+/// `url` accepts some hosts that no DNS resolver or web client will (`https://!!`
+/// parses, with `!!` as the host), so the parsed host is checked against this
+/// afterwards.
+static HOST_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$").unwrap()
 });
 
 static ALPHA_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-zA-Z]+$").unwrap());
@@ -96,8 +113,28 @@ impl IsEmail {
 pub struct IsUrl;
 
 impl IsUrl {
+    /// Accept an absolute `http`/`https` URL with a plausible host.
+    ///
+    /// The value is *parsed* (via the `url` crate), not pattern-matched, then
+    /// two checks are applied on top of a successful parse:
+    ///
+    /// - the scheme must be `http` or `https` - other schemes parse fine but
+    ///   are not what a field annotated `IsUrl` means in a web form;
+    /// - the host must look like a hostname or IP literal. `url` will happily
+    ///   parse `https://!!` with `!!` as the host.
+    ///
+    /// Single-label hosts are accepted: `https://a`, `http://localhost` and
+    /// `http://intranet` are all real, resolvable URLs.
     pub fn validate(value: &str, field: &str) -> Result<(), ValidationError> {
-        if URL_REGEX.is_match(value) {
+        let is_valid = match url::Url::parse(value) {
+            Ok(parsed) => {
+                matches!(parsed.scheme(), "http" | "https")
+                    && parsed.host_str().is_some_and(|h| HOST_REGEX.is_match(h))
+            }
+            Err(_) => false,
+        };
+
+        if is_valid {
             Ok(())
         } else {
             Err(
@@ -374,6 +411,45 @@ mod tests {
         assert!(IsUrl::validate("https://example.com", "url").is_ok());
         assert!(IsUrl::validate("http://test.org/path", "url").is_ok());
         assert!(IsUrl::validate("not a url", "url").is_err());
+
+        // A single-label host is a real URL. The old regex required at least
+        // two characters after the scheme and rejected this.
+        assert!(IsUrl::validate("https://a", "url").is_ok());
+        assert!(IsUrl::validate("http://localhost:8080/health", "url").is_ok());
+        assert!(IsUrl::validate("https://[::1]:8443/", "url").is_ok());
+
+        // The old regex accepted anything non-whitespace after the scheme.
+        assert!(IsUrl::validate("https://!!", "url").is_err());
+        assert!(IsUrl::validate("https://", "url").is_err());
+        // Only http(s); other schemes parse but are not web URLs.
+        assert!(IsUrl::validate("ftp://example.com", "url").is_err());
+        assert!(IsUrl::validate("javascript:alert(1)", "url").is_err());
+        // Relative references are not absolute URLs.
+        assert!(IsUrl::validate("/path/only", "url").is_err());
+    }
+
+    /// RFC 9562 §4: the hex digits are case-insensitive on input, so an
+    /// uppercase UUID is valid. The old regex was lowercase-only and also
+    /// checked neither the version nor the variant nibble.
+    #[test]
+    fn test_is_uuid_case_and_version_variant() {
+        let lower = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        assert!(IsUuid::validate(lower, "id").is_ok());
+        assert!(IsUuid::validate(&lower.to_uppercase(), "id").is_ok());
+        assert!(IsUuid::validate("F47AC10B-58cc-4372-A567-0e02b2c3d479", "id").is_ok());
+
+        // Nil and max UUIDs are valid despite carrying no version/variant.
+        assert!(IsUuid::validate("00000000-0000-0000-0000-000000000000", "id").is_ok());
+        assert!(IsUuid::validate("ffffffff-ffff-ffff-ffff-ffffffffffff", "id").is_ok());
+
+        // Version 0 and version 9 do not exist.
+        assert!(IsUuid::validate("f47ac10b-58cc-0372-a567-0e02b2c3d479", "id").is_err());
+        assert!(IsUuid::validate("f47ac10b-58cc-9372-a567-0e02b2c3d479", "id").is_err());
+        // Variant nibble must be 8/9/a/b.
+        assert!(IsUuid::validate("f47ac10b-58cc-4372-c567-0e02b2c3d479", "id").is_err());
+
+        assert!(IsUuid::validate("not-a-uuid", "id").is_err());
+        assert!(IsUuid::validate("f47ac10b58cc4372a5670e02b2c3d479", "id").is_err());
     }
 
     #[test]

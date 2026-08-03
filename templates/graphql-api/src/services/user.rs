@@ -9,6 +9,11 @@ use std::sync::{Arc, RwLock};
 use crate::schema::{CreateUserInput, User, UserRole};
 
 /// User service for managing users
+///
+/// `#[injectable]` makes this resolvable from the DI container, but nothing in
+/// this template resolves it that way: `build_schema` in `main.rs` constructs
+/// it directly and the schema owns it for the process lifetime. The attribute
+/// is here so you can move it into the container without rewriting the type.
 #[injectable]
 #[derive(Clone)]
 pub struct UserService {
@@ -99,7 +104,11 @@ impl UserService {
 
     /// Delete a user
     pub fn delete(&self, id: &ID) -> bool {
-        self.users.write().unwrap().remove(&id.to_string()).is_some()
+        self.users
+            .write()
+            .unwrap()
+            .remove(&id.to_string())
+            .is_some()
     }
 }
 

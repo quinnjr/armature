@@ -14,15 +14,20 @@
 //! ```no_run
 //! use armature_auth::passwordless::*;
 //!
-//! # async fn example() -> Result<(), PasswordlessError> {
-//! // Generate magic link
-//! let token = MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(3600))?;
+//! # async fn example(presented_token: &str) -> Result<(), PasswordlessError> {
+//! // Issue the link and store the record (keyed by identifier) somewhere the
+//! // callback can load it from.
+//! let mut token = MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(3600))?;
 //! let link = format!("https://myapp.com/auth/verify?token={}", token.token);
 //!
 //! // Send link via email...
 //!
-//! // Later, verify the token
-//! if token.verify()? {
+//! // In the callback: check the token the caller actually presented against
+//! // the stored record. `verify_token` does the constant-time comparison as
+//! // well as the expiry/single-use checks — the login decision must never be
+//! // made without comparing the secret.
+//! if token.verify_token(presented_token)? {
+//!     token.mark_used(); // persist this, or the link stays redeemable
 //!     println!("Magic link valid!");
 //! }
 //! # Ok(())
@@ -116,12 +121,19 @@ impl MagicLinkToken {
         })
     }
 
-    /// Verify the token is valid
+    /// Check that this token is still redeemable — **not** that the caller
+    /// presented it.
     ///
     /// Checks:
-    /// - Not expired
     /// - Not already used
-    pub fn verify(&self) -> Result<bool, PasswordlessError> {
+    /// - Not expired
+    ///
+    /// This answers a question about the stored record only. It takes no
+    /// candidate and therefore compares no secret, so on its own it authorises
+    /// nothing: any caller who can name the identifier could log in. To
+    /// authenticate a click on a magic link, look the record up and pass the
+    /// token from the URL to [`Self::verify_token`].
+    pub fn is_usable(&self) -> Result<bool, PasswordlessError> {
         if self.used {
             return Err(PasswordlessError::TokenUsed);
         }
@@ -131,6 +143,56 @@ impl MagicLinkToken {
         }
 
         Ok(true)
+    }
+
+    /// Verify a token presented by a caller against this stored record.
+    ///
+    /// This is the login check: it compares `candidate` against the issued
+    /// token in constant time (so the secret cannot be recovered a byte at a
+    /// time by timing the response) *and* enforces the single-use and expiry
+    /// rules.
+    ///
+    /// Returns `Err(InvalidToken)` when the candidate does not match, and the
+    /// corresponding error when the record is used or expired. On `Ok(true)`
+    /// the caller must persist [`Self::mark_used`] before completing the login,
+    /// otherwise the link stays redeemable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use armature_auth::passwordless::*;
+    ///
+    /// # fn example() -> Result<(), PasswordlessError> {
+    /// let mut token = MagicLinkToken::generate(
+    ///     "user@example.com",
+    ///     std::time::Duration::from_secs(900),
+    /// )?;
+    ///
+    /// // The value that arrived in the callback URL.
+    /// let presented = token.token.clone();
+    ///
+    /// if token.verify_token(&presented)? {
+    ///     token.mark_used();
+    /// }
+    ///
+    /// // Replaying the same link no longer works.
+    /// assert!(token.verify_token(&presented).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn verify_token(&self, candidate: &str) -> Result<bool, PasswordlessError> {
+        // Compare first and unconditionally, so a mismatched candidate is not
+        // distinguishable from a used/expired one by which check ran.
+        let matches =
+            armature_core::crypto::constant_time_eq(candidate.as_bytes(), self.token.as_bytes());
+
+        self.is_usable()?;
+
+        if matches {
+            Ok(true)
+        } else {
+            Err(PasswordlessError::InvalidToken)
+        }
     }
 
     /// Mark token as used
@@ -306,7 +368,48 @@ mod tests {
             MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(3600))
                 .unwrap();
 
-        assert!(token.verify().is_ok());
+        assert!(token.is_usable().is_ok());
+    }
+
+    #[test]
+    fn test_verify_token_requires_the_presented_secret() {
+        // The login check must compare the value the caller presented. A check
+        // that only inspects `used`/`expires_at` authorises anyone who can name
+        // the identifier.
+        let token =
+            MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(3600))
+                .unwrap();
+
+        assert!(token.verify_token(&token.token).unwrap());
+        assert!(matches!(
+            token.verify_token("not-the-token"),
+            Err(PasswordlessError::InvalidToken)
+        ));
+        assert!(matches!(
+            token.verify_token(""),
+            Err(PasswordlessError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn test_verify_token_rejects_used_and_expired() {
+        let mut token =
+            MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(3600))
+                .unwrap();
+        let presented = token.token.clone();
+        token.mark_used();
+        assert!(matches!(
+            token.verify_token(&presented),
+            Err(PasswordlessError::TokenUsed)
+        ));
+
+        let token = MagicLinkToken::generate("user@example.com", std::time::Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(matches!(
+            token.verify_token(&token.token),
+            Err(PasswordlessError::TokenExpired)
+        ));
     }
 
     #[test]
@@ -326,7 +429,10 @@ mod tests {
                 .unwrap();
 
         token.mark_used();
-        assert!(matches!(token.verify(), Err(PasswordlessError::TokenUsed)));
+        assert!(matches!(
+            token.is_usable(),
+            Err(PasswordlessError::TokenUsed)
+        ));
     }
 
     #[test]
@@ -339,7 +445,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(matches!(
-            token.verify(),
+            token.is_usable(),
             Err(PasswordlessError::TokenExpired)
         ));
     }

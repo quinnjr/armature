@@ -14,7 +14,60 @@ pub use fixed_window::FixedWindow;
 pub use sliding_window::SlidingWindowLog;
 pub use token_bucket::TokenBucket;
 
-use std::time::Duration;
+use dashmap::DashMap;
+use std::time::{Duration, Instant};
+
+/// Fraction of the key cap reclaimed by a single eviction pass: `max_keys / 64`.
+///
+/// Evicting exactly one entry per new key means every request past the cap pays
+/// a full scan of the map — the key-rotating client the cap exists to stop turns
+/// a memory-exhaustion attempt into a CPU-exhaustion one. Reclaiming a batch
+/// amortises that scan over the next `max_keys / 64` insertions, so the
+/// per-request cost is bounded by a small constant while the map stays capped.
+pub(crate) const EVICTION_BATCH_DIVISOR: usize = 64;
+
+/// Number of entries a single eviction pass reclaims for a given key cap.
+pub(crate) fn eviction_batch_size(max_keys: usize) -> usize {
+    (max_keys / EVICTION_BATCH_DIVISOR).max(1)
+}
+
+/// Evict the `batch` least-recently-active entries from `map`.
+///
+/// `last_active` reports an entry's most recent activity; entries for which it
+/// yields `None` (an empty request log, say) carry no usable age and are evicted
+/// first, since they hold state nothing is relying on.
+///
+/// The candidate list is materialised before any removal so no shard lock is
+/// held across a mutation, and the batch boundary is found with a linear
+/// selection rather than a full sort.
+pub(crate) fn evict_oldest_batch<V>(
+    map: &DashMap<String, V>,
+    batch: usize,
+    last_active: impl Fn(&V) -> Option<Instant>,
+) {
+    if batch == 0 {
+        return;
+    }
+
+    let mut entries: Vec<(String, Option<Instant>)> = map
+        .iter()
+        .map(|e| (e.key().clone(), last_active(e.value())))
+        .collect();
+
+    if entries.is_empty() {
+        return;
+    }
+
+    // `None` sorts before `Some`, so ageless entries lead.
+    let batch = batch.min(entries.len());
+    if batch < entries.len() {
+        entries.select_nth_unstable_by_key(batch - 1, |(_, t)| *t);
+    }
+
+    for (key, _) in entries.into_iter().take(batch) {
+        map.remove(&key);
+    }
+}
 
 /// Rate limiting algorithm configuration
 #[derive(Debug, Clone)]

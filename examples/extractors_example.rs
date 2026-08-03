@@ -64,7 +64,8 @@ struct UserList {
     limit: u32,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("🔧 Armature Request Extractors Example");
     println!("======================================\n");
 
@@ -73,7 +74,7 @@ fn main() {
     demonstrate_path_extraction();
     demonstrate_header_extraction();
     demonstrate_combined_extraction();
-    demonstrate_decorator_syntax();
+    demonstrate_decorator_syntax().await;
 }
 
 fn demonstrate_body_extraction() {
@@ -274,7 +275,7 @@ fn demonstrate_combined_extraction() {
     println!("  • RawBody      - Raw request body bytes");
     println!("  • Form<T>      - URL-encoded form data");
     println!("  • ContentType  - Content-Type header helper");
-    println!("  • Method       - HTTP method helper");
+    println!("  • MethodExtractor - HTTP method helper");
     println!();
     println!("Helper macros:");
     println!("  • body!(req, Type)           - Extract JSON body");
@@ -283,35 +284,148 @@ fn demonstrate_combined_extraction() {
     println!("  • header!(req, \"name\")       - Extract header");
 }
 
-fn demonstrate_decorator_syntax() {
+/// A real, compiled controller using parameter decorators.
+///
+/// This block is not illustrative text: `#[routes]` expands it into registered
+/// handlers, and `demonstrate_decorator_syntax` below dispatches real requests
+/// through a real `Router` and prints what came back. If the decorator codegen
+/// broke, this example would stop compiling.
+#[controller("/users")]
+#[derive(Default, Clone)]
+struct DecoratorUserController;
+
+#[routes]
+impl DecoratorUserController {
+    /// `#[query]` fills a whole struct from the query string.
+    #[get("/list")]
+    async fn list(#[query] filters: Query<UserListQuery>) -> Result<HttpResponse, Error> {
+        let page = filters.page.unwrap_or(1);
+        let limit = filters.limit.unwrap_or(10);
+        HttpResponse::ok().with_json(&UserList {
+            users: vec![User {
+                id: 1,
+                name: "Alice".to_string(),
+                email: "alice@example.com".to_string(),
+                role: "admin".to_string(),
+            }],
+            total: 1,
+            page,
+            limit,
+        })
+    }
+
+    /// `#[param("id")]` extracts and parses a single path parameter.
+    #[get("/by-id/:id")]
+    async fn get_one(#[param("id")] user_id: Path<u32>) -> Result<HttpResponse, Error> {
+        HttpResponse::ok().with_json(&User {
+            id: *user_id,
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+            role: "admin".to_string(),
+        })
+    }
+
+    /// Decorators compose: a JSON body and a header in one signature.
+    #[post("/create")]
+    async fn create(
+        #[body] body: Body<CreateUserDto>,
+        #[header("authorization")] auth: Header,
+    ) -> Result<HttpResponse, Error> {
+        HttpResponse::created().with_json(&serde_json::json!({
+            "name": body.name,
+            "email": body.email,
+            "authorized_by": auth.value(),
+        }))
+    }
+
+    /// Field-level extraction: individual query params, no DTO struct needed.
+    ///
+    /// `#[query("name")]` parses the value into the parameter's type via
+    /// `FromStr` and is **required** - a missing parameter is a 400. Use
+    /// `#[query]` with a struct of `Option<_>` fields (as `list` above does)
+    /// when a parameter may be absent.
+    #[get("/search/run")]
+    async fn search(
+        #[query("q")] term: String,
+        #[query("page")] page: u32,
+    ) -> Result<HttpResponse, Error> {
+        Ok(HttpResponse::ok()
+            .with_body(format!("searching for {term:?} on page {page}").into_bytes()))
+    }
+}
+
+#[module(controllers: [DecoratorUserController])]
+#[derive(Default)]
+struct DecoratorModule;
+
+/// Build a router from the macro-generated controller registration.
+fn decorator_router() -> Router {
+    let container = Container::new();
+    let mut router = Router::new();
+    let module = DecoratorModule;
+    for reg in module.controllers() {
+        let instance = (reg.factory)(&container).expect("controller factory");
+        (reg.route_registrar)(&container, &mut router, instance).expect("route registrar");
+    }
+    router
+}
+
+async fn demonstrate_decorator_syntax() {
     println!("6️⃣  NestJS-Style Decorator Syntax");
     println!("----------------------------------");
-    println!("   Armature supports NestJS-style parameter decorators!");
+    println!("   Parameters carry the extractor; the handler receives values.");
+    println!("   Every response below came out of a real Router dispatch.");
     println!();
-    println!("   Instead of manually extracting parameters:");
-    println!();
-    println!("     #[post(\"/users\")]");
-    println!("     async fn create_user(req: HttpRequest) -> Result<HttpResponse, Error> {{");
-    println!("         let body: Body<CreateUser> = Body::from_request(&req)?;");
-    println!("         let auth = header!(req, \"Authorization\")?;");
-    println!("         // ...");
-    println!("     }}");
-    println!();
-    println!("   You can use decorator attributes directly on parameters:");
-    println!();
-    println!("     #[post(\"/users\")]");
-    println!("     async fn create_user(");
-    println!("         #[body] body: Body<CreateUser>,");
-    println!("         #[header(\"Authorization\")] auth: Header,");
-    println!("     ) -> Result<HttpResponse, Error> {{");
-    println!("         // body and auth are automatically extracted!");
-    println!("         // ...");
-    println!("     }}");
+
+    let router = decorator_router();
+
+    // #[query] - whole-struct extraction
+    let resp = router
+        .route(HttpRequest::new("GET", "/users/list?page=2&limit=5"))
+        .await
+        .expect("GET /users/list must dispatch");
+    println!("   #[query] filters: Query<UserListQuery>");
+    println!("     GET /users/list?page=2&limit=5 -> {}", show(&resp));
+
+    // #[param("id")] - single path parameter, parsed to u32
+    let resp = router
+        .route(HttpRequest::new("GET", "/users/by-id/42"))
+        .await
+        .expect("GET /users/by-id/42 must dispatch");
+    println!("   #[param(\"id\")] user_id: Path<u32>");
+    println!("     GET /users/by-id/42 -> {}", show(&resp));
+
+    // #[body] + #[header] together
+    let mut req = HttpRequest::new("POST", "/users/create");
+    req.headers.insert("content-type", "application/json");
+    req.headers.insert("authorization", "Bearer token-123");
+    req.body = Bytes::from_static(br#"{"name":"Bob","email":"bob@example.com"}"#);
+    let resp = router
+        .route(req)
+        .await
+        .expect("POST /users/create must dispatch");
+    println!("   #[body] body: Body<CreateUserDto>, #[header(\"authorization\")] auth: Header");
+    println!("     POST /users/create -> {}", show(&resp));
+
+    // #[query("q")] - field-level extraction, no DTO
+    let resp = router
+        .route(HttpRequest::new(
+            "GET",
+            "/users/search/run?q=armature&page=3",
+        ))
+        .await
+        .expect("GET /users/search/run must dispatch");
+    println!("   #[query(\"q\")] term: String, #[query(\"page\")] page: u32");
+    println!(
+        "     GET /users/search/run?q=armature&page=3 -> {}",
+        show(&resp)
+    );
+
     println!();
     println!("   Available decorator attributes:");
     println!("     • #[body]              - Extract entire JSON body");
     println!("     • #[body(\"field\")]     - Extract specific field from body");
-    println!("     • #[query]             - Extract all query parameters struct");
+    println!("     • #[query]             - Extract all query parameters as a struct");
     println!("     • #[query(\"field\")]    - Extract single query parameter");
     println!("     • #[param(\"name\")]     - Extract single path parameter");
     println!("     • #[path(\"name\")]      - Alias for #[param]");
@@ -319,69 +433,13 @@ fn demonstrate_decorator_syntax() {
     println!("     • #[headers]           - Extract all headers");
     println!("     • #[raw_body]          - Extract raw body bytes");
     println!();
-    println!("   ✨ Field-level extraction (NestJS-like):");
-    println!();
-    println!("     // Extract specific fields - no need for a full DTO struct!");
-    println!("     #[post(\"/users\")]");
-    println!("     async fn create_user(");
-    println!("         #[body(\"name\")] name: String,");
-    println!("         #[body(\"email\")] email: String,");
-    println!("         #[body(\"age\")] age: u32,");
-    println!("     ) -> Result<HttpResponse, Error> {{");
-    println!("         println!(\"Creating user: {{}} ({{}})\", name, email);");
-    println!("         // ...");
-    println!("     }}");
-    println!();
-    println!("     // Extract specific query params");
-    println!("     #[get(\"/search\")]");
-    println!("     async fn search(");
-    println!("         #[query(\"q\")] search_term: String,");
-    println!("         #[query(\"page\")] page: Option<u32>,");
-    println!("     ) -> Result<HttpResponse, Error> {{");
-    println!("         // search_term and page are extracted directly!");
-    println!("         // ...");
-    println!("     }}");
-    println!();
-    println!("   Example controller:");
-    println!();
-    println!("     #[controller(\"/users\")]");
-    println!("     struct UserController;");
-    println!();
-    println!("     impl UserController {{");
-    println!("         #[get(\"\")]");
-    println!("         async fn list(");
-    println!("             #[query] filters: Query<UserFilters>,");
-    println!("         ) -> Result<HttpResponse, Error> {{");
-    println!("             // filters.page, filters.limit, etc.");
-    println!("             HttpResponse::ok().with_json(&UserList {{ ... }})");
-    println!("         }}");
-    println!();
-    println!("         #[post(\"\")]");
-    println!("         async fn create(");
-    println!("             #[body] body: Body<CreateUserDto>,");
-    println!("             #[header(\"Authorization\")] auth: Header,");
-    println!("         ) -> Result<HttpResponse, Error> {{");
-    println!("             // body.name, body.email, auth.value()");
-    println!("             HttpResponse::created().with_json(&User {{ ... }})");
-    println!("         }}");
-    println!();
-    println!("         #[get(\"/:id\")]");
-    println!("         async fn get_one(");
-    println!("             #[param(\"id\")] user_id: Path<u32>,");
-    println!("         ) -> Result<HttpResponse, Error> {{");
-    println!("             // *user_id = 123");
-    println!("             HttpResponse::ok().with_json(&User {{ ... }})");
-    println!("         }}");
-    println!();
-    println!("         #[put(\"/:id\")]");
-    println!("         async fn update(");
-    println!("             #[param(\"id\")] user_id: Path<u32>,");
-    println!("             #[body] update: Body<UpdateUserDto>,");
-    println!("             #[query] options: Query<UpdateOptions>,");
-    println!("         ) -> Result<HttpResponse, Error> {{");
-    println!("             // All three parameters extracted automatically!");
-    println!("             HttpResponse::ok().with_json(&User {{ ... }})");
-    println!("         }}");
-    println!("     }}");
-    println!();
+}
+
+/// Render a dispatched response as `status body` for the printouts above.
+fn show(resp: &HttpResponse) -> String {
+    format!(
+        "{} {}",
+        resp.status,
+        String::from_utf8_lossy(resp.body_ref())
+    )
 }

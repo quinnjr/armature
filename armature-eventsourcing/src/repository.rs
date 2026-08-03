@@ -8,6 +8,19 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tracing::debug;
 
+/// Serializes an aggregate into the JSON payload stored in a [`Snapshot`].
+///
+/// The [`Aggregate`] trait carries no serde bound, so the ability to snapshot is
+/// captured at construction time by [`AggregateRepository::with_snapshots`], which
+/// *does* require `A: Serialize`, rather than being demanded of every repository.
+/// That is what lets the plain [`AggregateRepository::save`] persist snapshots
+/// instead of silently ignoring a configured frequency.
+type Snapshotter<A> = fn(&A) -> Result<serde_json::Value, AggregateError>;
+
+fn serialize_aggregate<A: Serialize>(aggregate: &A) -> Result<serde_json::Value, AggregateError> {
+    serde_json::to_value(aggregate).map_err(|e| AggregateError::SerializationError(e.to_string()))
+}
+
 /// Aggregate repository
 ///
 /// Provides load/save operations for aggregates with event sourcing.
@@ -18,6 +31,7 @@ where
 {
     store: Arc<S>,
     snapshot_frequency: Option<u64>,
+    snapshotter: Option<Snapshotter<A>>,
     _phantom: PhantomData<A>,
 }
 
@@ -27,19 +41,14 @@ where
     S: EventStore,
 {
     /// Create new repository
+    ///
+    /// Snapshotting is disabled; use [`AggregateRepository::with_snapshots`] to
+    /// enable it.
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
             snapshot_frequency: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Create repository with snapshotting
-    pub fn with_snapshots(store: Arc<S>, frequency: u64) -> Self {
-        Self {
-            store,
-            snapshot_frequency: Some(frequency),
+            snapshotter: None,
             _phantom: PhantomData,
         }
     }
@@ -60,12 +69,30 @@ where
     }
 
     /// Save aggregate
+    ///
+    /// Relies on the [`Aggregate::version`] invariant: the version advances by
+    /// exactly one per applied event. A snapshot is persisted whenever the
+    /// resulting version is a multiple of the frequency configured via
+    /// [`AggregateRepository::with_snapshots`].
     pub async fn save(&self, aggregate: &mut A) -> Result<(), AggregateError> {
         let events = aggregate.uncommitted_events();
 
         if events.is_empty() {
             return Ok(());
         }
+
+        // The staged events have already been applied, so the version must have
+        // advanced at least once per event. An aggregate whose `apply_event`
+        // forgets to bump the version would otherwise compute a nonsense base
+        // version below and corrupt the optimistic-concurrency check silently.
+        debug_assert!(
+            aggregate.version() >= events.len() as u64,
+            "Aggregate::version() must advance by exactly one per applied event; \
+             {} has version {} with {} uncommitted event(s)",
+            aggregate.aggregate_id(),
+            aggregate.version(),
+            events.len()
+        );
 
         // The store's optimistic-concurrency check compares `expected_version`
         // against the number of events already persisted. `aggregate.version()`
@@ -84,47 +111,74 @@ where
 
         // Check if we should create a snapshot
         if let Some(frequency) = self.snapshot_frequency
+            && frequency > 0
             && aggregate.version().is_multiple_of(frequency)
         {
-            // A snapshot store + frequency are configured, so the caller clearly
-            // expects snapshots to be persisted here. `create_snapshot` on this
-            // generic (non-serde-bounded) path is a deliberate no-op (see its
-            // doc comment), so make the footgun visible instead of silently
-            // doing nothing: `save_with_snapshot` is required for real
-            // snapshot persistence.
-            debug!(
-                aggregate_id = aggregate.aggregate_id(),
-                version = aggregate.version(),
-                "snapshot_frequency configured but base save() does not persist \
-                 snapshots; use AggregateRepository::save_with_snapshot instead"
-            );
             self.create_snapshot(aggregate).await?;
         }
 
         Ok(())
     }
 
-    /// Create snapshot for aggregate
+    /// Persist a snapshot of the aggregate's current state.
     ///
-    /// Note: the generic path cannot serialize an arbitrary `A` (the [`Aggregate`]
-    /// trait has no serde bound), so this remains a no-op. Aggregates that also
-    /// implement [`serde::Serialize`] + [`serde::de::DeserializeOwned`] get real
-    /// snapshot persistence via [`AggregateRepository::save_snapshot`] and
-    /// [`AggregateRepository::save_with_snapshot`] in the serde-bounded impl below.
-    async fn create_snapshot(&self, _aggregate: &A) -> Result<(), AggregateError> {
-        // Snapshot creation requires custom serialization logic per aggregate type.
-        // Users should implement their own snapshot creation if needed.
+    /// A repository built with [`AggregateRepository::new`] has no snapshotter and
+    /// this is a no-op; one built with [`AggregateRepository::with_snapshots`]
+    /// always has one, so a configured frequency can never be silently ignored.
+    async fn create_snapshot(&self, aggregate: &A) -> Result<(), AggregateError> {
+        let Some(snapshotter) = self.snapshotter else {
+            return Ok(());
+        };
+
+        let state = snapshotter(aggregate)?;
+        let snapshot = Snapshot::new(
+            aggregate.aggregate_id().to_string(),
+            A::aggregate_type().to_string(),
+            aggregate.version(),
+            state,
+        );
+
+        self.store.save_snapshot(&snapshot).await?;
+
+        debug!(
+            aggregate_id = aggregate.aggregate_id(),
+            version = aggregate.version(),
+            "persisted aggregate snapshot"
+        );
+
         Ok(())
     }
 }
 
-/// Snapshot-aware operations for aggregates that are (de)serializable.
+impl<A, S> AggregateRepository<A, S>
+where
+    A: Aggregate + Serialize,
+    S: EventStore,
+{
+    /// Create repository with snapshotting every `frequency` versions.
+    ///
+    /// Requires `A: Serialize` so the repository can actually take the snapshots
+    /// it was configured for: [`AggregateRepository::save`] persists one whenever
+    /// the aggregate's version is a multiple of `frequency`. A `frequency` of 0
+    /// disables snapshotting.
+    pub fn with_snapshots(store: Arc<S>, frequency: u64) -> Self {
+        Self {
+            store,
+            snapshot_frequency: Some(frequency),
+            snapshotter: Some(serialize_aggregate::<A>),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Snapshot-aware *reads* and explicit snapshot writes, for aggregates that are
+/// (de)serializable.
 ///
-/// These are fully additive: they layer snapshot support on top of the base
-/// [`AggregateRepository`] without changing the behavior of [`load`] or [`save`].
-/// The extra `Serialize + DeserializeOwned` bounds are applied only to this impl
-/// block, so aggregates that do not implement serde still compile and work with
-/// the base API unchanged.
+/// Rehydrating from a snapshot needs `DeserializeOwned`, which the base repository
+/// cannot demand of every aggregate, so those operations live here. Periodic
+/// snapshot *writing* is not gated on this block — it is configured up front by
+/// [`AggregateRepository::with_snapshots`] and performed by [`load`]'s counterpart
+/// [`save`].
 ///
 /// [`load`]: AggregateRepository::load
 /// [`save`]: AggregateRepository::save
@@ -181,38 +235,11 @@ where
         Ok(())
     }
 
-    /// Save like [`AggregateRepository::save`], additionally persisting a real
-    /// snapshot every `snapshot_frequency` events (when configured via
-    /// [`AggregateRepository::with_snapshots`]).
-    ///
-    /// This is the serde-enabled counterpart to the base `save`, whose generic
-    /// `create_snapshot` is necessarily a no-op.
+    /// Alias for [`AggregateRepository::save`], kept so existing callers keep
+    /// working. `save` itself now honours the configured snapshot frequency, so
+    /// there is no longer any behavioural difference between the two.
     pub async fn save_with_snapshot(&self, aggregate: &mut A) -> Result<(), AggregateError> {
-        let events = aggregate.uncommitted_events();
-
-        if events.is_empty() {
-            return Ok(());
-        }
-
-        // See `save` above: the store compares `expected_version` against the
-        // number of already-persisted events, so we must pass the base version
-        // (before the staged events were applied), not `aggregate.version()`.
-        let base_version = aggregate.version().saturating_sub(events.len() as u64);
-
-        self.store
-            .save_events(aggregate.aggregate_id(), events, Some(base_version))
-            .await?;
-
-        aggregate.mark_events_committed();
-
-        if let Some(frequency) = self.snapshot_frequency
-            && frequency > 0
-            && aggregate.version().is_multiple_of(frequency)
-        {
-            self.save_snapshot(aggregate).await?;
-        }
-
-        Ok(())
+        self.save(aggregate).await
     }
 }
 
@@ -225,6 +252,7 @@ where
         Self {
             store: self.store.clone(),
             snapshot_frequency: self.snapshot_frequency,
+            snapshotter: self.snapshotter,
             _phantom: PhantomData,
         }
     }
@@ -265,6 +293,9 @@ mod tests {
         }
 
         fn apply_event(&mut self, _event: &DomainEvent) -> Result<(), AggregateError> {
+            // The version must advance exactly once per applied event; see the
+            // invariant documented on `Aggregate::version`.
+            self.root.increment_version();
             Ok(())
         }
 
@@ -358,12 +389,14 @@ mod tests {
         let repo = AggregateRepository::<TestAggregate, _>::new(store);
 
         let mut aggregate = TestAggregate::new_instance("test-1".to_string());
-        aggregate.root.add_event(DomainEvent::new(
+        let event = DomainEvent::new(
             "test_event",
             "test-1",
             "TestAggregate",
             serde_json::json!({}),
-        ));
+        );
+        aggregate.apply_event(&event).unwrap();
+        aggregate.root.add_event(event);
 
         repo.save(&mut aggregate).await.unwrap();
         assert_eq!(aggregate.uncommitted_events().len(), 0);
@@ -525,6 +558,39 @@ mod tests {
 
         let restored: CounterAggregate = serde_json::from_value(snapshot.state).unwrap();
         assert_eq!(restored.root.state.count, 20);
+    }
+
+    /// `with_snapshots(n)` must be honoured by plain `save`: a configured
+    /// frequency that silently does nothing is the failure mode this guards.
+    #[tokio::test]
+    async fn with_snapshots_makes_plain_save_persist_snapshots() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let repo = AggregateRepository::<CounterAggregate, _>::with_snapshots(store.clone(), 3);
+
+        let mut aggregate = repo.load("c3").await.unwrap();
+
+        for (index, amount) in [10u64, 20, 30].into_iter().enumerate() {
+            let event = increment_event("c3", amount);
+            aggregate.apply_event(&event).unwrap();
+            aggregate.root.add_event(event);
+            repo.save(&mut aggregate).await.unwrap();
+
+            // Only the third save reaches version 3, the configured frequency.
+            let snapshot = store.load_snapshot("c3").await.unwrap();
+            assert_eq!(
+                snapshot.is_some(),
+                index == 2,
+                "snapshot presence after save #{} should follow the frequency",
+                index + 1
+            );
+        }
+
+        let snapshot = store.load_snapshot("c3").await.unwrap().unwrap();
+        assert_eq!(snapshot.version, 3);
+        assert_eq!(snapshot.aggregate_type, "CounterAggregate");
+
+        let restored: CounterAggregate = serde_json::from_value(snapshot.state).unwrap();
+        assert_eq!(restored.root.state.count, 60);
     }
 
     #[tokio::test]

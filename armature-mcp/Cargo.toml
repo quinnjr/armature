@@ -33,6 +33,9 @@ async-trait = "0.1"
 # Error handling
 thiserror = "2.0"
 
+# Diagnostics for malformed compile-time registrations (see `McpToolEntry::to_definition`)
+tracing = "0.1"
+
 # Compile-time collection of MCP tools
 inventory = "0.3"
 

@@ -88,18 +88,15 @@ impl SlidingWindowLog {
         self
     }
 
-    /// Evict the entry whose most recent request is oldest, to make room for a
-    /// new key.
+    /// Reclaim a batch of the entries whose most recent request is oldest, to
+    /// make room for new keys. See [`super::evict_oldest_batch`] for why this
+    /// is batched.
     fn evict_oldest(&self) {
-        if let Some(oldest) = self
-            .logs
-            .iter()
-            .filter_map(|e| e.value().back().map(|last| (e.key().clone(), *last)))
-            .min_by_key(|(_, last)| *last)
-            .map(|(k, _)| k)
-        {
-            self.logs.remove(&oldest);
-        }
+        super::evict_oldest_batch(
+            &self.logs,
+            super::eviction_batch_size(self.max_keys),
+            |log| log.back().copied(),
+        );
     }
 
     /// Clean up old timestamps and count current requests

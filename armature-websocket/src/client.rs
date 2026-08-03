@@ -158,7 +158,16 @@ impl WebSocketClient {
     ) {
         while let Some(message) = rx.recv().await {
             let is_close = message.is_close();
-            let raw_message: TungsteniteMessage = message.into();
+            // See the matching note in `connection.rs`: a text message whose
+            // payload is not UTF-8 is unsendable, so drop it rather than
+            // silently corrupting it.
+            let raw_message: TungsteniteMessage = match message.try_into() {
+                Ok(raw) => raw,
+                Err(e) => {
+                    tracing::error!(error = %e, "Dropping unsendable WebSocket message");
+                    continue;
+                }
+            };
 
             if write.send(raw_message).await.is_err() {
                 break;

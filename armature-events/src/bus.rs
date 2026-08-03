@@ -1,6 +1,6 @@
 //! Event Bus implementation
 
-use crate::event::{DynEventHandler, Event, EventHandlerError};
+use crate::event::{DynEventHandler, Event, EventHandler, EventHandlerError, TypedEventHandler};
 use dashmap::DashMap;
 use std::any::TypeId;
 use std::sync::Arc;
@@ -55,6 +55,10 @@ impl EventBus {
 
     /// Subscribe a handler to an event type
     ///
+    /// `H` must implement [`EventHandler<E>`], so `E` can only ever be the event
+    /// type the handler actually handles: a mis-stated turbofish is a compile
+    /// error rather than a handler that is registered but never invoked.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -64,10 +68,10 @@ impl EventBus {
     pub fn subscribe<E, H>(&self, handler: H)
     where
         E: Event + Clone + 'static,
-        H: DynEventHandler + 'static,
+        H: EventHandler<E> + Clone + 'static,
     {
         let type_id = TypeId::of::<E>();
-        let handler = Arc::new(handler);
+        let handler: Arc<dyn DynEventHandler> = Arc::new(TypedEventHandler::<E, H>::new(handler));
 
         self.handlers.entry(type_id).or_default().push(handler);
 
@@ -80,13 +84,19 @@ impl EventBus {
     ///
     /// All registered handlers for this event type will be invoked.
     ///
+    /// Returns a [`PublishReport`] counting how many handlers were invoked and how
+    /// many failed. Under the default `continue_on_error: true` a handler failure
+    /// does not turn into an `Err`, so the report is the only way for a caller to
+    /// distinguish "every handler ran" from "a handler blew up and was logged".
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let bus = EventBus::new();
-    /// bus.publish(MyEvent::new("data")).await?;
+    /// let report = bus.publish(MyEvent::new("data")).await?;
+    /// assert!(report.all_succeeded());
     /// ```
-    pub async fn publish<E: Event>(&self, event: E) -> Result<(), EventBusError> {
+    pub async fn publish<E: Event>(&self, event: E) -> Result<PublishReport, EventBusError> {
         let type_id = TypeId::of::<E>();
 
         if self.config.enable_logging {
@@ -104,12 +114,13 @@ impl EventBus {
                 if self.config.enable_logging {
                     warn!("No handlers registered for event: {}", event.event_name());
                 }
-                return Ok(());
+                return Ok(PublishReport::default());
             }
         };
 
         let event: Arc<dyn Event> = Arc::new(event);
         let mut errors = Vec::new();
+        let mut report = PublishReport::default();
 
         // Handle events asynchronously or synchronously
         if self.config.async_handling && self.config.continue_on_error {
@@ -126,16 +137,19 @@ impl EventBus {
 
             // Wait for all handlers to complete
             for task in tasks {
+                report.handlers_invoked += 1;
                 match task.await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        // continue_on_error is true here, so this failure never affects
-                        // the final outcome; the handler already logged via `error!`
-                        // above, so there is nothing to accumulate.
+                        // continue_on_error is true here, so this failure never turns
+                        // into an `Err`; it is surfaced through the returned report so
+                        // the caller can still tell that a handler did not succeed.
                         error!("Handler failed: {}", e);
+                        report.handlers_failed += 1;
                     }
                     Err(e) => {
                         error!("Handler task panicked: {}", e);
+                        report.handlers_failed += 1;
                     }
                 }
             }
@@ -149,15 +163,18 @@ impl EventBus {
                 let handler = handler.clone();
                 let event = event.clone();
                 let task = tokio::spawn(async move { handler.handle_dyn(event.as_ref()).await });
+                report.handlers_invoked += 1;
                 match task.await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         error!("Handler failed: {}", e);
+                        report.handlers_failed += 1;
                         errors.push(e);
                         break;
                     }
                     Err(e) => {
                         error!("Handler task panicked: {}", e);
+                        report.handlers_failed += 1;
                         errors.push(EventHandlerError::HandlerFailed(e.to_string()));
                         break;
                     }
@@ -166,10 +183,12 @@ impl EventBus {
         } else {
             // Handle events synchronously
             for handler in handlers.iter() {
+                report.handlers_invoked += 1;
                 match handler.handle_dyn(event.as_ref()).await {
                     Ok(()) => {}
                     Err(e) => {
                         error!("Handler failed: {}", e);
+                        report.handlers_failed += 1;
                         errors.push(e);
                         if !self.config.continue_on_error {
                             break;
@@ -184,10 +203,15 @@ impl EventBus {
         }
 
         if self.config.enable_logging {
-            debug!("Event published successfully: {}", event.event_name());
+            debug!(
+                "Event published: {} ({} handler(s), {} failed)",
+                event.event_name(),
+                report.handlers_invoked,
+                report.handlers_failed
+            );
         }
 
-        Ok(())
+        Ok(report)
     }
 
     /// Unsubscribe all handlers for an event type
@@ -218,6 +242,27 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Outcome of a single [`EventBus::publish`] call.
+///
+/// With `continue_on_error: true` (the default) handler failures are logged and
+/// swallowed, so `publish` returns `Ok`. This report is what makes those failures
+/// observable to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PublishReport {
+    /// Number of handlers that were invoked for the event.
+    pub handlers_invoked: usize,
+
+    /// Number of invoked handlers that returned an error or panicked.
+    pub handlers_failed: usize,
+}
+
+impl PublishReport {
+    /// True when every invoked handler completed successfully.
+    pub fn all_succeeded(&self) -> bool {
+        self.handlers_failed == 0
     }
 }
 
@@ -353,7 +398,7 @@ mod tests {
         let handler = TestHandler::new();
         let handler_clone = handler.clone();
 
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(handler));
+        bus.subscribe::<TestEvent, _>(handler);
 
         let event = TestEvent::new("Hello".to_string());
         bus.publish(event).await.unwrap();
@@ -370,8 +415,8 @@ mod tests {
         let h1_clone = handler1.clone();
         let h2_clone = handler2.clone();
 
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(handler1));
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(handler2));
+        bus.subscribe::<TestEvent, _>(handler1);
+        bus.subscribe::<TestEvent, _>(handler2);
 
         let event = TestEvent::new("Hello".to_string());
         bus.publish(event).await.unwrap();
@@ -417,10 +462,8 @@ mod tests {
         let second_handler = TestHandler::new();
         let second_handler_clone = second_handler.clone();
 
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(FailingHandler::new(
-            failing_counter.clone(),
-        )));
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(second_handler));
+        bus.subscribe::<TestEvent, _>(FailingHandler::new(failing_counter.clone()));
+        bus.subscribe::<TestEvent, _>(second_handler);
 
         let event = TestEvent::new("Hello".to_string());
         let result = bus.publish(event).await;
@@ -442,10 +485,43 @@ mod tests {
         let bus = EventBus::new();
         assert_eq!(bus.handler_count::<TestEvent>(), 0);
 
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(TestHandler::new()));
+        bus.subscribe::<TestEvent, _>(TestHandler::new());
         assert_eq!(bus.handler_count::<TestEvent>(), 1);
 
-        bus.subscribe::<TestEvent, _>(crate::event::TypedEventHandler::new(TestHandler::new()));
+        bus.subscribe::<TestEvent, _>(TestHandler::new());
         assert_eq!(bus.handler_count::<TestEvent>(), 2);
+    }
+
+    /// Under the default `continue_on_error: true`, a failing handler is logged and
+    /// `publish` still returns `Ok`. The returned report is what lets a caller tell
+    /// "every handler ran" apart from "one blew up and I ignored it".
+    #[tokio::test]
+    async fn test_publish_report_counts_failed_handlers() {
+        let bus = EventBusBuilder::new().enable_logging(false).build();
+
+        bus.subscribe::<TestEvent, _>(FailingHandler::new(Arc::new(AtomicU32::new(0))));
+        bus.subscribe::<TestEvent, _>(TestHandler::new());
+
+        let report = bus
+            .publish(TestEvent::new("Hello".to_string()))
+            .await
+            .expect("continue_on_error(true) swallows the failure");
+
+        assert_eq!(report.handlers_invoked, 2);
+        assert_eq!(report.handlers_failed, 1);
+        assert!(!report.all_succeeded());
+    }
+
+    #[tokio::test]
+    async fn test_publish_report_is_empty_without_handlers() {
+        let bus = EventBusBuilder::new().enable_logging(false).build();
+
+        let report = bus
+            .publish(TestEvent::new("Hello".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(report, PublishReport::default());
+        assert!(report.all_succeeded());
     }
 }

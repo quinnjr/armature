@@ -1,6 +1,22 @@
-//! Memory allocation benchmarks for detecting potential memory leaks
+//! Allocation-pattern timing benchmarks.
 //!
-//! These benchmarks measure allocation patterns and help identify memory issues.
+//! # These do not detect leaks
+//!
+//! There is no allocator wrapper, no `dhat`, and no byte counter anywhere in
+//! this file: every number here is criterion wall-clock time. What it shows is
+//! how long a given allocation *shape* takes - small vs large `String`/`Vec`,
+//! `HashMap` growth and rehash, `Rc`/`Arc`/`Box` construction, pooled vs fresh
+//! buffers, bounded vs unbounded cache growth, drop cost - which is useful for
+//! choosing between shapes, and says nothing about whether memory is reclaimed.
+//! A run with a genuine leak in it looks exactly like a run without one.
+//!
+//! To actually measure bytes, wire in a counting `GlobalAlloc` or `dhat`;
+//! `examples/memory_profile_server.rs` shows the dhat pattern against a live
+//! server.
+//!
+//! ```bash
+//! cargo bench --bench memory_benchmarks
+//! ```
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use crossbeam::queue::ArrayQueue;
@@ -429,8 +445,13 @@ fn bench_object_pool(c: &mut Criterion) {
 // Leak Detection Pattern Benchmarks
 // ============================================================================
 
-fn bench_leak_patterns(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memory/leak_patterns");
+/// Bounded vs unbounded cache growth, timed.
+///
+/// Named for the *shape* being timed, not for leak detection: an unbounded
+/// cache is a leak-shaped pattern, but this measures how long filling one
+/// takes, not how much memory survives.
+fn bench_cache_growth_patterns(c: &mut Criterion) {
+    let mut group = c.benchmark_group("memory/cache_growth_patterns");
 
     // Pattern: Growing cache without bounds
     group.bench_function("unbounded_cache_growth", |b| {
@@ -571,7 +592,7 @@ criterion_group!(
     bench_smart_pointer_allocations,
     bench_request_response_allocations,
     bench_object_pool,
-    bench_leak_patterns,
+    bench_cache_growth_patterns,
     bench_allocation_sizes,
     bench_drop_timing,
 );

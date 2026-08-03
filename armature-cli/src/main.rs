@@ -8,13 +8,10 @@
 //! - `armature new <name>` - Create a new Armature project
 //! - `armature generate <type> <name>` - Generate code (controller, module, etc.)
 //! - `armature dev` - Run development server with file watching
-//! - `armature serve` - Run production server
 //! - `armature build` - Build for production
 //! - `armature routes` - List all routes in the application
 //! - `armature config` - Validate configuration files
 //! - `armature doctor` - Check system requirements and dependencies
-//! - `armature upgrade` - Check for and install CLI updates
-//! - `armature deploy` - Deploy to cloud providers
 //! - `armature repl` - Interactive Rust REPL
 //! - `armature info` - Show project information
 //! - `armature completions` - Generate shell completions
@@ -31,7 +28,6 @@ mod commands;
 mod error;
 mod generators;
 mod templates;
-mod watcher;
 
 use commands::{
     build, config, dev, external, generate, info, mock, new, openapi, repl, routes, run,
@@ -47,7 +43,7 @@ use error::{CliError, CliResult};
 #[command(long_about = None)]
 #[command(propagate_version = true)]
 #[command(after_help = format!(
-    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature deploy --provider aws\n\n{}\n  {} https://github.com/quinnjr/armature",
+    "{}\n  {} armature new my-api\n  {} armature dev\n  {} armature g controller users --crud\n  {} armature routes\n  {} armature mock --spec openapi.yaml\n\n{}\n  {} https://github.com/quinnjr/armature",
     "Examples:".bright_cyan().bold(),
     "$".dimmed(),
     "$".dimmed(),
@@ -91,8 +87,8 @@ enum Commands {
     #[command(alias = "d")]
     Dev(DevArgs),
 
-    /// Run production server
-    #[command(alias = "s", visible_alias = "start")]
+    /// Run production server (not implemented yet — hidden until it works)
+    #[command(alias = "s", alias = "start", hide = true)]
     Serve(ServeArgs),
 
     /// Build the project for production
@@ -111,11 +107,12 @@ enum Commands {
     #[command(visible_alias = "check")]
     Doctor,
 
-    /// Check for and install CLI updates
-    #[command(alias = "up")]
+    /// Check for and install CLI updates (not implemented yet — hidden until it works)
+    #[command(alias = "up", hide = true)]
     Upgrade(UpgradeArgs),
 
-    /// Deploy to cloud providers
+    /// Deploy to cloud providers (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Deploy(DeployArgs),
 
     /// Interactive Rust REPL with Armature prelude
@@ -140,10 +137,12 @@ enum Commands {
         command: PluginCommands,
     },
 
-    /// Run benchmarks
+    /// Run benchmarks (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Bench(BenchArgs),
 
-    /// Analyze project for potential issues
+    /// Analyze project for potential issues (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Lint(LintArgs),
 
     /// Clean build artifacts
@@ -719,13 +718,15 @@ enum ConfigCommands {
         file: Option<String>,
     },
 
-    /// Show current configuration
+    /// Show current configuration (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Show {
         /// Configuration key to display
         key: Option<String>,
     },
 
-    /// Set a configuration value
+    /// Set a configuration value (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Set {
         /// Configuration key
         key: String,
@@ -734,7 +735,8 @@ enum ConfigCommands {
         value: String,
     },
 
-    /// Initialize configuration files
+    /// Initialize configuration files (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Init {
         /// Environment (development, production, test)
         #[arg(short, long, default_value = "development")]
@@ -968,13 +970,15 @@ enum OpenapiCommands {
     #[command(alias = "gen-client")]
     Client(OpenapiClientArgs),
 
-    /// Validate an OpenAPI spec
+    /// Validate an OpenAPI spec (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Validate {
         /// Path to OpenAPI spec (JSON or YAML)
         spec: String,
     },
 
-    /// Generate OpenAPI spec from Armature routes
+    /// Generate OpenAPI spec from Armature routes (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Generate {
         /// Output file path
         #[arg(short, long, default_value = "openapi.yaml")]
@@ -1041,19 +1045,22 @@ enum PluginCommands {
     /// List installed plugins
     List,
 
-    /// Install a plugin
+    /// Install a plugin (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Install {
         /// Plugin name or URL
         name: String,
     },
 
-    /// Uninstall a plugin
+    /// Uninstall a plugin (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     Uninstall {
         /// Plugin name
         name: String,
     },
 
-    /// Create a new plugin
+    /// Create a new plugin (not implemented yet — hidden until it works)
+    #[command(hide = true)]
     New {
         /// Plugin name
         name: String,
@@ -2226,41 +2233,23 @@ async fn main() {
                             );
                         }
                     }
+                    Ok(())
                 }
                 PluginCommands::Install { .. } => {
-                    return Err(CliError::Unimplemented("plugin install".to_string()));
+                    Err(CliError::Unimplemented("plugin install".to_string()))
                 }
                 PluginCommands::Uninstall { .. } => {
-                    return Err(CliError::Unimplemented("plugin uninstall".to_string()));
+                    Err(CliError::Unimplemented("plugin uninstall".to_string()))
                 }
                 PluginCommands::New { .. } => {
-                    return Err(CliError::Unimplemented("plugin new".to_string()));
+                    Err(CliError::Unimplemented("plugin new".to_string()))
                 }
             }
-            Ok(())
         }
 
-        Commands::Bench(args) => {
-            print_mini_banner();
-            if let Some(pattern) = args.pattern {
-                info(&format!("Running benchmarks matching: {}", pattern.cyan()));
-            } else {
-                info("Running all benchmarks...");
-            }
-            warn("Benchmark command is coming soon!");
-            Ok(())
-        }
+        Commands::Bench(_) => Err(CliError::Unimplemented("bench".to_string())),
 
-        Commands::Lint(args) => {
-            print_mini_banner();
-            if args.fix {
-                info("Linting with auto-fix...");
-            } else {
-                info("Linting project...");
-            }
-            warn("Lint command is coming soon!");
-            Ok(())
-        }
+        Commands::Lint(_) => Err(CliError::Unimplemented("lint".to_string())),
 
         Commands::Clean => {
             print_mini_banner();
@@ -2302,15 +2291,11 @@ async fn main() {
                     };
                     openapi::generate_client(&args.spec, &args.output, language, &options).await
                 }
-                OpenapiCommands::Validate { spec } => {
-                    info(&format!("Validating OpenAPI spec: {}", spec.cyan()));
-                    warn("OpenAPI validation is coming soon!");
-                    Ok(())
+                OpenapiCommands::Validate { .. } => {
+                    Err(CliError::Unimplemented("openapi validate".to_string()))
                 }
-                OpenapiCommands::Generate { output, format: _ } => {
-                    info(&format!("Generating OpenAPI spec to: {}", output.cyan()));
-                    warn("OpenAPI generation from routes is coming soon!");
-                    Ok(())
+                OpenapiCommands::Generate { .. } => {
+                    Err(CliError::Unimplemented("openapi generate".to_string()))
                 }
             }
         }

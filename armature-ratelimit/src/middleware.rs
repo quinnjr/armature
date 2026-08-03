@@ -40,6 +40,38 @@ pub struct RateLimitMiddleware {
     /// [`Self::skip_on_error_count`]. Mirrors
     /// `AuditMiddleware::write_failures` (armature-audit).
     skip_on_error_count: AtomicU64,
+    /// What to do with a request no key could be derived from. See
+    /// [`UnkeyedRequestPolicy`].
+    unkeyed_policy: UnkeyedRequestPolicy,
+    /// Count of requests let through because no rate limit key could be
+    /// extracted, observed by this middleware instance. See
+    /// [`Self::unkeyed_allow_count`].
+    unkeyed_allow_count: AtomicU64,
+}
+
+/// What the middleware does with a request the key extractor cannot key.
+///
+/// The unkeyed case is not exotic: the default [`KeyExtractor::Ip`] needs a
+/// client IP, and `armature_core::HttpRequest` exposes no socket peer address,
+/// so with the default `trusted_proxy_depth` of `0` (no forwarding header
+/// trusted) *every* request is unkeyed. A default-constructed middleware
+/// therefore rate limits nothing — which is defensible as a posture but must be
+/// a choice the deployment makes, and must be visible when it happens rather
+/// than being a silent bypass hidden behind a `warn!`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnkeyedRequestPolicy {
+    /// Let the request through unchecked, counting it in
+    /// [`RateLimitMiddleware::unkeyed_allow_count`].
+    ///
+    /// The default, because the alternative would turn a middleware that was
+    /// merely ineffective into one that rejects all traffic.
+    #[default]
+    Allow,
+    /// Reject the request with the same 429 response an exceeded limit
+    /// produces. Choose this when the key is expected to always be present
+    /// (e.g. an authenticated-only surface keyed on user ID) and its absence
+    /// means a misconfiguration rather than an anonymous caller.
+    Deny,
 }
 
 /// Select the client IP from an `X-Forwarded-For` value using the number of
@@ -91,7 +123,18 @@ impl RateLimitMiddleware {
             bypass_keys: config.bypass_keys,
             trusted_proxy_depth: config.trusted_proxy_depth,
             skip_on_error_count: AtomicU64::new(0),
+            unkeyed_policy: UnkeyedRequestPolicy::default(),
+            unkeyed_allow_count: AtomicU64::new(0),
         }
+    }
+
+    /// Choose what happens to requests no rate limit key can be derived from.
+    ///
+    /// Defaults to [`UnkeyedRequestPolicy::Allow`]. See that type for why the
+    /// unkeyed case is the common one under the default configuration.
+    pub fn with_unkeyed_policy(mut self, policy: UnkeyedRequestPolicy) -> Self {
+        self.unkeyed_policy = policy;
+        self
     }
 
     /// Set the number of trusted reverse proxies in front of the app.
@@ -136,8 +179,32 @@ impl RateLimitMiddleware {
         let key = match self.key_extractor.extract(info) {
             Some(k) => k,
             None => {
-                warn!("Could not extract rate limit key, allowing request");
-                return RateLimitCheckResponse::Allowed { headers: None };
+                return match self.unkeyed_policy {
+                    UnkeyedRequestPolicy::Allow => {
+                        // Counted, not just logged: an unkeyed request is a
+                        // request that was not rate limited at all, and under
+                        // the default configuration that is every request. A
+                        // deployment needs a number it can alarm on to notice
+                        // that its abuse control is inert.
+                        self.unkeyed_allow_count.fetch_add(1, Ordering::Relaxed);
+                        warn!(
+                            extractor = self.key_extractor.description(),
+                            "no rate limit key could be extracted — request allowed through unchecked"
+                        );
+                        RateLimitCheckResponse::Allowed { headers: None }
+                    }
+                    UnkeyedRequestPolicy::Deny => {
+                        warn!(
+                            extractor = self.key_extractor.description(),
+                            "no rate limit key could be extracted — request denied"
+                        );
+                        RateLimitCheckResponse::Limited {
+                            headers: None,
+                            message: self.error_message.clone(),
+                            retry_after: None,
+                        }
+                    }
+                };
             }
         };
 
@@ -263,6 +330,19 @@ impl RateLimitMiddleware {
     pub fn skip_on_error_count(&self) -> u64 {
         self.skip_on_error_count.load(Ordering::Relaxed)
     }
+
+    /// Number of requests this middleware instance let through unchecked
+    /// because no rate limit key could be extracted.
+    ///
+    /// Export this alongside [`Self::skip_on_error_count`] (e.g. as
+    /// `ratelimit_unkeyed_allow_total`). A non-zero and growing value under
+    /// [`UnkeyedRequestPolicy::Allow`] means rate limiting is not being applied
+    /// to that traffic at all — most often because the default
+    /// [`KeyExtractor::Ip`] has no IP to work with (see
+    /// [`Self::with_trusted_proxy_depth`]).
+    pub fn unkeyed_allow_count(&self) -> u64 {
+        self.unkeyed_allow_count.load(Ordering::Relaxed)
+    }
 }
 
 /// Response from rate limit check
@@ -357,15 +437,36 @@ impl armature_core::Middleware for RateLimitMiddleware {
                 })
         };
 
-        let user_id = req.headers.get("x-user-id");
+        // Build the key-extraction input from the few fields that are actually
+        // read. Copying the entire header map into owned `String`s per request
+        // was pure allocation for data no extractor looks at — the default one
+        // reads nothing but the IP.
+        //
+        // The routing path (query string excluded) is what identifies the
+        // endpoint: keying on the raw target would let a caller append a
+        // throwaway query parameter to mint a fresh bucket under `IpAndPath`.
+        let mut info = RequestInfo::new(req.path_only(), req.method_str());
 
-        let headers: Vec<(String, String)> = req
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect();
+        if let Some(ip) = ip {
+            info = info.with_ip(ip);
+        }
 
-        let info = Self::extract_request_info(ip, &req.path, req.method_str(), user_id, &headers);
+        if let Some(uid) = req.headers.get("x-user-id") {
+            info = info.with_user_id(uid);
+        }
+
+        if let Some(name) = self.key_extractor.required_header()
+            && let Some(value) = req.headers.get(name)
+        {
+            info = info.with_header(name, value);
+        }
+
+        for name in ["x-api-key", "authorization"] {
+            if let Some(value) = req.headers.get(name) {
+                info = info.with_api_key(value);
+                break;
+            }
+        }
 
         // Check rate limit
         match self.check(&info).await {
@@ -697,6 +798,113 @@ mod tests {
 
         // Sanity: the selector itself refuses to trust anything at depth 0.
         assert_eq!(forwarded_ip_at_depth("1.2.3.4, 5.6.7.8", 0), None);
+    }
+
+    /// A default-configured middleware has no IP to key on (no peer address is
+    /// exposed and no proxy is trusted), so it rate limits nothing. That is the
+    /// documented default posture — but it must be *counted*, not silent, so an
+    /// operator can tell the control is inert.
+    #[tokio::test]
+    async fn test_default_middleware_unkeyed_requests_are_allowed_and_counted() {
+        use armature_core::Middleware;
+
+        let limiter = Arc::new(
+            RateLimiter::builder()
+                .token_bucket(1, f64::EPSILON)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let middleware = RateLimitMiddleware::new(limiter);
+
+        for expected in 1..=3u64 {
+            let req = armature_core::HttpRequest::new("GET", "/api/test".to_string());
+            let res = middleware
+                .handle(
+                    req,
+                    Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status, 200, "unkeyed requests are allowed by default");
+            assert_eq!(middleware.unkeyed_allow_count(), expected);
+        }
+    }
+
+    /// The unkeyed case is a policy choice: a deployment that expects a key to
+    /// always be present can make its absence a rejection instead of a bypass.
+    #[tokio::test]
+    async fn test_unkeyed_deny_policy_rejects() {
+        use armature_core::Middleware;
+
+        let limiter = Arc::new(
+            RateLimiter::builder()
+                .token_bucket(10, 1.0)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let middleware =
+            RateLimitMiddleware::new(limiter).with_unkeyed_policy(UnkeyedRequestPolicy::Deny);
+
+        let req = armature_core::HttpRequest::new("GET", "/api/test".to_string());
+        let res = middleware
+            .handle(
+                req,
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status, 429);
+        assert_eq!(middleware.unkeyed_allow_count(), 0);
+    }
+
+    /// The header the configured extractor names is still reachable even though
+    /// the middleware no longer copies the whole header map per request.
+    #[tokio::test]
+    async fn test_extractor_header_is_available_from_request() {
+        use armature_core::Middleware;
+
+        let limiter = Arc::new(
+            RateLimiter::builder()
+                .token_bucket(1, f64::EPSILON)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let middleware = RateLimitMiddleware::new(limiter).with_extractor(KeyExtractor::ApiKey {
+            header_name: "X-API-Key".to_string(),
+        });
+
+        let make_req = || {
+            let mut req = armature_core::HttpRequest::new("GET", "/api/test".to_string());
+            req.headers.insert("x-api-key", "sk_live_abc");
+            req
+        };
+
+        let r1 = middleware
+            .handle(
+                make_req(),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status, 200);
+
+        let r2 = middleware
+            .handle(
+                make_req(),
+                Box::new(|_r| Box::pin(async { Ok(armature_core::HttpResponse::ok()) })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status, 429, "the API key must key the bucket");
+        assert_eq!(
+            middleware.unkeyed_allow_count(),
+            0,
+            "the request was keyed, not bypassed"
+        );
     }
 
     /// A store that always errors, used to exercise the fail-open/closed path.

@@ -7,14 +7,27 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
 /// Request binding for Rhai scripts.
+///
+/// Cloning is cheap in the body — it is `Bytes`, so a clone is a refcount bump
+/// — but not in the maps, so build one per request and share it rather than
+/// rebuilding it per guard/middleware hop.
 #[derive(Debug, Clone)]
 pub struct RequestBinding {
     method: String,
     path: String,
     headers: HashMap<String, String>,
-    query: HashMap<String, String>,
+    /// Query pairs in wire order, duplicates included.
+    ///
+    /// A `Vec` rather than a `HashMap` so repeated keys resolve the same way
+    /// they do in Rust: `armature_core::QueryView::get` returns the FIRST value
+    /// for a key, and a map would have made scripts see the LAST — `?tag=a&tag=b`
+    /// reading `"b"` in a script and `"a"` in Rust for the same request.
+    query: Vec<(String, String)>,
     params: HashMap<String, String>,
-    body: Vec<u8>,
+    /// Names of every path param the router captured, including any whose bytes
+    /// are not valid UTF-8 and therefore have no entry in `params`.
+    param_names: Vec<String>,
+    body: Bytes,
 }
 
 impl RequestBinding {
@@ -27,13 +40,16 @@ impl RequestBinding {
             headers.insert(name.to_owned(), value.to_owned());
         }
 
-        let mut query = HashMap::new();
-        for (key, value) in req.query().iter() {
-            query.insert(key.to_owned(), value.to_owned());
-        }
+        let query: Vec<(String, String)> = req
+            .query()
+            .iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
 
         let mut params = HashMap::new();
+        let mut param_names = Vec::new();
         for (key, value) in req.path_params.iter() {
+            param_names.push((*key).to_owned());
             if let Ok(value) = std::str::from_utf8(value) {
                 params.insert((*key).to_owned(), value.to_owned());
             }
@@ -41,11 +57,16 @@ impl RequestBinding {
 
         Self {
             method: req.method_str().to_owned(),
-            path: req.path_str().to_owned(),
+            // The routing path, not the raw request target: a script reading
+            // `request.path` for `/users/42?a=1` gets `/users/42`, matching
+            // what the router matched against. The query is reachable through
+            // `request.query(name)`/`request.query_params`.
+            path: req.path_only().to_owned(),
             headers,
             query,
             params,
-            body: req.body_ref().to_vec(),
+            param_names,
+            body: req.body_bytes(),
         }
     }
 
@@ -80,19 +101,37 @@ impl RequestBinding {
     }
 
     /// Get a query parameter.
+    ///
+    /// For a repeated key this is the FIRST value, matching
+    /// `armature_core::QueryView::get` and `HttpRequest::query_param`. Use
+    /// [`RequestBinding::query_all`] to see every value.
     pub fn query(&mut self, name: &str) -> Dynamic {
         self.query
-            .get(name)
-            .cloned()
-            .map(Dynamic::from)
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| Dynamic::from(v.clone()))
             .unwrap_or(Dynamic::UNIT)
     }
 
+    /// Get every value for a repeated query parameter, in wire order.
+    pub fn query_all(&mut self, name: &str) -> rhai::Array {
+        self.query
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| Dynamic::from(v.clone()))
+            .collect()
+    }
+
     /// Get all query parameters as a map.
+    ///
+    /// A map cannot represent a repeated key, so each key maps to its FIRST
+    /// value — the same value `query(name)` returns. Reach for `query_all` when
+    /// repeats matter.
     pub fn get_query_params(&mut self) -> Map {
         let mut map = Map::new();
         for (k, v) in &self.query {
-            map.insert(k.clone().into(), Dynamic::from(v.clone()));
+            map.entry(k.clone().into())
+                .or_insert_with(|| Dynamic::from(v.clone()));
         }
         map
     }
@@ -105,12 +144,26 @@ impl RequestBinding {
     /// `/users/john%20doe` yields `"john%20doe"`, not `"john doe"`; decode
     /// it in the script yourself (e.g. via a registered helper) if you need
     /// the decoded value.
+    ///
+    /// Returns `()` both when no such param was captured and when the captured
+    /// bytes are not valid UTF-8 (Rhai strings are UTF-8, so there is nothing
+    /// to hand back). [`RequestBinding::has_param`] distinguishes the two: it
+    /// is `true` for a captured-but-undecodable param and `false` for an
+    /// absent one.
     pub fn param(&mut self, name: &str) -> Dynamic {
         self.params
             .get(name)
             .cloned()
             .map(Dynamic::from)
             .unwrap_or(Dynamic::UNIT)
+    }
+
+    /// Whether the router captured a path param called `name`.
+    ///
+    /// True even when `param(name)` returns `()` because the captured bytes
+    /// were not valid UTF-8.
+    pub fn has_param(&mut self, name: &str) -> bool {
+        self.param_names.iter().any(|n| n == name)
     }
 
     /// Get all path parameters as a map.
@@ -123,13 +176,17 @@ impl RequestBinding {
     }
 
     /// Get raw body bytes.
+    ///
+    /// A `rhai::Blob` is a `Vec<u8>`, so this copies; the binding itself holds
+    /// the body as `Bytes` and only pays the copy when a script asks for it.
     pub fn get_body_bytes(&mut self) -> rhai::Blob {
-        self.body.clone()
+        self.body.to_vec()
     }
 
     /// Get body as string.
     pub fn body_text(&mut self) -> Result<String, Box<EvalAltResult>> {
-        String::from_utf8(self.body.to_vec())
+        std::str::from_utf8(&self.body)
+            .map(str::to_owned)
             .map_err(|e| Box::new(EvalAltResult::from(e.to_string())))
     }
 
@@ -347,8 +404,10 @@ pub fn register_armature_api(engine: &mut Engine) {
         .register_fn("header", RequestBinding::header)
         .register_get("headers", RequestBinding::get_headers)
         .register_fn("query", RequestBinding::query)
+        .register_fn("query_all", RequestBinding::query_all)
         .register_get("query_params", RequestBinding::get_query_params)
         .register_fn("param", RequestBinding::param)
+        .register_fn("has_param", RequestBinding::has_param)
         .register_get("params", RequestBinding::get_params)
         .register_get("body_bytes", RequestBinding::get_body_bytes)
         .register_fn("body_text", RequestBinding::body_text)
@@ -518,6 +577,71 @@ mod tests {
         let dynamic = json_to_dynamic(value.clone()).unwrap();
         let back = dynamic_to_json(dynamic).unwrap();
         assert_eq!(value, back);
+    }
+
+    /// Regression: `path` used to be the raw request target, so a script
+    /// reading `request.path` for `/users/42?a=1` saw `/users/42?a=1` while the
+    /// router had matched `/users/42`.
+    #[test]
+    fn test_path_excludes_the_query_string() {
+        let req = HttpRequest::new("GET", "/users/42?a=1&b=2");
+        let mut binding = RequestBinding::from_request(&req);
+        assert_eq!(binding.get_path(), "/users/42");
+    }
+
+    /// Regression: the query was a `HashMap`, so a repeated key was LAST-wins
+    /// in scripts while `QueryView::get` is FIRST-wins in Rust — the same
+    /// request read differently from the two languages.
+    #[test]
+    fn test_repeated_query_key_is_first_wins_like_core() {
+        let req = HttpRequest::new("GET", "/search?tag=a&tag=b");
+        assert_eq!(req.query_param("tag"), Some("a"));
+
+        let mut binding = RequestBinding::from_request(&req);
+        assert_eq!(binding.query("tag").into_string().unwrap(), "a");
+        assert_eq!(
+            binding
+                .get_query_params()
+                .get("tag")
+                .unwrap()
+                .clone()
+                .into_string()
+                .unwrap(),
+            "a"
+        );
+
+        // Every value is still reachable, in wire order.
+        let all: Vec<String> = binding
+            .query_all("tag")
+            .into_iter()
+            .map(|v| v.into_string().unwrap())
+            .collect();
+        assert_eq!(all, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// A missing query param is `()`, and `query_all` is empty rather than an
+    /// error.
+    #[test]
+    fn test_absent_query_param() {
+        let req = HttpRequest::new("GET", "/search?tag=a");
+        let mut binding = RequestBinding::from_request(&req);
+        assert!(binding.query("missing").is_unit());
+        assert!(binding.query_all("missing").is_empty());
+    }
+
+    /// `param` cannot represent a non-UTF-8 capture, so `has_param` is what
+    /// separates "captured but undecodable" from "not captured at all".
+    #[test]
+    fn test_has_param_distinguishes_undecodable_from_absent() {
+        let mut req = HttpRequest::new("GET", "/files/x");
+        req.push_param("name", Bytes::from_static(&[0xff, 0xfe]));
+
+        let mut binding = RequestBinding::from_request(&req);
+        assert!(binding.param("name").is_unit());
+        assert!(binding.has_param("name"));
+
+        assert!(binding.param("nope").is_unit());
+        assert!(!binding.has_param("nope"));
     }
 
     #[test]

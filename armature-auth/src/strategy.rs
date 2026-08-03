@@ -33,13 +33,23 @@ pub trait LocalUserStore<T: AuthUser>: Send + Sync {
 pub struct LocalStrategy<T: AuthUser> {
     store: Option<Arc<dyn LocalUserStore<T>>>,
     hasher: PasswordHasher,
+    /// Hash of a fixed, unusable password, verified against whenever no real
+    /// hash is available. Built on first use because it costs a full KDF run
+    /// and the hasher can still be swapped after construction.
+    dummy_hash: std::sync::OnceLock<String>,
 }
+
+/// Plaintext behind [`LocalStrategy::dummy_hash`]. Its value is irrelevant —
+/// nothing ever compares equal to it on purpose — but it must be a constant so
+/// the hash is computed once and reused.
+const DUMMY_PASSWORD: &str = "armature-local-strategy-dummy-password";
 
 impl<T: AuthUser> LocalStrategy<T> {
     pub fn new() -> Self {
         Self {
             store: None,
             hasher: PasswordHasher::default(),
+            dummy_hash: std::sync::OnceLock::new(),
         }
     }
 
@@ -48,13 +58,33 @@ impl<T: AuthUser> LocalStrategy<T> {
         Self {
             store: Some(store),
             hasher: PasswordHasher::default(),
+            dummy_hash: std::sync::OnceLock::new(),
         }
     }
 
     /// Override the password hasher/verifier (default: [`PasswordHasher::default`]).
     pub fn with_password_hasher(mut self, hasher: PasswordHasher) -> Self {
         self.hasher = hasher;
+        self.dummy_hash = std::sync::OnceLock::new();
         self
+    }
+
+    /// Spend the same KDF work an existing user's login would, then discard the
+    /// result.
+    ///
+    /// Returning as soon as the username misses makes the "no such user" path
+    /// orders of magnitude faster than the "wrong password" path — Argon2 and
+    /// bcrypt are deliberately slow — which turns the login endpoint into an
+    /// account-enumeration oracle measurable over the network. Verifying
+    /// against a fixed dummy hash makes both paths cost the same.
+    fn equalize_timing(&self, password: &str) {
+        let dummy = self
+            .dummy_hash
+            .get_or_init(|| self.hasher.hash(DUMMY_PASSWORD).unwrap_or_default());
+
+        if !dummy.is_empty() {
+            let _ = self.hasher.verify(password, dummy);
+        }
     }
 }
 
@@ -75,12 +105,17 @@ impl<T: AuthUser + 'static> AuthStrategy<T> for LocalStrategy<T> {
                 )
             })?;
 
-        let store = self.store.as_ref().ok_or(AuthError::InvalidCredentials)?;
+        let Some(store) = self.store.as_ref() else {
+            self.equalize_timing(&creds.password);
+            return Err(AuthError::InvalidCredentials);
+        };
 
-        let (user, password_hash) = store
-            .find_by_username(&creds.username)
-            .await?
-            .ok_or(AuthError::InvalidCredentials)?;
+        let Some((user, password_hash)) = store.find_by_username(&creds.username).await? else {
+            // An unknown username must cost what a known one costs; see
+            // `equalize_timing`.
+            self.equalize_timing(&creds.password);
+            return Err(AuthError::InvalidCredentials);
+        };
 
         if self.hasher.verify(&creds.password, &password_hash)? {
             Ok(user)

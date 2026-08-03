@@ -147,10 +147,19 @@ fn bench_map_allocation(c: &mut Criterion) {
 fn bench_request_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("request_create");
 
-    // Standard HttpRequest with typical data
+    // Standard HttpRequest with typical data.
+    //
+    // The query arrives inline in the target, as it does on the serve path.
+    // Calling `push_query_param` twice instead would percent-encode each pair
+    // and rebuild the whole target string per call - work the arena arm's
+    // bump-append `add_query_param` never does, and work no real request pays -
+    // so the two arms would not be measuring the same thing.
     group.bench_function("http_request/typical", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("POST", "/api/v1/users/123".to_string());
+            let mut req = HttpRequest::new(
+                "POST",
+                "/api/v1/users/123?include=profile&fields=name,email",
+            );
             req.headers
                 .insert("Content-Type", "application/json".to_string());
             req.headers
@@ -159,8 +168,9 @@ fn bench_request_creation(c: &mut Criterion) {
             req.headers
                 .insert("User-Agent", "TestClient/1.0".to_string());
             req.push_param("id", "123");
-            req.push_query_param("include", "profile");
-            req.push_query_param("fields", "name,email");
+            // Same observation as the arena arm below, so neither arm is
+            // charged for reading more of the request than the other.
+            let _ = black_box(req.method_str().len());
             black_box(req)
         })
     });
@@ -186,13 +196,14 @@ fn bench_request_creation(c: &mut Criterion) {
     // HttpRequest with many headers
     group.bench_function("http_request/many_headers", |b| {
         b.iter(|| {
-            let mut req = HttpRequest::new("GET", "/api/data".to_string());
+            let mut req = HttpRequest::new("GET", "/api/data");
             for i in 0..20 {
                 req.headers.insert(
                     format!("X-Custom-Header-{}", i),
                     format!("value-{}-with-some-content", i),
                 );
             }
+            let _ = black_box(req.headers.len());
             black_box(req)
         })
     });
@@ -229,21 +240,25 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("heap/full_cycle", |b| {
         b.iter(|| {
-            // Create request
-            let mut req = HttpRequest::new("POST", "/api/users".to_string());
+            // Create request. Query inline in the target, matching the arena
+            // arm and the real serve path (see the note in
+            // `bench_request_creation`).
+            let mut req = HttpRequest::new("POST", "/api/users?page=1");
             req.headers
                 .insert("Content-Type", "application/json".to_string());
             req.headers
                 .insert("Authorization", "Bearer xyz".to_string());
-            req.push_query_param("page", "1");
             req.body = Bytes::from_static(b"{\"name\":\"John\"}");
 
-            // "Process" request
-            let _method = req.method.clone();
-            let _path = req.path.clone();
-            let _ct = req.headers.get("Content-Type").map(str::to_owned);
+            // "Process" request. Read the same three things as the arena arm,
+            // and observe only their lengths: cloning the method and path here
+            // while the arena arm borrowed `&str` charged this arm for two
+            // copies the comparison was not about.
+            let method = req.method_str();
+            let path = req.path_only();
+            let ct = req.headers.get("Content-Type");
 
-            // Request dropped here - multiple deallocations
+            let _ = black_box((method.len(), path.len(), ct.map(str::len)));
             black_box(req)
         })
     });
@@ -276,9 +291,11 @@ fn bench_request_lifecycle(c: &mut Criterion) {
     group.bench_function("heap/100_requests", |b| {
         b.iter(|| {
             for i in 0..100 {
-                let mut req = HttpRequest::new("GET", format!("/api/item/{}", i));
+                // Query inline in the target, matching the arena arm's
+                // bump-append `add_query_param`.
+                let mut req = HttpRequest::new("GET", format!("/api/item/{}?v=1", i));
                 req.headers.insert("Accept", "application/json".to_string());
-                req.push_query_param("v", "1");
+                let _ = black_box(req.method_str().len());
                 black_box(&req);
             }
         })

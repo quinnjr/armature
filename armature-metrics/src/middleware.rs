@@ -101,6 +101,11 @@ static HTTP_RESPONSE_SIZE_BYTES: Lazy<HistogramVec> = Lazy::new(|| {
 /// remote client mint unbounded series simply by requesting random URLs
 /// (`/{random}`), which floods the global registry and can exhaust memory.
 ///
+/// The label is taken from [`HttpRequest::path_only`], never the raw request
+/// target: the query string is both unbounded (one series per distinct query)
+/// and frequently sensitive (`/login?token=...` would otherwise be published in
+/// a label value on the `/metrics` endpoint).
+///
 /// To make this safe:
 /// - Path labelling is **disabled by default** ([`RequestMetricsMiddleware::new`]
 ///   sets `include_path = false`). Opt in explicitly with
@@ -269,7 +274,11 @@ impl Middleware for RequestMetricsMiddleware {
     ) -> Result<HttpResponse, Error> {
         let start = Instant::now();
         let method = request.method.clone();
-        let path = self.sanitize_path(&request.path);
+        // `request.path` is the raw request target, query string included.
+        // Labelling with it would put `?token=SECRET` in a Prometheus label
+        // value and give every distinct query its own time series, defeating
+        // the cardinality cap below.
+        let path = self.sanitize_path(request.path_only());
         let request_size = request.body.len() as f64;
 
         // Record request size
@@ -452,6 +461,48 @@ mod tests {
             .with_label_values(&[method, path])
             .get();
         assert_eq!(in_flight, 0.0);
+    }
+
+    /// Regression: the label must come from the routing path, not the raw
+    /// request target. Against the pre-fix code, which passed `&request.path`,
+    /// each of these three requests minted its own time series and published
+    /// the query string - including the token - as a Prometheus label value.
+    #[tokio::test]
+    async fn test_query_string_does_not_reach_the_path_label() {
+        use armature_core::HttpResponse;
+
+        let method = "QZQUERYLABELTEST";
+        let path = "/query-label-regression";
+        let middleware = RequestMetricsMiddleware::with_path();
+
+        let before = HTTP_REQUEST_COUNTER
+            .with_label_values(&[method, path, "200"])
+            .get();
+
+        for target in [
+            path.to_string(),
+            format!("{path}?token=SECRET"),
+            format!("{path}?page=2&sort=desc"),
+        ] {
+            let request = HttpRequest::new(method.to_string(), target);
+            let next: armature_core::middleware::Next =
+                Box::new(|_req| Box::pin(async move { Ok(HttpResponse::ok()) }));
+            middleware.handle(request, next).await.unwrap();
+        }
+
+        // All three collapse onto the single query-less label.
+        let after = HTTP_REQUEST_COUNTER
+            .with_label_values(&[method, path, "200"])
+            .get();
+        assert_eq!(after - before, 3.0);
+
+        // And no series was created for the query-bearing targets.
+        assert_eq!(
+            HTTP_REQUEST_COUNTER
+                .with_label_values(&[method, &format!("{path}?token=SECRET"), "200"])
+                .get(),
+            0.0
+        );
     }
 
     #[test]

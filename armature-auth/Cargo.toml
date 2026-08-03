@@ -48,6 +48,7 @@ webauthn-rs = { version = "0.5", optional = true }
 chrono = "0.4"
 flate2 = { version = "1.1.9", optional = true }  # Used by SAML
 quick-xml = { version = "0.40", features = ["serialize"], optional = true }  # Used by SAML
+dashmap = "6.2"
 uuid = { version = "1.23", features = ["v4"] }
 sha2 = "0.11"
 hex = "0.4"

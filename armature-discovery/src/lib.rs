@@ -5,10 +5,28 @@
 //! ## Features
 //!
 //! - **Service Registration** - Register service instances
-//! - **Service Discovery** - Find healthy service instances
-//! - **Health Checks** - Automated health checking
+//! - **Service Discovery** - Find registered service instances
+//! - **Health Checks** - On-demand probing via
+//!   [`ServiceDiscovery::health_check`]
 //! - **Load Balancing** - Round-robin, random, or custom strategies
 //! - **Multiple Backends** - Consul, etcd, or in-memory
+//!
+//! ## Health and liveness
+//!
+//! `discover` returns every *registered* instance, not every *healthy* one.
+//! This crate runs no background health checker:
+//! [`ServiceDiscovery::health_check`] is an on-demand probe you must call
+//! yourself, and [`ServiceResolver::resolve`] does not consult it.
+//!
+//! What each backend does about instances that never deregister differs:
+//!
+//! - [`EtcdDiscovery`] writes registrations under a lease with a TTL and
+//!   refreshes it from a background task, so a crashed instance disappears
+//!   roughly one TTL after its process dies.
+//! - [`ConsulDiscovery`] queries Consul with `passing=true`, so Consul's own
+//!   health checks filter the results.
+//! - [`InMemoryDiscovery`] keeps registrations until they are explicitly
+//!   deregistered; it is intended for tests.
 //!
 //! ## Quick Start
 //!

@@ -4,18 +4,63 @@ use crate::service::{DiscoveryError, ServiceDiscovery, ServiceInstance};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use serde_json;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
-use tracing::{debug, info};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 
 /// Timeout applied to every etcd HTTP request so a stalled/unreachable
 /// etcd endpoint fails fast instead of hanging the caller indefinitely.
 const ETCD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// etcd service discovery client
+/// Default time-to-live of the etcd lease attached to a registration. If the
+/// registering process dies its keep-alive task dies with it, so etcd expires
+/// the lease after this long and drops both registration keys — that is what
+/// stops a crashed instance from staying discoverable forever.
+const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
+
+/// Lower bound on the keep-alive refresh interval, so a very short TTL cannot
+/// turn into a hot loop against etcd.
+const MIN_KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A live registration owned by this client: the lease its keys hang off and
+/// the task refreshing that lease.
+struct Registration {
+    lease_id: String,
+    keep_alive: JoinHandle<()>,
+}
+
+/// etcd service discovery client.
+///
+/// # Liveness
+///
+/// Registrations are written under an etcd lease with a TTL (see
+/// [`EtcdDiscovery::with_lease_ttl`], default 30s) and refreshed by a
+/// background keep-alive task spawned by [`register`](ServiceDiscovery::register).
+/// If the process holding the registration dies, the keep-alive stops, the
+/// lease expires, and etcd removes the registration automatically — so a
+/// crashed instance stops being discoverable within roughly one TTL.
+///
+/// The lease covers *liveness*, not *health*: this crate performs no
+/// background health checking, and [`discover`](ServiceDiscovery::discover)
+/// returns every registered instance whose lease is still alive, healthy or
+/// not. Use [`health_check`](ServiceDiscovery::health_check) explicitly if you
+/// need a probe.
+///
+/// Both registration keys are written in a single etcd transaction, so a
+/// failed write can never leave an instance visible to `discover` but absent
+/// from `get_service`.
+///
+/// The keep-alive tasks are aborted when the client is dropped; the leases
+/// then expire on their own, which is the intended behavior for a process
+/// that is shutting down.
 pub struct EtcdDiscovery {
     base_url: String,
     prefix: String,
     client: reqwest::Client,
+    lease_ttl: Duration,
+    registrations: Mutex<HashMap<String, Registration>>,
 }
 
 impl EtcdDiscovery {
@@ -41,7 +86,41 @@ impl EtcdDiscovery {
             base_url: base_url.into(),
             prefix: prefix.into(),
             client,
+            lease_ttl: DEFAULT_LEASE_TTL,
+            registrations: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Set the TTL of the lease attached to future registrations.
+    ///
+    /// A shorter TTL evicts crashed instances sooner at the cost of more
+    /// frequent keep-alive traffic (the keep-alive fires roughly every
+    /// `ttl / 3`). etcd lease TTLs are whole seconds, so anything under one
+    /// second is rounded up to one second.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use armature_discovery::EtcdDiscovery;
+    /// use std::time::Duration;
+    ///
+    /// let etcd = EtcdDiscovery::new("http://localhost:2379", "/services")?
+    ///     .with_lease_ttl(Duration::from_secs(10));
+    /// ```
+    pub fn with_lease_ttl(mut self, ttl: Duration) -> Self {
+        self.lease_ttl = ttl.max(Duration::from_secs(1));
+        self
+    }
+
+    /// TTL sent to etcd, in whole seconds (etcd's lease granularity).
+    fn lease_ttl_secs(&self) -> u64 {
+        self.lease_ttl.as_secs().max(1)
+    }
+
+    /// How often the keep-alive task refreshes the lease. A third of the TTL
+    /// leaves room for two lost refreshes before etcd expires the lease.
+    fn keep_alive_interval(&self) -> Duration {
+        (self.lease_ttl / 3).max(MIN_KEEP_ALIVE_INTERVAL)
     }
 
     /// Prefix under which all instances of `service_name` are stored:
@@ -138,31 +217,155 @@ impl EtcdDiscovery {
         }
     }
 
-    /// PUT a single key/value pair into etcd.
-    async fn put_key(&self, key: &str, value: &str) -> Result<reqwest::Response, DiscoveryError> {
-        let url = format!("{}/v3/kv/put", self.base_url);
-        let key_b64 = general_purpose::STANDARD.encode(key.as_bytes());
-        let value_b64 = general_purpose::STANDARD.encode(value.as_bytes());
+    /// Apply a list of operations as a single unconditional etcd transaction.
+    /// Every operation commits or none does, which is what keeps the two
+    /// registration keys from drifting apart.
+    async fn txn(&self, operations: Vec<serde_json::Value>) -> Result<(), DiscoveryError> {
+        let url = format!("{}/v3/kv/txn", self.base_url);
+        let payload = serde_json::json!({ "success": operations });
 
-        let payload = serde_json::json!({
-            "key": key_b64,
-            "value": value_b64,
-        });
+        let response = self.client.post(&url).json(&payload).send().await?;
+        if !response.status().is_success() {
+            let error = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(DiscoveryError::InvalidConfiguration(format!(
+                "etcd transaction failed: {error}"
+            )));
+        }
 
-        Ok(self.client.post(&url).json(&payload).send().await?)
+        Ok(())
     }
 
-    /// Point-delete a single key from etcd.
-    async fn delete_key(&self, key: &str) -> Result<reqwest::Response, DiscoveryError> {
-        let url = format!("{}/v3/kv/deleterange", self.base_url);
-        let key_b64 = general_purpose::STANDARD.encode(key.as_bytes());
+    /// Grant a lease with the configured TTL, returning its id.
+    async fn grant_lease(&self) -> Result<String, DiscoveryError> {
+        let url = format!("{}/v3/lease/grant", self.base_url);
+        let payload = serde_json::json!({ "TTL": self.lease_ttl_secs() });
 
-        let payload = serde_json::json!({
-            "key": key_b64,
-        });
+        let response = self.client.post(&url).json(&payload).send().await?;
+        if !response.status().is_success() {
+            let error = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(DiscoveryError::RegistrationFailed(format!(
+                "etcd lease grant failed: {error}"
+            )));
+        }
 
-        Ok(self.client.post(&url).json(&payload).send().await?)
+        let body: serde_json::Value = response.json().await?;
+        // etcd's JSON gateway renders int64 fields as strings, but older
+        // gateways (and hand-rolled stubs) emit a bare number — accept both.
+        let lease_id = match &body["ID"] {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        };
+
+        lease_id.filter(|id| id.as_str() != "0").ok_or_else(|| {
+            DiscoveryError::RegistrationFailed(format!(
+                "etcd lease grant returned no usable lease id: {body}"
+            ))
+        })
     }
+
+    /// Revoke a lease, which atomically removes every key attached to it.
+    async fn revoke_lease(&self, lease_id: &str) -> Result<(), DiscoveryError> {
+        let url = format!("{}/v3/lease/revoke", self.base_url);
+        let payload = serde_json::json!({ "ID": lease_id });
+
+        let response = self.client.post(&url).json(&payload).send().await?;
+        if !response.status().is_success() {
+            let error = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(DiscoveryError::DeregistrationFailed(format!(
+                "etcd lease revoke failed: {error}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Spawn the task that refreshes `lease_id` for as long as the
+    /// registration is alive. Dropping/aborting the task stops the refreshes,
+    /// so etcd expires the lease and evicts the registration.
+    fn spawn_keep_alive(&self, service_id: String, lease_id: String) -> JoinHandle<()> {
+        let client = self.client.clone();
+        let url = format!("{}/v3/lease/keepalive", self.base_url);
+        let interval = self.keep_alive_interval();
+        let payload = serde_json::json!({ "ID": lease_id });
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match client.post(&url).json(&payload).send().await {
+                    Ok(response) if response.status().is_success() => {
+                        debug!("Refreshed etcd lease for service {}", service_id);
+                    }
+                    Ok(response) => {
+                        warn!(
+                            "etcd lease keep-alive for service {} returned status {}",
+                            service_id,
+                            response.status()
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "etcd lease keep-alive for service {} failed: {}",
+                            service_id, e
+                        );
+                    }
+                }
+            }
+        })
+    }
+
+    /// Remove and abort the keep-alive for `service_id`, returning the lease
+    /// it was refreshing (if this client owns the registration).
+    fn take_registration(&self, service_id: &str) -> Option<String> {
+        let registration = self
+            .registrations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(service_id)?;
+        registration.keep_alive.abort();
+        Some(registration.lease_id)
+    }
+}
+
+impl Drop for EtcdDiscovery {
+    fn drop(&mut self) {
+        let registrations = self
+            .registrations
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for registration in registrations.values() {
+            registration.keep_alive.abort();
+        }
+    }
+}
+
+/// A `RequestPut` transaction operation attaching `key` to `lease_id`.
+fn put_op(key: &str, value: &str, lease_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "requestPut": {
+            "key": general_purpose::STANDARD.encode(key.as_bytes()),
+            "value": general_purpose::STANDARD.encode(value.as_bytes()),
+            "lease": lease_id,
+        }
+    })
+}
+
+/// A `RequestDeleteRange` transaction operation covering a single key.
+fn delete_op(key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "requestDeleteRange": {
+            "key": general_purpose::STANDARD.encode(key.as_bytes()),
+        }
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -227,35 +430,70 @@ impl ServiceDiscovery for EtcdDiscovery {
         let value = serde_json::to_string(service)
             .map_err(|e| DiscoveryError::InvalidConfiguration(e.to_string()))?;
 
-        let response = self.put_key(&composite_key, &value).await?;
-        if !response.status().is_success() {
-            let error = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(DiscoveryError::RegistrationFailed(error));
+        // The lease is what bounds the registration's lifetime: if this
+        // process dies, nothing refreshes it and etcd drops both keys.
+        let lease_id = self.grant_lease().await?;
+
+        // Both keys go in one transaction. The secondary index
+        // ({prefix}__idx/{id} -> serialized instance) lets
+        // get_service/deregister do a point lookup instead of scanning every
+        // service under {prefix}/, but only if it can never disagree with the
+        // composite key about whether the instance exists.
+        let write = self
+            .txn(vec![
+                put_op(&composite_key, &value, &lease_id),
+                put_op(&idx_key, &value, &lease_id),
+            ])
+            .await;
+
+        if let Err(e) = write {
+            // Don't leak the lease we just granted for keys that were never
+            // written; the TTL would clean it up eventually, but not now.
+            let _ = self.revoke_lease(&lease_id).await;
+            return Err(DiscoveryError::RegistrationFailed(e.to_string()));
         }
 
-        // Secondary index: {prefix}__idx/{id} -> serialized instance, so
-        // get_service/deregister can do a single point lookup instead of
-        // scanning every service under {prefix}/.
-        let idx_response = self.put_key(&idx_key, &value).await?;
-        if !idx_response.status().is_success() {
-            let error = idx_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(DiscoveryError::RegistrationFailed(error));
+        let keep_alive = self.spawn_keep_alive(service.id.clone(), lease_id.clone());
+        let previous = self
+            .registrations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                service.id.clone(),
+                Registration {
+                    lease_id,
+                    keep_alive,
+                },
+            );
+        // Re-registering the same id supersedes the old lease; stop refreshing
+        // it so it expires instead of keeping a stale value alive.
+        if let Some(previous) = previous {
+            previous.keep_alive.abort();
         }
 
-        info!("Registered service {} with etcd", service.id);
+        info!(
+            "Registered service {} with etcd under a {}s lease",
+            service.id,
+            self.lease_ttl_secs()
+        );
         Ok(())
     }
 
     async fn deregister(&self, service_id: &str) -> Result<(), DiscoveryError> {
-        // Point-lookup the secondary index to learn the instance (and
+        // If this client registered the service, revoking its lease removes
+        // every key attached to it in one etcd operation — no lookup needed,
+        // and no window where one key outlives the other.
+        if let Some(lease_id) = self.take_registration(service_id) {
+            self.revoke_lease(&lease_id).await?;
+            info!("Deregistered service {} from etcd", service_id);
+            return Ok(());
+        }
+
+        // Otherwise the registration belongs to another process (or predates
+        // leases). Point-lookup the secondary index to learn the instance (and
         // therefore its composite key) with a single get, instead of a
-        // full-prefix scan over every registered service.
+        // full-prefix scan over every registered service, then delete both
+        // keys in one transaction.
         let idx_key = self.idx_key(service_id);
         let instance = self
             .get_key(&idx_key)
@@ -263,23 +501,9 @@ impl ServiceDiscovery for EtcdDiscovery {
             .ok_or_else(|| DiscoveryError::ServiceNotFound(service_id.to_string()))?;
         let composite_key = self.composite_key(&instance.name, &instance.id);
 
-        let response = self.delete_key(&composite_key).await?;
-        if !response.status().is_success() {
-            let error = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(DiscoveryError::DeregistrationFailed(error));
-        }
-
-        let idx_response = self.delete_key(&idx_key).await?;
-        if !idx_response.status().is_success() {
-            let error = idx_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(DiscoveryError::DeregistrationFailed(error));
-        }
+        self.txn(vec![delete_op(&composite_key), delete_op(&idx_key)])
+            .await
+            .map_err(|e| DiscoveryError::DeregistrationFailed(e.to_string()))?;
 
         info!("Deregistered service {} from etcd", service_id);
         Ok(())
@@ -326,6 +550,14 @@ impl ServiceDiscovery for EtcdDiscovery {
 mod tests {
     use super::*;
     use armature_testkit::http_stub::{StubResponse, StubServer};
+
+    /// A `LeaseGrant` response as etcd's JSON gateway renders it (int64 as a
+    /// string).
+    const LEASE_JSON: &str = r#"{"ID":"7587822721650585186","TTL":"30"}"#;
+
+    fn decode_b64(encoded: &str) -> String {
+        String::from_utf8(general_purpose::STANDARD.decode(encoded).unwrap()).unwrap()
+    }
 
     #[test]
     fn test_etcd_discovery_creation() {
@@ -384,7 +616,12 @@ mod tests {
         .to_string();
 
         let server = StubServer::builder()
-            .route("POST", "/v3/kv/put", StubResponse::json(200, "{}"))
+            .route(
+                "POST",
+                "/v3/lease/grant",
+                StubResponse::json(200, LEASE_JSON),
+            )
+            .route("POST", "/v3/kv/txn", StubResponse::json(200, "{}"))
             .route("POST", "/v3/kv/range", StubResponse::json(200, kv_json))
             .start()
             .await;
@@ -394,12 +631,13 @@ mod tests {
         etcd.register(&instance).await.unwrap();
 
         // register() must write the composite key, not just the bare id.
-        let put_req = server.assert_received("POST", "/v3/kv/put");
-        let put_body: serde_json::Value = serde_json::from_str(&put_req.body_string()).unwrap();
-        let put_key_bytes = general_purpose::STANDARD
-            .decode(put_body["key"].as_str().unwrap())
-            .unwrap();
-        let put_key = String::from_utf8(put_key_bytes).unwrap();
+        let txn_req = server.assert_received("POST", "/v3/kv/txn");
+        let txn_body: serde_json::Value = serde_json::from_str(&txn_req.body_string()).unwrap();
+        let put_key = decode_b64(
+            txn_body["success"][0]["requestPut"]["key"]
+                .as_str()
+                .unwrap(),
+        );
         assert_eq!(put_key, composite_key);
         assert!(put_key.starts_with(&etcd.service_name_prefix("api")));
 
@@ -450,7 +688,7 @@ mod tests {
 
         let server = StubServer::builder()
             .route("POST", "/v3/kv/range", StubResponse::json(200, kv_json))
-            .route("POST", "/v3/kv/deleterange", StubResponse::json(200, "{}"))
+            .route("POST", "/v3/kv/txn", StubResponse::json(200, "{}"))
             .start()
             .await;
 
@@ -461,17 +699,159 @@ mod tests {
 
         etcd.deregister("svc-1").await.unwrap();
 
-        // Both the composite key and the idx key must be deleted.
-        let delete_requests: Vec<_> = server
+        // Both the composite key and the idx key must be deleted, and in a
+        // single transaction so neither can outlive the other.
+        let txn_requests: Vec<_> = server
             .requests()
             .into_iter()
-            .filter(|r| r.method == "POST" && r.path == "/v3/kv/deleterange")
+            .filter(|r| r.method == "POST" && r.path == "/v3/kv/txn")
             .collect();
         assert_eq!(
-            delete_requests.len(),
-            2,
-            "deregister must delete both the composite key and the idx key"
+            txn_requests.len(),
+            1,
+            "deregister must delete both keys in one transaction"
         );
+        let body: serde_json::Value = serde_json::from_str(&txn_requests[0].body_string()).unwrap();
+        let deleted: Vec<String> = body["success"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| decode_b64(op["requestDeleteRange"]["key"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            deleted,
+            vec![
+                key_builder.composite_key("api", "svc-1"),
+                key_builder.idx_key("svc-1"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn register_attaches_a_lease_to_both_keys_in_one_transaction() {
+        let instance = ServiceInstance::new("svc-1", "api", "localhost", 8080);
+
+        let server = StubServer::builder()
+            .route(
+                "POST",
+                "/v3/lease/grant",
+                StubResponse::json(200, LEASE_JSON),
+            )
+            .route("POST", "/v3/kv/txn", StubResponse::json(200, "{}"))
+            .start()
+            .await;
+
+        let etcd = EtcdDiscovery::new(server.url(), "/services").unwrap();
+        etcd.register(&instance).await.unwrap();
+
+        // The TTL must actually be requested, otherwise a crashed instance
+        // would stay discoverable forever.
+        let grant = server.assert_received("POST", "/v3/lease/grant");
+        let grant_body: serde_json::Value = serde_json::from_str(&grant.body_string()).unwrap();
+        assert_eq!(grant_body["TTL"].as_u64(), Some(30));
+
+        let txn = server.assert_received("POST", "/v3/kv/txn");
+        let txn_body: serde_json::Value = serde_json::from_str(&txn.body_string()).unwrap();
+        let ops = txn_body["success"].as_array().unwrap();
+        assert_eq!(ops.len(), 2, "both keys must be written in one transaction");
+        for op in ops {
+            assert_eq!(
+                op["requestPut"]["lease"].as_str(),
+                Some("7587822721650585186"),
+                "every registration key must hang off the granted lease"
+            );
+        }
+
+        // Only one round trip wrote keys: no second, non-atomic PUT.
+        assert!(
+            !server
+                .requests()
+                .iter()
+                .any(|r| r.path == "/v3/kv/put" || r.path == "/v3/kv/deleterange")
+        );
+    }
+
+    #[tokio::test]
+    async fn register_spawns_a_keep_alive_that_refreshes_the_lease() {
+        let instance = ServiceInstance::new("svc-1", "api", "localhost", 8080);
+
+        let server = StubServer::builder()
+            .route(
+                "POST",
+                "/v3/lease/grant",
+                StubResponse::json(200, LEASE_JSON),
+            )
+            .route("POST", "/v3/kv/txn", StubResponse::json(200, "{}"))
+            .route("POST", "/v3/lease/keepalive", StubResponse::json(200, "{}"))
+            .start()
+            .await;
+
+        // 1s TTL -> ~333ms refresh interval, so a short sleep is enough.
+        let etcd = EtcdDiscovery::new(server.url(), "/services")
+            .unwrap()
+            .with_lease_ttl(Duration::from_secs(1));
+        etcd.register(&instance).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        let keepalive = server.assert_received("POST", "/v3/lease/keepalive");
+        let body: serde_json::Value = serde_json::from_str(&keepalive.body_string()).unwrap();
+        assert_eq!(body["ID"].as_str(), Some("7587822721650585186"));
+    }
+
+    #[tokio::test]
+    async fn deregister_revokes_the_lease_it_registered_with() {
+        let instance = ServiceInstance::new("svc-1", "api", "localhost", 8080);
+
+        let server = StubServer::builder()
+            .route(
+                "POST",
+                "/v3/lease/grant",
+                StubResponse::json(200, LEASE_JSON),
+            )
+            .route("POST", "/v3/kv/txn", StubResponse::json(200, "{}"))
+            .route("POST", "/v3/lease/revoke", StubResponse::json(200, "{}"))
+            .start()
+            .await;
+
+        let etcd = EtcdDiscovery::new(server.url(), "/services").unwrap();
+        etcd.register(&instance).await.unwrap();
+        etcd.deregister("svc-1").await.unwrap();
+
+        let revoke = server.assert_received("POST", "/v3/lease/revoke");
+        let body: serde_json::Value = serde_json::from_str(&revoke.body_string()).unwrap();
+        assert_eq!(body["ID"].as_str(), Some("7587822721650585186"));
+
+        // Revoking the lease drops both keys, so no key lookup or delete is
+        // needed at all.
+        assert!(
+            !server
+                .requests()
+                .iter()
+                .any(|r| r.path == "/v3/kv/range" || r.path == "/v3/kv/deleterange")
+        );
+    }
+
+    #[tokio::test]
+    async fn register_revokes_the_lease_when_the_write_transaction_fails() {
+        let instance = ServiceInstance::new("svc-1", "api", "localhost", 8080);
+
+        let server = StubServer::builder()
+            .route(
+                "POST",
+                "/v3/lease/grant",
+                StubResponse::json(200, LEASE_JSON),
+            )
+            .route("POST", "/v3/kv/txn", StubResponse::json(500, r#"{"e":1}"#))
+            .route("POST", "/v3/lease/revoke", StubResponse::json(200, "{}"))
+            .start()
+            .await;
+
+        let etcd = EtcdDiscovery::new(server.url(), "/services").unwrap();
+        let result = etcd.register(&instance).await;
+
+        assert!(matches!(result, Err(DiscoveryError::RegistrationFailed(_))));
+        server.assert_received("POST", "/v3/lease/revoke");
     }
 
     #[tokio::test]

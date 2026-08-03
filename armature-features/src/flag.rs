@@ -3,34 +3,56 @@
 //! Defines feature flags, targeting rules, and evaluation logic.
 
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
 
-thread_local! {
-    /// Per-thread cache of compiled regexes keyed by pattern string.
-    ///
-    /// `Operator::Matches` previously recompiled the DFA on every flag
-    /// evaluation (µs–ms on the request path); memoizing the compiled `Regex`
-    /// per pattern makes repeat evaluations effectively free. `None` memoizes
-    /// patterns that failed to compile, so an invalid pattern still yields no
-    /// match — identical to the old `Regex::new(..).map(..).unwrap_or(false)`.
-    static REGEX_CACHE: RefCell<HashMap<String, Option<regex::Regex>>> =
-        RefCell::new(HashMap::new());
-}
+/// Maximum number of distinct patterns memoized before the cache is dropped
+/// and rebuilt.
+///
+/// Patterns reach this cache from targeting rules, which can be pushed by a
+/// remote flag service — i.e. their cardinality is not bounded by anything in
+/// this process. A hard cap turns "remote config grows memory forever" into
+/// "worst case, we recompile after a burst of novel patterns". Real rule sets
+/// are far below this, so steady-state behaviour is an unconditional hit.
+const REGEX_CACHE_CAPACITY: usize = 256;
 
-/// Test `value` against `pattern`, compiling the regex once per thread and
-/// reusing the cached compilation thereafter. Invalid patterns match nothing.
+/// Process-wide cache of compiled regexes keyed by pattern string.
+///
+/// `Operator::Matches` previously recompiled the DFA on every flag evaluation
+/// (µs–ms on the request path); memoizing the compiled `Regex` makes repeat
+/// evaluations effectively free. `None` memoizes patterns that failed to
+/// compile, so an invalid pattern still yields no match — identical to the old
+/// `Regex::new(..).map(..).unwrap_or(false)`.
+///
+/// Process-wide rather than thread-local so the memory cost is paid once
+/// instead of once per worker thread.
+static REGEX_CACHE: LazyLock<RwLock<HashMap<String, Option<regex::Regex>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Test `value` against `pattern`, compiling the regex once and reusing the
+/// cached compilation thereafter. Invalid patterns match nothing.
 fn regex_matches(pattern: &str, value: &str) -> bool {
-    REGEX_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let compiled = cache
-            .entry(pattern.to_string())
-            .or_insert_with(|| regex::Regex::new(pattern).ok());
-        compiled
-            .as_ref()
-            .map(|re| re.is_match(value))
-            .unwrap_or(false)
-    })
+    // A poisoned lock only means some other evaluation panicked mid-update;
+    // the map itself is still a valid cache, so recover rather than propagate.
+    {
+        let cache = REGEX_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(compiled) = cache.get(pattern) {
+            return compiled.as_ref().is_some_and(|re| re.is_match(value));
+        }
+    }
+
+    // Compile outside the lock: a pathological pattern must not stall every
+    // other evaluation in the process.
+    let compiled = regex::Regex::new(pattern).ok();
+    let matched = compiled.as_ref().is_some_and(|re| re.is_match(value));
+
+    let mut cache = REGEX_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= REGEX_CACHE_CAPACITY && !cache.contains_key(pattern) {
+        cache.clear();
+    }
+    cache.insert(pattern.to_string(), compiled);
+
+    matched
 }
 
 /// Feature flag
@@ -442,6 +464,29 @@ impl EvaluationContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the regex memo was unbounded, so patterns arriving from a
+    /// remote flag service could grow it without limit. It must stay capped
+    /// while still answering correctly across the overflow.
+    #[test]
+    fn test_regex_cache_is_bounded() {
+        for i in 0..(REGEX_CACHE_CAPACITY * 2) {
+            let pattern = format!("^bounded-cache-probe-{i}$");
+            assert!(regex_matches(&pattern, &format!("bounded-cache-probe-{i}")));
+            assert!(!regex_matches(&pattern, "no-match"));
+        }
+
+        let len = REGEX_CACHE.read().unwrap().len();
+        assert!(
+            len <= REGEX_CACHE_CAPACITY,
+            "regex cache grew to {len}, above the {REGEX_CACHE_CAPACITY} cap"
+        );
+    }
+
+    #[test]
+    fn test_invalid_regex_pattern_never_matches() {
+        assert!(!regex_matches("([unclosed", "([unclosed"));
+    }
 
     #[test]
     fn test_boolean_flag() {

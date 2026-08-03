@@ -17,7 +17,22 @@ use tracing::{debug, trace};
 /// idle bucket is behaviourally identical to keeping it (a returning client
 /// simply gets a fresh, full bucket) — but it frees the memory that would
 /// otherwise be retained forever for every distinct/spoofed client key.
-const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(3600);
+///
+/// Five minutes rather than an hour: the threat is a client minting keys faster
+/// than they are reclaimed, and an hour of retention is an hour of accumulation
+/// for keys that were used exactly once. Typical rate-limit windows are seconds
+/// to minutes, so this still leaves an active client's state untouched across
+/// many windows.
+const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Default hard cap on entries per algorithm map.
+///
+/// A cap that is off by default is not a cap: the idle TTL alone only bounds
+/// memory if new keys arrive slower than old ones age out, which is exactly
+/// what an attacker rotating keys does not do. Matches the standalone
+/// algorithms' `DEFAULT_MAX_KEYS`. At roughly a hundred bytes of key plus
+/// state per entry this is single-digit megabytes per map.
+const DEFAULT_MAX_KEYS: usize = 100_000;
 
 /// Token bucket state
 #[derive(Debug, Clone)]
@@ -81,8 +96,12 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
-    /// Create a new in-memory store with default eviction settings
-    /// (idle entries pruned after one hour, no hard cap).
+    /// Create a new in-memory store with bounded default eviction settings:
+    /// idle entries pruned after [`DEFAULT_IDLE_TTL`], and a hard cap of
+    /// [`DEFAULT_MAX_KEYS`] entries per algorithm map.
+    ///
+    /// Both defaults are on because the memory-safety guarantee this type
+    /// documents is only real if it holds without configuration.
     pub fn new() -> Self {
         debug!("Creating new in-memory rate limit store");
         Self {
@@ -90,7 +109,7 @@ impl MemoryStore {
             sliding_logs: DashMap::new(),
             fixed_windows: DashMap::new(),
             idle_ttl: DEFAULT_IDLE_TTL,
-            max_keys: None,
+            max_keys: Some(DEFAULT_MAX_KEYS),
         }
     }
 
@@ -113,6 +132,26 @@ impl MemoryStore {
     pub fn with_max_keys(mut self, max_keys: usize) -> Self {
         self.max_keys = Some(max_keys);
         self
+    }
+
+    /// Remove the hard cap, letting the idle TTL alone bound the maps.
+    ///
+    /// Only appropriate where the key space is closed and trusted (keys derived
+    /// from a fixed tenant list, say). With request-derived keys this restores
+    /// the unbounded-growth exposure described on [`MemoryStore`].
+    pub fn without_max_keys(mut self) -> Self {
+        self.max_keys = None;
+        self
+    }
+
+    /// The configured hard cap on entries per algorithm map, if any.
+    pub fn max_keys(&self) -> Option<usize> {
+        self.max_keys
+    }
+
+    /// The configured idle threshold after which `cleanup` evicts an entry.
+    pub fn idle_ttl(&self) -> Duration {
+        self.idle_ttl
     }
 
     /// Get the number of tracked keys (for monitoring)
@@ -546,6 +585,28 @@ mod tests {
             "token bucket map must be capped at max_keys, got {}",
             store.token_buckets.len()
         );
+    }
+
+    /// The unbounded-growth protection the type documents must hold for a store
+    /// nobody configured — the default was previously `max_keys: None`, under
+    /// which the cap branch in `cleanup` never runs at all.
+    #[tokio::test]
+    async fn test_default_store_is_bounded() {
+        let store = MemoryStore::new();
+        assert_eq!(store.max_keys(), Some(DEFAULT_MAX_KEYS));
+        assert!(store.idle_ttl() <= Duration::from_secs(600));
+
+        // The cap is genuinely enforced for the default construction, not just
+        // recorded: shrink it to keep the test cheap and drive cleanup.
+        let store = MemoryStore::new().with_max_keys(50);
+        for i in 0..500 {
+            store
+                .token_bucket_check(&format!("client-{i}"), 10, 1.0)
+                .await
+                .unwrap();
+        }
+        store.cleanup().await.unwrap();
+        assert!(store.token_buckets.len() <= 50);
     }
 
     #[tokio::test]

@@ -1,6 +1,17 @@
 //! Body Handling Benchmarks
 //!
-//! Compares zero-copy Bytes-based body handling vs Vec<u8> copying.
+//! Times the ways a body can be attached to an `HttpRequest`/`HttpResponse`.
+//!
+//! ## What "legacy" means here
+//!
+//! `HttpRequest::body` and `HttpResponse::body` are **already** `Bytes`. The
+//! arms named `legacy_*` therefore do not measure a `Vec<u8>` body type that
+//! still exists - they measure the cost of the `Vec<u8>`-taking *entry points*
+//! (`with_body`, `vec![...]` then assign), which allocate a 1 KiB buffer and
+//! hand its allocation to `Bytes`, against the `Bytes`-taking entry points
+//! (`with_bytes_body`, `set_body_bytes`), where a clone is a refcount bump.
+//! The difference the numbers show is one 1 KiB allocation plus fill, not a
+//! representation conversion.
 //!
 //! Run with: cargo bench --bench body_benchmarks
 
@@ -116,7 +127,9 @@ fn bench_response_body_creation(c: &mut Criterion) {
 fn bench_http_request_body(c: &mut Criterion) {
     let mut group = c.benchmark_group("http_request_body");
 
-    // Old way: set body via Vec<u8> assignment
+    // The `Vec<u8>` entry point: allocate and fill 1 KiB, then move that
+    // allocation into `Bytes`. The cost measured is the allocation, not a
+    // conversion - `req.body` is `Bytes` either way.
     group.bench_function("legacy_vec_assignment", |b| {
         b.iter(|| {
             let mut req = HttpRequest::new("POST", "/api".to_string());
@@ -209,11 +222,14 @@ fn bench_http_response_body(c: &mut Criterion) {
 fn bench_hyper_passthrough(c: &mut Criterion) {
     let mut group = c.benchmark_group("hyper_passthrough");
 
-    // Simulate the old pattern: Vec<u8> -> Bytes (copies)
-    group.bench_function("legacy_vec_to_bytes", |b| {
+    // Handing the body to hyper when it came in through the `Vec<u8>` entry
+    // point. `resp.body` is `Bytes`, so taking it is a move, not a conversion:
+    // what this arm costs over `zero_copy_bytes` below is the 1 KiB `vec!`
+    // allocation, which is exactly the cost `with_bytes_body` avoids.
+    group.bench_function("vec_entry_point_to_hyper", |b| {
         b.iter(|| {
             let resp = HttpResponse::ok().with_body(black_box(vec![0u8; 1024]));
-            // Simulates: Full::new(bytes::Bytes::from(response.body))
+            // Simulates: Full::new(response.body)
             let body_bytes = resp.body;
             black_box(body_bytes.len())
         })

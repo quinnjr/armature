@@ -9,6 +9,13 @@
 //! - `GET /json` - JSON response
 //! - `GET /users/:id` - Path parameter extraction
 //! - `POST /api/users` - JSON body parsing
+//! - `GET /health` - Liveness probe
+//! - `GET /data?size=small|medium|large|xlarge` - Variable-size JSON payload
+//!
+//! Only the first four endpoints exist on the other frameworks in
+//! `benches/comparison_servers/`, so they are the only ones
+//! `benches/http_benchmark_runner.rs` compares across frameworks; `/health` and
+//! `/data` are Armature-only and are here for single-server profiling.
 //!
 //! ## Usage
 //!

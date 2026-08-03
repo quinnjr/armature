@@ -26,7 +26,38 @@ pub trait CacheStore: Send + Sync {
     /// * `key` - The cache key
     /// * `value` - The JSON string value
     /// * `ttl` - Optional time-to-live duration
+    ///
+    /// # `None` means "unspecified", not "forever"
+    ///
+    /// Backends configured with a `CacheConfig::default_ttl` treat `ttl: None`
+    /// as "no TTL was specified for this write" and fall back to that default.
+    /// To store an entry that genuinely never expires — bypassing
+    /// `default_ttl` — use [`Self::set_json_forever`].
     async fn set_json(&self, key: &str, value: String, ttl: Option<Duration>) -> CacheResult<()>;
+
+    /// Set a JSON value that never expires, explicitly bypassing any configured
+    /// `CacheConfig::default_ttl`.
+    ///
+    /// This exists because [`Self::set_json`] cannot express the difference
+    /// between "the caller did not specify a TTL" and "the caller wants no
+    /// expiry at all" — both are `None`, and backends resolve `None` against
+    /// `default_ttl`. On a store built with `.with_default_ttl(..)` that made
+    /// a non-expiring entry unobtainable, so "remember forever" silently
+    /// became "remember for the default TTL". Callers that mean *forever*
+    /// must come through here.
+    ///
+    /// The default implementation forwards to `set_json(key, value, None)`,
+    /// which is already correct for any backend that has no `default_ttl`
+    /// concept (e.g. [`crate::tiered::InMemoryCache`]). Backends that resolve
+    /// `None` against a configured default **must** override this.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The cache key
+    /// * `value` - The JSON string value
+    async fn set_json_forever(&self, key: &str, value: String) -> CacheResult<()> {
+        self.set_json(key, value, None).await
+    }
 
     /// Delete a key from the cache.
     ///
@@ -405,6 +436,34 @@ pub trait CacheStore: Send + Sync {
                     .map_err(|e| CacheError::Serialization(e.to_string()))?;
                 self.set_json(set_key, json, None).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Add every member of `members` to the set stored at `set_key`.
+    ///
+    /// Backends with a native set type should override this with a single
+    /// variadic command (`SADD key m1 m2 ...`), turning N round-trips into one;
+    /// `RedisCache` does.
+    ///
+    /// The default implementation applies [`Self::set_add`] **sequentially**,
+    /// not concurrently: the default `set_add` is a read-modify-write against
+    /// the same `set_key`, so issuing those concurrently would race with
+    /// itself and drop members.
+    async fn set_add_many(&self, set_key: &str, members: &[&str]) -> CacheResult<()> {
+        for member in members {
+            self.set_add(set_key, member).await?;
+        }
+        Ok(())
+    }
+
+    /// Remove every member of `members` from the set stored at `set_key`.
+    ///
+    /// The variadic counterpart to [`Self::set_remove`]; see
+    /// [`Self::set_add_many`] for why the default implementation is sequential.
+    async fn set_remove_many(&self, set_key: &str, members: &[&str]) -> CacheResult<()> {
+        for member in members {
+            self.set_remove(set_key, member).await?;
         }
         Ok(())
     }

@@ -14,9 +14,13 @@ rust-version = "1.94.1"
 # package, so the real crate -- published as "armature-framework" but exposing
 # its library as `armature` (see this repo's root `[lib] name = "armature"`)
 # -- must be pulled in under an explicit `package` rename.
-armature = { package = "armature-framework", version = "0", features = ["queue"] }
+armature = { package = "armature-framework", version = "0.4", features = ["queue"] }
+# Both requirements pin the exact minor. 0.x minors are breaking under
+# Cargo's caret rules and this project treats them that way, so a bare "0"
+# would let a user resolve armature-core 0.9 against armature-framework 0.4
+# and get a template that does not compile.
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
-armature-core = "0"
+armature-core = "0.8"
 async-trait = "0.1"
 
 # Runtime

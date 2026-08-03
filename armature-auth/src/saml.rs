@@ -30,6 +30,13 @@ pub struct SamlAuthRequest {
     /// The SAML request XML
     pub saml_request: String,
 
+    /// The AuthnRequest's `ID`. Store it against the user's session: the IdP
+    /// echoes it back as `InResponseTo`, and comparing the two is what ties a
+    /// response to a login this SP actually started. Without that correlation
+    /// an attacker can feed the ACS endpoint a response minted for their own
+    /// account (SSO login CSRF) or replay a captured unsolicited one.
+    pub request_id: String,
+
     /// Relay state for tracking
     pub relay_state: Option<String>,
 
@@ -87,6 +94,17 @@ pub struct SamlConfig {
     /// Allow unsigned assertions (not recommended for production)
     pub allow_unsigned_assertions: bool,
 
+    /// Accept responses that do not correspond to an AuthnRequest this SP
+    /// issued (IdP-initiated SSO).
+    ///
+    /// Defaults to `false`. When `false`, a response must be validated through
+    /// [`SamlServiceProvider::validate_response_with_request_id`] with the ID
+    /// of the AuthnRequest that started the flow, and its `InResponseTo` must
+    /// match. Turn it on only if the deployment genuinely uses IdP-initiated
+    /// SSO — it is what makes unsolicited responses acceptable, and with it on
+    /// there is nothing tying a response to the browser session receiving it.
+    pub allow_idp_initiated: bool,
+
     /// Required assertion attributes
     pub required_attributes: Vec<String>,
 }
@@ -122,6 +140,7 @@ impl SamlConfig {
             sp_private_key: None,
             contact_person: None,
             allow_unsigned_assertions: false,
+            allow_idp_initiated: false,
             required_attributes: Vec::new(),
         }
     }
@@ -148,6 +167,13 @@ impl SamlConfig {
     /// Allow unsigned assertions (not recommended)
     pub fn allow_unsigned(mut self, allow: bool) -> Self {
         self.allow_unsigned_assertions = allow;
+        self
+    }
+
+    /// Accept unsolicited (IdP-initiated) responses. See
+    /// [`SamlConfig::allow_idp_initiated`]; off by default.
+    pub fn allow_idp_initiated(mut self, allow: bool) -> Self {
+        self.allow_idp_initiated = allow;
         self
     }
 
@@ -209,6 +235,51 @@ impl SamlServiceProvider {
         })
     }
 
+    /// Validate a SAML response against the login flow this SP started.
+    ///
+    /// This is the correlated counterpart to
+    /// [`SamlProvider::validate_response`]: it requires the response's
+    /// `InResponseTo` to match `expected_request_id` (the
+    /// [`SamlAuthRequest::request_id`] stored when the flow began), and
+    /// optionally that the returned RelayState matches the one issued.
+    ///
+    /// Signature, issuer, audience and expiry are enforced either way — what
+    /// this adds is the binding between the response and *this browser's*
+    /// login attempt. Without it, an attacker can complete SSO in a victim's
+    /// browser using an assertion for the attacker's own account (login CSRF),
+    /// or replay a captured unsolicited response.
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_request_id` - the AuthnRequest ID this SP issued
+    /// * `expected_relay_state` - the RelayState issued with that request, if
+    ///   RelayState is being used; `None` skips the check
+    /// * `received_relay_state` - the RelayState the IdP sent back
+    pub fn validate_response_with_request_id(
+        &self,
+        saml_response: &str,
+        expected_request_id: &str,
+        expected_relay_state: Option<&str>,
+        received_relay_state: Option<&str>,
+    ) -> Result<SamlAssertion> {
+        if let Some(expected) = expected_relay_state {
+            let received = received_relay_state.ok_or_else(|| {
+                AuthError::SamlValidation(
+                    "SAML response is missing the RelayState issued with the AuthnRequest"
+                        .to_string(),
+                )
+            })?;
+            if !armature_core::crypto::constant_time_eq(expected.as_bytes(), received.as_bytes()) {
+                return Err(AuthError::SamlValidation(
+                    "SAML RelayState does not match the value issued with the AuthnRequest"
+                        .to_string(),
+                ));
+            }
+        }
+
+        self.validate_response_verified(saml_response, Some(expected_request_id))
+    }
+
     /// Generate relay state
     fn generate_relay_state(&self) -> String {
         use rand::Rng;
@@ -245,7 +316,7 @@ impl SamlProvider for SamlServiceProvider {
     async fn validate_response(&self, saml_response: &str) -> Result<SamlAssertion> {
         #[cfg(feature = "saml")]
         {
-            self.validate_response_verified(saml_response)
+            self.validate_response_verified(saml_response, None)
         }
 
         // Without the `saml` feature there is no XML-signature verification available.
@@ -381,6 +452,10 @@ impl SamlServiceProvider {
             AuthError::SamlValidation(format!("Failed to build SAML AuthnRequest: {e}"))
         })?;
 
+        // Captured before serialization: the IdP echoes this back as
+        // `InResponseTo`, and the caller needs it to correlate the response.
+        let request_id = authn_request.id.clone();
+
         // 4. Sign the AuthnRequest when SP credentials are configured. `sp_private_key` and
         //    `sp_certificate` are otherwise-unused config knobs without this. Signing
         //    requires an enveloped `<ds:Signature>` template (referencing the request's own
@@ -414,6 +489,7 @@ impl SamlServiceProvider {
 
         Ok(SamlAuthRequest {
             saml_request: encoded,
+            request_id,
             relay_state: Some(self.generate_relay_state()),
             redirect_url: idp_sso_url,
         })
@@ -457,7 +533,11 @@ fn pem_body(pem: &str) -> String {
 /// without a verified signature unless `allow_unsigned_assertions` is explicitly set.
 #[cfg(feature = "saml")]
 impl SamlServiceProvider {
-    fn validate_response_verified(&self, saml_response: &str) -> Result<SamlAssertion> {
+    fn validate_response_verified(
+        &self,
+        saml_response: &str,
+        expected_request_id: Option<&str>,
+    ) -> Result<SamlAssertion> {
         use samael::service_provider::ServiceProviderBuilder;
 
         // 1. Use the IdP metadata parsed once at construction. The signing certificate(s)
@@ -489,10 +569,11 @@ impl SamlServiceProvider {
             .entity_id(Some(self.config.entity_id.clone()))
             .acs_url(Some(self.config.acs_url.clone()))
             .idp_metadata(idp_metadata)
-            // The trait's validate_response does not carry the original AuthnRequest ID,
-            // so we accept IdP-initiated flows. Signature, issuer, audience and expiry
-            // remain fully enforced; only the InResponseTo correlation is relaxed.
-            .allow_idp_initiated(true)
+            // Unsolicited responses are accepted only where the deployment says
+            // it uses IdP-initiated SSO. Left on unconditionally, `InResponseTo`
+            // is never correlated and a response minted for another login is
+            // indistinguishable from the one this browser asked for.
+            .allow_idp_initiated(self.config.allow_idp_initiated)
             .build()
             .map_err(|e| {
                 AuthError::SamlValidation(format!("Failed to build SAML service provider: {e}"))
@@ -517,11 +598,15 @@ impl SamlServiceProvider {
         // 3. Verify the enveloped XML signature and enforce SAML conditions. This is the
         //    single call that closes the SSO bypass: it rejects unsigned, tampered,
         //    expired, wrong-audience and wrong-issuer responses.
-        let assertion = sp.parse_base64_response(saml_response, None).map_err(|e| {
-            AuthError::SamlValidation(format!(
-                "SAML response signature/condition check failed: {e}"
-            ))
-        })?;
+        let expected_ids = expected_request_id.map(|id| [id]);
+        let possible_request_ids = expected_ids.as_ref().map(<[&str; 1]>::as_slice);
+        let assertion = sp
+            .parse_base64_response(saml_response, possible_request_ids)
+            .map_err(|e| {
+                AuthError::SamlValidation(format!(
+                    "SAML response signature/condition check failed: {e}"
+                ))
+            })?;
 
         // 4. Extract attributes and enforce required attributes.
         let attributes = extract_saml_attributes(&assertion);
@@ -703,6 +788,8 @@ mod saml_verification_tests {
     const SP_ENTITY_ID: &str = "https://sp.example.test/metadata";
     const ACS_URL: &str = "https://sp.example.test/saml/acs";
     const NAME_ID: &str = "user@example.test";
+    /// `InResponseTo` carried by every minted fixture response.
+    const REQUEST_ID: &str = "_test_request_id";
 
     /// Options controlling how a fixture Response is minted.
     struct MintOptions {
@@ -768,7 +855,7 @@ mod saml_verification_tests {
             &opts.audience,
             &opts.issuer,
             ACS_URL,
-            "_test_request_id",
+            REQUEST_ID,
             &attrs,
         );
 
@@ -846,7 +933,9 @@ mod saml_verification_tests {
 
     async fn validate(fixture: &Fixture, allow_unsigned: bool) -> Result<SamlAssertion> {
         let provider = provider_from(&fixture.idp_metadata_xml, allow_unsigned);
-        provider.validate_response(&fixture.response_b64).await
+        // Correlated validation is the supported path: the SP knows which
+        // AuthnRequest it issued, so the response must answer that one.
+        provider.validate_response_with_request_id(&fixture.response_b64, REQUEST_ID, None, None)
     }
 
     // (a) A validly-signed response is accepted, and the returned NameID, attributes and
@@ -967,8 +1056,7 @@ mod saml_verification_tests {
         let fixture = mint(MintOptions::default());
         let provider = provider_from(&metadata, false);
         let err = provider
-            .validate_response(&fixture.response_b64)
-            .await
+            .validate_response_with_request_id(&fixture.response_b64, REQUEST_ID, None, None)
             .expect_err("must refuse when no signing cert is configured");
         assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
     }
@@ -986,10 +1074,98 @@ mod saml_verification_tests {
         let provider =
             SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
         let err = provider
-            .validate_response(&fixture.response_b64)
-            .await
+            .validate_response_with_request_id(&fixture.response_b64, REQUEST_ID, None, None)
             .expect_err("missing required attribute must be rejected");
         assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // A response answering a *different* AuthnRequest must be rejected: this is
+    // what stops an attacker's assertion from completing SSO in a victim's
+    // browser.
+    #[tokio::test]
+    async fn response_for_another_request_id_is_rejected() {
+        let fixture = mint(MintOptions::default());
+        let provider = provider_from(&fixture.idp_metadata_xml, false);
+        let err = provider
+            .validate_response_with_request_id(
+                &fixture.response_b64,
+                "_some_other_request",
+                None,
+                None,
+            )
+            .expect_err("InResponseTo must be correlated with the issued AuthnRequest");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // Unsolicited responses are refused unless the deployment opted in.
+    #[tokio::test]
+    async fn unsolicited_response_is_rejected_by_default() {
+        let fixture = mint(MintOptions::default());
+        let provider = provider_from(&fixture.idp_metadata_xml, false);
+        assert!(!provider.config.allow_idp_initiated);
+
+        let err = provider
+            .validate_response(&fixture.response_b64)
+            .await
+            .expect_err("IdP-initiated SSO must be opt-in");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+    }
+
+    // ...and accepted once it is, so the opt-in is a real switch.
+    #[tokio::test]
+    async fn unsolicited_response_is_accepted_when_opted_in() {
+        let fixture = mint(MintOptions::default());
+        let config = SamlConfig::new(
+            SP_ENTITY_ID.to_string(),
+            ACS_URL.to_string(),
+            IdpMetadata::Xml(fixture.idp_metadata_xml.clone()),
+        )
+        .allow_idp_initiated(true)
+        .with_required_attributes(vec!["email".to_string()]);
+        let provider =
+            SamlServiceProvider::new("test-idp".to_string(), config).expect("provider build");
+
+        provider
+            .validate_response(&fixture.response_b64)
+            .await
+            .expect("opted-in IdP-initiated SSO must be accepted");
+    }
+
+    // RelayState is generated per login; if it is being used it must come back
+    // unchanged, otherwise the response belongs to some other flow.
+    #[tokio::test]
+    async fn mismatched_relay_state_is_rejected() {
+        let fixture = mint(MintOptions::default());
+        let provider = provider_from(&fixture.idp_metadata_xml, false);
+
+        let err = provider
+            .validate_response_with_request_id(
+                &fixture.response_b64,
+                REQUEST_ID,
+                Some("issued-relay-state"),
+                Some("attacker-relay-state"),
+            )
+            .expect_err("a mismatched RelayState must be rejected");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+
+        let err = provider
+            .validate_response_with_request_id(
+                &fixture.response_b64,
+                REQUEST_ID,
+                Some("issued-relay-state"),
+                None,
+            )
+            .expect_err("a missing RelayState must be rejected when one was issued");
+        assert!(matches!(err, AuthError::SamlValidation(_)), "got {err:?}");
+
+        provider
+            .validate_response_with_request_id(
+                &fixture.response_b64,
+                REQUEST_ID,
+                Some("issued-relay-state"),
+                Some("issued-relay-state"),
+            )
+            .expect("a matching RelayState must pass");
     }
 }
 

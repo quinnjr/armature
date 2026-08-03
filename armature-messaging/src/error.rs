@@ -69,6 +69,16 @@ pub enum MessagingError {
     #[error("Message expired: {0}")]
     Expired(String),
 
+    /// A requested option has no equivalent on the selected backend.
+    ///
+    /// Returned instead of silently downgrading the request. Several
+    /// [`SubscribeOptions`](crate::SubscribeOptions) fields are meaningful on
+    /// only some brokers; quietly aliasing them to the nearest supported
+    /// behavior would leave a caller believing they narrowed a subscription or
+    /// took manual control of acknowledgment when they did not.
+    #[error("Unsupported on this backend: {0}")]
+    Unsupported(String),
+
     /// Internal broker error
     #[error("Broker error: {0}")]
     BrokerError(String),

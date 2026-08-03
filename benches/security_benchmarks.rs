@@ -1,3 +1,13 @@
+//! JWT benchmarks.
+//!
+//! Times `armature-jwt` token issue and verify across the HMAC algorithms,
+//! plus config construction. Signing keys are fixed test values held in memory;
+//! nothing here touches a key store, a JWKS endpoint or the network.
+//!
+//! ```bash
+//! cargo bench --bench security_benchmarks
+//! ```
+
 #![allow(deprecated)]
 #![allow(clippy::needless_question_mark)]
 

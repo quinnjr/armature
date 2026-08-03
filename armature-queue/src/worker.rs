@@ -64,8 +64,10 @@ impl Default for WorkerConfig {
 /// Outcome of a graceful (or partially force-aborted) worker shutdown, as
 /// returned by [`Worker::stop_with_timeout`].
 ///
-/// The three counts always sum to the total number of worker tasks that were
-/// spawned by [`Worker::start`] and reaped by this shutdown call.
+/// The three counts always sum to `concurrency` — the job-processing tasks
+/// spawned by [`Worker::start`]. The stale-claim reaper is cancelled up front
+/// and deliberately excluded, so these numbers describe in-flight *jobs* and
+/// nothing else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StopOutcome {
     /// Number of worker tasks that returned normally on their own within the
@@ -94,6 +96,13 @@ pub struct Worker {
     // each `JoinHandle` in a second spawned task and aborting that wrapper
     // would leave the original worker task running detached.
     handles: JoinSet<()>,
+    /// The stale-claim reaper, held apart from `handles`.
+    ///
+    /// It is infrastructure, not a job-processing task, so counting it in
+    /// [`StopOutcome`] would tell an operator that one more job drained than
+    /// actually ran — and those counts exist precisely to reason about
+    /// in-flight jobs.
+    reaper: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -115,6 +124,7 @@ impl Worker {
             config,
             running: Arc::new(RwLock::new(false)),
             handles: JoinSet::new(),
+            reaper: None,
         }
     }
 
@@ -177,6 +187,35 @@ impl Worker {
             "Starting worker with {} concurrent processors",
             self.config.concurrency
         );
+
+        // Reaper task. `dequeue` records a claim timestamp in the queue's
+        // `processing` set, but a worker that is SIGKILLed (or whose handler
+        // task panics) never resolves its claim: the job sits in no pending
+        // queue, no retry path can see it, and its body eventually TTL-expires.
+        // Nothing else in the system reads that timestamp back, so without this
+        // task the claim is written and never looked at again.
+        //
+        // It is held apart from the worker `JoinSet` so it does not inflate
+        // `StopOutcome`, and it wakes on `poll_interval` (rather than on the
+        // far longer visibility timeout) so the stop flag is observed promptly.
+        if let Some(visibility_timeout) = self.config.visibility_timeout {
+            let queue = self.queue.clone();
+            let running = self.running.clone();
+            let poll_interval = self.config.poll_interval;
+
+            self.reaper = Some(tokio::spawn(async move {
+                while *running.read().await {
+                    // A reap failure is transient (a Redis blip): log and keep
+                    // the loop alive, exactly as the worker tasks do, rather
+                    // than silently leaving the queue without a reaper for the
+                    // rest of the process's life.
+                    if let Err(e) = queue.reclaim_stale(visibility_timeout).await {
+                        warn!("[REAPER] Failed to reclaim stale in-flight jobs: {}", e);
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                }
+            }));
+        }
 
         // Start worker tasks
         for i in 0..self.config.concurrency {
@@ -543,6 +582,14 @@ impl Worker {
             println!("[WORKER] Stopping (grace period: {:?})...", timeout);
         }
 
+        // The reaper does no work worth finishing at shutdown, and its Lua
+        // reclaim is atomic server-side, so aborting cannot leave a partial
+        // reclaim behind. Cancelling it up front also keeps it from consuming
+        // the grace period the in-flight jobs need.
+        if let Some(reaper) = self.reaper.take() {
+            reaper.abort();
+        }
+
         // Wait for tasks to return on their own, up to `timeout` total (not
         // per-task): each completed task is drained from the `JoinSet` as it
         // finishes, and we keep waiting -- against a single shared deadline --
@@ -631,6 +678,23 @@ mod tests {
         assert!(config.log_execution);
     }
 
+    /// Reaping must be on by default -- a worker that crashes without one
+    /// strands its in-flight job in `processing` forever -- and the timeout
+    /// must exceed `job_timeout`, or a merely slow job is re-filed while still
+    /// running and executes twice.
+    #[test]
+    fn test_default_visibility_timeout_exceeds_job_timeout() {
+        let config = WorkerConfig::default();
+        let visibility = config
+            .visibility_timeout
+            .expect("stale-claim reaping must be enabled by default");
+        assert!(
+            visibility > config.job_timeout,
+            "visibility_timeout {visibility:?} must exceed job_timeout {:?}",
+            config.job_timeout
+        );
+    }
+
     #[tokio::test]
     async fn test_worker_creation() {
         // This test requires a real Redis connection, so we just test creation
@@ -640,6 +704,7 @@ mod tests {
             poll_interval: Duration::from_millis(500),
             job_timeout: Duration::from_secs(60),
             log_execution: false,
+            ..Default::default()
         };
 
         assert_eq!(config.concurrency, 5);

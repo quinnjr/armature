@@ -116,19 +116,24 @@ impl Middleware for AnalyticsMiddleware {
         }
 
         let method = req.method_str().to_owned();
-        let raw_path = req.path.clone();
 
         // Exclusion and sampling gate what we record, but never what we return.
         // Evaluate them first, before any normalization or allocation, so that
         // excluded/unsampled requests skip the expensive path-normalization and
         // query/client-id work entirely.
-        if config.should_exclude(&raw_path) || !config.should_sample() {
+        //
+        // `path_only`, not `path`: the raw target still carries the query
+        // string. Keeping it would defeat both the exclusion prefixes and the
+        // `:id` normalization, and would make the endpoint key unique per query
+        // string — letting a caller flood the capped endpoint table.
+        let excluded = config.should_exclude(req.path_only());
+        if excluded || !config.should_sample() {
             return next(req).await;
         }
 
         // Build the recording path (before `req` is consumed by `next`).
         // Optionally fold query parameters into the tracked path.
-        let mut tracked_path = normalize_path(&raw_path);
+        let mut tracked_path = normalize_path(req.path_only());
         if config.include_query_params && !req.query().is_empty() {
             let mut pairs: Vec<(&str, &str)> = req.query().iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(b.0));
@@ -320,5 +325,73 @@ mod tests {
         });
         mw.handle(req, next).await.unwrap();
         assert_eq!(analytics.snapshot().requests.total, 0);
+    }
+
+    // Regression: `req.path` is the raw target, so a query string used to leak
+    // into the endpoint key (`/users/123?ref=x`), defeating normalization and
+    // giving an attacker unbounded distinct keys in the capped endpoint table.
+    #[tokio::test]
+    async fn test_middleware_strips_query_from_endpoint_key() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let analytics = Analytics::new(AnalyticsConfig::default());
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+
+        for query in ["?ref=x", "?ref=y", "?ref=z"] {
+            let req = HttpRequest::new("GET", format!("/users/123{}", query));
+            let next: Next = Box::new(|_req: HttpRequest| {
+                Box::pin(async { Ok(HttpResponse::ok()) })
+                    as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+            });
+            mw.handle(req, next).await.unwrap();
+        }
+
+        let snapshot = analytics.snapshot();
+        assert_eq!(snapshot.endpoints.len(), 1, "query must not fork the key");
+        assert_eq!(snapshot.endpoints[0].path, "/users/:id");
+    }
+
+    // The exclusion prefixes are matched against the query-free path, so a
+    // query string cannot smuggle an excluded path back into the recording.
+    #[tokio::test]
+    async fn test_middleware_exclusion_ignores_query() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let analytics = Analytics::new(AnalyticsConfig::default());
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+        let req = HttpRequest::new("GET", "/health?cache-bust=1".to_string());
+        let next: Next = Box::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok()) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+        mw.handle(req, next).await.unwrap();
+        assert_eq!(analytics.snapshot().requests.total, 0);
+    }
+
+    // With `include_query_params`, the query is appended exactly once on top of
+    // the query-free normalized path — not doubled.
+    #[tokio::test]
+    async fn test_middleware_include_query_params_appends_once() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let analytics = Analytics::new(
+            AnalyticsConfig::builder()
+                .include_query_params(true)
+                .build(),
+        );
+        let mw = AnalyticsMiddleware::new(analytics.clone());
+        let req = HttpRequest::new("GET", "/users/123?b=2&a=1".to_string());
+        let next: Next = Box::new(|_req: HttpRequest| {
+            Box::pin(async { Ok(HttpResponse::ok()) })
+                as Pin<Box<dyn Future<Output = Result<HttpResponse, Error>> + Send>>
+        });
+        mw.handle(req, next).await.unwrap();
+
+        let snapshot = analytics.snapshot();
+        assert_eq!(snapshot.endpoints.len(), 1);
+        assert_eq!(snapshot.endpoints[0].path, "/users/:id?a=1&b=2");
     }
 }

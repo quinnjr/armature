@@ -1,6 +1,6 @@
 //! GraphQL types
 
-use async_graphql::{InputObject, SimpleObject, Enum, ID};
+use async_graphql::{Enum, ID, InputObject, SimpleObject};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

@@ -158,6 +158,26 @@ impl<E: Event, H: EventHandler<E>> TypedEventHandler<E, H> {
     }
 }
 
+impl<E: Event, H: EventHandler<E> + Clone> Clone for TypedEventHandler<E, H> {
+    fn clone(&self) -> Self {
+        Self {
+            handler: self.handler.clone(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+/// A `TypedEventHandler` is itself a handler for `E`, so wrapping is idempotent.
+/// This keeps `EventBus::subscribe` — which now requires `H: EventHandler<E>` so
+/// the event type cannot be stated wrongly — usable with both a bare handler and
+/// an already-wrapped one.
+#[async_trait]
+impl<E: Event, H: EventHandler<E>> EventHandler<E> for TypedEventHandler<E, H> {
+    async fn handle(&self, event: &E) -> Result<(), EventHandlerError> {
+        self.handler.handle(event).await
+    }
+}
+
 #[async_trait]
 impl<E: Event + Clone, H: EventHandler<E> + Clone + 'static> DynEventHandler
     for TypedEventHandler<E, H>

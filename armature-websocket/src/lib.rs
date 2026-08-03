@@ -50,7 +50,7 @@ pub use client::{WebSocketClient, WebSocketClientBuilder};
 pub use connection::{Connection, ConnectionId, ConnectionState};
 pub use error::{WebSocketError, WebSocketResult};
 pub use handler::{LoggingHandler, WebSocketHandler};
-pub use message::{Message, MessageType};
+pub use message::{InvalidTextPayload, Message, MessageType};
 pub use room::{Room, RoomId, RoomManager};
 pub use server::{WebSocketServer, WebSocketServerBuilder, WebSocketServerConfig};
 

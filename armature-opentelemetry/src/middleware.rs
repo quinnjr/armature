@@ -45,22 +45,31 @@ impl TelemetryMiddleware {
         self
     }
 
-    /// Extract span attributes from request
+    /// Extract span attributes from request.
+    ///
+    /// Names follow OTel semantic conventions 1.0 and later. The pre-1.0
+    /// spellings (`http.method`, `http.target`, `http.host`,
+    /// `http.user_agent`, `http.scheme`) were retired when the HTTP
+    /// conventions stabilized, and collectors/backends key their HTTP
+    /// dashboards off the current names.
     fn extract_attributes(&self, req: &HttpRequest) -> Vec<KeyValue> {
         let mut attributes = vec![
-            KeyValue::new("http.method", req.method.to_string()),
-            KeyValue::new("http.target", req.path_str().to_owned()),
-            KeyValue::new("http.scheme", "http"),
+            KeyValue::new("http.request.method", req.method_str().to_owned()),
+            // `url.path` is the path component only; the query belongs in
+            // `url.query`, which is omitted here because it is unbounded and
+            // routinely carries credentials.
+            KeyValue::new("url.path", req.path_only().to_owned()),
+            KeyValue::new("url.scheme", "http"),
         ];
 
         // Add host header if present
         if let Some(host) = req.headers.get("host") {
-            attributes.push(KeyValue::new("http.host", host.to_owned()));
+            attributes.push(KeyValue::new("server.address", host.to_owned()));
         }
 
         // Add user agent if present
         if let Some(ua) = req.headers.get("user-agent") {
-            attributes.push(KeyValue::new("http.user_agent", ua.to_owned()));
+            attributes.push(KeyValue::new("user_agent.original", ua.to_owned()));
         }
 
         attributes
@@ -69,8 +78,8 @@ impl TelemetryMiddleware {
     /// Extract response attributes
     fn extract_response_attributes(&self, res: &HttpResponse) -> Vec<KeyValue> {
         vec![
-            KeyValue::new("http.status_code", res.status.to_string()),
-            KeyValue::new("http.response_content_length", res.body.len() as i64),
+            KeyValue::new("http.response.status_code", res.status as i64),
+            KeyValue::new("http.response.body.size", res.body.len() as i64),
         ]
     }
 
@@ -101,7 +110,12 @@ impl Middleware for TelemetryMiddleware {
 
         // Capture the real request dimensions before `req` is consumed by `next`.
         let method = req.method_str().to_owned();
-        let route = req.path.clone();
+        // `http.route` is defined by OTel as the low-cardinality route
+        // template. The matched template is not available to a middleware here,
+        // so use the query-less path: still higher cardinality than a template,
+        // but bounded by the URL space the app actually serves rather than by
+        // every distinct query string a client cares to send.
+        let route = req.path_only().to_owned();
 
         // Increment active requests
         if let Some(ref metrics) = self.metrics {
@@ -117,7 +131,10 @@ impl Middleware for TelemetryMiddleware {
         let request_attrs = self.extract_attributes(&req);
         let span = self
             .tracer
-            .span_builder(format!("{} {}", req.method, req.path))
+            // Span names are a grouping dimension in every tracing backend, so
+            // the query string stays out of them for the same reason it stays
+            // out of `http.route`.
+            .span_builder(format!("{} {}", method, route))
             .with_kind(SpanKind::Server)
             .with_attributes(request_attrs)
             .start_with_context(&self.tracer, &parent_context);
@@ -352,18 +369,92 @@ mod tests {
         let attrs = attrs.expect("request count metric with a data point must be recorded");
 
         // The recorded dimensions must be the REAL request values, never the
-        // old hardcoded literals "method"/"path".
-        assert_eq!(attrs.get("http.method").map(String::as_str), Some("GET"));
+        // old hardcoded literals "method"/"path". Attribute names are the
+        // stable OTel HTTP semantic conventions, not the retired pre-1.0 ones.
+        assert_eq!(
+            attrs.get("http.request.method").map(String::as_str),
+            Some("GET")
+        );
         assert_eq!(
             attrs.get("http.route").map(String::as_str),
             Some("/users/42")
         );
         assert_eq!(
-            attrs.get("http.status_code").map(String::as_str),
+            attrs.get("http.response.status_code").map(String::as_str),
             Some("201")
         );
-        assert_ne!(attrs.get("http.method").map(String::as_str), Some("method"));
+        assert!(
+            !attrs.contains_key("http.method"),
+            "the retired pre-1.0 attribute name must not be emitted"
+        );
+        assert!(
+            !attrs.contains_key("http.status_code"),
+            "the retired pre-1.0 attribute name must not be emitted"
+        );
+        assert_ne!(
+            attrs.get("http.request.method").map(String::as_str),
+            Some("method")
+        );
         assert_ne!(attrs.get("http.route").map(String::as_str), Some("path"));
+    }
+
+    /// Regression: `http.route` is a low-cardinality dimension, so the query
+    /// string must not reach it. Against the pre-fix code, which passed
+    /// `req.path.clone()` (the raw target), every distinct query minted its own
+    /// time series.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn handle_strips_the_query_string_from_http_route() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let meter = provider.meter("test");
+        let metrics = Arc::new(crate::metrics::HttpMetrics::new(&meter).unwrap());
+        let middleware = TelemetryMiddleware::new("test-service").with_metrics(metrics);
+
+        // Two targets that differ only in their query string must land on the
+        // same `http.route`.
+        for target in ["/search?q=alpha&page=1", "/search?q=beta&page=9"] {
+            let req = HttpRequest::new("GET", target.to_string());
+            let next: Next = Box::new(|_req| Box::pin(async { Ok(HttpResponse::ok()) }));
+            middleware.handle(req, next).await.unwrap();
+        }
+
+        provider.force_flush().unwrap();
+
+        let resource_metrics = exporter.get_finished_metrics().unwrap();
+        let mut routes: Vec<String> = Vec::new();
+        for rm in &resource_metrics {
+            for sm in rm.scope_metrics() {
+                for metric in sm.metrics() {
+                    if metric.name() != "http.server.request.count" {
+                        continue;
+                    }
+                    if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
+                        for dp in sum.data_points() {
+                            for kv in dp.attributes() {
+                                if kv.key.as_str() == "http.route" {
+                                    routes.push(kv.value.as_str().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(!routes.is_empty(), "http.route must be recorded");
+        for route in &routes {
+            assert_eq!(
+                route, "/search",
+                "the query string must not reach the label"
+            );
+        }
     }
 
     /// Regression: `next(req)` used to run without the request's OpenTelemetry

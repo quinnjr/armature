@@ -227,9 +227,7 @@ impl QueueConfig {
     /// wait itself *plus* the full retention window, so `retention_time` keeps
     /// meaning "how long the terminal record survives after the job ran".
     fn body_ttl_secs(&self, wait: Duration) -> u64 {
-        self.retention_time
-            .as_secs()
-            .saturating_add(wait.as_secs())
+        self.retention_time.as_secs().saturating_add(wait.as_secs())
     }
 }
 
@@ -918,8 +916,8 @@ mod tests {
 
         // Scheduled well beyond the 24h default retention time.
         let far_future = Utc::now() + chrono::Duration::days(40);
-        let job = Job::new("test_long_horizon", "task", serde_json::json!({}))
-            .schedule_at(far_future);
+        let job =
+            Job::new("test_long_horizon", "task", serde_json::json!({})).schedule_at(far_future);
         let job_id = queue.enqueue_job(job).await.unwrap();
 
         // The body must still be readable and its TTL must outlast the wait,
@@ -963,7 +961,10 @@ mod tests {
 
         // A timeout longer than the claim's age reclaims nothing...
         assert_eq!(
-            queue.reclaim_stale(Duration::from_secs(3600)).await.unwrap(),
+            queue
+                .reclaim_stale(Duration::from_secs(3600))
+                .await
+                .unwrap(),
             0
         );
         assert_eq!(queue.processing_len().await.unwrap(), 1);

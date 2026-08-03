@@ -21,9 +21,26 @@ pub trait Aggregate: Send + Sync + Debug + Clone {
         Self: Sized;
 
     /// Get current version
+    ///
+    /// # Invariant
+    ///
+    /// The version MUST equal the number of events applied to this aggregate: a
+    /// fresh instance starts at 0 and every successful [`Aggregate::apply_event`]
+    /// advances it by exactly one, including events replayed from the store.
+    ///
+    /// This is not a stylistic preference. [`crate::EventStore`] treats versions
+    /// as positional indices into the aggregate's event log — `load_events`
+    /// interprets `from_version` as a count of events to skip, and `save_events`
+    /// compares `expected_version` against the number of events already stored.
+    /// An aggregate that advances its version by anything other than one per
+    /// event will silently replay from the wrong offset and produce bogus
+    /// optimistic-concurrency conflicts.
     fn version(&self) -> u64;
 
     /// Apply an event to the aggregate
+    ///
+    /// Implementations must advance [`Aggregate::version`] by exactly one on
+    /// success (see the invariant documented there).
     fn apply_event(&mut self, event: &DomainEvent) -> Result<(), AggregateError>;
 
     /// Get uncommitted events

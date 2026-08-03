@@ -15,22 +15,41 @@ impl EnvLoader {
         Self { prefix }
     }
 
-    /// Load all environment variables
+    /// Load all environment variables.
+    ///
+    /// Keys are lowercased, the prefix (if any) is stripped, and a double
+    /// underscore becomes a dot: `APP__DATABASE__URL` with prefix `APP`
+    /// becomes `database.url`. Without that mapping no environment variable
+    /// could ever satisfy a dotted lookup like `get("database.url")`, because
+    /// a `.` is not portable in an environment variable name — `APP_DATABASE_URL`
+    /// only ever produced the flat key `database_url`.
+    ///
+    /// Single underscores are left alone, so a name that is genuinely one
+    /// segment (`MAX_CONNECTIONS` -> `max_connections`) still works.
     pub fn load(&self) -> Result<HashMap<String, String>> {
         let mut config = HashMap::new();
 
         for (key, value) in env::vars() {
-            if let Some(ref prefix) = self.prefix {
-                if key.starts_with(prefix) {
-                    let trimmed_key = key.trim_start_matches(prefix).trim_start_matches('_');
-                    config.insert(trimmed_key.to_lowercase(), value);
+            let key = match self.prefix {
+                Some(ref prefix) => {
+                    if !key.starts_with(prefix) {
+                        continue;
+                    }
+                    key.trim_start_matches(prefix)
+                        .trim_start_matches('_')
+                        .to_string()
                 }
-            } else {
-                config.insert(key.to_lowercase(), value);
-            }
+                None => key,
+            };
+            config.insert(Self::normalize_key(&key), value);
         }
 
         Ok(config)
+    }
+
+    /// Lowercase a variable name and map `__` to the path separator `.`.
+    fn normalize_key(key: &str) -> String {
+        key.to_lowercase().replace("__", ".")
     }
 
     /// Load a specific environment variable
@@ -63,6 +82,23 @@ mod tests {
     // Note: Environment variable tests are inherently difficult to test safely
     // in Rust 1.78+ because std::env::set_var is unsafe (not thread-safe).
     // These tests use existing environment variables or test default behavior.
+
+    /// `__` is the only way an environment variable can address a nested key,
+    /// since `.` is not portable in a variable name. Tested on the key
+    /// normalizer directly so no process-global env mutation is needed.
+    #[test]
+    fn test_double_underscore_maps_to_a_dotted_path() {
+        assert_eq!(EnvLoader::normalize_key("DATABASE__URL"), "database.url");
+        assert_eq!(
+            EnvLoader::normalize_key("SERVER__TLS__CERT_PATH"),
+            "server.tls.cert_path"
+        );
+        // A single underscore is part of the segment name, not a separator.
+        assert_eq!(
+            EnvLoader::normalize_key("MAX_CONNECTIONS"),
+            "max_connections"
+        );
+    }
 
     #[test]
     fn test_env_loader_with_default() {

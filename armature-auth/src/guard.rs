@@ -66,8 +66,10 @@ impl Guard for AuthGuard {
             ));
         }
 
-        // Token exists - authentication check passed
-        // In production, you'd verify the token here
+        // Presence and shape of the credential is all this guard decides. The
+        // token's signature, expiry and claims are verified by
+        // [`crate::JwtAuthMiddleware`], which must be registered ahead of the
+        // guarded route; this guard deliberately does not re-verify it.
         Ok(true)
     }
 }

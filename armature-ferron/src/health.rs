@@ -381,12 +381,31 @@ impl HealthState {
             loop {
                 interval_timer.tick().await;
 
+                // Check every backend concurrently. Serially, one backend
+                // sitting on `config.timeout` delayed the check of every
+                // backend behind it, and with enough backends a single slow
+                // one pushed the whole sweep past the tick interval - so the
+                // health data went stale exactly when a backend was in
+                // trouble.
+                let mut set = tokio::task::JoinSet::new();
                 for backend in &backends {
-                    let result = state.check_backend(backend).await;
-                    debug!(
-                        "Background health check for {}: {:?}",
-                        backend, result.status
-                    );
+                    let state = state.clone();
+                    let backend = backend.clone();
+                    set.spawn(async move {
+                        let result = state.check_backend(&backend).await;
+                        (backend, result.status)
+                    });
+                }
+
+                while let Some(joined) = set.join_next().await {
+                    match joined {
+                        Ok((backend, status)) => {
+                            debug!("Background health check for {}: {:?}", backend, status);
+                        }
+                        Err(e) => {
+                            debug!("Background health check task failed: {}", e);
+                        }
+                    }
                 }
             }
         });

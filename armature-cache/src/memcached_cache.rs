@@ -5,13 +5,49 @@ use crate::error::{CacheError, CacheResult};
 use crate::traits::CacheStore;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+
+/// Largest expiration value the memcached protocol interprets as a *relative*
+/// number of seconds (30 days). Anything strictly greater is interpreted by the
+/// server as an **absolute Unix timestamp** instead — see
+/// [`MemcachedCache::expiration_from_secs`].
+const MEMCACHED_RELATIVE_TTL_MAX_SECS: u64 = 2_592_000;
 
 /// Memcached cache store.
 ///
 /// Note: The `memcache` crate doesn't have native async support,
 /// so we wrap it with tokio's Mutex and use spawn_blocking for operations.
+///
+/// # Limitations
+///
+/// This backend deliberately does **not** honour several [`CacheConfig`]
+/// fields. They are accepted (so one `CacheConfig` can describe either
+/// backend) but ignored here; `RedisCache` wires all three.
+///
+/// * **`connection_timeout` — ignored.** The initial connect is performed by
+///   `memcache::connect` inside `spawn_blocking` with no timeout applied, so a
+///   hung server can block the connect for as long as the OS TCP timeout
+///   allows.
+/// * **`operation_timeout` — ignored.** Individual gets/sets/deletes are not
+///   bounded by a deadline, so `CacheError::Timeout` is never produced by this
+///   backend. A stalled memcached server stalls the calling task.
+/// * **`max_connections` — ignored, and structurally unhonourable as
+///   implemented.** The whole backend holds a *single* `memcache::Client`
+///   behind one `Arc<Mutex<..>>`, and every operation takes that mutex inside
+///   `spawn_blocking`. All memcached traffic from a given `MemcachedCache`
+///   (including every clone of it, since the `Arc` is shared) therefore
+///   serializes onto one lock and one socket. Batch operations that are
+///   "parallel" at the future level still execute one at a time underneath;
+///   `mget` sidesteps this only because it uses memcached's native multi-get,
+///   which is a single round-trip.
+///
+/// [`Self::new`] logs a warning when `max_connections > 1` is configured, so
+/// this is visible at runtime and not only in these docs.
+///
+/// Two further protocol-level limitations are documented on the methods
+/// themselves: [`CacheStore::clear`] cannot be scoped to `key_prefix`, and
+/// [`CacheStore::ttl`] always returns `None`.
 #[derive(Clone)]
 pub struct MemcachedCache {
     client: Arc<Mutex<memcache::Client>>,
@@ -41,6 +77,20 @@ impl MemcachedCache {
         // Parse the URL to extract the server address
         let url = config.url.clone();
         let server_url = Self::parse_memcached_url(&url)?;
+
+        // Surface the ignored pool setting at runtime rather than only in the
+        // type's `# Limitations` rustdoc: an operator who configured a pool is
+        // otherwise given no signal that every operation still serializes onto
+        // a single client behind a single mutex.
+        if config.max_connections > 1 {
+            armature_log::warn!(
+                "MemcachedCache ignores CacheConfig::max_connections (configured: {}); \
+                 this backend holds a single memcache::Client behind one mutex, so all \
+                 operations serialize onto one connection. connection_timeout and \
+                 operation_timeout are ignored by this backend as well.",
+                config.max_connections
+            );
+        }
 
         // Create client in blocking context
         let client = tokio::task::spawn_blocking(move || memcache::connect(server_url.as_str()))
@@ -76,9 +126,47 @@ impl MemcachedCache {
         self.config.build_key(key)
     }
 
-    /// Convert Duration to Memcached expiration (in seconds).
+    /// Convert a `Duration` to the expiration value memcached expects.
+    ///
+    /// See [`Self::expiration_from_secs`] for the 30-day rule this implements.
+    /// `None` maps to `0`, memcached's "never expires".
     fn duration_to_expiration(ttl: Option<Duration>) -> u32 {
-        ttl.map(|d| d.as_secs() as u32).unwrap_or(0)
+        match ttl {
+            Some(d) => Self::expiration_from_secs(d.as_secs(), Self::unix_now()),
+            None => 0,
+        }
+    }
+
+    /// Seconds since the Unix epoch, saturating at 0 if the clock is somehow
+    /// before the epoch.
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Encode `secs` of desired lifetime as a memcached expiration value,
+    /// given the current Unix time `now`.
+    ///
+    /// The memcached protocol overloads this single field: a value of at most
+    /// 2,592,000 (30 days) is a *relative* offset from now, but anything larger
+    /// is read as an *absolute* Unix timestamp. Passing a raw 40-day lifetime
+    /// (3,456,000) therefore does not store the item for 40 days — the server
+    /// reads it as a date in early 1970, so the item is written already
+    /// expired, is never readable again, and the write still reports success.
+    /// Longer lifetimes must consequently be converted to `now + secs`.
+    ///
+    /// The result is clamped to `u32::MAX`, so an absurdly long lifetime
+    /// degrades to "expires at the far end of the 32-bit epoch" rather than
+    /// wrapping around into a timestamp in the past.
+    fn expiration_from_secs(secs: u64, now: u64) -> u32 {
+        if secs <= MEMCACHED_RELATIVE_TTL_MAX_SECS {
+            // Fits in u32 by construction (2_592_000 < u32::MAX).
+            secs as u32
+        } else {
+            now.saturating_add(secs).min(u32::MAX as u64) as u32
+        }
     }
 }
 
@@ -145,6 +233,23 @@ impl CacheStore for MemcachedCache {
         tokio::task::spawn_blocking(move || {
             let client = client.blocking_lock();
             client.set(&key, value, expiration)
+        })
+        .await
+        .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
+
+        Ok(())
+    }
+
+    /// Store with memcached's `0` expiration ("never expires"), skipping the
+    /// `default_ttl` fallback that `set_json` applies to a `None` TTL. See
+    /// [`CacheStore::set_json_forever`].
+    async fn set_json_forever(&self, key: &str, value: String) -> CacheResult<()> {
+        let key = self.build_key(key);
+        let client = self.client.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let client = client.blocking_lock();
+            client.set(&key, value, 0)
         })
         .await
         .map_err(|e| CacheError::Other(format!("Task join error: {}", e)))??;
@@ -324,6 +429,65 @@ mod tests {
         assert_eq!(
             MemcachedCache::duration_to_expiration(Some(Duration::from_secs(60))),
             60
+        );
+    }
+
+    /// A lifetime at or below memcached's 30-day threshold is a relative
+    /// offset and must be passed through untouched.
+    #[test]
+    fn test_expiration_under_threshold_passes_through() {
+        let now = 1_700_000_000;
+        assert_eq!(MemcachedCache::expiration_from_secs(0, now), 0);
+        assert_eq!(MemcachedCache::expiration_from_secs(60, now), 60);
+        assert_eq!(
+            MemcachedCache::expiration_from_secs(MEMCACHED_RELATIVE_TTL_MAX_SECS - 1, now),
+            (MEMCACHED_RELATIVE_TTL_MAX_SECS - 1) as u32
+        );
+    }
+
+    /// Exactly 30 days is still relative — the absolute-timestamp
+    /// interpretation only kicks in *above* the threshold.
+    #[test]
+    fn test_expiration_at_threshold_passes_through() {
+        let now = 1_700_000_000;
+        assert_eq!(
+            MemcachedCache::expiration_from_secs(MEMCACHED_RELATIVE_TTL_MAX_SECS, now),
+            MEMCACHED_RELATIVE_TTL_MAX_SECS as u32
+        );
+    }
+
+    /// Regression: a lifetime above the threshold used to be sent raw, which
+    /// memcached read as a 1970 timestamp and stored already-expired. It must
+    /// now be converted to an absolute timestamp in the future.
+    #[test]
+    fn test_expiration_over_threshold_becomes_future_absolute_timestamp() {
+        let now = 1_700_000_000;
+        let forty_days = 40 * 24 * 60 * 60; // 3_456_000 > 2_592_000
+        let expiration = MemcachedCache::expiration_from_secs(forty_days, now);
+
+        assert_eq!(expiration as u64, now + forty_days);
+        assert!(
+            (expiration as u64) > now,
+            "an over-threshold TTL must land in the future, not 1970"
+        );
+    }
+
+    /// A lifetime large enough to overflow the 32-bit expiration field
+    /// saturates at `u32::MAX` instead of wrapping into the past.
+    #[test]
+    fn test_expiration_overflow_saturates() {
+        let now = 1_700_000_000;
+        assert_eq!(
+            MemcachedCache::expiration_from_secs(u64::MAX, now),
+            u32::MAX
+        );
+        assert_eq!(
+            MemcachedCache::expiration_from_secs(u32::MAX as u64, now),
+            u32::MAX
+        );
+        assert_eq!(
+            MemcachedCache::duration_to_expiration(Some(Duration::from_secs(u64::MAX))),
+            u32::MAX
         );
     }
 }

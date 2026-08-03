@@ -34,7 +34,10 @@ async fn mcp_attribute_tool_appears_in_tools_list() {
     let service = McpService::new();
     let request = JsonRpcRequest::new("tools/list");
 
-    let response = service.handle_request(request, &no_headers()).await;
+    let response = service
+        .handle_request(request, &no_headers())
+        .await
+        .expect("a request carrying an id must produce a response");
     assert!(response.error.is_none(), "tools/list returned an error");
 
     let result: ToolsListResult =
@@ -59,7 +62,10 @@ async fn mcp_attribute_tool_dispatches_via_tools_call() {
         "arguments": { "name": "Ada" }
     }));
 
-    let response = service.handle_request(request, &no_headers()).await;
+    let response = service
+        .handle_request(request, &no_headers())
+        .await
+        .expect("a request carrying an id must produce a response");
     assert!(response.error.is_none(), "tools/call returned an error");
 
     let result: ToolCallResult =

@@ -244,6 +244,56 @@ fn test_http_request_helpers() {
 }
 
 // =============================================================================
+// Router Round-Trip
+// =============================================================================
+
+/// A request actually dispatched through a `Router`.
+///
+/// Every other test in this file constructs a type and asserts on the value it
+/// just built. This one registers a route, sends a real request through
+/// `Router::route`, and asserts on what the handler saw and what came back -
+/// path-param capture, query parsing on a target that carries a query string,
+/// status, and 404 for an unregistered path.
+#[tokio::test]
+async fn test_router_dispatches_a_request_end_to_end() {
+    async fn show_user(req: HttpRequest) -> Result<HttpResponse, Error> {
+        // The handler reads what routing captured and what the target carried.
+        let id = req.param("id").unwrap_or("<none>").to_owned();
+        let verbose = req.query_param("verbose").unwrap_or("<none>").to_owned();
+        Ok(HttpResponse::ok().with_body(format!("{id}|{verbose}").into_bytes()))
+    }
+
+    let mut router = Router::new();
+    router.add_route(Route::new(HttpMethod::GET, "/users/:id", show_user));
+
+    // A query string must not affect matching, must not be captured into the
+    // path param, and must be readable through `query_param`.
+    let response = router
+        .route(HttpRequest::new("GET", "/users/1?verbose=true"))
+        .await
+        .expect("GET /users/1?verbose=true must dispatch");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, Bytes::from_static(b"1|true"));
+
+    // Same route, no query string.
+    let response = router
+        .route(HttpRequest::new("GET", "/users/42"))
+        .await
+        .expect("GET /users/42 must dispatch");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, Bytes::from_static(b"42|<none>"));
+
+    // An unregistered path is a routing error, not a 200.
+    assert!(
+        router
+            .route(HttpRequest::new("GET", "/nope"))
+            .await
+            .is_err(),
+        "an unregistered path must not dispatch"
+    );
+}
+
+// =============================================================================
 // Circuit Breaker Tests
 // =============================================================================
 
@@ -278,12 +328,14 @@ fn test_retry_config() {
     let config = RetryConfig::default();
     assert!(config.max_attempts > 0);
 
-    // Test constant backoff
+    // Destructuring a `Constant` built one line earlier only asserts that
+    // `match` works, so assert what the strategy actually computes instead:
+    // a constant backoff returns the same delay for every attempt.
     let backoff = BackoffStrategy::Constant(Duration::from_millis(500));
-    match backoff {
-        BackoffStrategy::Constant(d) => assert_eq!(d.as_millis(), 500),
-        _ => panic!("Expected constant backoff"),
-    }
+    let delays: Vec<Duration> = (1..=4)
+        .map(|attempt| backoff.delay_for_attempt(attempt))
+        .collect();
+    assert_eq!(delays, vec![Duration::from_millis(500); 4]);
 }
 
 // =============================================================================
@@ -305,4 +357,68 @@ async fn test_bulkhead_basic() {
     let stats = bulkhead.stats();
     assert_eq!(stats.name, "test");
     assert_eq!(stats.max_concurrent, 2);
+}
+
+/// A bulkhead that never has a permit taken never demonstrates it bounds
+/// anything. Hold both permits of a size-2 bulkhead and assert the third
+/// caller is refused rather than admitted.
+#[tokio::test]
+async fn test_bulkhead_refuses_calls_beyond_capacity() {
+    use armature_core::resilience::{Bulkhead, BulkheadConfig, BulkheadError};
+    use tokio::sync::oneshot;
+
+    let bulkhead = Bulkhead::new(BulkheadConfig::new("saturate", 2));
+
+    // Two in-flight calls, each parked on a channel we control, so both permits
+    // are genuinely held while the third attempt is made.
+    let mut releases = Vec::new();
+    let mut holders = Vec::new();
+    for _ in 0..2 {
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let (entered_tx, entered_rx) = oneshot::channel::<()>();
+        let bulkhead = bulkhead.clone();
+
+        holders.push(tokio::spawn(async move {
+            bulkhead
+                .call(|| async move {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.await;
+                    Ok::<(), std::convert::Infallible>(())
+                })
+                .await
+        }));
+        entered_rx.await.expect("call must enter the bulkhead");
+        releases.push(release_tx);
+    }
+
+    assert_eq!(bulkhead.available_permits(), 0);
+    assert!(!bulkhead.has_capacity());
+
+    // Third caller: no permit is free, so it is rejected outright.
+    let rejected = bulkhead
+        .try_call(|| async { Ok::<(), std::convert::Infallible>(()) })
+        .await;
+    assert!(
+        matches!(rejected, Err(BulkheadError::Full)),
+        "a third concurrent call must be refused, got {rejected:?}"
+    );
+
+    // Release both holders; capacity comes back.
+    for release in releases {
+        let _ = release.send(());
+    }
+    for holder in holders {
+        holder
+            .await
+            .expect("holder task")
+            .expect("call must succeed");
+    }
+    assert_eq!(bulkhead.available_permits(), 2);
+    assert!(
+        bulkhead
+            .try_call(|| async { Ok::<(), std::convert::Infallible>(()) })
+            .await
+            .is_ok(),
+        "a freed permit must be reusable"
+    );
 }

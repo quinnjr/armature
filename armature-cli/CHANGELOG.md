@@ -13,3 +13,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).
 - Generated project templates use the new `HttpRequest::new` signature.
+- **Breaking (scripts):** subcommands that were declared but never implemented now exit non-zero instead of printing "coming soon!" and exiting `0`. This affects `serve`, `deploy`, `upgrade`, `bench`, `lint`, `config show|set|init`, `plugin install|uninstall|new`, and `openapi validate|generate`. They are also hidden from `--help` until they do something, and are no longer listed in the crate-level docs. `armature serve` used as a container start-command and `armature deploy` in CI previously reported success having done nothing.
+- Generated code templates no longer emit source that fails to compile against `armature-core`: `req.body = <Vec<u8>>` became `req.set_body(...)` (the body is `Bytes`), `req.params.get(...)`/`req.params.insert(...)` became `req.param(...)`/`req.push_param(...)`, and `HttpRequest::default()` (no such impl) became `HttpRequest::new(method, path)`.
+
+### Fixed
+
+- The generated exception filter put `req.path` — the raw request target — into the error response body, leaking any query string (and anything sensitive in it) back to the caller. It now uses `req.path_only()`.
+- `armature dev -- <args>` no longer mangles the extra cargo arguments when `cargo-watch` is installed; they are folded into the `-x run ...` command string as the built-in watcher branch already did.
+- Removed the dangling `mod watcher;` declaration left behind when the unused, substring-matching `watcher` module was deleted.

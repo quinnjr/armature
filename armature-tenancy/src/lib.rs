@@ -149,7 +149,7 @@ pub use resolver::{
     TenantError, TenantResolver, TenantStore,
 };
 pub use schema::{SchemaConfig, SchemaManager, SchemaProvider, TenantQuery};
-pub use tenant::{Tenant, TenantContext};
+pub use tenant::{Tenant, TenantContext, is_valid_schema_name};
 
 /// Prelude module for convenient imports
 pub mod prelude {

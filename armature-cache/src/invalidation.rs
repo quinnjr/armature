@@ -2,6 +2,7 @@
 
 use crate::error::{CacheError, CacheResult};
 use crate::traits::CacheStore;
+use futures::future::join_all;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,6 +124,20 @@ impl<C: CacheStore> TaggedCache<C> {
         );
     }
 
+    /// Collapse the results of a concurrently-issued batch into the first
+    /// error, if any.
+    ///
+    /// The batch is driven with `join_all` rather than `try_join_all` so every
+    /// operation is actually issued: short-circuiting on the first failure
+    /// would cancel the still-pending index updates and widen the
+    /// partial-update window described in the struct docs.
+    fn first_error(op: &str, results: Vec<CacheResult<()>>) -> CacheResult<()> {
+        for result in results {
+            result.inspect_err(|e| Self::warn_on_partial_failure(op, e))?;
+        }
+        Ok(())
+    }
+
     /// Create new tagged cache
     ///
     /// Checks [`CacheStore::supports_atomic_sets`] on `cache` and logs a
@@ -156,6 +171,20 @@ impl<C: CacheStore> TaggedCache<C> {
     /// A repeated call for the same `key` REPLACES its tag membership with
     /// `tags` (it does not union with whatever tags the key carried before).
     ///
+    /// # TTL and the tag index
+    ///
+    /// `ttl` applies to the value, and is **mirrored onto the key's reverse
+    /// index** (`key -> tags`) so that bookkeeping disappears along with the
+    /// value instead of outliving it forever.
+    ///
+    /// The forward index (`tag -> keys`) cannot carry the same TTL: one tag set
+    /// holds many keys with independent lifetimes, so expiring the set would
+    /// drop the memberships of keys that are still alive. An expired key
+    /// therefore remains a member of its tags until it is noticed, and
+    /// [`Self::get_keys_by_tag`] reconciles that on read — it filters out
+    /// members whose value is gone and prunes them from the tag set, so tag
+    /// sets do not grow monotonically and stale keys are never returned.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -181,37 +210,76 @@ impl<C: CacheStore> TaggedCache<C> {
         // Replace this key's persisted tag membership: drop it from any
         // previously associated tag that is no longer in `tags`, then (re)add
         // it to the current set.
+        //
+        // Each phase below issues its per-tag writes as ONE wave instead of a
+        // sequential chain: writes that target distinct set keys are driven
+        // concurrently with `join_all`, and writes that target the *same* set
+        // key go through the variadic `set_add_many`/`set_remove_many` (a
+        // single `SADD`/`SREM` on backends with native sets). The old code cost
+        // 3N sequential round-trips for N tags.
         let previous_tags = self.get_tags_for_key(key).await?;
         let new_tags: HashSet<String> = tags.iter().map(|t| t.to_string()).collect();
         let key_tags_key = Self::key_tags_set_key(key);
 
-        for old_tag in &previous_tags {
-            if !new_tags.contains(old_tag) {
-                self.cache
-                    .set_remove(&Self::tag_set_key(old_tag), key)
-                    .await
-                    .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
-                self.cache
-                    .set_remove(&key_tags_key, old_tag)
-                    .await
-                    .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
-                self.prune_tag_index_if_empty(old_tag).await?;
-            }
+        let stale_tags: Vec<&str> = previous_tags
+            .iter()
+            .filter(|t| !new_tags.contains(*t))
+            .map(|t| t.as_str())
+            .collect();
+
+        if !stale_tags.is_empty() {
+            let stale_set_keys: Vec<String> =
+                stale_tags.iter().map(|t| Self::tag_set_key(t)).collect();
+            let removals = join_all(
+                stale_set_keys
+                    .iter()
+                    .map(|set_key| self.cache.set_remove(set_key, key)),
+            )
+            .await;
+            Self::first_error("set_with_tags", removals)?;
+
+            self.cache
+                .set_remove_many(&key_tags_key, &stale_tags)
+                .await
+                .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
+
+            self.prune_tag_index_where_empty(&stale_tags).await?;
         }
 
-        for tag in &new_tags {
+        let added_tags: Vec<&str> = new_tags.iter().map(|t| t.as_str()).collect();
+        if !added_tags.is_empty() {
+            let added_set_keys: Vec<String> =
+                added_tags.iter().map(|t| Self::tag_set_key(t)).collect();
+            let additions = join_all(
+                added_set_keys
+                    .iter()
+                    .map(|set_key| self.cache.set_add(set_key, key)),
+            )
+            .await;
+            Self::first_error("set_with_tags", additions)?;
+
             self.cache
-                .set_add(&Self::tag_set_key(tag), key)
+                .set_add_many(&key_tags_key, &added_tags)
                 .await
                 .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
             self.cache
-                .set_add(&key_tags_key, tag)
+                .set_add_many(Self::TAG_INDEX_KEY, &added_tags)
                 .await
                 .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
-            self.cache
-                .set_add(Self::TAG_INDEX_KEY, tag)
-                .await
-                .inspect_err(|e| Self::warn_on_partial_failure("set_with_tags", e))?;
+
+            // Mirror the value's TTL onto the reverse index so it cannot
+            // outlive the value it describes. Best-effort: a failure here
+            // leaves a longer-lived index entry, which reconciliation on read
+            // still copes with, so it must not fail the write itself.
+            if let Some(ttl) = ttl
+                && let Err(e) = self.cache.expire(&key_tags_key, ttl).await
+            {
+                armature_log::warn!(
+                    "TaggedCache::set_with_tags could not mirror the value TTL onto the \
+                     reverse tag index for key {key:?}; the index entry may outlive the \
+                     value (stale members are still reconciled on read): {e}"
+                );
+            }
         }
 
         Ok(())
@@ -230,18 +298,24 @@ impl<C: CacheStore> TaggedCache<C> {
         // Delete from cache
         self.cache.delete(key).await?;
 
-        // Remove from the persisted tag mappings.
+        // Remove from the persisted tag mappings. The per-tag removals target
+        // distinct set keys, so they go out as one concurrent wave.
         let key_tags_key = Self::key_tags_set_key(key);
         let tags = self.cache.set_members(&key_tags_key).await?;
 
-        for tag in &tags {
-            self.cache
-                .set_remove(&Self::tag_set_key(tag), key)
-                .await
-                .inspect_err(|e| Self::warn_on_partial_failure("delete", e))?;
-            self.prune_tag_index_if_empty(tag).await?;
-        }
         if !tags.is_empty() {
+            let tag_set_keys: Vec<String> = tags.iter().map(|t| Self::tag_set_key(t)).collect();
+            let removals = join_all(
+                tag_set_keys
+                    .iter()
+                    .map(|set_key| self.cache.set_remove(set_key, key)),
+            )
+            .await;
+            Self::first_error("delete", removals)?;
+
+            let tag_refs: Vec<&str> = tags.iter().map(|t| t.as_str()).collect();
+            self.prune_tag_index_where_empty(&tag_refs).await?;
+
             self.cache
                 .delete(&key_tags_key)
                 .await
@@ -272,12 +346,20 @@ impl<C: CacheStore> TaggedCache<C> {
     /// tagged.invalidate_tags(&["users", "sessions"]).await?;
     /// ```
     pub async fn invalidate_tags(&self, tags: &[&str]) -> CacheResult<()> {
-        // Gather the union of keys across all requested tags, reading each
-        // tag's persisted member set from the backing store.
+        // Gather the union of keys across all requested tags. The reads target
+        // distinct set keys, so they are issued concurrently rather than as a
+        // sequential chain of one round-trip per tag.
+        let tag_set_keys: Vec<String> = tags.iter().map(|t| Self::tag_set_key(t)).collect();
+        let member_lists = join_all(
+            tag_set_keys
+                .iter()
+                .map(|set_key| self.cache.set_members(set_key)),
+        )
+        .await;
+
         let mut victims: HashSet<String> = HashSet::new();
-        for &tag in tags {
-            let members = self.cache.set_members(&Self::tag_set_key(tag)).await?;
-            victims.extend(members);
+        for members in member_lists {
+            victims.extend(members?);
         }
 
         // One batch delete for the whole union — coalesced into a single
@@ -292,27 +374,43 @@ impl<C: CacheStore> TaggedCache<C> {
 
         // Update each victim's reverse index: drop only the tags being
         // invalidated (a key may carry tags beyond those requested).
+        //
+        // Each victim owns a distinct reverse-index set key, so the victims are
+        // processed concurrently, and each victim's tag removals collapse into
+        // one variadic `set_remove_many`. The old code was O(victims x tags)
+        // strictly sequential round-trips.
         let removed: HashSet<&str> = tags.iter().copied().collect();
-        for key in &victims {
-            let key_tags_key = Self::key_tags_set_key(key);
-            let current_tags = self.cache.set_members(&key_tags_key).await?;
-            for tag in current_tags.iter().filter(|t| removed.contains(t.as_str())) {
-                self.cache
-                    .set_remove(&key_tags_key, tag)
-                    .await
-                    .inspect_err(|e| Self::warn_on_partial_failure("invalidate_tags", e))?;
+        let reverse_updates = join_all(victims.iter().map(|key| {
+            let removed = &removed;
+            async move {
+                let key_tags_key = Self::key_tags_set_key(key.as_str());
+                let current_tags = self.cache.set_members(&key_tags_key).await?;
+                let doomed: Vec<&str> = current_tags
+                    .iter()
+                    .map(|t| t.as_str())
+                    .filter(|t| removed.contains(t))
+                    .collect();
+                if doomed.is_empty() {
+                    return Ok(());
+                }
+                self.cache.set_remove_many(&key_tags_key, &doomed).await
             }
-        }
+        }))
+        .await;
+        Self::first_error("invalidate_tags", reverse_updates)?;
 
         // Drop the invalidated tags' member sets entirely and prune them from
-        // the tag index, rather than leaving emptied sets behind.
-        for &tag in tags {
+        // the tag index, rather than leaving emptied sets behind. Both are
+        // batched: one variadic delete for the member sets, one variadic
+        // removal from the global tag index.
+        let tag_set_key_refs: Vec<&str> = tag_set_keys.iter().map(|k| k.as_str()).collect();
+        if !tag_set_key_refs.is_empty() {
             self.cache
-                .delete(&Self::tag_set_key(tag))
+                .delete_many(&tag_set_key_refs)
                 .await
                 .inspect_err(|e| Self::warn_on_partial_failure("invalidate_tags", e))?;
             self.cache
-                .set_remove(Self::TAG_INDEX_KEY, tag)
+                .set_remove_many(Self::TAG_INDEX_KEY, tags)
                 .await
                 .inspect_err(|e| Self::warn_on_partial_failure("invalidate_tags", e))?;
         }
@@ -320,9 +418,61 @@ impl<C: CacheStore> TaggedCache<C> {
         Ok(())
     }
 
-    /// Get all keys with a specific tag
+    /// Get all keys currently tagged with `tag`.
+    ///
+    /// Members whose value is no longer present — most commonly because the
+    /// value's TTL elapsed — are **reconciled away** rather than returned: the
+    /// forward index (`tag -> keys`) cannot carry the value's TTL (one tag set
+    /// spans many keys with independent lifetimes), so an expired key would
+    /// otherwise stay a member of every one of its tags forever, growing the
+    /// tag sets monotonically and handing callers keys that no longer exist.
+    ///
+    /// Reconciliation is best-effort: if pruning the stale members fails, the
+    /// live keys are still returned and the prune is retried on the next read.
     pub async fn get_keys_by_tag(&self, tag: &str) -> CacheResult<Vec<String>> {
-        self.cache.set_members(&Self::tag_set_key(tag)).await
+        let tag_key = Self::tag_set_key(tag);
+        let members = self.cache.set_members(&tag_key).await?;
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let member_refs: Vec<&str> = members.iter().map(|m| m.as_str()).collect();
+        let present = self.cache.exists_many(&member_refs).await?;
+
+        let mut live: Vec<String> = Vec::with_capacity(members.len());
+        let mut stale: Vec<&str> = Vec::new();
+        for (member, exists) in members.iter().zip(present) {
+            if exists {
+                live.push(member.clone());
+            } else {
+                stale.push(member.as_str());
+            }
+        }
+
+        if !stale.is_empty() {
+            match self.cache.set_remove_many(&tag_key, &stale).await {
+                Ok(()) => {
+                    if live.is_empty()
+                        && let Err(e) = self.prune_tag_index_where_empty(&[tag]).await
+                    {
+                        armature_log::warn!(
+                            "TaggedCache::get_keys_by_tag could not prune the now-empty tag \
+                             {tag:?} from the tag index: {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    let stale_count = stale.len();
+                    armature_log::warn!(
+                        "TaggedCache::get_keys_by_tag could not prune {stale_count} expired \
+                         member(s) from tag {tag:?}; they are excluded from this result and \
+                         the prune will be retried on the next read: {e}"
+                    );
+                }
+            }
+        }
+
+        Ok(live)
     }
 
     /// Get all tags for a specific key
@@ -335,11 +485,37 @@ impl<C: CacheStore> TaggedCache<C> {
         self.cache.set_members(Self::TAG_INDEX_KEY).await
     }
 
-    /// Drop `tag` from the global tag index once it has no members left.
-    async fn prune_tag_index_if_empty(&self, tag: &str) -> CacheResult<()> {
-        let members = self.cache.set_members(&Self::tag_set_key(tag)).await?;
-        if members.is_empty() {
-            self.cache.set_remove(Self::TAG_INDEX_KEY, tag).await?;
+    /// Drop from the global tag index every tag in `tags` that has no members
+    /// left.
+    ///
+    /// The membership reads target distinct set keys and go out concurrently;
+    /// the resulting removals all target `TAG_INDEX_KEY`, so they collapse into
+    /// a single variadic `set_remove_many` (issuing them concurrently would
+    /// instead race the default backend's read-modify-write against itself).
+    async fn prune_tag_index_where_empty(&self, tags: &[&str]) -> CacheResult<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+
+        let tag_set_keys: Vec<String> = tags.iter().map(|t| Self::tag_set_key(t)).collect();
+        let member_lists = join_all(
+            tag_set_keys
+                .iter()
+                .map(|set_key| self.cache.set_members(set_key)),
+        )
+        .await;
+
+        let mut empty: Vec<&str> = Vec::new();
+        for (tag, members) in tags.iter().zip(member_lists) {
+            if members?.is_empty() {
+                empty.push(*tag);
+            }
+        }
+
+        if !empty.is_empty() {
+            self.cache
+                .set_remove_many(Self::TAG_INDEX_KEY, &empty)
+                .await?;
         }
         Ok(())
     }
@@ -361,26 +537,37 @@ mod tests {
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::tiered::InMemoryCache;
 
-    // Mock cache for testing. Counts batch-delete round-trips so tests can
-    // assert that `invalidate_tags` coalesces into a single backend call.
+    // Mock cache for testing. Records each batch-delete round-trip (as the set
+    // of keys it carried) so tests can assert that `invalidate_tags` coalesces
+    // its deletes instead of issuing one per tag.
     #[derive(Clone)]
     struct MockCache {
         data: Arc<RwLock<HashMap<String, String>>>,
-        mdel_calls: Arc<AtomicUsize>,
+        mdel_batches: Arc<RwLock<Vec<Vec<String>>>>,
     }
 
     impl MockCache {
         fn new() -> Self {
             Self {
                 data: Arc::new(RwLock::new(HashMap::new())),
-                mdel_calls: Arc::new(AtomicUsize::new(0)),
+                mdel_batches: Arc::new(RwLock::new(Vec::new())),
             }
         }
 
-        fn mdel_calls(&self) -> usize {
-            self.mdel_calls.load(Ordering::Relaxed)
+        /// Every recorded batch delete, each as a sorted list of keys.
+        async fn mdel_batches(&self) -> Vec<Vec<String>> {
+            self.mdel_batches
+                .read()
+                .await
+                .iter()
+                .map(|batch| {
+                    let mut batch = batch.clone();
+                    batch.sort();
+                    batch
+                })
+                .collect()
         }
     }
 
@@ -415,7 +602,10 @@ mod tests {
         }
 
         async fn mdel(&self, keys: &[&str]) -> CacheResult<()> {
-            self.mdel_calls.fetch_add(1, Ordering::Relaxed);
+            self.mdel_batches
+                .write()
+                .await
+                .push(keys.iter().map(|k| k.to_string()).collect());
             let mut data = self.data.write().await;
             for key in keys {
                 data.remove(*key);
@@ -520,11 +710,23 @@ mod tests {
         assert_eq!(tagged.get("k2").await.unwrap(), None);
         assert_eq!(tagged.get("shared").await.unwrap(), None);
 
-        // Exactly one batch delete round-trip, regardless of tag count.
+        // Two coalesced batch deletes regardless of tag count: one carrying the
+        // whole union of victim keys, one carrying every tag's member set.
+        // Neither scales with the number of tags in round-trips.
+        let batches = cache.mdel_batches().await;
         assert_eq!(
-            cache.mdel_calls(),
-            1,
-            "invalidate_tags must issue a single coalesced batch delete"
+            batches.len(),
+            2,
+            "invalidate_tags must coalesce its deletes, got batches: {batches:?}"
+        );
+        assert_eq!(batches[0], vec!["k1", "k2", "shared"]);
+        assert_eq!(
+            batches[1],
+            vec![
+                "__armature_tag__:t1",
+                "__armature_tag__:t2",
+                "__armature_tag__:t3"
+            ]
         );
 
         // Reverse index fully cleaned up.
@@ -651,5 +853,177 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tagged.get("k").await.unwrap(), Some("v".to_string()));
+    }
+
+    /// The value's TTL must be mirrored onto the key's reverse tag index so
+    /// that bookkeeping cannot outlive the value it describes. `InMemoryCache`
+    /// is used here (rather than `MockCache`) because it actually honours TTLs.
+    #[tokio::test(start_paused = true)]
+    async fn test_set_with_tags_mirrors_ttl_onto_reverse_index() {
+        let cache = Arc::new(InMemoryCache::new());
+        let tagged = TaggedCache::new(cache.clone());
+
+        tagged
+            .set_with_tags(
+                "user:1",
+                "Alice".to_string(),
+                &["users"],
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let key_tags_key = TaggedCache::<InMemoryCache>::key_tags_set_key("user:1");
+        let index_ttl = cache
+            .ttl(&key_tags_key)
+            .await
+            .unwrap()
+            .expect("the reverse tag index must inherit the value's TTL");
+        assert!(index_ttl > Duration::from_secs(0));
+        assert!(index_ttl <= Duration::from_secs(60));
+
+        // Once the value expires, its reverse index is gone too rather than
+        // lingering forever.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert_eq!(tagged.get("user:1").await.unwrap(), None);
+        assert!(tagged.get_tags_for_key("user:1").await.unwrap().is_empty());
+    }
+
+    /// A `None` TTL leaves the reverse index unexpiring, matching the value.
+    #[tokio::test(start_paused = true)]
+    async fn test_set_with_tags_without_ttl_leaves_index_unexpiring() {
+        let cache = Arc::new(InMemoryCache::new());
+        let tagged = TaggedCache::new(cache.clone());
+
+        tagged
+            .set_with_tags("user:1", "Alice".to_string(), &["users"], None)
+            .await
+            .unwrap();
+
+        let key_tags_key = TaggedCache::<InMemoryCache>::key_tags_set_key("user:1");
+        assert_eq!(cache.ttl(&key_tags_key).await.unwrap(), None);
+
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_eq!(
+            tagged.get_keys_by_tag("users").await.unwrap(),
+            vec!["user:1".to_string()],
+            "a key with no TTL must stay a live member of its tags"
+        );
+    }
+
+    /// Regression: an expired key used to remain a member of every tag it
+    /// carried forever, so tag sets grew monotonically and `get_keys_by_tag`
+    /// handed back keys that no longer existed. Stale members must now be
+    /// filtered out on read and pruned from the tag set.
+    #[tokio::test(start_paused = true)]
+    async fn test_get_keys_by_tag_reconciles_expired_members() {
+        let cache = Arc::new(InMemoryCache::new());
+        let tagged = TaggedCache::new(cache.clone());
+
+        tagged
+            .set_with_tags(
+                "short",
+                "gone-soon".to_string(),
+                &["users"],
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+        tagged
+            .set_with_tags("forever", "stays".to_string(), &["users"], None)
+            .await
+            .unwrap();
+
+        let mut keys = tagged.get_keys_by_tag("users").await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["forever".to_string(), "short".to_string()]);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // The expired key is not returned...
+        assert_eq!(
+            tagged.get_keys_by_tag("users").await.unwrap(),
+            vec!["forever".to_string()]
+        );
+
+        // ...and has actually been pruned from the persisted tag set, so the
+        // set does not grow monotonically with dead keys.
+        let tag_key = TaggedCache::<InMemoryCache>::tag_set_key("users");
+        assert_eq!(
+            cache.set_members(&tag_key).await.unwrap(),
+            vec!["forever".to_string()]
+        );
+    }
+
+    /// When reconciliation empties a tag entirely, the tag is also dropped
+    /// from the global tag index instead of lingering as a phantom tag.
+    #[tokio::test(start_paused = true)]
+    async fn test_reconciliation_prunes_emptied_tag_from_index() {
+        let cache = Arc::new(InMemoryCache::new());
+        let tagged = TaggedCache::new(cache.clone());
+
+        tagged
+            .set_with_tags(
+                "short",
+                "gone-soon".to_string(),
+                &["ephemeral"],
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tagged.list_tags().await.unwrap(),
+            vec!["ephemeral".to_string()]
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        assert!(
+            tagged
+                .get_keys_by_tag("ephemeral")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            tagged.list_tags().await.unwrap().is_empty(),
+            "an emptied tag must be pruned from the global tag index"
+        );
+    }
+
+    /// Replacing a key's tags must still drop it from the tags it no longer
+    /// carries, now that those removals are issued as one concurrent wave.
+    #[tokio::test]
+    async fn test_retagging_removes_key_from_dropped_tags() {
+        let cache = Arc::new(MockCache::new());
+        let tagged = TaggedCache::new(cache);
+
+        tagged
+            .set_with_tags("k", "v1".to_string(), &["a", "b", "c"], None)
+            .await
+            .unwrap();
+        tagged
+            .set_with_tags("k", "v2".to_string(), &["c", "d"], None)
+            .await
+            .unwrap();
+
+        assert!(tagged.get_keys_by_tag("a").await.unwrap().is_empty());
+        assert!(tagged.get_keys_by_tag("b").await.unwrap().is_empty());
+        assert_eq!(
+            tagged.get_keys_by_tag("c").await.unwrap(),
+            vec!["k".to_string()]
+        );
+        assert_eq!(
+            tagged.get_keys_by_tag("d").await.unwrap(),
+            vec!["k".to_string()]
+        );
+
+        let mut tags = tagged.get_tags_for_key("k").await.unwrap();
+        tags.sort();
+        assert_eq!(tags, vec!["c".to_string(), "d".to_string()]);
+
+        let mut listed = tagged.list_tags().await.unwrap();
+        listed.sort();
+        assert_eq!(listed, vec!["c".to_string(), "d".to_string()]);
     }
 }

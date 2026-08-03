@@ -2,7 +2,6 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Azure Functions HTTP response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,8 +9,14 @@ pub struct FunctionResponse {
     /// HTTP status code.
     #[serde(rename = "statusCode")]
     pub status_code: u16,
-    /// Response headers.
-    pub headers: HashMap<String, String>,
+    /// Response headers, in emission order.
+    ///
+    /// A list rather than a map because HTTP allows the same field name to
+    /// appear more than once and a handler must be able to use that — most
+    /// importantly to emit several `Set-Cookie` lines, which cannot legally be
+    /// folded into one. A map would silently keep only the last one.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     /// Response body.
     pub body: String,
     /// Whether the body is base64 encoded.
@@ -24,7 +29,7 @@ impl FunctionResponse {
     pub fn new(status_code: u16) -> Self {
         Self {
             status_code,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: String::new(),
             is_base64_encoded: false,
         }
@@ -39,7 +44,7 @@ impl FunctionResponse {
     pub fn with_body(status_code: u16, body: impl Into<String>) -> Self {
         Self {
             status_code,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: body.into(),
             is_base64_encoded: false,
         }
@@ -74,10 +79,40 @@ impl FunctionResponse {
         Self::error(500, message)
     }
 
-    /// Set a header.
+    /// Append a header.
+    ///
+    /// Appends rather than replaces, so calling this twice with the same name
+    /// emits two header lines (e.g. two `Set-Cookie`s). Use [`set_header`] to
+    /// replace instead.
+    ///
+    /// [`set_header`]: FunctionResponse::set_header
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
+        self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// Set a header, removing any existing lines with the same name.
+    pub fn set_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+        self.headers.push((name, value.into()));
+        self
+    }
+
+    /// The first value for `name`, matched case-insensitively.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.header_values(name).next()
+    }
+
+    /// Every value for `name`, in emission order, matched case-insensitively.
+    pub fn header_values<'a, 'n>(
+        &'a self,
+        name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
+        self.headers
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 
     /// Set the body.
@@ -96,7 +131,7 @@ impl FunctionResponse {
 
     /// Set the content type.
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
-        self.header("content-type", content_type)
+        self.set_header("content-type", content_type)
     }
 
     /// Add CORS headers.
@@ -112,7 +147,14 @@ impl FunctionResponse {
             )
     }
 
-    /// Convert to JSON string for Azure Functions output.
+    /// Serialize this crate's internal response shape to JSON.
+    ///
+    /// Note: this is the JSON form of [`FunctionResponse`] itself — `headers`
+    /// is an array of `[name, value]` pairs so repeated names survive — not the
+    /// Azure Functions custom-handler output envelope
+    /// (`{"Outputs":{"res":{..}},"Logs":[..]}`). The runtime never calls this;
+    /// it writes an HTTP response directly. Use it for logging or for
+    /// round-tripping the internal shape, not as a wire format Azure will read.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -198,10 +240,7 @@ mod tests {
     #[test]
     fn json_sets_content_type_header() {
         let r = FunctionResponse::json(&serde_json::json!({ "a": 1 })).unwrap();
-        assert_eq!(
-            r.headers.get("content-type").map(String::as_str),
-            Some("application/json")
-        );
+        assert_eq!(r.header_value("content-type"), Some("application/json"));
         assert_eq!(r.status_code, 200);
     }
 
@@ -210,9 +249,28 @@ mod tests {
         let r = FunctionResponse::error(503, "down");
         assert_eq!(r.status_code, 503);
         assert!(r.body.contains("down"));
+        assert_eq!(r.header_value("content-type"), Some("application/json"));
+    }
+
+    #[test]
+    fn duplicate_headers_are_kept_separate() {
+        // Session/auth flows need more than one Set-Cookie line, and these
+        // cannot be folded into a single comma-separated value.
+        let r = FunctionResponse::ok()
+            .header("set-cookie", "a=1")
+            .header("set-cookie", "b=2");
         assert_eq!(
-            r.headers.get("content-type").map(String::as_str),
-            Some("application/json")
+            r.header_values("Set-Cookie").collect::<Vec<_>>(),
+            ["a=1", "b=2"]
         );
+    }
+
+    #[test]
+    fn set_header_replaces_existing_lines() {
+        let r = FunctionResponse::ok()
+            .header("content-type", "text/plain")
+            .content_type("application/json");
+        assert_eq!(r.header_values("content-type").count(), 1);
+        assert_eq!(r.header_value("content-type"), Some("application/json"));
     }
 }

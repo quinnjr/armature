@@ -213,11 +213,17 @@ impl CronScheduler {
                             continue;
                         }
                         job.status = JobStatus::Running;
-                        let context = JobContext::new(
-                            job.name.clone(),
-                            job.next_run.unwrap_or_else(Utc::now),
-                            job.execution_count,
-                        );
+                        let scheduled = job.next_run.unwrap_or_else(Utc::now);
+                        // Advance the schedule here, in the same write-lock
+                        // section that flips the job to `Running`. Advancing on
+                        // completion instead would leave a past-due `next_run`
+                        // for the whole run, re-dispatching a long job on every
+                        // tick whenever `prevent_overlap` is off, and would
+                        // compute the following fire from the completion
+                        // instant, drifting the schedule by the execution time.
+                        job.next_run = job.expression.next_after(scheduled);
+                        let context =
+                            JobContext::new(job.name.clone(), scheduled, job.execution_count);
                         due.push((job.name.clone(), job.function.clone(), context));
                     }
                     due
@@ -278,7 +284,8 @@ impl CronScheduler {
                             if let Some(job) = jobs.get_mut(&name) {
                                 job.last_run = Some(Utc::now());
                                 job.execution_count += 1;
-                                job.next_run = job.expression.next();
+                                // `next_run` was already advanced at dispatch;
+                                // re-advancing here would skip an occurrence.
                                 job.status = match &result {
                                     Ok(()) => JobStatus::Completed,
                                     Err(e) => JobStatus::Failed(e.to_string()),
@@ -667,6 +674,56 @@ mod tests {
         assert!(
             stats.execution_count >= 1,
             "the panicking execution must still be recorded"
+        );
+    }
+
+    // A job whose execution spans many ticks must still fire only on its
+    // scheduled occurrences. `next_run` used to be advanced on completion, so
+    // an in-flight job kept a past-due `next_run` and — with overlap
+    // suppression off — was re-dispatched on every single tick.
+    #[tokio::test]
+    async fn test_long_running_job_fires_once_per_occurrence() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let mut scheduler = CronScheduler::with_config(SchedulerConfig {
+            tick_interval: Duration::from_millis(20),
+            log_execution: false,
+            ..Default::default()
+        });
+        scheduler
+            .add_job("slow", "* * * * * *", move |_ctx| {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        // Overlap suppression must not be the thing preventing re-fires; the
+        // schedule itself has to be.
+        scheduler
+            .jobs
+            .write()
+            .await
+            .get_mut("slow")
+            .unwrap()
+            .prevent_overlap = false;
+
+        scheduler.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        scheduler.stop().await.unwrap();
+
+        let observed = count.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&observed),
+            "a per-second job still executing must fire at most once per second \
+             (60 ticks elapsed here); observed {observed}"
         );
     }
 }

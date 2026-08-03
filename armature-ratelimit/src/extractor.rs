@@ -63,16 +63,25 @@ impl RequestInfo {
     }
 
     /// Get a header value by name (case-insensitive)
+    ///
+    /// Compares in place rather than lower-casing both sides: this runs on the
+    /// request path for every extractor lookup, and the allocations it used to
+    /// make were pure overhead for an ASCII case fold.
     pub fn get_header(&self, name: &str) -> Option<&str> {
-        let name_lower = name.to_lowercase();
         self.headers
             .iter()
-            .find(|(n, _)| n.to_lowercase() == name_lower)
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
 }
 
 /// Key extraction strategies
+///
+/// Every variant here is a strategy this enum can actually evaluate. Custom
+/// logic lives in [`KeyExtractorFn`] / [`KeyExtractorBuilder`] instead: a
+/// variant that merely carried a description could not call anything, so it
+/// always yielded no key — and a missing key is the fail-open path that
+/// disables rate limiting for the request.
 #[derive(Debug, Clone, Default)]
 pub enum KeyExtractor {
     /// Extract key from IP address
@@ -94,8 +103,6 @@ pub enum KeyExtractor {
     IpAndPath,
     /// Combine user ID and path for per-endpoint limiting
     UserIdAndPath,
-    /// Custom extractor function
-    Custom(String), // Store description for Debug
 }
 
 impl KeyExtractor {
@@ -143,7 +150,18 @@ impl KeyExtractor {
                 .user_id
                 .as_ref()
                 .map(|uid| format!("{}:{}", uid, info.path)),
-            Self::Custom(_) => None, // Custom extractors use the function directly
+        }
+    }
+
+    /// The request header this extractor reads, if any.
+    ///
+    /// Lets a caller populate only the header it will actually look at instead
+    /// of copying the whole header map into [`RequestInfo`] on every request.
+    pub fn required_header(&self) -> Option<&str> {
+        match self {
+            Self::ApiKey { header_name } => Some(header_name),
+            Self::Header { name } => Some(name),
+            _ => None,
         }
     }
 
@@ -156,7 +174,6 @@ impl KeyExtractor {
             Self::Header { .. } => "Custom header",
             Self::IpAndPath => "IP + Path",
             Self::UserIdAndPath => "User ID + Path",
-            Self::Custom(desc) => desc,
         }
     }
 }

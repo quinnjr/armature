@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -10,6 +11,30 @@ use thiserror::Error;
 /// stalled/unreachable health endpoint fails fast instead of hanging the
 /// caller indefinitely.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Client shared by every default `health_check` probe. Building a client per
+/// probe would rebuild the connection pool, TLS config and DNS resolver each
+/// time — probes are repetitive by nature, so they are exactly the workload
+/// that wants a pooled, reused client (both concrete backends in this crate
+/// cache one for the same reason).
+static HEALTH_CHECK_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// The shared health-probe client, built on first use. The build result is
+/// cached (not just the client) so a TLS-backend failure surfaces as an error
+/// instead of a panic, and isn't retried on every probe.
+fn health_check_client() -> Result<&'static reqwest::Client, DiscoveryError> {
+    HEALTH_CHECK_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(HEALTH_CHECK_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| {
+            DiscoveryError::HealthCheckFailed(format!("could not build health check client: {e}"))
+        })
+}
 
 /// Service discovery errors
 #[derive(Debug, Error)]
@@ -119,12 +144,18 @@ pub trait ServiceDiscovery: Send + Sync {
     /// List all registered services
     async fn list_services(&self) -> Result<Vec<String>, DiscoveryError>;
 
-    /// Perform health check on a service
+    /// Perform a health check on a service.
+    ///
+    /// This is an on-demand probe: nothing in this crate schedules it, and
+    /// [`discover`](Self::discover) does not filter its results on health.
+    /// Callers that want continuous health tracking must drive this
+    /// themselves.
     async fn health_check(&self, service_id: &str) -> Result<bool, DiscoveryError> {
         let service = self.get_service(service_id).await?;
 
         if let Some(health_url) = service.health_check_url {
-            match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, reqwest::get(&health_url)).await {
+            let probe = health_check_client()?.get(&health_url).send();
+            match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, probe).await {
                 Ok(Ok(response)) => Ok(response.status().is_success()),
                 // A transport error (connection refused, DNS failure, TLS
                 // error, ...) is not the same thing as the service
@@ -214,6 +245,16 @@ mod tests {
         assert_eq!(service.name, "api");
         assert_eq!(service.url(), "http://localhost:8080");
         assert!(service.tags.contains(&"production".to_string()));
+    }
+
+    #[test]
+    fn health_check_probes_share_one_client() {
+        let first = health_check_client().unwrap();
+        let second = health_check_client().unwrap();
+        assert!(
+            std::ptr::eq(first, second),
+            "every probe must reuse the same pooled client, not build a new one"
+        );
     }
 
     #[tokio::test]

@@ -49,17 +49,28 @@ impl CompressionMiddleware {
         &self.config
     }
 
-    /// Determine the compression algorithm to use for a request
+    /// Determine the compression algorithm to use for a request.
+    ///
+    /// `Accept-Encoding` is authoritative in both modes. A configured
+    /// algorithm expresses which coding the server *prefers*, not permission to
+    /// send a coding the client never advertised: a client asking only for `br`
+    /// must not be handed gzip it may be unable to decode. When the configured
+    /// algorithm is not acceptable to this client, the response goes out
+    /// uncompressed rather than mis-encoded.
     fn select_algorithm(&self, accept_encoding: Option<&str>) -> CompressionAlgorithm {
+        // No Accept-Encoding at all: RFC 9110 §12.5.3 says any coding is then
+        // acceptable, but sending one to a client that never advertised
+        // support is the riskier read, so stay uncompressed.
+        let Some(encoding) = accept_encoding else {
+            return CompressionAlgorithm::None;
+        };
+
         match self.config.algorithm {
             CompressionAlgorithm::Auto => {
-                if let Some(encoding) = accept_encoding {
-                    CompressionAlgorithm::select_from_accept_encoding(encoding)
-                } else {
-                    CompressionAlgorithm::None
-                }
+                CompressionAlgorithm::select_from_accept_encoding(encoding)
             }
-            algo => algo,
+            algo if algo.is_accepted_by(encoding) => algo,
+            _ => CompressionAlgorithm::None,
         }
     }
 
@@ -271,10 +282,28 @@ mod tests {
         let config = CompressionConfig::builder().gzip().build();
         let middleware = CompressionMiddleware::with_config(config);
 
-        // Should always use gzip regardless of Accept-Encoding
+        // The configured algorithm is used when the client accepts it...
+        assert_eq!(
+            middleware.select_algorithm(Some("gzip, deflate")),
+            CompressionAlgorithm::Gzip
+        );
+        // ...and when a wildcard covers it.
+        assert_eq!(
+            middleware.select_algorithm(Some("*")),
+            CompressionAlgorithm::Gzip
+        );
+
+        // A client that advertises only `br` must not receive gzip. The
+        // previous behaviour returned Gzip here, sending a coding the client
+        // never said it could decode.
         assert_eq!(
             middleware.select_algorithm(Some("br")),
-            CompressionAlgorithm::Gzip
+            CompressionAlgorithm::None
+        );
+        // An explicit refusal is honoured too.
+        assert_eq!(
+            middleware.select_algorithm(Some("gzip;q=0")),
+            CompressionAlgorithm::None
         );
     }
 

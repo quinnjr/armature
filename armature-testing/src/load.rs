@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 /// Load testing errors
 #[derive(Debug, Error)]
@@ -75,17 +74,17 @@ impl LoadTestStats {
             Duration::default()
         };
 
-        let median = if !sorted.is_empty() {
-            sorted[sorted.len() / 2]
-        } else {
-            Duration::default()
-        };
-
-        let p95_idx = (sorted.len() as f64 * 0.95) as usize;
-        let p95 = sorted.get(p95_idx).copied().unwrap_or(max);
-
-        let p99_idx = (sorted.len() as f64 * 0.99) as usize;
-        let p99 = sorted.get(p99_idx).copied().unwrap_or(max);
+        // One rank formula for all three quantiles. Previously `median` took
+        // the upper median (`len / 2`) while p95/p99 truncated
+        // (`len as f64 * 0.95`), so the "median" and the "95th percentile" were
+        // computed by two different definitions and could not be compared with
+        // each other or with any other tool's output.
+        //
+        // Nearest-rank (RFC-style): the smallest sample at or above the q-th
+        // fraction, i.e. index `ceil(q * n) - 1`, clamped into range.
+        let median = Self::quantile(&sorted, 0.50);
+        let p95 = Self::quantile(&sorted, 0.95);
+        let p99 = Self::quantile(&sorted, 0.99);
 
         let rps = if total_duration.as_secs_f64() > 0.0 {
             total as f64 / total_duration.as_secs_f64()
@@ -106,6 +105,19 @@ impl LoadTestStats {
             p99_response_time: p99,
             rps,
         }
+    }
+
+    /// Nearest-rank quantile over an ascending-sorted slice.
+    ///
+    /// `q` is a fraction in `[0, 1]`. Returns `Duration::default()` for an
+    /// empty slice.
+    fn quantile(sorted: &[Duration], q: f64) -> Duration {
+        if sorted.is_empty() {
+            return Duration::default();
+        }
+        let rank = (q * sorted.len() as f64).ceil() as usize;
+        let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+        sorted[idx]
     }
 
     /// Print statistics
@@ -247,10 +259,15 @@ where
     /// Run load test
     pub async fn run(&self) -> Result<LoadTestStats, LoadTestError> {
         let start_time = Instant::now();
-        let response_times = Arc::new(Mutex::new(Vec::new()));
-        let failed_count = Arc::new(Mutex::new(0u64));
 
-        let mut handles = vec![];
+        // Each worker accumulates into its own `Vec`/counter and returns them
+        // from its task; the merge happens once, after every worker has
+        // joined. Taking a shared `Mutex` to push one `Duration` put lock
+        // acquisition inside the measured region of every request, so the
+        // harness inflated exactly the latencies it was there to record - and
+        // the inflation grew with concurrency, which is the axis a load test
+        // sweeps.
+        let mut handles: Vec<tokio::task::JoinHandle<(Vec<Duration>, u64)>> = vec![];
 
         let concurrency = self.config.concurrency as u64;
 
@@ -266,8 +283,6 @@ where
 
         for worker_idx in 0..self.config.concurrency {
             let test_fn = self.test_fn.clone();
-            let response_times = response_times.clone();
-            let failed_count = failed_count.clone();
             let timeout = self.config.timeout;
             let duration = self.config.duration;
 
@@ -289,6 +304,8 @@ where
             let handle = tokio::spawn(async move {
                 let worker_start = Instant::now();
                 let mut request_count = 0u64;
+                let mut worker_times: Vec<Duration> = Vec::new();
+                let mut worker_failed = 0u64;
 
                 // Whether the worker should stop *before* starting another
                 // request, given how many it has completed so far. Shared
@@ -318,10 +335,10 @@ where
                     match result {
                         Ok(Ok(())) => {
                             let elapsed = req_start.elapsed();
-                            response_times.lock().await.push(elapsed);
+                            worker_times.push(elapsed);
                         }
                         _ => {
-                            *failed_count.lock().await += 1;
+                            worker_failed += 1;
                         }
                     }
 
@@ -343,19 +360,24 @@ where
                         }
                     }
                 }
+
+                (worker_times, worker_failed)
             });
 
             handles.push(handle);
         }
 
-        // Wait for all workers to complete
+        // Wait for all workers to complete, merging their per-worker buffers.
+        let mut response_times: Vec<Duration> = Vec::new();
+        let mut failed = 0u64;
         for handle in handles {
-            let _ = handle.await;
+            if let Ok((times, worker_failed)) = handle.await {
+                response_times.extend(times);
+                failed += worker_failed;
+            }
         }
 
         let total_duration = start_time.elapsed();
-        let response_times = response_times.lock().await;
-        let failed = *failed_count.lock().await;
 
         Ok(LoadTestStats::from_response_times(
             &response_times,

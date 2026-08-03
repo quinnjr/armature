@@ -296,8 +296,12 @@ impl HttpClient {
             match self.execute_once(request).await {
                 Ok(response) => {
                     // Check if response status should trigger retry
+                    // Written as `attempt + 1 < max_attempts` rather than
+                    // `attempt < max_attempts - 1`: the latter underflows when
+                    // `max_attempts == 0`, panicking in debug and wrapping to
+                    // `u32::MAX` (effectively infinite retries) in release.
                     if retry_config.should_retry_status(response.status().as_u16())
-                        && attempt < retry_config.max_attempts - 1
+                        && attempt + 1 < retry_config.max_attempts
                     {
                         debug!(
                             attempt = attempt + 1,
@@ -319,7 +323,7 @@ impl HttpClient {
                 Err(e) => {
                     // Check if error is retryable
                     if retry_config.should_retry(attempt, &e)
-                        && attempt < retry_config.max_attempts - 1
+                        && attempt + 1 < retry_config.max_attempts
                     {
                         debug!(
                             attempt = attempt + 1,

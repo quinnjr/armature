@@ -177,7 +177,7 @@ impl {{name_pascal}}Controller {
     /// Get a single {{name_snake}} by ID.
     #[get("/:id")]
     pub async fn show(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.params.get("id").unwrap_or(&"0".to_string()).clone();
+        let id = req.param("id").unwrap_or("0").to_string();
         HttpResponse::ok().with_json(&serde_json::json!({
             "message": format!("Get {{name_snake}} with id: {}", id)
         }))
@@ -232,7 +232,7 @@ impl {{name_pascal}}Controller {
     /// GET /{{base_path}}/:id
     #[get("/:id")]
     pub async fn show(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.params.get("id")
+        let id = req.param("id")
             .ok_or_else(|| Error::BadRequest("Missing id parameter".to_string()))?;
 
         // TODO: Implement fetch logic
@@ -266,7 +266,7 @@ impl {{name_pascal}}Controller {
     /// PUT /{{base_path}}/:id
     #[put("/:id")]
     pub async fn update(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.params.get("id")
+        let id = req.param("id")
             .ok_or_else(|| Error::BadRequest("Missing id parameter".to_string()))?;
 
         let body: Update{{name_pascal}}Request = serde_json::from_slice(&req.body)
@@ -286,7 +286,7 @@ impl {{name_pascal}}Controller {
     /// DELETE /{{base_path}}/:id
     #[delete("/:id")]
     pub async fn destroy(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req.params.get("id")
+        let id = req.param("id")
             .ok_or_else(|| Error::BadRequest("Missing id parameter".to_string()))?;
 
         // TODO: Implement delete logic
@@ -308,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn test_index() {
         let controller = {{name_pascal}}Controller::default();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
 
         let response = controller.index(req).await;
         assert!(response.is_ok());
@@ -317,8 +317,8 @@ mod tests {
     #[tokio::test]
     async fn test_show() {
         let controller = {{name_pascal}}Controller::default();
-        let mut req = HttpRequest::default();
-        req.params.insert("id".to_string(), "1".to_string());
+        let mut req = HttpRequest::new("GET", "/test");
+        req.push_param("id", "1");
 
         let response = controller.show(req).await;
         assert!(response.is_ok());
@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn test_middleware_passes_through() {
         let middleware = {{name_pascal}}Middleware::new();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
 
         let next: Next = Box::new(|_req| {
             Box::pin(async { Ok(HttpResponse::ok()) })
@@ -1890,7 +1890,7 @@ mod tests {
     #[tokio::test]
     async fn test_interceptor_before() {
         let interceptor = {{name_pascal}}Interceptor::new();
-        let mut req = HttpRequest::default();
+        let mut req = HttpRequest::new("GET", "/test");
 
         let result = interceptor.before(&mut req).await;
         assert!(result.is_ok());
@@ -1899,7 +1899,7 @@ mod tests {
     #[tokio::test]
     async fn test_interceptor_after() {
         let interceptor = {{name_pascal}}Interceptor::new();
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
         let mut res = HttpResponse::ok();
 
         let result = interceptor.after(&req, &mut res).await;
@@ -2014,8 +2014,8 @@ mod tests {
     #[tokio::test]
     async fn test_valid_input() {
         let pipe = {{name_pascal}}Pipe::<TestInput>::new();
-        let mut req = HttpRequest::default();
-        req.body = r#"{"name": "test"}"#.as_bytes().to_vec();
+        let mut req = HttpRequest::new("POST", "/test");
+        req.set_body(r#"{"name": "test"}"#.as_bytes().to_vec());
 
         let result = pipe.transform(&req).await;
         assert!(result.is_ok());
@@ -2024,8 +2024,8 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_input() {
         let pipe = {{name_pascal}}Pipe::<TestInput>::new();
-        let mut req = HttpRequest::default();
-        req.body = r#"{"name": ""}"#.as_bytes().to_vec();
+        let mut req = HttpRequest::new("POST", "/test");
+        req.set_body(r#"{"name": ""}"#.as_bytes().to_vec());
 
         let result = pipe.transform(&req).await;
         assert!(result.is_err());
@@ -2115,7 +2115,9 @@ impl ExceptionFilter for {{name_pascal}}ExceptionFilter {
             message,
             details: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
-            path: req.path.clone(),
+            // `req.path` is the raw target; the routing path keeps query
+            // strings (which may carry tokens) out of the error body.
+            path: req.path_only().to_string(),
         };
 
         let body = serde_json::to_vec(&error_response).unwrap_or_default();
@@ -2139,7 +2141,7 @@ mod tests {
     async fn test_not_found_error() {
         let filter = {{name_pascal}}ExceptionFilter::new();
         let error = Error::NotFound("Resource not found".to_string());
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
 
         let response = filter.catch(error, &req).await;
         assert_eq!(response.status, 404);
@@ -2149,7 +2151,7 @@ mod tests {
     async fn test_bad_request_error() {
         let filter = {{name_pascal}}ExceptionFilter::new();
         let error = Error::BadRequest("Invalid input".to_string());
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
 
         let response = filter.catch(error, &req).await;
         assert_eq!(response.status, 400);
@@ -2159,7 +2161,7 @@ mod tests {
     async fn test_internal_error() {
         let filter = {{name_pascal}}ExceptionFilter::new();
         let error = Error::Internal("Something went wrong".to_string());
-        let req = HttpRequest::default();
+        let req = HttpRequest::new("GET", "/test");
 
         let response = filter.catch(error, &req).await;
         assert_eq!(response.status, 500);
@@ -4492,6 +4494,223 @@ mod dockerfile_embedding_tests {
         assert_ne!(
             cloudrun, generic,
             "dockerfile_cloudrun must not be the same content as the generic dockerfile template"
+        );
+    }
+}
+
+// =============================================================================
+// GENERATED-CODE COMPILATION COVERAGE
+// =============================================================================
+
+#[cfg(test)]
+mod generated_code_shape_tests {
+    //! Load-bearing coverage for the Rust source these templates emit.
+    //!
+    //! The only end-to-end check that a scaffolded project builds is
+    //! `tests/cli.rs::generated_minimal_project_cargo_checks`, which is
+    //! `#[ignore]`d (a full `cargo build` of a generated crate can't run in
+    //! CI) and only covers the minimal project — so a template can drift from
+    //! `armature-core`'s API and nothing fails. That is exactly how
+    //! `req.body = …` (the body is `Bytes`, not `Vec<u8>`),
+    //! `path: req.path.clone()` (a `ByteStr` assigned into a `String`) and
+    //! `req.params.get(…)` (no such field) all survived in-tree.
+    //!
+    //! Two layers here, both running in the normal `cargo test` build:
+    //!
+    //! 1. `mirrors` reproduces the load-bearing expressions from the emitted
+    //!    handler / error-body / pipe code against the real `armature_core`
+    //!    types, so a breaking core change fails *this* crate's build.
+    //! 2. `no_template_uses_a_stale_request_api` scans every Rust-emitting
+    //!    template string for the API shapes that mirror proves wrong.
+    //!
+    //! Keep the two in sync: when a mirror changes, the banned-pattern list
+    //! usually needs the old spelling added to it.
+
+    use super::*;
+
+    /// Compiled mirrors of the emitted code. Nothing calls most of these at
+    /// runtime — the point is that they must typecheck.
+    mod mirrors {
+        use armature_core::{HttpRequest, HttpResponse};
+        use serde::{Deserialize, Serialize};
+
+        /// Mirrors `EXCEPTION_FILTER_TEMPLATE`'s `ErrorResponse`.
+        #[derive(Debug, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct ErrorResponse {
+            pub status_code: u16,
+            pub error: String,
+            pub message: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub details: Option<serde_json::Value>,
+            pub timestamp: String,
+            pub path: String,
+        }
+
+        /// Mirrors `CONTROLLER_CRUD_TEMPLATE`'s `Create…Request`.
+        #[derive(Debug, Deserialize)]
+        pub struct CreateRequest {
+            pub name: String,
+        }
+
+        /// Mirrors the tail of `EXCEPTION_FILTER_TEMPLATE`'s `catch`.
+        pub fn exception_filter_catch(req: &HttpRequest) -> HttpResponse {
+            let error_response = ErrorResponse {
+                status_code: 404,
+                error: "Not Found".to_string(),
+                message: "nope".to_string(),
+                details: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                path: req.path_only().to_string(),
+            };
+
+            let body = serde_json::to_vec(&error_response).unwrap_or_default();
+
+            HttpResponse::new(404)
+                .with_header("Content-Type".to_string(), "application/json".to_string())
+                .with_body(body)
+        }
+
+        /// Mirrors `CONTROLLER_CRUD_TEMPLATE`'s `show`/`update`/`destroy`
+        /// path-parameter read.
+        pub fn crud_path_param(req: &HttpRequest) -> Option<&str> {
+            req.param("id")
+        }
+
+        /// Mirrors `CONTROLLER_CRUD_TEMPLATE`'s `create` body parse and
+        /// `PIPE_TEMPLATE`'s `transform`.
+        pub fn parse_json_body(req: &HttpRequest) -> Result<CreateRequest, String> {
+            serde_json::from_slice(&req.body).map_err(|e| format!("Invalid request body: {}", e))
+        }
+
+        /// Mirrors how the emitted `#[cfg(test)]` blocks build a request.
+        pub fn build_request() -> HttpRequest {
+            let mut req = HttpRequest::new("POST", "/test?token=shh");
+            req.push_param("id", "1");
+            req.set_body(r#"{"name": "test"}"#.as_bytes().to_vec());
+            req
+        }
+    }
+
+    #[test]
+    fn emitted_handler_shapes_typecheck_and_behave() {
+        let req = mirrors::build_request();
+
+        assert_eq!(mirrors::crud_path_param(&req), Some("1"));
+        assert_eq!(mirrors::parse_json_body(&req).unwrap().name, "test");
+
+        // The error body must carry the routing path, never the raw target:
+        // query strings routinely carry tokens, and the error body is
+        // returned to the caller and logged.
+        let res = mirrors::exception_filter_catch(&req);
+        let decoded: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        assert_eq!(decoded["path"], "/test");
+        assert!(
+            !decoded["path"].as_str().unwrap().contains("shh"),
+            "error body leaked the query string: {decoded}"
+        );
+    }
+
+    /// Every template that emits Rust source. Docker/CI/README templates are
+    /// deliberately excluded — they are not compiled.
+    fn rust_emitting_templates() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("CONTROLLER_TEMPLATE", CONTROLLER_TEMPLATE),
+            ("CONTROLLER_CRUD_TEMPLATE", CONTROLLER_CRUD_TEMPLATE),
+            ("CONTROLLER_TEST_TEMPLATE", CONTROLLER_TEST_TEMPLATE),
+            ("MODULE_TEMPLATE", MODULE_TEMPLATE),
+            ("MIDDLEWARE_TEMPLATE", MIDDLEWARE_TEMPLATE),
+            ("MIDDLEWARE_TEST_TEMPLATE", MIDDLEWARE_TEST_TEMPLATE),
+            ("GUARD_TEMPLATE", GUARD_TEMPLATE),
+            ("GUARD_TEST_TEMPLATE", GUARD_TEST_TEMPLATE),
+            ("GUARD_AUTH_TEMPLATE", GUARD_AUTH_TEMPLATE),
+            ("GUARD_ROLE_TEMPLATE", GUARD_ROLE_TEMPLATE),
+            ("GUARD_PERMISSION_TEMPLATE", GUARD_PERMISSION_TEMPLATE),
+            ("GUARD_APIKEY_TEMPLATE", GUARD_APIKEY_TEMPLATE),
+            ("GUARD_RATELIMIT_TEMPLATE", GUARD_RATELIMIT_TEMPLATE),
+            ("SERVICE_TEMPLATE", SERVICE_TEMPLATE),
+            ("SERVICE_TEST_TEMPLATE", SERVICE_TEST_TEMPLATE),
+            ("MAIN_MINIMAL_TEMPLATE", MAIN_MINIMAL_TEMPLATE),
+            ("REPOSITORY_TEMPLATE", REPOSITORY_TEMPLATE),
+            ("REPOSITORY_TEST_TEMPLATE", REPOSITORY_TEST_TEMPLATE),
+            ("DTO_TEMPLATE", DTO_TEMPLATE),
+            ("MODEL_TEMPLATE", MODEL_TEMPLATE),
+            ("WEBSOCKET_TEMPLATE", WEBSOCKET_TEMPLATE),
+            ("WEBSOCKET_TEST_TEMPLATE", WEBSOCKET_TEST_TEMPLATE),
+            ("GRAPHQL_RESOLVER_TEMPLATE", GRAPHQL_RESOLVER_TEMPLATE),
+            (
+                "GRAPHQL_RESOLVER_TEST_TEMPLATE",
+                GRAPHQL_RESOLVER_TEST_TEMPLATE,
+            ),
+            ("JOB_TEMPLATE", JOB_TEMPLATE),
+            ("JOB_TEST_TEMPLATE", JOB_TEST_TEMPLATE),
+            ("JOB_SCHEDULED_TEMPLATE", JOB_SCHEDULED_TEMPLATE),
+            ("JOB_RECURRING_TEMPLATE", JOB_RECURRING_TEMPLATE),
+            ("EVENT_HANDLER_TEMPLATE", EVENT_HANDLER_TEMPLATE),
+            ("EVENT_HANDLER_TEST_TEMPLATE", EVENT_HANDLER_TEST_TEMPLATE),
+            ("INTERCEPTOR_TEMPLATE", INTERCEPTOR_TEMPLATE),
+            ("INTERCEPTOR_TEST_TEMPLATE", INTERCEPTOR_TEST_TEMPLATE),
+            ("PIPE_TEMPLATE", PIPE_TEMPLATE),
+            ("PIPE_TEST_TEMPLATE", PIPE_TEST_TEMPLATE),
+            ("EXCEPTION_FILTER_TEMPLATE", EXCEPTION_FILTER_TEMPLATE),
+            (
+                "EXCEPTION_FILTER_TEST_TEMPLATE",
+                EXCEPTION_FILTER_TEST_TEMPLATE,
+            ),
+            ("CONFIG_TEMPLATE", CONFIG_TEMPLATE),
+            ("ENTITY_TEMPLATE", ENTITY_TEMPLATE),
+            ("ENTITY_PRAX_TEMPLATE", ENTITY_PRAX_TEMPLATE),
+            ("PRAX_REPOSITORY_TEMPLATE", PRAX_REPOSITORY_TEMPLATE),
+            (
+                "PRAX_REPOSITORY_TEST_TEMPLATE",
+                PRAX_REPOSITORY_TEST_TEMPLATE,
+            ),
+            ("PRAX_MODULE_TEMPLATE", PRAX_MODULE_TEMPLATE),
+            ("HEALTH_CONTROLLER_TEMPLATE", HEALTH_CONTROLLER_TEMPLATE),
+            ("INTEGRATION_TEST_TEMPLATE", INTEGRATION_TEST_TEMPLATE),
+            ("SCHEDULER_TEMPLATE", SCHEDULER_TEMPLATE),
+            ("SCHEDULER_TEST_TEMPLATE", SCHEDULER_TEST_TEMPLATE),
+            ("CACHE_SERVICE_TEMPLATE", CACHE_SERVICE_TEMPLATE),
+            ("CACHE_SERVICE_TEST_TEMPLATE", CACHE_SERVICE_TEST_TEMPLATE),
+            ("API_CLIENT_TEMPLATE", API_CLIENT_TEMPLATE),
+        ]
+    }
+
+    #[test]
+    fn no_template_uses_a_stale_request_api() {
+        // (banned spelling, what to write instead)
+        let banned = [
+            ("req.body =", "req.set_body(…) — the body is `Bytes`"),
+            (
+                "req.path.clone()",
+                "req.path_only().to_string() — `path` is a `ByteStr` holding the raw target",
+            ),
+            (
+                "req.params",
+                "req.param(name) / req.push_param(name, value)",
+            ),
+            (
+                "HttpRequest::default()",
+                "HttpRequest::new(method, path) — there is no `Default` impl",
+            ),
+        ];
+
+        for (name, source) in rust_emitting_templates() {
+            for (pattern, fix) in banned {
+                assert!(
+                    !source.contains(pattern),
+                    "{name} emits `{pattern}`, which does not compile against armature-core; use {fix}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exception_filter_template_does_not_leak_the_query_string() {
+        assert!(
+            EXCEPTION_FILTER_TEMPLATE.contains("req.path_only().to_string()"),
+            "EXCEPTION_FILTER_TEMPLATE must build `ErrorResponse.path` from the routing path, \
+             not the raw request target"
         );
     }
 }

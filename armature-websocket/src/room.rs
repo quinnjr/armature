@@ -54,8 +54,22 @@ impl Room {
     }
 
     /// Get all connection IDs in the room.
+    ///
+    /// Allocates a `Vec` and clones every id. Use
+    /// [`Room::for_each_member`] on hot paths such as broadcast.
     pub fn members(&self) -> Vec<ConnectionId> {
         self.members.iter().map(|r| r.key().clone()).collect()
+    }
+
+    /// Visit each member id in place, without allocating or cloning.
+    ///
+    /// Holds a shard lock on the member map for the duration, so `f` must not
+    /// touch this same room's membership (`join`/`leave`) - it may freely touch
+    /// other maps, which is what broadcast does.
+    pub fn for_each_member<F: FnMut(&str)>(&self, mut f: F) {
+        for entry in self.members.iter() {
+            f(entry.key());
+        }
     }
 }
 
@@ -174,14 +188,18 @@ impl RoomManager {
             .get(room_id)
             .ok_or_else(|| WebSocketError::RoomNotFound(room_id.to_string()))?;
 
+        // Iterate the membership map directly rather than materializing a
+        // `Vec<ConnectionId>` of cloned ids first: on a broadcast that is one
+        // allocation plus one string clone per recipient, before a single byte
+        // is sent.
         let mut sent_count = 0;
-        for member_id in room.members() {
-            if let Some(conn) = self.connections.get(&member_id)
+        room.for_each_member(|member_id| {
+            if let Some(conn) = self.connections.get(member_id)
                 && conn.send(message.clone()).is_ok()
             {
                 sent_count += 1;
             }
-        }
+        });
 
         Ok(sent_count)
     }
@@ -199,14 +217,14 @@ impl RoomManager {
             .ok_or_else(|| WebSocketError::RoomNotFound(room_id.to_string()))?;
 
         let mut sent_count = 0;
-        for member_id in room.members() {
+        room.for_each_member(|member_id| {
             if member_id != except_id
-                && let Some(conn) = self.connections.get(&member_id)
+                && let Some(conn) = self.connections.get(member_id)
                 && conn.send(message.clone()).is_ok()
             {
                 sent_count += 1;
             }
-        }
+        });
 
         Ok(sent_count)
     }

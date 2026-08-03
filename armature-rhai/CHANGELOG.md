@@ -9,6 +9,17 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ScriptRouter::find_route` matched patterns against the raw request target, so any request carrying a query string 404'd (`/users?a=1`) or captured the query into a path param (`/users/42?a=1` gave `id == "42?a=1"`). Matching is now against `HttpRequest::path_only`.
+- `request.path` in scripts is the routing path, not the raw target — it no longer carries the query string.
+
+### Changed
+
+- The script-visible query is FIRST-wins for a repeated key, matching `armature_core::QueryView::get`. It was a `HashMap` and therefore LAST-wins, so `?tag=a&tag=b` read `"b"` in a script and `"a"` in Rust for the same request.
+- New `request.query_all(name)` returns every value for a repeated key, and `request.has_param(name)` distinguishes a param captured with non-UTF-8 bytes (`param()` returns `()`) from one that was never captured.
+- `RequestBinding` holds the body as `Bytes`, so cloning one no longer copies the body.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

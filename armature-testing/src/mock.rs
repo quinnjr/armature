@@ -118,8 +118,40 @@ pub trait MockProvider: Provider + Clone {
     fn call_count(&self) -> usize;
 }
 
-/// Spy wrapper for providers
-#[allow(dead_code)]
+/// Call recorder that carries a wrapped value alongside it.
+///
+/// # This does not intercept anything
+///
+/// `Spy` is a **manual** recorder, not a proxy. Wrapping a value does not make
+/// its methods observable: [`Spy::inner`] hands back the value untouched, and
+/// calls made through that reference go straight to it. Recording happens only
+/// where you call [`Spy::record`] yourself:
+///
+/// ```
+/// # use armature_testing::Spy;
+/// #[derive(Clone)]
+/// struct Repo;
+/// impl Repo {
+///     fn find(&self, id: u32) -> String { format!("user-{id}") }
+/// }
+///
+/// let spy = Spy::new(Repo);
+///
+/// // The call is recorded because the test records it, not because `Spy` saw it.
+/// spy.record("find");
+/// let user = spy.inner().find(7);
+///
+/// assert_eq!(user, "user-7");
+/// assert_eq!(spy.call_count(), 1);
+/// assert!(spy.was_called("find"));
+/// ```
+///
+/// For automatic interception, implement the trait under test on a hand-written
+/// fake that records in each method - `Spy` is then useful as that fake's
+/// storage.
+///
+/// Cloning a `Spy` shares the recording buffer, so a clone handed to production
+/// code records into the same log the test asserts on.
 #[derive(Clone)]
 pub struct Spy<T: Clone> {
     inner: T,
@@ -128,7 +160,6 @@ pub struct Spy<T: Clone> {
 
 impl<T: Clone> Spy<T> {
     /// Create a new spy wrapping a provider
-    #[allow(dead_code)]
     pub fn new(inner: T) -> Self {
         Self {
             inner,
@@ -136,26 +167,38 @@ impl<T: Clone> Spy<T> {
         }
     }
 
-    /// Record a method call
-    #[allow(dead_code)]
+    /// Record a method call.
+    ///
+    /// Call this yourself at each site you want observed; `Spy` cannot see
+    /// calls made through [`Spy::inner`].
     pub fn record(&self, method: &str) {
         self.calls.lock().unwrap().push(method.to_string());
     }
 
-    /// Get the number of calls
-    #[allow(dead_code)]
+    /// Get the number of recorded calls
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
 
-    /// Check if a method was called
-    #[allow(dead_code)]
+    /// Check if a method was recorded as called
     pub fn was_called(&self, method: &str) -> bool {
         self.calls.lock().unwrap().contains(&method.to_string())
     }
 
-    /// Get the wrapped provider
-    #[allow(dead_code)]
+    /// Every recorded call, in order.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Drop every recorded call.
+    pub fn clear(&self) {
+        self.calls.lock().unwrap().clear();
+    }
+
+    /// Get the wrapped provider.
+    ///
+    /// Returned untouched - calls made through this reference are NOT
+    /// recorded. See the type-level docs.
     pub fn inner(&self) -> &T {
         &self.inner
     }

@@ -51,11 +51,12 @@
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
+use dashmap::DashMap;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use thiserror::Error;
 
 /// API Key errors
@@ -80,9 +81,9 @@ pub enum ApiKeyError {
     RateLimitExceeded,
 }
 
-/// Once the per-key rate-limit counter map grows past this many entries, a
-/// miss triggers an opportunistic sweep of expired windows (see
-/// [`ApiKeyManager::check_rate_limit`]) instead of sweeping on every call.
+/// Below this many tracked keys the counter map is small enough that expired
+/// windows are not worth sweeping; above it, a sweep runs at most once per
+/// rate-limit window (see [`ApiKeyManager::check_rate_limit`]).
 const RATE_COUNTER_SWEEP_THRESHOLD: usize = 1024;
 
 /// API Key structure
@@ -159,7 +160,17 @@ pub struct ApiKeyManager {
     /// documented on [`ApiKey::rate_limit`].
     rate_limit_window: Duration,
     /// Per-key request counters: `(window_start, count_in_window)`.
-    rate_counters: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
+    ///
+    /// Sharded rather than a single `Mutex<HashMap<..>>`: every validated
+    /// request with a rate limit touches this map, and one process-wide lock
+    /// covering *all* keys made unrelated keys contend with each other — the
+    /// map became a serialization point on the request path for the whole
+    /// application.
+    rate_counters: DashMap<String, (DateTime<Utc>, u32)>,
+    /// Unix seconds at which expired windows were last swept, so the O(n) sweep
+    /// runs at most once per window instead of on the request that happens to
+    /// miss the map.
+    last_sweep_unix: AtomicI64,
 }
 
 impl ApiKeyManager {
@@ -191,7 +202,8 @@ impl ApiKeyManager {
             key_prefix: "ak".to_string(),
             default_expiration: Some(Duration::days(365)),
             rate_limit_window: Duration::minutes(1),
-            rate_counters: Mutex::new(HashMap::new()),
+            rate_counters: DashMap::new(),
+            last_sweep_unix: AtomicI64::new(0),
         }
     }
 
@@ -218,50 +230,82 @@ impl ApiKeyManager {
     /// against `limit` (requests per window). Returns
     /// [`ApiKeyError::RateLimitExceeded`] once the count exceeds `limit`.
     ///
-    /// The counter map is bounded: once it grows past
-    /// [`RATE_COUNTER_SWEEP_THRESHOLD`] entries, a miss (a key id not yet
-    /// tracked) triggers an opportunistic sweep that evicts any entries whose
-    /// window has fully elapsed — those are exactly the entries this
-    /// function would reset to `(now, 0)` on next access, so limit decisions
-    /// are unaffected. This keeps unbounded key rotation/revocation traffic
-    /// from growing the map forever without paying for an O(n) sweep on
-    /// every call.
+    /// Only the shard holding `key_id` is locked, and only for the duration of
+    /// the counter update — no clock call or map-wide scan happens under it.
+    /// Reclaiming expired windows is handled by [`Self::sweep_expired_windows`],
+    /// which is rate-limited to once per window.
     fn check_rate_limit(&self, key_id: &str, limit: u32) -> Result<(), ApiKeyError> {
-        let mut counters = self
-            .rate_counters
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now();
+        let window = self.rate_limit_window;
 
-        // Borrowing lookup first: avoids allocating `key_id.to_string()` on
-        // the common hot path where the key is already tracked.
-        if let Some(entry) = counters.get_mut(key_id) {
-            if now - entry.0 > self.rate_limit_window {
+        // Borrowing lookup first: avoids allocating `key_id.to_string()` on the
+        // common hot path where the key is already tracked. The guard is scoped
+        // so it is released before anything else touches the map.
+        let mut count = None;
+        if let Some(mut entry) = self.rate_counters.get_mut(key_id) {
+            if now - entry.0 > window {
                 *entry = (now, 0);
             }
-
             entry.1 += 1;
-            return if entry.1 > limit {
-                Err(ApiKeyError::RateLimitExceeded)
-            } else {
-                Ok(())
-            };
+            count = Some(entry.1);
         }
 
-        // Miss: this key id isn't tracked yet. Opportunistically evict
-        // expired entries before inserting, but only once the map has grown
-        // large enough to matter, so we don't pay an O(n) sweep every call.
-        if counters.len() >= RATE_COUNTER_SWEEP_THRESHOLD {
-            let window = self.rate_limit_window;
-            counters.retain(|_, (window_start, _)| now - *window_start <= window);
-        }
+        let count = match count {
+            Some(count) => count,
+            None => {
+                self.rate_counters
+                    .entry(key_id.to_string())
+                    .and_modify(|entry| {
+                        // Another caller may have inserted between the lookup
+                        // and here; fold into their window rather than resetting.
+                        if now - entry.0 > window {
+                            *entry = (now, 0);
+                        }
+                        entry.1 += 1;
+                    })
+                    .or_insert((now, 1))
+                    .1
+            }
+        };
 
-        counters.insert(key_id.to_string(), (now, 1));
-        if 1 > limit {
+        self.sweep_expired_windows(now);
+
+        if count > limit {
             Err(ApiKeyError::RateLimitExceeded)
         } else {
             Ok(())
         }
+    }
+
+    /// Drop counters whose window has fully elapsed, at most once per window.
+    ///
+    /// Those entries are exactly the ones `check_rate_limit` would reset to
+    /// `(now, 0)` on next access, so evicting them cannot change a limit
+    /// decision; the sweep exists only to stop key rotation from growing the
+    /// map without bound. The compare-exchange means one caller pays for it and
+    /// concurrent callers return immediately instead of queueing behind it.
+    fn sweep_expired_windows(&self, now: DateTime<Utc>) {
+        if self.rate_counters.len() < RATE_COUNTER_SWEEP_THRESHOLD {
+            return;
+        }
+
+        let window_secs = self.rate_limit_window.num_seconds().max(1);
+        let now_secs = now.timestamp();
+        let last = self.last_sweep_unix.load(Ordering::Relaxed);
+        if now_secs.saturating_sub(last) < window_secs {
+            return;
+        }
+        if self
+            .last_sweep_unix
+            .compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let window = self.rate_limit_window;
+        self.rate_counters
+            .retain(|_, entry| now - entry.0 <= window);
     }
 
     /// Generate a new API key

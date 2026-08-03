@@ -10,15 +10,43 @@ type ValidatorFn = Arc<dyn Fn(&str, &str) -> Result<(), ValidationError> + Send 
 pub struct ValidationRules {
     validators: Vec<ValidatorFn>,
     field: String,
+    optional: bool,
 }
 
 impl ValidationRules {
-    /// Create new validation rules for a field
+    /// Create new validation rules for a field.
+    ///
+    /// The field is **required** by default: if the input has no entry for it,
+    /// [`ValidationBuilder::validate`] runs the validators against `""` rather
+    /// than skipping them, so a form that simply omits `email` fails
+    /// `NotEmpty`/`IsEmail` instead of passing. Call
+    /// [`ValidationRules::optional`] for a field that may legitimately be
+    /// absent.
     pub fn for_field(field: impl Into<String>) -> Self {
         Self {
             validators: Vec::new(),
             field: field.into(),
+            optional: false,
         }
+    }
+
+    /// Skip these rules entirely when the field is absent from the input.
+    ///
+    /// A present-but-empty value is still validated - absence and emptiness
+    /// are different things, and only absence is exempted here.
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    /// Whether these rules are skipped when the field is absent.
+    pub fn is_optional(&self) -> bool {
+        self.optional
+    }
+
+    /// The field these rules apply to.
+    pub fn field_name(&self) -> &str {
+        &self.field
     }
 
     /// Add a custom validator function
@@ -66,7 +94,30 @@ impl ValidationBuilder {
         self
     }
 
-    /// Validate all fields
+    /// The value a rule should be run against, or `None` to skip the rule.
+    ///
+    /// Shared by the sync and parallel paths so the two cannot drift on how
+    /// they treat a missing field.
+    fn value_for<'a>(
+        rule: &ValidationRules,
+        data: &'a std::collections::HashMap<String, String>,
+    ) -> Option<&'a str> {
+        match data.get(rule.field_name()) {
+            Some(value) => Some(value.as_str()),
+            None if rule.is_optional() => None,
+            // Absent and required: validate as empty so `NotEmpty` and friends
+            // reject it rather than never running.
+            None => Some(""),
+        }
+    }
+
+    /// Validate all fields.
+    ///
+    /// A field with rules but no entry in `data` is validated as `""`, not
+    /// skipped: skipping it meant a submission that simply omitted `email`
+    /// passed `NotEmpty` and `IsEmail`, so the easiest way to defeat validation
+    /// was to leave the field out. Mark genuinely optional fields with
+    /// [`ValidationRules::optional`].
     pub fn validate(
         &self,
         data: &std::collections::HashMap<String, String>,
@@ -74,9 +125,10 @@ impl ValidationBuilder {
         let mut all_errors = Vec::new();
 
         for rule in &self.rules {
-            if let Some(value) = data.get(&rule.field)
-                && let Err(mut errors) = rule.validate(value)
-            {
+            let Some(value) = Self::value_for(rule, data) else {
+                continue;
+            };
+            if let Err(mut errors) = rule.validate(value) {
                 all_errors.append(&mut errors);
             }
         }
@@ -131,23 +183,26 @@ impl ValidationBuilder {
 
         let mut set = JoinSet::new();
 
-        // Spawn validation tasks for each field
+        // Spawn validation tasks for each field. Missing-field handling goes
+        // through the same `value_for` as the synchronous path, so the two
+        // cannot disagree about whether an absent field passes.
         for rule in &self.rules {
-            if let Some(value) = data.get(&rule.field) {
-                let value = value.clone();
-                let field = rule.field.clone();
-                let validators = rule.validators.clone();
+            let Some(value) = Self::value_for(rule, data) else {
+                continue;
+            };
+            let value = value.to_owned();
+            let field = rule.field.clone();
+            let validators = rule.validators.clone();
 
-                set.spawn(async move {
-                    let mut errors = Vec::new();
-                    for validator in &validators {
-                        if let Err(error) = validator(&value, &field) {
-                            errors.push(error);
-                        }
+            set.spawn(async move {
+                let mut errors = Vec::new();
+                for validator in &validators {
+                    if let Err(error) = validator(&value, &field) {
+                        errors.push(error);
                     }
-                    errors
-                });
-            }
+                }
+                errors
+            });
         }
 
         // Collect all errors from parallel validations
@@ -207,5 +262,59 @@ mod tests {
             .field(ValidationRules::for_field("email").add(IsEmail::validate));
 
         assert!(builder.validate(&data).is_ok());
+    }
+
+    fn signup_validator() -> ValidationBuilder {
+        ValidationBuilder::new()
+            .field(
+                ValidationRules::for_field("email")
+                    .add(NotEmpty::validate)
+                    .add(IsEmail::validate),
+            )
+            .field(ValidationRules::for_field("name").add(NotEmpty::validate))
+    }
+
+    /// Regression: a field with rules but absent from the input used to be
+    /// skipped outright, so omitting `email` passed both `NotEmpty` and
+    /// `IsEmail`.
+    #[test]
+    fn test_missing_required_field_fails() {
+        let mut data = std::collections::HashMap::new();
+        data.insert("name".to_string(), "John".to_string());
+
+        let errors = signup_validator()
+            .validate(&data)
+            .expect_err("an omitted required field must not pass validation");
+        assert!(errors.iter().any(|e| e.field == "email"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_required_field_fails_in_parallel_path_too() {
+        let mut data = std::collections::HashMap::new();
+        data.insert("name".to_string(), "John".to_string());
+
+        let errors = signup_validator()
+            .validate_parallel(&data)
+            .await
+            .expect_err("the parallel path must agree with the sync path");
+        assert!(errors.iter().any(|e| e.field == "email"));
+    }
+
+    /// An explicitly optional field may be absent, but is still validated when
+    /// present.
+    #[test]
+    fn test_optional_field_may_be_absent() {
+        let validator = ValidationBuilder::new().field(
+            ValidationRules::for_field("website")
+                .optional()
+                .add(IsUrl::validate),
+        );
+
+        let empty = std::collections::HashMap::new();
+        assert!(validator.validate(&empty).is_ok());
+
+        let mut present = std::collections::HashMap::new();
+        present.insert("website".to_string(), "not a url".to_string());
+        assert!(validator.validate(&present).is_err());
     }
 }

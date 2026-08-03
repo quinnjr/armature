@@ -134,6 +134,55 @@ impl fmt::Display for Currency {
     }
 }
 
+/// Why an external amount could not be turned into a [`Money`].
+///
+/// Every variant here describes an amount this crate cannot represent
+/// faithfully. None of them may be recovered from by substituting a default:
+/// the conversions these come from sit on the charge and refund paths, where a
+/// zero reported as a success is a charge for nothing that no reconciliation
+/// run can detect after the fact.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MoneyError {
+    /// The float was `NaN` or an infinity.
+    #[error("amount {amount} is not a finite number ({currency})")]
+    NotFinite {
+        /// The rejected amount, rendered for diagnostics.
+        amount: String,
+        /// The currency the conversion was attempted in.
+        currency: Currency,
+    },
+
+    /// The amount scaled to the currency's minor units does not fit in `i64`.
+    #[error("amount {amount} does not fit in {currency}'s minor units")]
+    Overflow {
+        /// The rejected amount, rendered for diagnostics.
+        amount: String,
+        /// The currency the conversion was attempted in.
+        currency: Currency,
+    },
+
+    /// The currency declares more decimal places than an `i64` multiplier can
+    /// express. Unreachable while every [`Currency::decimals`] is 0 or 2; it
+    /// exists so adding an implausible precision surfaces as an error rather
+    /// than a panic inside `10i64.pow`.
+    #[error("{currency} declares a precision that cannot be represented")]
+    UnrepresentablePrecision {
+        /// The offending currency.
+        currency: Currency,
+    },
+}
+
+impl MoneyError {
+    /// Build an [`MoneyError::Overflow`] from a decimal amount.
+    fn overflow(amount: Decimal, currency: Currency) -> Self {
+        Self::Overflow {
+            amount: amount.to_string(),
+            currency,
+        }
+    }
+}
+
 /// Money amount with currency
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Money {
@@ -149,22 +198,116 @@ impl Money {
         Self { amount, currency }
     }
 
-    /// Create from decimal amount (e.g., 29.99)
-    pub fn from_decimal(amount: Decimal, currency: Currency) -> Self {
-        let multiplier = 10i64.pow(currency.decimals());
-        let amount = (amount * Decimal::from(multiplier))
+    /// Create from a decimal amount (e.g. `29.99` USD is 2999 cents).
+    ///
+    /// # Rounding
+    ///
+    /// Scaling to minor units uses [`Decimal::round`], i.e. **banker's
+    /// rounding** (half-to-even): `0.125` USD is 12 cents and `0.135` USD is 14
+    /// cents. Sub-minor-unit precision is therefore accepted, not rejected — if
+    /// you need a value that cannot be rounded to be an error, use
+    /// [`from_gateway_string`](Self::from_gateway_string) instead.
+    ///
+    /// # Errors
+    ///
+    /// [`MoneyError::Overflow`] if the amount scaled to minor units does not fit
+    /// in an `i64`. That case previously produced **zero**, which on a payment
+    /// path is a charge for nothing reported as a success.
+    pub fn try_from_decimal(amount: Decimal, currency: Currency) -> Result<Self, MoneyError> {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let multiplier = 10i64
+            .checked_pow(currency.decimals())
+            .ok_or(MoneyError::UnrepresentablePrecision { currency })?;
+        let minor = amount
+            .checked_mul(Decimal::from(multiplier))
+            .ok_or_else(|| MoneyError::overflow(amount, currency))?
             .round()
-            .to_string()
-            .parse()
-            .unwrap_or(0);
-        Self { amount, currency }
+            .to_i64()
+            .ok_or_else(|| MoneyError::overflow(amount, currency))?;
+
+        Ok(Self {
+            amount: minor,
+            currency,
+        })
+    }
+
+    /// Create from a binary float amount.
+    ///
+    /// Prefer [`try_from_decimal`](Self::try_from_decimal): a binary float
+    /// cannot represent most decimal money amounts exactly, so `0.29 * 100.0` is
+    /// 28.999999999999996 and only lands on 29 cents because the rounding
+    /// happens to go the right way.
+    ///
+    /// # Rounding
+    ///
+    /// Scaling to minor units uses [`f64::round`], i.e. **half away from zero**
+    /// — which differs from [`try_from_decimal`](Self::try_from_decimal)'s
+    /// banker's rounding at exact halfway points.
+    ///
+    /// # Errors
+    ///
+    /// [`MoneyError::NotFinite`] for `NaN` and the infinities, and
+    /// [`MoneyError::Overflow`] when the scaled amount is outside `i64`. Both
+    /// previously produced a silent zero (`NaN as i64` saturates to 0, and
+    /// out-of-range floats saturate to `i64::MIN`/`i64::MAX`).
+    pub fn try_from_float(amount: f64, currency: Currency) -> Result<Self, MoneyError> {
+        if !amount.is_finite() {
+            return Err(MoneyError::NotFinite {
+                amount: amount.to_string(),
+                currency,
+            });
+        }
+
+        let multiplier = 10i64
+            .checked_pow(currency.decimals())
+            .ok_or(MoneyError::UnrepresentablePrecision { currency })?;
+        let scaled = (amount * multiplier as f64).round();
+
+        // `i64::MAX as f64` rounds *up* to 2^63, which is one past the last
+        // representable i64, so the upper bound must be exclusive. `i64::MIN as
+        // f64` is exactly -2^63 and stays inclusive.
+        if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled >= i64::MAX as f64 {
+            return Err(MoneyError::Overflow {
+                amount: amount.to_string(),
+                currency,
+            });
+        }
+
+        Ok(Self {
+            amount: scaled as i64,
+            currency,
+        })
+    }
+
+    /// Create from decimal amount (e.g., 29.99)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the amount cannot be represented — see
+    /// [`try_from_decimal`](Self::try_from_decimal), which reports the same
+    /// condition as an error instead.
+    #[deprecated(
+        since = "0.2.0",
+        note = "returns a panic where it used to silently produce 0; use Money::try_from_decimal"
+    )]
+    pub fn from_decimal(amount: Decimal, currency: Currency) -> Self {
+        Self::try_from_decimal(amount, currency).expect("money amount is not representable")
     }
 
     /// Create from float amount
+    ///
+    /// # Panics
+    ///
+    /// Panics if the amount cannot be represented — see
+    /// [`try_from_float`](Self::try_from_float), which reports the same
+    /// condition as an error instead.
+    #[deprecated(
+        since = "0.2.0",
+        note = "returns a panic where it used to silently produce 0; use Money::try_from_float"
+    )]
     pub fn from_float(amount: f64, currency: Currency) -> Self {
-        let multiplier = 10f64.powi(currency.decimals() as i32);
-        let amount = (amount * multiplier).round() as i64;
-        Self { amount, currency }
+        Self::try_from_float(amount, currency).expect("money amount is not representable")
     }
 
     /// Parse the decimal amount string a gateway put on the wire.
@@ -360,21 +503,32 @@ impl Price {
     }
 
     /// Is on sale
+    ///
+    /// `false` when `compare_at` is in a different currency than `amount`.
+    /// Minor units are only comparable within one currency: ¥2500 against
+    /// $20.00 is 2500 against 2000 in raw units, which would report a sale on a
+    /// price that is roughly four times higher.
     pub fn is_on_sale(&self) -> bool {
-        self.compare_at
-            .map(|c| c.amount > self.amount.amount)
-            .unwrap_or(false)
+        self.compare_at.is_some_and(|compare| {
+            compare.currency == self.amount.currency && compare.amount > self.amount.amount
+        })
     }
 
     /// Get discount percentage
+    ///
+    /// `None` when there is no compare-at price, or when it is denominated in a
+    /// different currency than `amount` — see [`is_on_sale`](Self::is_on_sale)
+    /// for why a cross-currency comparison of minor units is meaningless. This
+    /// crate carries no exchange rates, so converting is not an option.
     pub fn discount_percent(&self) -> Option<f64> {
-        self.compare_at.map(|compare| {
-            if compare.amount > 0 {
-                ((compare.amount - self.amount.amount) as f64 / compare.amount as f64) * 100.0
-            } else {
-                0.0
-            }
-        })
+        let compare = self.compare_at?;
+        if compare.currency != self.amount.currency {
+            return None;
+        }
+        if compare.amount <= 0 {
+            return Some(0.0);
+        }
+        Some(((compare.amount - self.amount.amount) as f64 / compare.amount as f64) * 100.0)
     }
 }
 
@@ -391,8 +545,99 @@ mod tests {
 
     #[test]
     fn test_money_from_float() {
-        let money = Money::from_float(29.99, Currency::USD);
+        let money = Money::try_from_float(29.99, Currency::USD).unwrap();
         assert_eq!(money.amount, 2999);
+    }
+
+    #[test]
+    fn try_from_decimal_scales_to_minor_units() {
+        assert_eq!(
+            Money::try_from_decimal(Decimal::from_str_exact("29.99").unwrap(), Currency::USD),
+            Ok(Money::usd(2999))
+        );
+        assert_eq!(
+            Money::try_from_decimal(Decimal::from_str_exact("-29.99").unwrap(), Currency::USD),
+            Ok(Money::usd(-2999))
+        );
+        // Zero-decimal currencies are already whole units.
+        assert_eq!(
+            Money::try_from_decimal(Decimal::from_str_exact("1000").unwrap(), Currency::JPY),
+            Ok(Money::new(1000, Currency::JPY))
+        );
+        // Banker's rounding (half-to-even) at exact halfway points.
+        assert_eq!(
+            Money::try_from_decimal(Decimal::from_str_exact("0.125").unwrap(), Currency::USD),
+            Ok(Money::usd(12))
+        );
+        assert_eq!(
+            Money::try_from_decimal(Decimal::from_str_exact("0.135").unwrap(), Currency::USD),
+            Ok(Money::usd(14))
+        );
+    }
+
+    #[test]
+    fn try_from_decimal_reports_overflow_instead_of_zero() {
+        // The regression: `.parse().unwrap_or(0)` turned every one of these into
+        // a charge for nothing that reported success.
+        for huge in ["100000000000000000000", "-100000000000000000000"] {
+            let amount = Decimal::from_str_exact(huge).unwrap();
+            assert!(
+                matches!(
+                    Money::try_from_decimal(amount, Currency::USD),
+                    Err(MoneyError::Overflow { .. })
+                ),
+                "{huge} must not silently become 0"
+            );
+        }
+        // Scaling itself overflows Decimal, before the i64 conversion.
+        assert!(matches!(
+            Money::try_from_decimal(Decimal::MAX, Currency::USD),
+            Err(MoneyError::Overflow { .. })
+        ));
+    }
+
+    #[test]
+    fn try_from_float_rejects_nan_and_infinities() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(
+                    Money::try_from_float(bad, Currency::USD),
+                    Err(MoneyError::NotFinite { .. })
+                ),
+                "{bad} must not silently become 0"
+            );
+        }
+    }
+
+    #[test]
+    fn try_from_float_reports_overflow_instead_of_saturating() {
+        // `as i64` saturates at the boundaries, so these used to produce
+        // i64::MAX / i64::MIN worth of cents rather than an error.
+        for huge in [1e30_f64, -1e30_f64, 1e17_f64] {
+            assert!(
+                matches!(
+                    Money::try_from_float(huge, Currency::USD),
+                    Err(MoneyError::Overflow { .. })
+                ),
+                "{huge} must not saturate"
+            );
+        }
+        // Just inside the range still converts.
+        assert!(Money::try_from_float(1e10, Currency::USD).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "money amount is not representable")]
+    #[allow(deprecated)]
+    fn deprecated_from_float_panics_rather_than_returning_zero() {
+        let _ = Money::from_float(f64::NAN, Currency::USD);
+    }
+
+    #[test]
+    #[should_panic(expected = "money amount is not representable")]
+    #[allow(deprecated)]
+    fn deprecated_from_decimal_panics_rather_than_returning_zero() {
+        let _ = Money::from_decimal(Decimal::MAX, Currency::USD);
     }
 
     #[test]
@@ -584,5 +829,28 @@ mod tests {
 
         assert!(price.is_on_sale());
         assert!((price.discount_percent().unwrap() - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn price_comparison_requires_a_matching_currency() {
+        // ¥2500 and $20.00 are 2500 and 2000 in raw minor units, so comparing
+        // them reported a 20% discount on a price that is actually far higher.
+        let price = Price::new(Money::usd(2000)).with_compare_at(Money::new(2500, Currency::JPY));
+
+        assert!(
+            !price.is_on_sale(),
+            "cross-currency compare-at is not a sale"
+        );
+        assert_eq!(price.discount_percent(), None);
+
+        // The same-currency case is unchanged.
+        let same = Price::new(Money::usd(2000)).with_compare_at(Money::usd(2500));
+        assert!(same.is_on_sale());
+        assert!((same.discount_percent().unwrap() - 20.0).abs() < 0.01);
+
+        // No compare-at at all remains "not on sale" / `None`.
+        let plain = Price::new(Money::usd(2000));
+        assert!(!plain.is_on_sale());
+        assert_eq!(plain.discount_percent(), None);
     }
 }

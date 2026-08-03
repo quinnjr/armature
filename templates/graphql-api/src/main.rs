@@ -1,6 +1,13 @@
 //! Armature GraphQL API Template
 //!
-//! A production-ready GraphQL API with queries, mutations, and subscriptions.
+//! A production-ready GraphQL API with queries and mutations.
+//!
+//! Subscriptions are **not** wired up: the schema is built with
+//! `EmptySubscription`, there is no subscription root type, and no WebSocket
+//! transport or `/graphql/ws` route is registered. Adding them means writing a
+//! `SubscriptionRoot`, passing it to `Schema::build` in place of
+//! `EmptySubscription`, and mounting a WebSocket route - none of which this
+//! template does for you.
 //!
 //! Run with: cargo run
 //! GraphQL Playground: http://localhost:3000/playground
@@ -11,8 +18,8 @@ mod services;
 
 use std::sync::OnceLock;
 
-use armature::prelude::*;
 use armature::armature_graphql::graphiql_html;
+use armature::prelude::*;
 use async_graphql::{EmptySubscription, Schema};
 use serde::Deserialize;
 use tracing::info;
@@ -183,8 +190,14 @@ impl HealthController {
 // Application Module
 // =============================================================================
 
+// No `providers:` list. `UserService`/`BookService` are constructed inside
+// `build_schema` and owned by the process-wide `GRAPHQL_SCHEMA`, and nothing
+// here resolves them from the container - registering them as providers made
+// the `#[injectable]` attributes and this list look load-bearing when they were
+// inert, teaching a DI pattern that was not actually running. If you move the
+// services out of the schema and into the container, add them back here and
+// resolve them through it.
 #[module(
-    providers: [UserService, BookService],
     controllers: [GraphQLController, PlaygroundController, HealthController]
 )]
 #[derive(Default)]
@@ -258,7 +271,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  query {{ book(id: \"1\") {{ id title authorId }} }}");
     println!();
     println!("  # Create a user");
-    println!("  mutation {{ createUser(name: \"Alice\", email: \"alice@example.com\") {{ id name }} }}");
+    println!(
+        "  mutation {{ createUser(name: \"Alice\", email: \"alice@example.com\") {{ id name }} }}"
+    );
     println!();
     println!("  # Search books");
     println!("  query {{ searchBooks(query: \"Rust\") {{ id title }} }}");

@@ -675,3 +675,61 @@ fn generated_minimal_project_cargo_checks() {
         "generated minimal project should cargo-check"
     );
 }
+
+// =============================================================================
+// Unimplemented subcommands must fail, not silently succeed
+// =============================================================================
+
+/// Subcommands that are declared but do nothing must exit non-zero.
+///
+/// They used to print "coming soon!" and return `Ok(())`, so `armature deploy
+/// --env prod` in CI reported a successful deploy having deployed nothing, and
+/// `armature serve` as a container start-command exited 0 with no server
+/// running. They are also `hide = true` now, so they no longer appear in
+/// `--help` — but remain invocable (and failing) for anyone who scripted them.
+#[test]
+fn unimplemented_subcommands_exit_non_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["serve"],
+        vec!["deploy", "--env", "prod"],
+        vec!["upgrade"],
+        vec!["upgrade", "--check"],
+        vec!["bench"],
+        vec!["lint"],
+        vec!["config", "show"],
+        vec!["config", "set", "k", "v"],
+        vec!["config", "init"],
+        vec!["plugin", "install", "foo"],
+        vec!["plugin", "uninstall", "foo"],
+        vec!["plugin", "new", "foo"],
+        vec!["openapi", "validate", "openapi.yaml"],
+        vec!["openapi", "generate"],
+    ] {
+        armature_in(tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not implemented yet"));
+    }
+}
+
+/// Hidden-but-real commands stay out of the top-level help listing.
+#[test]
+fn unimplemented_subcommands_are_hidden_from_help() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = armature_in(tmp.path())
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(out).unwrap();
+    for hidden in ["deploy", "bench"] {
+        assert!(
+            !help.contains(&format!("  {}", hidden)),
+            "`{hidden}` is not implemented and must not be advertised in --help:\n{help}"
+        );
+    }
+}

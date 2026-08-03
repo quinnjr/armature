@@ -492,6 +492,39 @@ jobs:
         run: cargo run --example distributed_locks_example --features full-with-saml
 
   # ============================================================================
+  # OUT-OF-WORKSPACE CRATES
+  #
+  # armature-fuzz, benches/comparison_servers/* and benchmarks/comparison each
+  # declare their own `[workspace]`, so a workspace-wide `cargo check` never
+  # touches them and they can reference an API that no longer exists — all
+  # three had accumulated exactly that. Each is checked from its own manifest
+  # here. The `http-benchmark` bin lives in the root package but no job built
+  # it either, so it is checked alongside them.
+  #
+  # armature-fuzz is `cargo check`ed on nightly rather than fuzzed: this only
+  # needs to prove the targets still compile against armature-core. Actually
+  # running them is what the fuzz-smoke job below is for.
+  # ============================================================================
+
+  out-of-workspace-checks:
+    name: Out-of-Workspace Crate Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check armature-fuzz targets
+        run: cargo check --manifest-path armature-fuzz/Cargo.toml --all-targets
+      - name: cargo check hyper h1 baseline server
+        run: >-
+          cargo check --manifest-path
+          benches/comparison_servers/hyper_h1_server/Cargo.toml
+      - name: cargo check benchmarks/comparison bins
+        run: cargo check --manifest-path benchmarks/comparison/Cargo.toml --bins
+      - name: cargo check http-benchmark bin
+        run: cargo check --bin http-benchmark
+
+  # ============================================================================
   # TEMPLATE BUILDS
   #
   # templates/{api-full,api-minimal,microservice,graphql-api} are excluded
@@ -529,6 +562,39 @@ jobs:
           armature-core = { path = "../../armature-core" }
           EOF
       - name: cargo check --all-features
+        working-directory: templates/${{ matrix.template }}
+        run: cargo check --all-features
+
+  # ============================================================================
+  # TEMPLATE RESOLUTION AGAINST CRATES.IO
+  #
+  # `template-builds` above patches both armature deps to the in-repo source,
+  # so it proves the template source matches THIS tree — never that the
+  # published version pair a real user resolves actually works together. When
+  # armature-core publishes a breaking 0.x minor ahead of a matching facade
+  # release, that job stays green while `cargo new` from the template fails
+  # for everyone.
+  #
+  # This job resolves the committed version requirements against crates.io
+  # with no patching. It is `continue-on-error` on purpose: it legitimately
+  # fails in the window between bumping the in-repo version and publishing it,
+  # and blocking every PR on the state of the registry is worse than a
+  # visible-but-non-fatal signal.
+  # ============================================================================
+
+  template-crates-io-resolution:
+    name: Template Resolves From crates.io (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [api-full, api-minimal, microservice, graphql-api]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --all-features (no [patch.crates-io])
         working-directory: templates/${{ matrix.template }}
         run: cargo check --all-features
 

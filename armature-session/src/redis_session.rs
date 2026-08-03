@@ -1,12 +1,12 @@
 //! Redis session storage implementation.
 
-use armature_log::{debug, info};
 use crate::config::SessionConfig;
 use crate::error::{SessionError, SessionResult};
 use crate::traits::{Session, SessionStore, generate_session_id};
+use armature_log::{debug, info};
 use async_trait::async_trait;
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use std::time::Duration;
 
 /// Number of keys hinted per `SCAN` iteration when sweeping the namespace.
@@ -140,9 +140,16 @@ impl SessionStore for RedisSessionStore {
         let now = chrono::Utc::now();
         let remaining = (session.expires_at - now).num_seconds().max(0) as u64;
 
-        if remaining > 0 {
-            let _: () = conn.set_ex(&key, json, remaining).await?;
+        // A non-positive TTL means the session is already expired, so there is
+        // nothing sensible to write. Returning `Ok(())` for it made `save` a
+        // silent no-op — `create()` would hand back a session that was never
+        // persisted, and the caller would only find out when the next request
+        // came back unauthenticated.
+        if remaining == 0 {
+            return Err(SessionError::Expired(session.id.clone()));
         }
+
+        let _: () = conn.set_ex(&key, json, remaining).await?;
 
         Ok(())
     }
@@ -312,4 +319,3 @@ mod tests {
         assert_eq!(scan_count_model(&batches), 0);
     }
 }
-

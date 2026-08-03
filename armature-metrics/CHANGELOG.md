@@ -9,6 +9,14 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Prometheus path label is taken from `HttpRequest::path_only`, not the raw request target. `/login?token=SECRET` was published as a label value on `/metrics`, and every distinct query string burned a slot against the cardinality cap.
+
+### Changed
+
+- `Summary::quantile` and `Collector::collect` reuse a scratch buffer instead of allocating a copy of the whole observation window (up to `max_size` values) on every call.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).

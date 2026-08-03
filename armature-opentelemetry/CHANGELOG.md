@@ -9,6 +9,15 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- `http.route` is the query-less path rather than the raw request target. OTel defines `http.route` as a low-cardinality route template, so every distinct URL was minting its own time series.
+
+### Changed
+
+- **Breaking (telemetry):** span and metric attributes use the stable OTel HTTP semantic conventions instead of the retired pre-1.0 names: `http.method` → `http.request.method`, `http.target` → `url.path`, `http.status_code` → `http.response.status_code`, `http.scheme` → `url.scheme`, `http.host` → `server.address`, `http.user_agent` → `user_agent.original`, `http.response_content_length` → `http.response.body.size`. Dashboards and alerts keyed on the old names must be updated.
+- Span names use the query-less path, for the same cardinality reason.
+
 ### Changed — `0.2.0` → `0.2.1`
 
 - Migrated onto `armature-core` `0.8`'s `Bytes`-backed request and response types. No behavior change beyond what that migration implies; see [`armature-core/CHANGELOG.md`](../armature-core/CHANGELOG.md).
