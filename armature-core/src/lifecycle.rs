@@ -274,17 +274,25 @@ impl LifecycleManager {
     pub async fn call_module_init_hooks(
         &self,
     ) -> Result<(), Vec<(String, Box<dyn std::error::Error + Send + Sync>)>> {
-        println!("🔄 Calling module initialization hooks...");
-        let hooks = self.init_hooks.read().await;
+        tracing::info!("🔄 Calling module initialization hooks...");
+        // Snapshot the registrations and drop the read guard before awaiting
+        // any hook. `tokio::sync::RwLock` is write-preferring, so holding the
+        // guard across the whole loop would stall every concurrent
+        // `register_on_init` for the full duration of every hook, deadlock a
+        // hook that registers another hook on this same manager, and cause
+        // `register_on_init_sync`'s `try_write` to fail -- silently dropping
+        // that registration. The entries are `(String, Arc<dyn ..>)`, so the
+        // clone is just a string copy plus a refcount bump.
+        let hooks: Vec<_> = self.init_hooks.read().await.clone();
         let mut errors = Vec::new();
 
         for (name, hook) in hooks.iter() {
             match hook.on_module_init().await {
                 Ok(_) => {
-                    println!("  ✓ {}: onModuleInit() completed", name);
+                    tracing::info!("  ✓ {}: onModuleInit() completed", name);
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {}: onModuleInit() failed: {}", name, e);
+                    tracing::error!("  ✗ {}: onModuleInit() failed: {}", name, e);
                     errors.push((name.clone(), e));
                 }
             }
@@ -301,18 +309,20 @@ impl LifecycleManager {
     pub async fn call_module_destroy_hooks(
         &self,
     ) -> Result<(), Vec<(String, Box<dyn std::error::Error + Send + Sync>)>> {
-        println!("🔄 Calling module destruction hooks...");
-        let hooks = self.destroy_hooks.read().await;
+        tracing::info!("🔄 Calling module destruction hooks...");
+        // Snapshot first, then drop the guard -- see `call_module_init_hooks`
+        // for why the read guard must not be held across hook `.await`s.
+        let hooks: Vec<_> = self.destroy_hooks.read().await.clone();
         let mut errors = Vec::new();
 
         // Call in reverse order (LIFO)
         for (name, hook) in hooks.iter().rev() {
             match hook.on_module_destroy().await {
                 Ok(_) => {
-                    println!("  ✓ {}: onModuleDestroy() completed", name);
+                    tracing::info!("  ✓ {}: onModuleDestroy() completed", name);
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {}: onModuleDestroy() failed: {}", name, e);
+                    tracing::error!("  ✗ {}: onModuleDestroy() failed: {}", name, e);
                     errors.push((name.clone(), e));
                 }
             }
@@ -329,17 +339,19 @@ impl LifecycleManager {
     pub async fn call_bootstrap_hooks(
         &self,
     ) -> Result<(), Vec<(String, Box<dyn std::error::Error + Send + Sync>)>> {
-        println!("🚀 Calling application bootstrap hooks...");
-        let hooks = self.bootstrap_hooks.read().await;
+        tracing::info!("🚀 Calling application bootstrap hooks...");
+        // Snapshot first, then drop the guard -- see `call_module_init_hooks`
+        // for why the read guard must not be held across hook `.await`s.
+        let hooks: Vec<_> = self.bootstrap_hooks.read().await.clone();
         let mut errors = Vec::new();
 
         for (name, hook) in hooks.iter() {
             match hook.on_application_bootstrap().await {
                 Ok(_) => {
-                    println!("  ✓ {}: onApplicationBootstrap() completed", name);
+                    tracing::info!("  ✓ {}: onApplicationBootstrap() completed", name);
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {}: onApplicationBootstrap() failed: {}", name, e);
+                    tracing::error!("  ✗ {}: onApplicationBootstrap() failed: {}", name, e);
                     errors.push((name.clone(), e));
                 }
             }
@@ -357,17 +369,19 @@ impl LifecycleManager {
         &self,
         signal: Option<String>,
     ) -> Result<(), Vec<(String, Box<dyn std::error::Error + Send + Sync>)>> {
-        println!("⚠️  Calling before shutdown hooks...");
-        let hooks = self.before_shutdown_hooks.read().await;
+        tracing::info!("⚠️  Calling before shutdown hooks...");
+        // Snapshot first, then drop the guard -- see `call_module_init_hooks`
+        // for why the read guard must not be held across hook `.await`s.
+        let hooks: Vec<_> = self.before_shutdown_hooks.read().await.clone();
         let mut errors = Vec::new();
 
         for (name, hook) in hooks.iter() {
             match hook.before_application_shutdown(signal.clone()).await {
                 Ok(_) => {
-                    println!("  ✓ {}: beforeApplicationShutdown() completed", name);
+                    tracing::info!("  ✓ {}: beforeApplicationShutdown() completed", name);
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {}: beforeApplicationShutdown() failed: {}", name, e);
+                    tracing::error!("  ✗ {}: beforeApplicationShutdown() failed: {}", name, e);
                     errors.push((name.clone(), e));
                 }
             }
@@ -411,18 +425,20 @@ impl LifecycleManager {
         &self,
         signal: Option<String>,
     ) -> Result<(), Vec<(String, Box<dyn std::error::Error + Send + Sync>)>> {
-        println!("🛑 Calling application shutdown hooks...");
-        let hooks = self.shutdown_hooks.read().await;
+        tracing::info!("🛑 Calling application shutdown hooks...");
+        // Snapshot first, then drop the guard -- see `call_module_init_hooks`
+        // for why the read guard must not be held across hook `.await`s.
+        let hooks: Vec<_> = self.shutdown_hooks.read().await.clone();
         let mut errors = Vec::new();
 
         // Call in reverse order (LIFO)
         for (name, hook) in hooks.iter().rev() {
             match hook.on_application_shutdown(signal.clone()).await {
                 Ok(_) => {
-                    println!("  ✓ {}: onApplicationShutdown() completed", name);
+                    tracing::info!("  ✓ {}: onApplicationShutdown() completed", name);
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {}: onApplicationShutdown() failed: {}", name, e);
+                    tracing::error!("  ✗ {}: onApplicationShutdown() failed: {}", name, e);
                     errors.push((name.clone(), e));
                 }
             }
@@ -717,6 +733,135 @@ mod tests {
 
         let execution_order = order.read().await.clone();
         assert_eq!(execution_order, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_destroy_hooks_run_in_reverse_registration_order() {
+        // Teardown must unwind in LIFO order: a provider registered later may
+        // depend on one registered earlier, so it has to be torn down first.
+        let manager = LifecycleManager::new();
+        let order = Arc::new(RwLock::new(Vec::new()));
+
+        struct OrderService {
+            id: usize,
+            order: Arc<RwLock<Vec<usize>>>,
+        }
+
+        #[async_trait]
+        impl OnModuleDestroy for OrderService {
+            async fn on_module_destroy(&self) -> LifecycleResult {
+                self.order.write().await.push(self.id);
+                Ok(())
+            }
+        }
+
+        for i in 1..=3 {
+            let service = Arc::new(OrderService {
+                id: i,
+                order: order.clone(),
+            });
+            manager
+                .register_on_destroy(format!("Service{}", i), service)
+                .await;
+        }
+
+        manager.call_module_destroy_hooks().await.unwrap();
+
+        let execution_order = order.read().await.clone();
+        assert_eq!(execution_order, vec![3, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_hooks_run_in_reverse_registration_order() {
+        // Same LIFO contract as destroy: shutdown unwinds registration order.
+        let manager = LifecycleManager::new();
+        let order = Arc::new(RwLock::new(Vec::new()));
+
+        struct OrderService {
+            id: usize,
+            order: Arc<RwLock<Vec<usize>>>,
+        }
+
+        #[async_trait]
+        impl OnApplicationShutdown for OrderService {
+            async fn on_application_shutdown(&self, _signal: Option<String>) -> LifecycleResult {
+                self.order.write().await.push(self.id);
+                Ok(())
+            }
+        }
+
+        for i in 1..=3 {
+            let service = Arc::new(OrderService {
+                id: i,
+                order: order.clone(),
+            });
+            manager
+                .register_on_shutdown(format!("Service{}", i), service)
+                .await;
+        }
+
+        manager
+            .call_shutdown_hooks(Some("SIGTERM".to_string()))
+            .await
+            .unwrap();
+
+        let execution_order = order.read().await.clone();
+        assert_eq!(execution_order, vec![3, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_failing_init_hook_is_reported_by_name_and_does_not_abort_the_rest() {
+        // The `Vec<(String, Box<dyn Error>)>` error channel only earns its
+        // keep if the failing hook's *registered name* comes back with it --
+        // that name is the only handle an operator has on which provider
+        // broke. Hook execution is also continue-on-error by construction, so
+        // a hook registered after the failure must still run.
+        let manager = LifecycleManager::new();
+        let later_ran = Arc::new(AtomicBool::new(false));
+
+        struct FailingService;
+
+        #[async_trait]
+        impl OnModuleInit for FailingService {
+            async fn on_module_init(&self) -> LifecycleResult {
+                Err("boom".into())
+            }
+        }
+
+        struct FlagService {
+            ran: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl OnModuleInit for FlagService {
+            async fn on_module_init(&self) -> LifecycleResult {
+                self.ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        manager
+            .register_on_init("FailingService".to_string(), Arc::new(FailingService))
+            .await;
+        manager
+            .register_on_init(
+                "FlagService".to_string(),
+                Arc::new(FlagService {
+                    ran: later_ran.clone(),
+                }),
+            )
+            .await;
+
+        let errors = manager
+            .call_module_init_hooks()
+            .await
+            .expect_err("a failing hook must surface as Err");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "FailingService");
+        assert!(
+            later_ran.load(Ordering::SeqCst),
+            "hooks registered after a failing one must still run"
+        );
     }
 
     // ---- sync registration variants (used by the provider registration

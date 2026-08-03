@@ -320,29 +320,26 @@ pub struct ConditionalHeaders {
 
 impl ConditionalHeaders {
     /// Parse conditional headers from an HTTP request.
+    ///
+    /// Lookups use the canonical casing only: `HeaderMap::get` compares names
+    /// with `eq_ignore_ascii_case`, so a client sending `if-none-match` is
+    /// matched by the same call that matches `If-None-Match`.
     pub fn from_request(request: &HttpRequest) -> Self {
         let if_none_match = request
             .headers
             .get("If-None-Match")
-            .or_else(|| request.headers.get("if-none-match"))
             .map(|h| ETagList::parse(h));
 
-        let if_match = request
-            .headers
-            .get("If-Match")
-            .or_else(|| request.headers.get("if-match"))
-            .map(|h| ETagList::parse(h));
+        let if_match = request.headers.get("If-Match").map(|h| ETagList::parse(h));
 
         let if_modified_since = request
             .headers
             .get("If-Modified-Since")
-            .or_else(|| request.headers.get("if-modified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok());
 
         let if_unmodified_since = request
             .headers
             .get("If-Unmodified-Since")
-            .or_else(|| request.headers.get("if-unmodified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok());
 
         Self {
@@ -465,28 +462,22 @@ impl ConditionalRequest for HttpRequest {
     fn if_none_match(&self) -> Option<ETagList> {
         self.headers
             .get("If-None-Match")
-            .or_else(|| self.headers.get("if-none-match"))
             .map(|h| ETagList::parse(h))
     }
 
     fn if_match(&self) -> Option<ETagList> {
-        self.headers
-            .get("If-Match")
-            .or_else(|| self.headers.get("if-match"))
-            .map(|h| ETagList::parse(h))
+        self.headers.get("If-Match").map(|h| ETagList::parse(h))
     }
 
     fn if_modified_since(&self) -> Option<SystemTime> {
         self.headers
             .get("If-Modified-Since")
-            .or_else(|| self.headers.get("if-modified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok())
     }
 
     fn if_unmodified_since(&self) -> Option<SystemTime> {
         self.headers
             .get("If-Unmodified-Since")
-            .or_else(|| self.headers.get("if-unmodified-since"))
             .and_then(|h| httpdate::parse_http_date(h).ok())
     }
 
@@ -900,6 +891,43 @@ mod tests {
 
         let etag = ETag::strong("abc123");
         assert!(headers.is_not_modified(Some(&etag), None));
+    }
+
+    /// Clients are free to send header names in any casing, and HTTP/2 and
+    /// HTTP/3 send them lowercased on the wire, so parsing must not depend on
+    /// the canonical spelling used in the lookups above.
+    #[test]
+    fn test_conditional_headers_lowercase_header_names() {
+        let mut request = HttpRequest::new("GET".to_string(), "/resource".to_string());
+        request
+            .headers
+            .insert("if-none-match".to_string(), "\"abc123\"".to_string());
+        request
+            .headers
+            .insert("if-match".to_string(), "\"abc123\"".to_string());
+        request.headers.insert(
+            "if-modified-since".to_string(),
+            "Sun, 06 Nov 1994 08:49:37 GMT".to_string(),
+        );
+        request.headers.insert(
+            "if-unmodified-since".to_string(),
+            "Sun, 06 Nov 1994 08:49:37 GMT".to_string(),
+        );
+
+        let headers = ConditionalHeaders::from_request(&request);
+        assert!(headers.if_none_match.is_some());
+        assert!(headers.if_match.is_some());
+        assert!(headers.if_modified_since.is_some());
+        assert!(headers.if_unmodified_since.is_some());
+
+        let etag = ETag::strong("abc123");
+        assert!(headers.is_not_modified(Some(&etag), None));
+
+        // The ConditionalRequest accessors read the same headers directly.
+        assert!(request.if_none_match().is_some());
+        assert!(request.if_match().is_some());
+        assert!(request.if_modified_since().is_some());
+        assert!(request.if_unmodified_since().is_some());
     }
 
     #[test]

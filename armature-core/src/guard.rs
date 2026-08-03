@@ -2,6 +2,8 @@
 
 use crate::{Error, HttpRequest};
 use async_trait::async_trait;
+use compact_str::CompactString;
+use std::collections::HashSet;
 
 /// Execution context for guards
 pub struct GuardContext {
@@ -75,13 +77,17 @@ impl RequestRoles {
 /// containing at least one of the required roles. Fails closed: requests
 /// without verified roles are rejected.
 pub struct RolesGuard {
-    required_roles: Vec<String>,
+    /// Built once at construction so authorizing a request is a hash probe per
+    /// granted role rather than a scan of required roles against a scan of
+    /// granted ones. `CompactString` keeps the common short names ("admin",
+    /// "user") inline, so the set costs no heap allocation per entry.
+    required_roles: HashSet<CompactString>,
 }
 
 impl RolesGuard {
     pub fn new(roles: Vec<String>) -> Self {
         Self {
-            required_roles: roles,
+            required_roles: roles.into_iter().map(CompactString::from).collect(),
         }
     }
 }
@@ -112,7 +118,13 @@ impl Guard for RolesGuard {
                 Error::Forbidden("No verified roles associated with this request".to_string())
             })?;
 
-        if self.required_roles.iter().any(|role| roles.contains(role)) {
+        // Probe the required set with each granted role: a request carries a
+        // handful of roles, and membership is O(1) per probe.
+        if roles
+            .0
+            .iter()
+            .any(|role| self.required_roles.contains(role.as_str()))
+        {
             Ok(true)
         } else {
             Err(Error::Forbidden("Insufficient role".to_string()))
@@ -397,8 +409,15 @@ mod tests {
     #[test]
     fn test_roles_guard_creation() {
         let roles = vec!["admin".to_string(), "user".to_string()];
-        let _guard = RolesGuard::new(roles);
-        // Just test creation
+        let guard = RolesGuard::new(roles.clone());
+
+        // The constructor converts into a set, so pin that every role survives
+        // the conversion: a guard that silently dropped one would authorize
+        // fewer requests than configured.
+        assert_eq!(guard.required_roles.len(), roles.len());
+        for role in &roles {
+            assert!(guard.required_roles.contains(role.as_str()));
+        }
     }
 
     #[tokio::test]
