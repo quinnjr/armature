@@ -9,6 +9,17 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ### Fixed
 
+- **Chunked line-length limits were bypassable by packetization.** The bound on
+  a chunk-size line and on a trailer line was enforced only while the decoder
+  was still waiting for the terminating LF. A peer that delivered an over-long
+  line in a single segment arrived with the LF already present, so the length
+  was never checked and the line was accepted whole — meaning the limit
+  constrained only senders that dribbled bytes, which is the opposite of the
+  threat. Both limits now apply however the input is split. The trailer path
+  additionally reported the wrong error depending on arrival: `MissingCrlf`
+  when dribbled, `TrailerTooLarge` when delivered at once; it is now
+  `TrailerTooLarge` either way.
+
 - **Two remaining response-desync vectors closed.** A 204, 304 or 1xx response
   now drops any body a handler attached: the writer already suppresses their
   framing field, so writing body bytes anyway left them unaccounted for and a

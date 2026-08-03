@@ -158,7 +158,8 @@ impl ChunkedDecoder {
                 }
 
                 State::Size => {
-                    let Some((content_len, consumed)) = find_line(buf, MAX_SIZE_DIGITS + 256)?
+                    let Some((content_len, consumed)) =
+                        find_line(buf, MAX_SIZE_DIGITS + 256, ChunkedError::MissingCrlf)?
                     else {
                         return Ok(None);
                     };
@@ -211,7 +212,9 @@ impl ChunkedDecoder {
                 }
 
                 State::Trailers => {
-                    let Some((content_len, consumed)) = find_line(buf, self.max_trailer)? else {
+                    let Some((content_len, consumed)) =
+                        find_line(buf, self.max_trailer, ChunkedError::TrailerTooLarge)?
+                    else {
                         return Ok(None);
                     };
 
@@ -300,17 +303,37 @@ impl ChunkedDecoder {
 ///
 /// Strict CRLF: a bare LF is [`ChunkedError::MissingCrlf`], matching the policy
 /// [`crate::parse::prescan`] applies to the message head.
-fn find_line(buf: &Bytes, max: usize) -> Result<Option<(usize, usize)>, ChunkedError> {
+///
+/// `max` bounds the line's content and `too_long` is the verdict when it is
+/// exceeded. The bound is enforced whether or not the terminator has arrived,
+/// and both paths raise the same error, so the outcome cannot depend on how the
+/// peer packetized its writes. Checking only the "no LF yet" path would invert
+/// the protection: a line dribbled a byte at a time trips the limit while the
+/// buffer grows, but the identical line delivered in one segment arrives with
+/// its LF already present and skips the check entirely — and one segment is the
+/// easy case for a sender, so the limit would constrain only the slow ones.
+///
+/// The caller names the error because the two line kinds answer differently: an
+/// over-long size line is malformed framing, while an over-long trailer line is
+/// the head-size budget running out.
+fn find_line(
+    buf: &Bytes,
+    max: usize,
+    too_long: ChunkedError,
+) -> Result<Option<(usize, usize)>, ChunkedError> {
     match memchr::memchr(b'\n', buf) {
         None => {
             if buf.len() > max {
-                return Err(ChunkedError::MissingCrlf);
+                return Err(too_long);
             }
             Ok(None)
         }
         Some(i) => {
             if i == 0 || buf[i - 1] != b'\r' {
                 return Err(ChunkedError::MissingCrlf);
+            }
+            if i - 1 > max {
+                return Err(too_long);
             }
             Ok(Some((i - 1, i + 1)))
         }
@@ -458,6 +481,64 @@ mod tests {
     fn skips_chunk_extensions() {
         let events = drain(&mut dec(), b"5;name=value\r\nhello\r\n0\r\n\r\n").unwrap();
         assert_eq!(events[0], data("hello"));
+    }
+
+    /// The size-line bound must not depend on how the peer packetized its
+    /// writes. Feeding an over-long chunk extension one byte at a time trips the
+    /// limit while the buffer grows; delivering the identical bytes in a single
+    /// segment must reach the same verdict, not sail past because the LF is
+    /// already present when the line is first examined.
+    #[test]
+    fn over_long_chunk_extension_is_rejected_however_it_is_split() {
+        let mut raw = Vec::from(*b"0;");
+        raw.resize(2 + MAX_SIZE_DIGITS + 256 + 1, b'x');
+        raw.extend_from_slice(b"\r\n\r\n");
+
+        // `poll` reports `End` for as long as it is asked once the body is
+        // complete, so both loops stop there rather than spinning on it.
+        let whole = {
+            let mut d = dec();
+            let mut buf = Bytes::from(raw.clone());
+            loop {
+                match d.poll(&mut buf) {
+                    Err(e) => break Err(e),
+                    Ok(Some(ChunkEvent::End)) | Ok(None) => break Ok(()),
+                    Ok(Some(_)) => {}
+                }
+            }
+        };
+
+        let dribbled = {
+            let mut d = dec();
+            let mut buf = Bytes::new();
+            let mut fed = 0;
+            loop {
+                match d.poll(&mut buf) {
+                    Err(e) => break Err(e),
+                    Ok(Some(ChunkEvent::End)) => break Ok(()),
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                }
+                if fed == raw.len() {
+                    break Ok(());
+                }
+                let mut next = Vec::with_capacity(buf.len() + 1);
+                next.extend_from_slice(&buf);
+                next.push(raw[fed]);
+                buf = Bytes::from(next);
+                fed += 1;
+            }
+        };
+
+        assert_eq!(
+            dribbled,
+            Err(ChunkedError::MissingCrlf),
+            "a size line longer than the bound must be rejected"
+        );
+        assert_eq!(
+            whole, dribbled,
+            "the same bytes in one segment must reach the same verdict"
+        );
     }
 
     #[test]
