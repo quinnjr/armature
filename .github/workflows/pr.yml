@@ -36,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Check PR size
@@ -67,6 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Check commit messages
@@ -98,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Check for documentation
         run: |

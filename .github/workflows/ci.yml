@@ -50,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
       - id: detect
         env:
@@ -103,6 +104,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -114,6 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -132,6 +137,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -168,6 +175,8 @@ jobs:
             rust: nightly
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -188,6 +197,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -347,6 +358,8 @@ jobs:
     # dependency compilation, the actual test run) is what gets skipped.
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
         if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Install system dependencies
         if: ${{ matrix.apt != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
@@ -407,6 +420,8 @@ jobs:
         provider: [stripe, paypal, braintree]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -431,6 +446,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -466,6 +483,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -511,6 +530,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: cargo check armature-fuzz targets
@@ -550,6 +571,8 @@ jobs:
         template: [api-full, api-minimal, microservice, graphql-api]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Patch template to build against in-repo armature/armature-core (CI-only)
@@ -592,6 +615,8 @@ jobs:
         template: [api-full, api-minimal, microservice, graphql-api]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check --all-features (no [patch.crates-io])
@@ -622,6 +647,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -640,6 +667,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -667,6 +696,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -702,6 +733,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
       - id: scope
         name: Decide whether this PR touches the fuzzed surface
@@ -761,6 +793,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -783,6 +817,8 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
