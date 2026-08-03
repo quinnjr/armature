@@ -42,6 +42,14 @@ pub struct LocalStrategy<T: AuthUser> {
 /// Plaintext behind [`LocalStrategy::dummy_hash`]. Its value is irrelevant —
 /// nothing ever compares equal to it on purpose — but it must be a constant so
 /// the hash is computed once and reused.
+///
+/// This is not a credential. It is never stored, never accepted as input and
+/// never compared for equality; only the *cost* of hashing and verifying it
+/// matters. Code scanning reads any literal reaching a password parameter as a
+/// hard-coded credential and cannot tell this apart from one, so the alert is
+/// suppressed here rather than in the dashboard, where the reasoning would not
+/// travel with the code.
+// codeql[rust/hard-coded-cryptographic-value]
 const DUMMY_PASSWORD: &str = "armature-local-strategy-dummy-password";
 
 impl<T: AuthUser> LocalStrategy<T> {
@@ -80,6 +88,7 @@ impl<T: AuthUser> LocalStrategy<T> {
     fn equalize_timing(&self, password: &str) {
         let dummy = self
             .dummy_hash
+            // codeql[rust/hard-coded-cryptographic-value]
             .get_or_init(|| self.hasher.hash(DUMMY_PASSWORD).unwrap_or_default());
 
         if !dummy.is_empty() {
