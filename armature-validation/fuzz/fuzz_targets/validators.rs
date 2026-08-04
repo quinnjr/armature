@@ -14,7 +14,13 @@
 //!   which is the property its doc claims and the reason it exists rather than
 //!   a bare regex;
 //! * `IsAlpha`, `IsAlphanumeric` and `IsNumeric` must agree with Rust's own
-//!   character classification, and must not disagree with each other.
+//!   character classification, and must not disagree with each other;
+//! * `MinLength` and `MaxLength` must bound `char`s rather than bytes, which
+//!   only text outside ASCII can tell apart.
+//!
+//! Nothing here re-derives a bound with the same expression the validator uses
+//! — an assertion that restates the implementation cannot fail, so it would
+//! cost fuzzing time without covering anything.
 
 #![no_main]
 
@@ -100,28 +106,37 @@ fuzz_target!(|data: &[u8]| {
         assert!(!value.is_empty(), "IsEmail accepted the empty string");
     }
 
-    // Length bounds are exact arithmetic and must never disagree with `chars`.
-    let len = value.chars().count();
-    assert_eq!(
-        NotEmpty::validate(value, FIELD).is_ok(),
-        !value.trim().is_empty(),
-        "NotEmpty disagreed with `trim` on {value:?}",
-    );
-    assert_eq!(
-        MinLength(len).validate(value, FIELD).is_ok(),
-        true,
-        "MinLength({len}) rejected a value of exactly that length: {value:?}",
-    );
-    assert_eq!(
-        MaxLength(len).validate(value, FIELD).is_ok(),
-        true,
-        "MaxLength({len}) rejected a value of exactly that length: {value:?}",
-    );
-    if len > 0 {
+    // `NotEmpty` is documented as rejecting input that is empty or whitespace
+    // only. Stated as a property of the characters rather than as a second call
+    // to `trim`, so that a validator narrowed to a plain emptiness check — which
+    // would still agree with `trim` on every ASCII-space-free input — is caught.
+    if NotEmpty::validate(value, FIELD).is_ok() {
         assert!(
-            MaxLength(len - 1).validate(value, FIELD).is_err(),
-            "MaxLength({}) accepted a longer value: {value:?}",
-            len - 1,
+            value.chars().any(|c| !c.is_whitespace()),
+            "NotEmpty accepted {value:?}, which holds no non-whitespace character",
         );
     }
+
+    // Length bounds count `char`s, not bytes, and the plausible regression is a
+    // slip to `value.len()`. That is invisible on ASCII and shows up only where
+    // `bytes > chars`, so both bounds are asserted at the point where the two
+    // measures disagree: the fuzzer supplies the multi-byte text that separates
+    // them. Comparing the validator against a bound recomputed with its own
+    // `chars().count()` expression would be true by construction instead.
+    let chars = value.chars().count();
+    let bytes = value.len();
+    // A byte-counting `MaxLength` rejects here as soon as any character needs
+    // more than one byte, since it sees `bytes > chars`.
+    assert!(
+        MaxLength(chars).validate(value, FIELD).is_ok(),
+        "MaxLength({chars}) rejected a {chars}-char value of {bytes} bytes: {value:?}",
+    );
+    // The same divergence from below: no value can satisfy a minimum one
+    // character longer than itself, but a byte-counting check is satisfied
+    // whenever `bytes >= chars + 1`.
+    assert!(
+        MinLength(chars + 1).validate(value, FIELD).is_err(),
+        "MinLength({}) accepted a {chars}-char value of {bytes} bytes: {value:?}",
+        chars + 1,
+    );
 });

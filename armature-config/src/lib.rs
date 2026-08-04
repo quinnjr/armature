@@ -195,8 +195,13 @@ impl ConfigManager {
         // A non-object used to fall through this match to `Ok(())`, applying
         // nothing while reporting success — so a config file that rendered to
         // a bare scalar left the service on defaults with no error to explain
-        // it. The loaders reject that shape now; this arm keeps the guarantee
-        // at the point where the keys are actually applied.
+        // it. The loaders reject that shape now: `parse_json` guards it
+        // directly, `parse_toml` goes through `toml::Value`, whose root is
+        // always a table, and `parse_env` builds a `Map` unconditionally — so
+        // this arm is unreachable by construction and cannot be provoked by a
+        // test today. It is kept anyway because it states the guarantee at the
+        // point where the keys are actually applied, so a loader added later
+        // cannot reintroduce the silent-success path.
         let serde_json::Value::Object(map) = data else {
             return Err(ConfigError::ParseError(format!(
                 "expected a top-level object in {path}, found a value carrying no keys"

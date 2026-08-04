@@ -11,22 +11,19 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
-- **Security — `IsUrl` rejects embedded control characters.** The WHATWG URL
-  parser strips C0 controls (tab, CR, LF among them) *before* parsing, so
-  `https://a.example/\r\nX-Injected: 1` parsed cleanly and was accepted. The
-  caller keeps the original string, so the validator was approving text it had
-  never actually examined, and that text still carried a CRLF into wherever it
-  was used next — a `Location` header being the obvious route to response
-  splitting.
-
-### Fixed
-
-- **Breaking:** a field with rules that is absent from the input now fails validation. It was silently skipped, so a form missing `email` entirely passed `NotEmpty` and `IsEmail`; `ValidationRules::optional()` opts out.
-- `IsUuid` accepts uppercase and checks version/variant; `IsUrl` parses with the `url` crate instead of a regex that rejected `https://a` and accepted `https://!!`.
-
-### Fixed
-
-- A field with rules but **absent** from the input was silently skipped, so a form that simply omitted `email` passed `NotEmpty` and `IsEmail`. A missing required field is now validated as `""`; mark genuinely optional fields with the new `ValidationRules::optional()`. Applies to both `validate` and `validate_parallel`.
+- **Breaking:** a field with rules but **absent** from the input now fails validation. It was silently skipped, so a form that simply omitted `email` passed `NotEmpty` and `IsEmail`. A missing required field is now validated as `""`; mark genuinely optional fields with the new `ValidationRules::optional()`. Applies to both `validate` and `validate_parallel`.
+- **Security — `IsUrl` rejects embedded control characters and spaces.** The
+  WHATWG URL parser strips everything matching its own `c0_control_or_space`
+  predicate (`c <= ' '`, i.e. U+0000–U+0020 — tab, CR, LF and SPACE among them)
+  from both ends and percent-encodes it in the middle *before* parsing, so
+  `https://a.example/\r\nX-Injected: 1`, `" https://example.com "` and
+  `https://example.com/a b` all parsed cleanly and were accepted. The caller
+  keeps the original string, so the validator was approving text it had never
+  actually examined, and that text still carried its CRLF — or its raw,
+  un-encoded space — into wherever it was used next; a `Location` header is the
+  obvious route to response splitting. The check is now the parser's predicate
+  plus the remaining Unicode controls (U+007F–U+009F), since `char::is_control`
+  alone does not cover SPACE.
 - `IsUuid` accepted only lowercase and checked neither version nor variant. It is now case-insensitive per RFC 9562 §4, constrains the version to 1–8 and the variant to 8/9/a/b, and permits the nil and max UUIDs.
 - `IsUrl` parses with the `url` crate instead of pattern matching. It previously rejected valid URLs with a single-label host (`https://a`) and accepted invalid ones (`https://!!`).
 

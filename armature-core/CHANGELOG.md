@@ -38,6 +38,15 @@ Changes at or before `0.6.0` are recorded in the workspace
 
 ### Fixed
 
+- Registering a route with 26 or more parameters no longer aborts the process.
+  `matchit` normalizes a route by rewriting each parameter to a single letter
+  starting at `a`, and signals the exhausted alphabet by panicking rather than
+  returning an error — so the existing `insert(..).is_err()` arm could not catch
+  it, and the panic escaped through whatever was registering the route. Such
+  routes are now kept out of the tree and answered by the linear scan. One
+  consequence is visible: a route written past the ceiling in brace syntax
+  (`/{id}`) fails to match instead of aborting, because the fallback matcher
+  understands `:name` and `*name` but not braces.
 - Catch-all routes match zero remaining segments again, and a trailing slash no
   longer changes the outcome. `matchit` requires a catch-all to consume at least
   one segment and treats a trailing slash as significant, so `Router` had begun

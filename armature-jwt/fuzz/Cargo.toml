@@ -18,6 +18,11 @@ armature-jwt = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The harness assembles tokens segment by segment so the fuzzer chooses the
+# header and claims instead of having to invent base64url. Version tracks
+# armature-jwt's own.
+base64 = "0.22"
+
 [[bin]]
 name = "token_verify"
 path = "fuzz_targets/token_verify.rs"

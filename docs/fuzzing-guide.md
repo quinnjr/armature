@@ -92,7 +92,7 @@ harness would only suggest coverage that does not exist.
 ### Basic Usage
 
 ```bash
-cd fuzz
+cd armature-core
 
 # Run specific target
 cargo +nightly fuzz run routing
@@ -165,12 +165,14 @@ cargo +nightly fuzz cmin parse_head
 
 ### Sharing Corpus
 
-The corpus directory can be committed to version control:
-
-```bash
-git add '*/fuzz/corpus/'
-git commit -m "Add fuzz corpus"
-```
+The corpus is deliberately not version controlled — the root `.gitignore`
+excludes `**/fuzz/corpus/`, `**/fuzz/artifacts/` and `**/fuzz/coverage/`,
+because a corpus grows without bound and a crash artifact worth keeping belongs
+in a test rather than in a directory of opaque binary blobs. Every CI run
+therefore starts from an empty corpus and rediscovers coverage from scratch,
+which is what the 60-second smoke budget is sized for. A corpus you build
+locally is yours to keep locally; promote anything interesting it finds into a
+regression test in the owning crate.
 
 ---
 
@@ -178,40 +180,21 @@ git commit -m "Add fuzz corpus"
 
 ### GitHub Actions
 
-```yaml
-name: Fuzz Tests
+Fuzzing already runs in CI: the `fuzz-smoke` job in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) fans out one matrix
+entry per `{ crate, target }` pair, lints that crate's `fuzz` workspace with
+`cargo clippy --all-targets -- -D warnings`, runs the target for 60 seconds and
+uploads `<crate>/fuzz/artifacts/` on failure so the crashing input survives the
+runner.
 
-on:
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly
-  workflow_dispatch:
+Sixty seconds is a regression gate, not a campaign. On pull requests each entry
+runs only when the diff touches the code compiled into it — the owning crate,
+the shared `armature-core`/`armature-log` roots, the workspace manifest, or the
+workflow itself — and runs unconditionally on pushes, on the nightly schedule,
+and on PRs into `main` or `release/**`.
 
-jobs:
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-action@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
-      - name: Run fuzz tests
-        run: |
-          cd fuzz
-          for target in routing headers query_params; do
-            cargo +nightly fuzz run "$target" -- -max_total_time=300
-          done
-
-      - name: Upload crash artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-crashes
-          path: '*/fuzz/artifacts/'
-```
+Adding a target means adding a line to that matrix; see
+[Writing New Fuzz Targets](#writing-new-fuzz-targets).
 
 ### OSS-Fuzz Integration
 
@@ -221,11 +204,14 @@ Armature is compatible with [OSS-Fuzz](https://github.com/google/oss-fuzz). See 
 
 ## Writing New Fuzz Targets
 
-### 1. Add Target to Cargo.toml
+### 1. Add Target to `<crate>/fuzz/Cargo.toml`
+
+The bin name is the target name `cargo fuzz run` takes, and it must match the
+file stem — no `fuzz_` prefix; every existing target is named bare.
 
 ```toml
 [[bin]]
-name = "fuzz_new_target"
+name = "new_target"
 path = "fuzz_targets/new_target.rs"
 test = false
 doc = false
@@ -265,7 +251,22 @@ fuzz_target!(|data: FuzzInput| {
 });
 ```
 
-### 3. Using Arbitrary
+### 3. Register It in CI
+
+A target nothing runs is a target nothing catches. Add one line to the
+`fuzz-smoke` matrix in `.github/workflows/ci.yml`:
+
+```yaml
+          - { crate: armature-core, target: new_target }
+```
+
+### 4. Add It to the Target Table
+
+Add a row to [Available Fuzz Targets](#available-fuzz-targets) above, saying
+what the target covers — the table is how anyone finds out the surface is
+already fuzzed before writing a second harness for it.
+
+### 5. Using Arbitrary
 
 The `Arbitrary` derive macro generates random test inputs:
 
@@ -377,18 +378,19 @@ If fuzzing discovers a security vulnerability:
 # Install
 cargo install cargo-fuzz
 
-# Run
-cd fuzz && cargo +nightly fuzz run routing
-
-# Run all (60s each)
-for t in fuzz_*; do cargo +nightly fuzz run "$t" -- -max_total_time=60; done
+# Run one target (from the crate that owns it)
+cd armature-core && cargo +nightly fuzz run routing
 
 # Coverage
 cargo +nightly fuzz coverage routing
 
-# Minimize corpus
+# Minimize corpus (from armature-h1, which owns parse_head)
 cargo +nightly fuzz cmin parse_head
 ```
+
+To run every target in the repo for 60 seconds each, use the script under
+[Running All Targets](#running-all-targets) — it walks `*/fuzz/Cargo.toml` and
+asks each crate for its own target list.
 
 ### Directory Structure
 
@@ -404,7 +406,7 @@ armature-core/
     │   ├── routing.rs
     │   ├── headers.rs
     │   └── ...
-    ├── corpus/          # Seed inputs (version controlled)
+    ├── corpus/          # Seed and discovered inputs (gitignored)
     │   └── routing/
     └── artifacts/       # Crash reproductions (gitignored)
 ```

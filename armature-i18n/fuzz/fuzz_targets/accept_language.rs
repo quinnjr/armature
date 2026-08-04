@@ -1,14 +1,10 @@
 //! Fuzz `Accept-Language` parsing.
 //!
 //! This header arrives verbatim from the client on every request, so the parser
-//! sees whatever a peer chooses to send. Beyond not panicking, two properties
-//! are worth pinning because the parser sorts by a quality value it parses out
-//! of the same untrusted string:
-//!
-//! * the result is ordered by descending quality — a client must not be able to
-//!   promote a locale by malforming its `q` parameter;
-//! * every returned locale is one the input actually asked for, so a parse
-//!   accident cannot invent a locale that then selects a translation bundle.
+//! sees whatever a peer chooses to send. Beyond not panicking, the property
+//! worth pinning is that every returned locale is one the input actually asked
+//! for: the returned tags go on to select a translation bundle, so a parse
+//! accident that invents a locale serves content nobody requested.
 
 #![no_main]
 
@@ -25,18 +21,37 @@ fuzz_target!(|data: &[u8]| {
 
     let locales = parse_accept_language(header);
 
-    // Quality ordering is deliberately *not* asserted here. Tying a returned
-    // locale back to the header entry it came from is not reliable enough to
-    // build an assertion on: parsing normalizes (case folds, and treats `_` as
-    // a region separator) so a rendered tag is often not a substring of what
-    // was sent, and a header may repeat one tag with several different `q`
-    // values, leaving no single entry to attribute it to. Deriving the
-    // expected order properly would mean reimplementing the parser in this
-    // file and checking it agrees with itself, which proves nothing. Ordering
-    // for well-formed headers is pinned by unit tests in the crate instead.
+    // Quality ordering is deliberately *not* asserted here. It would need each
+    // returned locale tied back to the one header entry it came from, and a
+    // header may repeat a tag with several different `q` values, leaving no
+    // single entry to attribute it to. Deriving the expected order properly
+    // would mean reimplementing the whole parser in this file and checking it
+    // agrees with itself, which proves nothing. Ordering for well-formed
+    // headers is pinned by unit tests in the crate instead.
+
+    // The languages the header named, in the same normalized form the parser
+    // derives: an entry is the text before its first `;`, and its language is
+    // that tag up to the first subtag separator, case folded. That much *is*
+    // attributable without duplicating the parser, and it is what catches an
+    // invented locale. Comparing rendered tags against the raw input would not
+    // work — parsing case folds and rewrites `_` as `-`, so a returned tag is
+    // often not a substring of what was sent.
+    let requested: Vec<String> = header
+        .split(',')
+        .map(|part| {
+            let tag = part.trim().split(';').next().unwrap_or("").trim();
+            tag.split(['-', '_']).next().unwrap_or("").to_lowercase()
+        })
+        .collect();
 
     for locale in &locales {
         let tag = locale.tag();
+
+        assert!(
+            requested.contains(&locale.language),
+            "locale {tag:?} was never asked for in {header:?}"
+        );
+
         assert!(
             !tag.is_empty(),
             "an empty locale tag was produced from {header:?}"

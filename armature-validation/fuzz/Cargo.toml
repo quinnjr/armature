@@ -15,8 +15,14 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 armature-validation = { path = ".." }
-uuid = "1"
-url = "2"
+# Both are oracles, so their versions have to be the ones under test. `url`
+# mirrors `armature-validation`'s requirement exactly: `IsUrl` parses with this
+# crate, so comparing against a differently resolved copy would compare two
+# parsers rather than validate one. `uuid` has no counterpart in the parent —
+# `IsUuid` is hand-rolled — so it tracks the requirement the workspace uses
+# elsewhere instead of floating on `1`.
+uuid = "1.23"
+url = "2.5"
 
 [[bin]]
 name = "validators"

@@ -308,11 +308,19 @@ fn split_segments(path: &str) -> impl Iterator<Item = &str> {
 ///
 /// How many parameters one route may carry before `matchit` refuses it.
 ///
-/// It rewrites each parameter to a single letter while normalizing a route and
-/// starts at `a`, so the 26th exhausts the alphabet — and it announces that by
-/// panicking rather than returning an error, which no `is_err` arm can turn
-/// into a fallback. 25 is therefore the most a route may carry; anything above
-/// is kept out of the tree and answered by the linear scan instead.
+/// It rewrites each non-catch-all parameter to a single letter while
+/// normalizing a route and starts at `a`, so the 26th exhausts the alphabet —
+/// and it announces that by panicking rather than returning an error, which no
+/// `is_err` arm can turn into a fallback. 25 is therefore the most a route may
+/// carry; anything above is kept out of the tree and answered by the linear
+/// scan instead.
+///
+/// The `{`-byte count this is compared against is deliberately an upper bound,
+/// not the exact figure `matchit` uses: a trailing catch-all is exempt from the
+/// rewrite and consumes no letter, and an escaped `{{` is collapsed before the
+/// wildcards are found. Over-counting costs one route a linear scan it did not
+/// strictly need; under-counting would leave the panic reachable, so the bound
+/// is kept on the safe side rather than tightened to match.
 const MATCHIT_MAX_PARAMS: usize = 25;
 
 /// `:id` becomes `{id}` and `*rest` becomes `{*rest}`. User-facing pattern
@@ -1175,6 +1183,45 @@ mod tests {
             b"v29",
             "the fallback scan must still bind parameters"
         );
+    }
+
+    /// The ceiling itself, rather than a value comfortably past it. The other
+    /// tests use 30 parameters, which would still pass if the constant were off
+    /// by a few; only routes at exactly 25 and exactly 26 pin it down. Both must
+    /// match — 25 through the tree, 26 through the linear scan — and neither may
+    /// panic.
+    #[tokio::test]
+    async fn routes_on_either_side_of_the_parameter_ceiling_both_match() {
+        async fn last_handler(req: HttpRequest) -> Result<HttpResponse, Error> {
+            // The last parameter differs between the two patterns, and the
+            // 26-parameter one carries both names — so the longer route's
+            // parameter has to be checked first.
+            let v = req
+                .param("p25")
+                .or_else(|| req.param("p24"))
+                .unwrap_or_default()
+                .to_owned();
+            Ok(HttpResponse::ok().with_body(v.into_bytes()))
+        }
+
+        for count in [MATCHIT_MAX_PARAMS, MATCHIT_MAX_PARAMS + 1] {
+            let pattern: String = (0..count).map(|i| format!("/:p{i}")).collect();
+            let target: String = (0..count).map(|i| format!("/v{i}")).collect();
+
+            let mut router = Router::new();
+            router.get(&pattern, last_handler);
+
+            let response = router
+                .route(HttpRequest::new("GET", target))
+                .await
+                .unwrap_or_else(|_| panic!("a {count}-parameter route must match"));
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                response.body.as_ref(),
+                format!("v{}", count - 1).as_bytes(),
+                "a {count}-parameter route must still bind its last parameter"
+            );
+        }
     }
 
     /// The same ceiling, reached through brace syntax instead of `:name`.

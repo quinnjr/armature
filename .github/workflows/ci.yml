@@ -740,8 +740,16 @@ jobs:
 
           git fetch --no-tags --depth=1 origin "$BASE_REF"
           merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          # The owning crate's directory is not the whole input to this target.
+          # Each `<crate>/fuzz` crate resolves its parent as a path dependency,
+          # and every fuzzed crate except armature-h1 pulls armature-core (and
+          # through it armature-log) in by path as well, so that source is
+          # recompiled into the harness on every run. A change there changes the
+          # code under test even though the crate's own directory is untouched,
+          # which is exactly the blast radius `detect-changes` refuses to bound
+          # per-crate; the shared roots below are that job's list verbatim.
           if git diff --name-only "$merge_base"...HEAD \
-            | grep -qE "^(${{ matrix.crate }}/|\.github/workflows/ci\.yml)"; then
+            | grep -qE "^(${{ matrix.crate }}/|Cargo\.toml|Cargo\.lock|armature-core/|armature-log/|\.github/workflows/ci\.yml)"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -750,6 +758,10 @@ jobs:
       # instrumentation libFuzzer needs are nightly-only.
       - uses: dtolnay/rust-toolchain@nightly
         if: steps.scope.outputs.run == 'true'
+        with:
+          # The action installs a minimal profile; clippy has to be asked for
+          # explicitly, for the lint step below.
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:
@@ -757,6 +769,17 @@ jobs:
       - name: Install cargo-fuzz
         if: steps.scope.outputs.run == 'true'
         run: cargo install cargo-fuzz --locked
+      # Each `<crate>/fuzz` crate declares its own `[workspace]`, so the repo's
+      # whole-workspace `cargo clippy --all-targets -- -D warnings` gate cannot
+      # see any of the harness code. This job is the only place that already has
+      # a nightly toolchain and that workspace's cache, so it is where the lint
+      # belongs. Before the fuzz run: a lint failure should report in seconds
+      # rather than after a minute of fuzzing.
+      - name: Clippy ${{ matrix.crate }}/fuzz
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cargo clippy --manifest-path ${{ matrix.crate }}/fuzz/Cargo.toml \
+            --all-targets -- -D warnings
       - name: Fuzz ${{ matrix.target }} for 60s
         if: steps.scope.outputs.run == 'true'
         working-directory: ${{ matrix.crate }}

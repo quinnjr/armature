@@ -126,16 +126,25 @@ impl IsUrl {
     /// Single-label hosts are accepted: `https://a`, `http://localhost` and
     /// `http://intranet` are all real, resolvable URLs.
     ///
-    /// A value containing a C0 control character — tab, CR or LF among them —
-    /// is rejected outright. The WHATWG parser *strips* those before parsing,
-    /// so `"https://a.example/\r\nX-Injected: 1"` parses cleanly as
-    /// `https://a.example/X-Injected:%201`. Validating the stripped form while
-    /// the caller keeps the original means this function would be approving a
-    /// string it never actually examined, and that string still carries a CRLF
-    /// into wherever it is used next — a `Location` header being the obvious
-    /// way that becomes response splitting.
+    /// A value containing `c <= ' '` (U+0000–U+0020, so every C0 control plus
+    /// SPACE) or any other Unicode control (U+007F–U+009F) is rejected
+    /// outright. The first half is the WHATWG parser's own
+    /// `c0_control_or_space` predicate rather than a proxy for it: those are
+    /// exactly the characters it *strips* from both ends and percent-encodes in
+    /// the middle before parsing, so `"https://a.example/\r\nX-Injected: 1"`
+    /// parses cleanly as `https://a.example/X-Injected:%201` and
+    /// `"  https://example.com  "` parses as `https://example.com/`. Validating
+    /// the stripped form while the caller keeps the original means this
+    /// function would be approving a string it never actually examined, and
+    /// that string still carries its CRLF — or its raw, un-encoded space — into
+    /// wherever it is used next; a `Location` header is the obvious way that
+    /// becomes response splitting.
+    ///
+    /// Note that `char::is_control` alone is not that predicate: SPACE is not a
+    /// control character, so it has to be named separately even though the
+    /// parser treats the two identically.
     pub fn validate(value: &str, field: &str) -> Result<(), ValidationError> {
-        let is_valid = !value.chars().any(|c| c.is_control())
+        let is_valid = !value.chars().any(|c| c <= ' ' || c.is_control())
             && match url::Url::parse(value) {
                 Ok(parsed) => {
                     matches!(parsed.scheme(), "http" | "https")
@@ -438,21 +447,30 @@ mod tests {
         assert!(IsUrl::validate("/path/only", "url").is_err());
     }
 
-    /// The WHATWG parser strips C0 controls before parsing, so a value
-    /// carrying a CRLF parses cleanly while the caller keeps the original —
-    /// validating a string that was never examined. The caller then holds a
-    /// CRLF to carry into whatever it does next, a `Location` header being the
-    /// obvious route to response splitting.
+    /// The WHATWG parser strips C0 controls *and spaces* before parsing, so a
+    /// value carrying a CRLF or a stray space parses cleanly while the caller
+    /// keeps the original — validating a string that was never examined. The
+    /// caller then holds a CRLF to carry into whatever it does next, a
+    /// `Location` header being the obvious route to response splitting, or an
+    /// un-encoded space where the parser silently supplied `%20`.
     #[test]
-    fn is_url_rejects_embedded_control_characters() {
-        // Each of these parses successfully once the parser has stripped the
-        // control characters, which is exactly why they must be caught first.
+    fn is_url_rejects_embedded_controls_and_spaces() {
+        // Each of these parses successfully once the parser has stripped or
+        // percent-encoded the offending characters, which is exactly why they
+        // must be caught first.
         for value in [
             "https://a.example/\r\nX-Injected: 1",
             "http\n://evil.example/",
             "\u{11}http\n:L/x",
             "https://example.com/\tpath",
             "https://example.com/\u{0}",
+            // Trimmed from both ends: not control characters, still normalised
+            // away from what the caller kept.
+            " https://example.com ",
+            "https://example.com ",
+            // Interior space: rewritten to `a%20b`, so again the parser
+            // examined a different string than the one being approved.
+            "https://example.com/a b",
         ] {
             assert!(
                 url::Url::parse(value).is_ok(),
@@ -460,7 +478,7 @@ mod tests {
             );
             assert!(
                 IsUrl::validate(value, "url").is_err(),
-                "IsUrl accepted {value:?}, which carries a control character"
+                "IsUrl accepted {value:?}, which carries a control character or space"
             );
         }
     }

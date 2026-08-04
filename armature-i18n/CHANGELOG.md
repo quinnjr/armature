@@ -17,9 +17,11 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
   Returning it inverted that: `negotiate_locale` walks the list in order and
   would select the refused locale whenever nothing the client accepted was
   available.
-- A quality outside `0..=1` is clamped and a non-numeric one is ignored, both
-  now behaving as though no `q` had been sent. `str::parse::<f32>` accepts
-  `NaN`, `inf` and any magnitude, none of which is a qvalue.
+- A quality outside `0..=1` is clamped into it — above `1` becomes `1`, and
+  anything negative (including `-inf`) becomes `0` and is therefore refused
+  like an explicit `q=0`. A quality that is not a number, or is `NaN`, is
+  ignored and behaves as though no `q` had been sent. `str::parse::<f32>`
+  accepts `NaN`, `inf` and any magnitude, none of which is a qvalue.
 - Accept-Language entries are ordered with `f32::total_cmp`. The previous
   `partial_cmp(..).unwrap_or(Equal)` reported every pair involving a `NaN` as
   equal, which is not transitive, and `sort` is entitled to produce arbitrary

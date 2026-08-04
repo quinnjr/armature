@@ -1,7 +1,7 @@
 //! Small helpers shared between fuzz targets.
 //!
 //! `cargo-fuzz` targets are each their own `[[bin]]` (see
-//! `armature-fuzz/Cargo.toml`) rather than crate modules, so this file is
+//! `armature-core/fuzz/Cargo.toml`) rather than crate modules, so this file is
 //! pulled in via `#[path = "common.rs"] mod common;` from whichever targets
 //! need it, instead of being a `lib.rs`.
 
