@@ -627,3 +627,75 @@ path = "benches/http_benchmark_runner.rs"
 # unfiltered `cargo bench -p armature-framework` would execute it.
 bench = false
 test = false
+
+# Every crate here is also published, and each one now depends on its siblings
+# by version rather than by path so that it builds standalone in its own
+# repository. Inside this workspace that would resolve them from crates.io and
+# quietly ignore the working tree, so they are pointed back at the submodules.
+# A change in one crate is therefore seen by every crate that depends on it,
+# which is what makes this repo the integration pass over the split.
+[patch.crates-io]
+armature-acme = { path = "armature-acme" }
+armature-admin = { path = "armature-admin" }
+armature-analytics = { path = "armature-analytics" }
+armature-app = { path = "armature-app" }
+armature-audit = { path = "armature-audit" }
+armature-auth = { path = "armature-auth" }
+armature-aws = { path = "armature-aws" }
+armature-azure = { path = "armature-azure" }
+armature-azure-functions = { path = "armature-azure-functions" }
+armature-cache = { path = "armature-cache" }
+armature-cli = { path = "armature-cli" }
+armature-cloudrun = { path = "armature-cloudrun" }
+armature-collab = { path = "armature-collab" }
+armature-compression = { path = "armature-compression" }
+armature-config = { path = "armature-config" }
+armature-core = { path = "armature-core" }
+armature-cqrs = { path = "armature-cqrs" }
+armature-cron = { path = "armature-cron" }
+armature-diesel = { path = "armature-diesel" }
+armature-discovery = { path = "armature-discovery" }
+armature-distributed = { path = "armature-distributed" }
+armature-events = { path = "armature-events" }
+armature-eventsourcing = { path = "armature-eventsourcing" }
+armature-features = { path = "armature-features" }
+armature-ferron = { path = "armature-ferron" }
+armature-files = { path = "armature-files" }
+armature-gcp = { path = "armature-gcp" }
+armature-graphql = { path = "armature-graphql" }
+armature-graphql-client = { path = "armature-graphql-client" }
+armature-graphql-macros = { path = "armature-graphql-macros" }
+armature-grpc = { path = "armature-grpc" }
+armature-h1 = { path = "armature-h1" }
+armature-http-client = { path = "armature-http-client" }
+armature-i18n = { path = "armature-i18n" }
+armature-jwt = { path = "armature-jwt" }
+armature-lambda = { path = "armature-lambda" }
+armature-log = { path = "armature-log" }
+armature-macros = { path = "armature-macros" }
+armature-macros-utils = { path = "armature-macros-utils" }
+armature-mail = { path = "armature-mail" }
+armature-mcp = { path = "armature-mcp" }
+armature-messaging = { path = "armature-messaging" }
+armature-metrics = { path = "armature-metrics" }
+armature-openapi = { path = "armature-openapi" }
+armature-opensearch = { path = "armature-opensearch" }
+armature-opentelemetry = { path = "armature-opentelemetry" }
+armature-payments = { path = "armature-payments" }
+armature-proc-macro = { path = "armature-proc-macro" }
+armature-push = { path = "armature-push" }
+armature-queue = { path = "armature-queue" }
+armature-ratelimit = { path = "armature-ratelimit" }
+armature-redis = { path = "armature-redis" }
+armature-rhai = { path = "armature-rhai" }
+armature-seaorm = { path = "armature-seaorm" }
+armature-security = { path = "armature-security" }
+armature-siem = { path = "armature-siem" }
+armature-storage = { path = "armature-storage" }
+armature-tenancy = { path = "armature-tenancy" }
+armature-testing = { path = "armature-testing" }
+armature-testkit = { path = "armature-testkit" }
+armature-toon = { path = "armature-toon" }
+armature-validation = { path = "armature-validation" }
+armature-webhooks = { path = "armature-webhooks" }
+armature-websocket = { path = "armature-websocket" }
