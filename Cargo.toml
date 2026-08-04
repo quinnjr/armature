@@ -23,6 +23,7 @@ members = [
     "armature-queue",
     "armature-opentelemetry",
     "armature-security",
+    "armature-session",
     "armature-acme",
     "armature-ratelimit",
     "armature-compression",
@@ -690,6 +691,7 @@ armature-redis = { path = "armature-redis" }
 armature-rhai = { path = "armature-rhai" }
 armature-seaorm = { path = "armature-seaorm" }
 armature-security = { path = "armature-security" }
+armature-session = { path = "armature-session" }
 armature-siem = { path = "armature-siem" }
 armature-storage = { path = "armature-storage" }
 armature-tenancy = { path = "armature-tenancy" }
