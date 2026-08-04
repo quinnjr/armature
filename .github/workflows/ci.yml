@@ -494,16 +494,19 @@ jobs:
   # ============================================================================
   # OUT-OF-WORKSPACE CRATES
   #
-  # armature-fuzz, benches/comparison_servers/* and benchmarks/comparison each
-  # declare their own `[workspace]`, so a workspace-wide `cargo check` never
-  # touches them and they can reference an API that no longer exists — all
-  # three had accumulated exactly that. Each is checked from its own manifest
-  # here. The `http-benchmark` bin lives in the root package but no job built
-  # it either, so it is checked alongside them.
+  # benches/comparison_servers/* and benchmarks/comparison each declare their
+  # own `[workspace]`, so a workspace-wide `cargo check` never touches them and
+  # they can reference an API that no longer exists — both had accumulated
+  # exactly that. Each is checked from its own manifest here. The
+  # `http-benchmark` bin lives in the root package but no job built it either,
+  # so it is checked alongside them.
   #
-  # armature-fuzz is `cargo check`ed on nightly rather than fuzzed: this only
-  # needs to prove the targets still compile against armature-core. Actually
-  # running them is what the fuzz-smoke job below is for.
+  # The `<crate>/fuzz` crates are not checked here. They declare their own
+  # `[workspace]` too, but `cargo check` on a fuzz target proves only that it
+  # compiles, and that is exactly the gap that let `armature-core`'s `routing`
+  # target sit broken: it had never been *run*, and panicked within twenty
+  # seconds the first time it was. The fuzz-smoke job below runs them instead,
+  # which subsumes checking that they build.
   # ============================================================================
 
   out-of-workspace-checks:
@@ -513,8 +516,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check armature-fuzz targets
-        run: cargo check --manifest-path armature-fuzz/Cargo.toml --all-targets
       - name: cargo check hyper h1 baseline server
         run: >-
           cargo check --manifest-path
@@ -693,12 +694,32 @@ jobs:
   # ============================================================================
 
   fuzz-smoke:
-    name: Fuzz Smoke (armature-h1)
+    name: Fuzz Smoke (${{ matrix.crate }}/${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # One entry per fuzz target, each naming the crate that owns it. Fuzzing
+      # lives beside the code it exercises -- `<crate>/fuzz` -- so adding a
+      # target means adding a line here and nothing else.
       matrix:
-        target: [parse_head, chunked, framing_differential]
+        include:
+          - { crate: armature-h1, target: parse_head }
+          - { crate: armature-h1, target: chunked }
+          - { crate: armature-h1, target: framing_differential }
+          - { crate: armature-core, target: http_request }
+          - { crate: armature-core, target: http_response }
+          - { crate: armature-core, target: routing }
+          - { crate: armature-core, target: json }
+          - { crate: armature-core, target: url_parsing }
+          - { crate: armature-core, target: headers }
+          - { crate: armature-core, target: query_params }
+          - { crate: armature-core, target: path_params }
+          - { crate: armature-i18n, target: accept_language }
+          - { crate: armature-i18n, target: locale_tag }
+          - { crate: armature-webhooks, target: signature_verify }
+          - { crate: armature-config, target: config_parse }
+          - { crate: armature-jwt, target: token_verify }
+          - { crate: armature-validation, target: validators }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -720,7 +741,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_REF"
           merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
           if git diff --name-only "$merge_base"...HEAD \
-            | grep -qE '^(armature-h1/|\.github/workflows/ci\.yml)'; then
+            | grep -qE "^(${{ matrix.crate }}/|\.github/workflows/ci\.yml)"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -732,13 +753,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:
-          workspaces: armature-h1/fuzz
+          workspaces: ${{ matrix.crate }}/fuzz
       - name: Install cargo-fuzz
         if: steps.scope.outputs.run == 'true'
         run: cargo install cargo-fuzz --locked
       - name: Fuzz ${{ matrix.target }} for 60s
         if: steps.scope.outputs.run == 'true'
-        working-directory: armature-h1
+        working-directory: ${{ matrix.crate }}
         run: |
           cargo fuzz run ${{ matrix.target }} -- \
             -max_total_time=60 -print_final_stats=1
@@ -748,8 +769,8 @@ jobs:
         if: failure() && steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: armature-h1/fuzz/artifacts/
+          name: fuzz-artifacts-${{ matrix.crate }}-${{ matrix.target }}
+          path: ${{ matrix.crate }}/fuzz/artifacts/
           if-no-files-found: ignore
 
   # ============================================================================

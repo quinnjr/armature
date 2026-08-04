@@ -36,31 +36,54 @@ cargo install cargo-fuzz
 
 ### Run a Fuzz Target
 
+Each crate owns its own fuzz targets in `<crate>/fuzz`, so `cargo fuzz` is run
+from the crate directory rather than from a single workspace-wide fuzz crate:
+
 ```bash
-cd fuzz
-cargo +nightly fuzz run fuzz_http_request
+cd armature-core
+cargo +nightly fuzz run routing
 ```
 
 ### Run for a Limited Time
 
 ```bash
-cargo +nightly fuzz run fuzz_http_request -- -max_total_time=60
+cargo +nightly fuzz run routing -- -max_total_time=60
+```
+
+### List What a Crate Has
+
+```bash
+cd armature-h1
+cargo +nightly fuzz list
 ```
 
 ---
 
 ## Available Fuzz Targets
 
-| Target | Description | Priority |
-|--------|-------------|----------|
-| `fuzz_http_request` | HTTP request parsing | Critical |
-| `fuzz_http_response` | HTTP response building | High |
-| `fuzz_routing` | Route matching | Critical |
-| `fuzz_json` | JSON parsing/serialization | High |
-| `fuzz_url_parsing` | URL/path parsing | High |
-| `fuzz_headers` | HTTP header parsing | High |
-| `fuzz_query_params` | Query string parsing | Medium |
-| `fuzz_path_params` | Path parameter extraction | Medium |
+| Crate | Target | Covers |
+|-------|--------|--------|
+| `armature-core` | `http_request` | Request construction and accessors |
+| `armature-core` | `http_response` | Response building |
+| `armature-core` | `routing` | Route registration *and* matching, patterns chosen by the fuzzer |
+| `armature-core` | `json` | JSON round-tripping |
+| `armature-core` | `url_parsing` | Request-line and URI splitting |
+| `armature-core` | `headers` | Header-name validation and parsing |
+| `armature-core` | `query_params` | Query-string parsing and percent-decoding |
+| `armature-core` | `path_params` | Path-parameter extraction against fixed routes |
+| `armature-h1` | `parse_head` | Message-head parsing |
+| `armature-h1` | `chunked` | Chunked decoding, including split-invariance |
+| `armature-h1` | `framing_differential` | Framing decisions compared against hyper |
+| `armature-i18n` | `accept_language` | `Accept-Language` negotiation |
+| `armature-i18n` | `locale_tag` | Locale-tag parsing, asserting round-trip idempotence |
+| `armature-webhooks` | `signature_verify` | HMAC verification: no forgery accepted, no genuine signature rejected |
+| `armature-config` | `config_parse` | JSON/TOML/`.env` parsing, each driven with the others' bytes |
+| `armature-jwt` | `token_verify` | Token verification: no unissued token accepted |
+| `armature-validation` | `validators` | Validators cross-checked against independent implementations |
+
+A target is worth adding where a crate parses or authenticates something it did
+not produce. Most crates do neither and have no fuzz directory; an empty
+harness would only suggest coverage that does not exist.
 
 ---
 
@@ -72,54 +95,47 @@ cargo +nightly fuzz run fuzz_http_request -- -max_total_time=60
 cd fuzz
 
 # Run specific target
-cargo +nightly fuzz run fuzz_http_request
+cargo +nightly fuzz run routing
 
 # Run with more parallelism
-cargo +nightly fuzz run fuzz_http_request -- -jobs=4 -workers=4
+cargo +nightly fuzz run routing -- -jobs=4 -workers=4
 
 # Run with coverage report
-cargo +nightly fuzz coverage fuzz_http_request
+cargo +nightly fuzz coverage routing
 ```
 
 ### Common Options
 
 ```bash
 # Limit memory usage (MB)
-cargo +nightly fuzz run fuzz_http_request -- -rss_limit_mb=2048
+cargo +nightly fuzz run routing -- -rss_limit_mb=2048
 
 # Limit input size (bytes)
-cargo +nightly fuzz run fuzz_http_request -- -max_len=4096
+cargo +nightly fuzz run routing -- -max_len=4096
 
 # Set random seed for reproducibility
-cargo +nightly fuzz run fuzz_http_request -- -seed=12345
+cargo +nightly fuzz run routing -- -seed=12345
 
 # Run for limited iterations
-cargo +nightly fuzz run fuzz_http_request -- -runs=10000
+cargo +nightly fuzz run routing -- -runs=10000
 
 # Run for limited time (seconds)
-cargo +nightly fuzz run fuzz_http_request -- -max_total_time=300
+cargo +nightly fuzz run routing -- -max_total_time=300
 ```
 
 ### Running All Targets
 
 ```bash
 #!/bin/bash
-# Run all fuzz targets for 60 seconds each
+# Run every fuzz target in the repo for 60 seconds each.
+set -euo pipefail
 
-TARGETS=(
-    fuzz_http_request
-    fuzz_http_response
-    fuzz_routing
-    fuzz_json
-    fuzz_url_parsing
-    fuzz_headers
-    fuzz_query_params
-    fuzz_path_params
-)
-
-for target in "${TARGETS[@]}"; do
-    echo "Fuzzing $target..."
-    cargo +nightly fuzz run "$target" -- -max_total_time=60
+for manifest in */fuzz/Cargo.toml; do
+    crate="$(dirname "$(dirname "$manifest")")"
+    (cd "$crate" && cargo +nightly fuzz list) | while read -r target; do
+        echo "== $crate/$target"
+        (cd "$crate" && cargo +nightly fuzz run "$target" -- -max_total_time=60)
+    done
 done
 ```
 
@@ -129,14 +145,14 @@ done
 
 ### Seed Corpus
 
-Create initial test cases in `armature-fuzz/corpus/<target>/`:
+Create initial test cases in `<crate>/fuzz/corpus/<target>/`:
 
 ```bash
-mkdir -p armature-fuzz/corpus/fuzz_http_request
+mkdir -p armature-h1/fuzz/corpus/parse_head
 
 # Add seed files
-echo 'GET /api/users HTTP/1.1' > armature-fuzz/corpus/fuzz_http_request/simple_get
-echo 'POST /api/users HTTP/1.1\nContent-Type: application/json\n\n{"name":"test"}' > armature-fuzz/corpus/fuzz_http_request/post_json
+printf 'GET /api/users HTTP/1.1\r\n\r\n' > armature-h1/fuzz/corpus/parse_head/simple_get
+printf 'POST /api/users HTTP/1.1\r\nContent-Length: 15\r\n\r\n{"name":"test"}' > armature-h1/fuzz/corpus/parse_head/post_json
 ```
 
 ### Minimizing Corpus
@@ -144,7 +160,7 @@ echo 'POST /api/users HTTP/1.1\nContent-Type: application/json\n\n{"name":"test"
 After fuzzing, minimize the corpus to remove redundant inputs:
 
 ```bash
-cargo +nightly fuzz cmin fuzz_http_request
+cargo +nightly fuzz cmin parse_head
 ```
 
 ### Sharing Corpus
@@ -152,7 +168,7 @@ cargo +nightly fuzz cmin fuzz_http_request
 The corpus directory can be committed to version control:
 
 ```bash
-git add armature-fuzz/corpus/
+git add '*/fuzz/corpus/'
 git commit -m "Add fuzz corpus"
 ```
 
@@ -185,7 +201,7 @@ jobs:
       - name: Run fuzz tests
         run: |
           cd fuzz
-          for target in fuzz_http_request fuzz_routing fuzz_json; do
+          for target in routing headers query_params; do
             cargo +nightly fuzz run "$target" -- -max_total_time=300
           done
 
@@ -194,7 +210,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crashes
-          path: armature-fuzz/artifacts/
+          path: '*/fuzz/artifacts/'
 ```
 
 ### OSS-Fuzz Integration
@@ -362,31 +378,40 @@ If fuzzing discovers a security vulnerability:
 cargo install cargo-fuzz
 
 # Run
-cd fuzz && cargo +nightly fuzz run fuzz_http_request
+cd fuzz && cargo +nightly fuzz run routing
 
 # Run all (60s each)
 for t in fuzz_*; do cargo +nightly fuzz run "$t" -- -max_total_time=60; done
 
 # Coverage
-cargo +nightly fuzz coverage fuzz_http_request
+cargo +nightly fuzz coverage routing
 
 # Minimize corpus
-cargo +nightly fuzz cmin fuzz_http_request
+cargo +nightly fuzz cmin parse_head
 ```
 
 ### Directory Structure
 
+Fuzzing lives beside the code it exercises, one `fuzz/` per crate:
+
 ```
-armature-fuzz/
-├── Cargo.toml           # Fuzz crate manifest
-├── fuzz_targets/        # Fuzz target source files
-│   ├── http_request.rs
-│   ├── routing.rs
-│   └── ...
-├── corpus/              # Seed inputs (version controlled)
-│   └── fuzz_http_request/
-└── artifacts/           # Crash reproductions (gitignored)
+armature-core/
+├── src/
+└── fuzz/
+    ├── Cargo.toml       # Its own [workspace]; nightly-only, so the root
+    │                    # workspace must not reach it
+    ├── fuzz_targets/
+    │   ├── routing.rs
+    │   ├── headers.rs
+    │   └── ...
+    ├── corpus/          # Seed inputs (version controlled)
+    │   └── routing/
+    └── artifacts/       # Crash reproductions (gitignored)
 ```
+
+Each fuzz crate declares its own `[workspace]` because `libfuzzer-sys` links a
+sanitizer runtime and builds only on nightly — without that, a plain
+`cargo build` at the repo root would try to compile it and fail.
 
 ---
 
