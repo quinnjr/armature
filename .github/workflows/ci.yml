@@ -112,6 +112,26 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+  workspace-membership:
+    name: Workspace Membership
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      # Cargo says nothing about a directory it was never told to care about.
+      # A crate in neither `members` nor `exclude` is not a workspace member, so
+      # every whole-workspace build, test and clippy run skips it and
+      # `scripts/publish.sh` never publishes it — silently. That has cost three
+      # incidents here: `armature-h1` (publish script could not see it, so
+      # publishing `armature-core` would have failed against an unpublished
+      # dependency), `armature-fuzz` (left a submodule after its targets moved,
+      # accumulating failing CI), and `armature-session` (reached 0.3.0 having
+      # never been built, tested, linted or published; adding it surfaced two
+      # clippy denials immediately).
+      - name: Every crate directory is a member or explicitly excluded
+        run: python3 scripts/check-workspace-membership.py
+
   clippy:
     name: Clippy (without SAML)
     runs-on: ubuntu-latest
