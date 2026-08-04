@@ -1,0 +1,26 @@
+[package]
+name = "armature-jwt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Its own workspace root: `libfuzzer-sys` links a sanitizer runtime and builds
+# only on nightly, so a plain `cargo build` at the repo root must not reach it.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+armature-jwt = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "token_verify"
+path = "fuzz_targets/token_verify.rs"
+test = false
+doc = false
+bench = false

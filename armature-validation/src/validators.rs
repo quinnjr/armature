@@ -125,14 +125,24 @@ impl IsUrl {
     ///
     /// Single-label hosts are accepted: `https://a`, `http://localhost` and
     /// `http://intranet` are all real, resolvable URLs.
+    ///
+    /// A value containing a C0 control character — tab, CR or LF among them —
+    /// is rejected outright. The WHATWG parser *strips* those before parsing,
+    /// so `"https://a.example/\r\nX-Injected: 1"` parses cleanly as
+    /// `https://a.example/X-Injected:%201`. Validating the stripped form while
+    /// the caller keeps the original means this function would be approving a
+    /// string it never actually examined, and that string still carries a CRLF
+    /// into wherever it is used next — a `Location` header being the obvious
+    /// way that becomes response splitting.
     pub fn validate(value: &str, field: &str) -> Result<(), ValidationError> {
-        let is_valid = match url::Url::parse(value) {
-            Ok(parsed) => {
-                matches!(parsed.scheme(), "http" | "https")
-                    && parsed.host_str().is_some_and(|h| HOST_REGEX.is_match(h))
-            }
-            Err(_) => false,
-        };
+        let is_valid = !value.chars().any(|c| c.is_control())
+            && match url::Url::parse(value) {
+                Ok(parsed) => {
+                    matches!(parsed.scheme(), "http" | "https")
+                        && parsed.host_str().is_some_and(|h| HOST_REGEX.is_match(h))
+                }
+                Err(_) => false,
+            };
 
         if is_valid {
             Ok(())
@@ -426,6 +436,33 @@ mod tests {
         assert!(IsUrl::validate("javascript:alert(1)", "url").is_err());
         // Relative references are not absolute URLs.
         assert!(IsUrl::validate("/path/only", "url").is_err());
+    }
+
+    /// The WHATWG parser strips C0 controls before parsing, so a value
+    /// carrying a CRLF parses cleanly while the caller keeps the original —
+    /// validating a string that was never examined. The caller then holds a
+    /// CRLF to carry into whatever it does next, a `Location` header being the
+    /// obvious route to response splitting.
+    #[test]
+    fn is_url_rejects_embedded_control_characters() {
+        // Each of these parses successfully once the parser has stripped the
+        // control characters, which is exactly why they must be caught first.
+        for value in [
+            "https://a.example/\r\nX-Injected: 1",
+            "http\n://evil.example/",
+            "\u{11}http\n:L/x",
+            "https://example.com/\tpath",
+            "https://example.com/\u{0}",
+        ] {
+            assert!(
+                url::Url::parse(value).is_ok(),
+                "test case {value:?} no longer exercises the stripping behaviour"
+            );
+            assert!(
+                IsUrl::validate(value, "url").is_err(),
+                "IsUrl accepted {value:?}, which carries a control character"
+            );
+        }
     }
 
     /// RFC 9562 §4: the hex digits are case-insensitive on input, so an

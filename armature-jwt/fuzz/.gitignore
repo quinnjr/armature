@@ -1,0 +1,12 @@
+# Fuzz artifacts (crash reproductions)
+artifacts/
+
+# Build artifacts
+target/
+
+# Cargo lock for fuzz crate
+Cargo.lock
+
+
+# cargo-fuzz corpus (regenerated per run; crashes go in artifacts/)
+corpus/

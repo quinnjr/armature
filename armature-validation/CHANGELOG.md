@@ -11,6 +11,16 @@ Earlier changes are recorded in the workspace [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Fixed
 
+- **Security — `IsUrl` rejects embedded control characters.** The WHATWG URL
+  parser strips C0 controls (tab, CR, LF among them) *before* parsing, so
+  `https://a.example/\r\nX-Injected: 1` parsed cleanly and was accepted. The
+  caller keeps the original string, so the validator was approving text it had
+  never actually examined, and that text still carried a CRLF into wherever it
+  was used next — a `Location` header being the obvious route to response
+  splitting.
+
+### Fixed
+
 - **Breaking:** a field with rules that is absent from the input now fails validation. It was silently skipped, so a form missing `email` entirely passed `NotEmpty` and `IsEmail`; `ValidationRules::optional()` opts out.
 - `IsUuid` accepts uppercase and checks version/variant; `IsUrl` parses with the `url` crate instead of a regex that rejected `https://a` and accepted `https://!!`.
 
