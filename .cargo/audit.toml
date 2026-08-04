@@ -97,4 +97,14 @@ ignore = [
     # drop this ignore once samael releases against quick-xml >=0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+
+    # RUSTSEC-2026-0235: rkyv - insufficient archive validation allows
+    # out-of-bounds reads for archives containing Rc/Arc. Reaches us only as
+    # rkyv 0.7.46 under `rust_decimal`, which is itself pulled by `sea-orm` and
+    # `sqlx` — both dev-dependencies. `cargo tree -e normal` for
+    # armature-framework does not contain `rust_decimal` at all, so no shipped
+    # code path can hand rkyv an archive, and nothing here deserializes rkyv
+    # archives in the first place. The fix is rkyv >=0.8.17, which rust_decimal
+    # does not yet allow; drop this once it releases against 0.8.
+    "RUSTSEC-2026-0235",
 ]

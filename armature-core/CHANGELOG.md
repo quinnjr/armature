@@ -38,6 +38,15 @@ Changes at or before `0.6.0` are recorded in the workspace
 
 ### Fixed
 
+- Registration order decides between two overlapping parameterized routes
+  again. Both went into the same `matchit` tree, where the winner is chosen by
+  specificity — static beats parameter beats catch-all — which is the opposite
+  of this framework's first-registered-wins rule, and the fallback rescan could
+  not correct it because it only considers routes the tree does not hold.
+  Registering `/:x/:y` and then `/a/:z` handed `/a/q` to the *later* route. A
+  parameterized pattern that overlaps an earlier one is now answered by the
+  linear scan instead, which restores the order while leaving it in sole charge
+  of everything the earlier pattern does not describe.
 - Registering a route with 26 or more parameters no longer aborts the process.
   `matchit` normalizes a route by rewriting each parameter to a single letter
   starting at `a`, and signals the exhausted alphabet by panicking rather than
