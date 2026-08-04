@@ -755,12 +755,33 @@ jobs:
   # ============================================================================
 
   fuzz-smoke:
-    name: Fuzz Smoke (armature-h1)
+    name: Fuzz Smoke (${{ matrix.crate }}/${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # One entry per fuzz target, each naming the crate that owns it. Fuzzing
+      # lives beside the code it exercises -- `<crate>/fuzz` inside each
+      # submodule -- so adding a target means adding a line here and nothing
+      # else.
       matrix:
-        target: [parse_head, chunked, framing_differential]
+        include:
+          - { crate: armature-h1, target: parse_head }
+          - { crate: armature-h1, target: chunked }
+          - { crate: armature-h1, target: framing_differential }
+          - { crate: armature-core, target: http_request }
+          - { crate: armature-core, target: http_response }
+          - { crate: armature-core, target: routing }
+          - { crate: armature-core, target: json }
+          - { crate: armature-core, target: url_parsing }
+          - { crate: armature-core, target: headers }
+          - { crate: armature-core, target: query_params }
+          - { crate: armature-core, target: path_params }
+          - { crate: armature-i18n, target: accept_language }
+          - { crate: armature-i18n, target: locale_tag }
+          - { crate: armature-webhooks, target: signature_verify }
+          - { crate: armature-config, target: config_parse }
+          - { crate: armature-jwt, target: token_verify }
+          - { crate: armature-validation, target: validators }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -783,25 +804,37 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_REF"
           merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
           if git diff --name-only "$merge_base"...HEAD \
-            | grep -qE '^(armature-h1/|\.github/workflows/ci\.yml)'; then
+            | grep -qE "^(${{ matrix.crate }}(/|$)|Cargo\.toml|Cargo\.lock|armature-core(/|$)|armature-log(/|$)|\.github/workflows/ci\.yml)"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
       # cargo-fuzz requires nightly: -Z sanitizer=address and the coverage
-      # instrumentation libFuzzer needs are nightly-only.
+      # instrumentation libFuzzer needs are nightly-only. `clippy` is requested
+      # explicitly because this action installs the minimal profile, which does
+      # not carry it -- the lint step below would fail with "no such command".
       - uses: dtolnay/rust-toolchain@nightly
         if: steps.scope.outputs.run == 'true'
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:
-          workspaces: armature-h1/fuzz
+          workspaces: ${{ matrix.crate }}/fuzz
       - name: Install cargo-fuzz
         if: steps.scope.outputs.run == 'true'
         run: cargo install cargo-fuzz --locked
+      # Each `<crate>/fuzz` is its own workspace, so the repo-wide clippy run
+      # never sees it. Without this the harnesses are the one part of the tree
+      # outside the lint gate.
+      - name: Clippy ${{ matrix.crate }}/fuzz
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cargo clippy --manifest-path ${{ matrix.crate }}/fuzz/Cargo.toml \
+            --all-targets -- -D warnings
       - name: Fuzz ${{ matrix.target }} for 60s
         if: steps.scope.outputs.run == 'true'
-        working-directory: armature-h1
+        working-directory: ${{ matrix.crate }}
         run: |
           cargo fuzz run ${{ matrix.target }} -- \
             -max_total_time=60 -print_final_stats=1
@@ -811,8 +844,8 @@ jobs:
         if: failure() && steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: armature-h1/fuzz/artifacts/
+          name: fuzz-artifacts-${{ matrix.crate }}-${{ matrix.target }}
+          path: ${{ matrix.crate }}/fuzz/artifacts/
           if-no-files-found: ignore
 
   # ============================================================================
