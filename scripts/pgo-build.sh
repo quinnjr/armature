@@ -25,7 +25,14 @@ set -e
 # Configuration
 PGO_DIR="${PGO_DIR:-/tmp/armature-pgo}"
 PROFILE_DATA="${PGO_DIR}/merged.profdata"
-WORKLOAD_CMD="${WORKLOAD_CMD:-cargo bench --profile pgo-generate}"
+# Benchmarks live in the crates they measure, so the profiling workload has to
+# name them explicitly to exercise more than the root package. These three cover
+# the hot request path: HTTP/1.1 parse+write, routing/DI/handler dispatch, and
+# JWT on the auth path. The data/infra crates sit off that path, and the root
+# package's two benches touch no `armature_*` symbol at all (they time stdlib
+# and crossbeam allocation shapes), so including any of them dilutes the profile
+# rather than improving it. Override WORKLOAD_CMD to widen it.
+WORKLOAD_CMD="${WORKLOAD_CMD:-cargo bench --profile pgo-generate -p armature-core -p armature-h1 -p armature-jwt}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -65,7 +72,9 @@ OPTIONS:
 
 ENVIRONMENT VARIABLES:
     PGO_DIR          Directory for PGO data (default: /tmp/armature-pgo)
-    WORKLOAD_CMD     Command to run for profiling (default: cargo bench)
+    WORKLOAD_CMD     Command to run for profiling
+                     (default: cargo bench --profile pgo-generate over
+                      armature-core, armature-h1, armature-jwt)
 
 EXAMPLES:
     # Full PGO workflow
@@ -118,7 +127,28 @@ pgo_generate() {
 
     # Run the workload
     log_info "Running: ${WORKLOAD_CMD}"
-    RUSTFLAGS="-Cprofile-generate=${PGO_DIR}" eval "${WORKLOAD_CMD}" || true
+    # Start from a clean slate: a previous aborted run's .profraw would
+    # otherwise be merged alongside this run's, and they come from a different
+    # instrumented binary — llvm-profdata either fails on a function-hash
+    # mismatch or silently produces a contaminated profile.
+    rm -f "${PGO_DIR}"/*.profraw
+
+    WORKLOAD_STATUS=0
+    RUSTFLAGS="-Cprofile-generate=${PGO_DIR}" eval "${WORKLOAD_CMD}" || WORKLOAD_STATUS=$?
+
+    # A nonzero profraw count only proves *something* ran. With a multi-package
+    # workload, an abort partway through still leaves files behind, and a PGO
+    # build trained on a fraction of the intended workload is silently worse
+    # than one trained on all of it — so treat a failed workload as fatal.
+    if [ "${WORKLOAD_STATUS}" -ne 0 ]; then
+        if [ "${WORKLOAD_STATUS}" -eq 130 ]; then
+            log_error "Workload interrupted; the profile is partial. Refusing to build."
+        else
+            log_error "Workload exited ${WORKLOAD_STATUS}; the profile is partial. Refusing to build."
+        fi
+        log_info "Narrow or replace it via WORKLOAD_CMD, then re-run."
+        exit 1
+    fi
 
     # Check for profile data
     PROFRAW_COUNT=$(find "${PGO_DIR}" -name "*.profraw" 2>/dev/null | wc -l)
@@ -164,7 +194,7 @@ pgo_build() {
     echo "  Binary location: target/pgo-use/"
     echo ""
     echo "To benchmark:"
-    echo "  cargo bench --profile pgo-use"
+    echo "  cargo bench --profile pgo-use -p armature-core"
 }
 
 pgo_all() {

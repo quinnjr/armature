@@ -29,8 +29,11 @@ on:
     - cron: '0 3 * * 0'
 
 # Grant GITHUB_TOKEN permissions for benchmark data
+# Least privilege at workflow scope: only `update-baseline` pushes, and it
+# grants itself `contents: write` explicitly. Every other job here compiles and
+# runs PR-authored code (build scripts and proc macros execute at build time).
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
   issues: write
 
@@ -39,6 +42,14 @@ env:
   RUST_BACKTRACE: 1
   # Performance threshold - fail if regression > 15%
   PERFORMANCE_THRESHOLD: 15
+
+# Every bench step below pipes into `tee`. GitHub's implicit shell is `bash -e`
+# WITHOUT pipefail, so a failing `cargo bench` would be masked by tee's exit 0
+# and the step would go green having measured nothing. Naming `bash` explicitly
+# selects `bash --noprofile --norc -eo pipefail`.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # ============================================================================
@@ -69,30 +80,36 @@ jobs:
       # Run Core Benchmarks
       # ========================================
 
+      # Each benchmark lives in the crate it measures, so every invocation is
+      # scoped with `-p`. Adding a bench to a crate means adding a step here.
+
+      # NOTE: `regression-check` compares the FIRST `time:` line of this file
+      # against a baseline run filtered to "routing". Keep the same filter on
+      # both sides or the comparison divides two unrelated benchmarks.
       - name: Run routing benchmarks
         run: |
           mkdir -p target/benchmark-results
-          cargo bench --bench internal_overhead_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/routing.txt
+          cargo bench -p armature-core --bench internal_overhead -- --noplot --save-baseline pr "routing" 2>&1 | tee target/benchmark-results/routing.txt
 
       - name: Run arena benchmarks
         run: |
-          cargo bench --bench arena_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/arena.txt
+          cargo bench -p armature-core --bench arena -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/arena.txt
 
       - name: Run body benchmarks
         run: |
-          cargo bench --bench body_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/body.txt
+          cargo bench -p armature-core --bench body -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/body.txt
 
       - name: Run JSON benchmarks
         run: |
-          cargo bench --bench json_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/json.txt
+          cargo bench -p armature-core --bench json -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/json.txt
 
       - name: Run SIMD parser benchmarks
         run: |
-          cargo bench --bench simd_parser_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/simd_parser.txt
+          cargo bench -p armature-core --bench simd_parser -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/simd_parser.txt
 
-      - name: Run security benchmarks
+      - name: Run JWT benchmarks
         run: |
-          cargo bench --bench security_benchmarks --features full -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/security.txt
+          cargo bench -p armature-jwt --bench jwt -- --noplot --save-baseline pr 2>&1 | tee target/benchmark-results/jwt.txt
 
       # ========================================
       # Parse and Report Results
@@ -196,7 +213,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
-          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -212,17 +228,30 @@ jobs:
           name: benchmark-results-${{ github.sha }}
           path: pr-results
 
-      - name: Checkout base branch
-        run: |
-          git fetch origin ${{ github.base_ref }}
-          git checkout origin/${{ github.base_ref }} -- . 2>/dev/null || true
+      # Both benchmarks below live inside the `armature-core` submodule, and
+      # `git checkout <base> -- .` moves a gitlink without touching the
+      # submodule working tree — the baseline would silently be the PR's own
+      # code. A second checkout into `base/` with `submodules: recursive` is
+      # the supported way to get a real base tree (git's own manual warns that
+      # submodules in a linked worktree are unsupported, so `git worktree` is
+      # not an option here). Same pattern as flamegraph.yml's `differential`.
+      - name: Check out base branch
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: ${{ github.base_ref }}
+          path: base
 
       - name: Run baseline benchmarks
+        working-directory: base
         run: |
-          mkdir -p base-results
-          # Run quick subset of benchmarks for comparison
-          cargo bench --bench internal_overhead_benchmarks --features full -- --noplot "routing" 2>&1 | tee base-results/routing.txt || true
-          cargo bench --bench arena_benchmarks --features full -- --noplot "request_create" 2>&1 | tee base-results/arena.txt || true
+          mkdir -p ../base-results
+          # Run quick subset of benchmarks for comparison. A base branch that
+          # predates the per-crate benchmark move has no `internal_overhead`
+          # target; leave the file absent rather than writing an error into it,
+          # so the comparison step can tell "no baseline" from "measured 0".
+          cargo bench -p armature-core --bench internal_overhead -- --noplot "routing" 2>&1 | tee ../base-results/routing.txt || rm -f ../base-results/routing.txt
+          cargo bench -p armature-core --bench arena -- --noplot "request_create" 2>&1 | tee ../base-results/arena.txt || rm -f ../base-results/arena.txt
 
       - name: Compare benchmarks
         id: compare
@@ -233,12 +262,27 @@ jobs:
           # Simple comparison - check for significant slowdowns
           REGRESSIONS=0
 
-          # Parse PR results
-          if [ -f "pr-results/target/benchmark-results/routing.txt" ]; then
-            PR_TIME=$(grep -oP 'time:\s+\[\K[0-9.]+' pr-results/target/benchmark-results/routing.txt | head -1 || echo "0")
-            BASE_TIME=$(grep -oP 'time:\s+\[\K[0-9.]+' base-results/routing.txt | head -1 || echo "0")
+          # Parse PR results. A missing or timing-free baseline file means the
+          # baseline never ran (e.g. the base branch predates a bench rename) —
+          # that is a broken check, not a passing one, so say so loudly instead
+          # of silently reporting "no regressions".
+          BASELINE_OK=1
+          if [ ! -s "base-results/routing.txt" ] || ! grep -q 'time:' base-results/routing.txt; then
+            BASELINE_OK=0
+            echo "::warning::baseline benchmark produced no timings; regression comparison skipped"
+            echo "> ⚠️ Baseline benchmark produced no timings — comparison skipped, this run proves nothing." >> regression-report.md
+          fi
 
-            if [ ! -z "$PR_TIME" ] && [ ! -z "$BASE_TIME" ] && [ "$BASE_TIME" != "0" ]; then
+          if [ -f "pr-results/target/benchmark-results/routing.txt" ]; then
+            # `grep -m1` rather than `| head -1`: under pipefail a closed pipe
+            # makes grep exit 141, which would turn the fallback into a second
+            # line of output rather than a substitution.
+            PR_TIME=$(grep -m1 -oP 'time:\s+\[\K[0-9.]+' pr-results/target/benchmark-results/routing.txt || true)
+            BASE_TIME=$(grep -m1 -oP 'time:\s+\[\K[0-9.]+' base-results/routing.txt 2>/dev/null || true)
+            PR_TIME=${PR_TIME:-0}
+            BASE_TIME=${BASE_TIME:-0}
+
+            if [ "$PR_TIME" != "0" ] && [ "$BASE_TIME" != "0" ]; then
               # Calculate percentage change
               CHANGE=$(echo "scale=2; (($PR_TIME - $BASE_TIME) / $BASE_TIME) * 100" | bc 2>/dev/null || echo "0")
               echo "| Routing | ${BASE_TIME}ns | ${PR_TIME}ns | ${CHANGE}% |" >> regression-report.md
@@ -254,8 +298,12 @@ jobs:
           echo "" >> regression-report.md
 
           if [ $REGRESSIONS -gt 0 ]; then
-            echo "::error::Found $REGRESSIONS performance regression(s) exceeding ${PERFORMANCE_THRESHOLD}% threshold"
+            echo "::warning::Found $REGRESSIONS performance regression(s) exceeding ${PERFORMANCE_THRESHOLD}% threshold"
             echo "regression_detected=true" >> $GITHUB_OUTPUT
+          elif [ "$BASELINE_OK" -eq 0 ]; then
+            # Must not read as a pass: nothing was compared.
+            echo "> Result: **inconclusive** — no baseline to compare against." >> regression-report.md
+            echo "regression_detected=false" >> $GITHUB_OUTPUT
           else
             echo "✅ No significant performance regressions detected" >> regression-report.md
             echo "regression_detected=false" >> $GITHUB_OUTPUT
@@ -268,13 +316,18 @@ jobs:
           path: regression-report.md
           retention-days: 30
 
-      - name: Fail on regression
+      # ADVISORY BY DESIGN — this step deliberately does not fail the build.
+      # Criterion numbers on shared CI runners are too noisy to gate a merge on,
+      # so a regression surfaces as an annotation plus the uploaded report and a
+      # human decides. Do not add `exit 1` here without first making the
+      # measurement reproducible (dedicated runner, or `--save-baseline` over
+      # several runs); a flaky blocking gate gets disabled, which is worse than
+      # an advisory one.
+      - name: Report regression (advisory, does not fail the build)
         if: steps.compare.outputs.regression_detected == 'true'
         run: |
           echo "⚠️ Performance regression detected!"
           echo "Please review the benchmark results and optimize the affected code."
-          # Don't fail the build, just warn
-          # exit 1
 
   # ============================================================================
   # BASELINE UPDATE
@@ -283,6 +336,9 @@ jobs:
   update-baseline:
     name: Update Baseline
     runs-on: ubuntu-latest
+    # The only job here that writes to the repo.
+    permissions:
+      contents: write
     needs: benchmark
     if: |
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) ||
@@ -299,10 +355,17 @@ jobs:
           name: benchmark-results-${{ github.sha }}
           path: benchmark-results
 
+      # NOTE: `.github/benchmark-baseline/` is an archived record of past runs,
+      # not an input — nothing reads it back. `regression-check` re-measures the
+      # base branch in a worktree instead. Do not hand-edit these files.
       - name: Create baseline data
         run: |
           mkdir -p .github/benchmark-baseline
-          cp benchmark-results/target/benchmark-results/*.txt .github/benchmark-baseline/ 2>/dev/null || true
+          # Replace, don't merge: a renamed bench step would otherwise strand
+          # its old output here forever (as `security.txt` did when the step
+          # became `jwt`).
+          rm -f .github/benchmark-baseline/*.txt
+          cp benchmark-results/target/benchmark-results/*.txt .github/benchmark-baseline/
 
           # Create summary JSON
           cat > .github/benchmark-baseline/baseline.json << EOF
@@ -319,8 +382,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/benchmark-baseline/
-          git diff --staged --quiet || git commit -m "chore: update benchmark baseline [skip ci]"
-          git push || echo "No changes to push"
+          # The `git diff --staged --quiet ||` guard already handles the
+          # genuine no-op case, so a bare push fails only on real errors —
+          # don't relabel those as "no changes".
+          git diff --staged --quiet && exit 0
+          git commit -m "chore: update benchmark baseline [skip ci]"
+          git push
 
   # ============================================================================
   # PERFORMANCE TRENDS (Weekly)
@@ -345,7 +412,22 @@ jobs:
       - name: Run comprehensive benchmarks
         run: |
           mkdir -p trend-results
-          cargo bench --features full -- --noplot 2>&1 | tee trend-results/full-bench.txt
+          # Benchmarks are owned by the crates they measure; the root package
+          # keeps only the framework-comparison ones.
+          cargo bench \
+            -p armature-core \
+            -p armature-h1 \
+            -p armature-jwt \
+            -p armature-auth \
+            -p armature-validation \
+            -p armature-cache \
+            -p armature-cron \
+            -p armature-queue \
+            -p armature-ratelimit \
+            -p armature-storage \
+            -p armature-http-client \
+            -p armature-framework \
+            -- --noplot 2>&1 | tee trend-results/full-bench.txt
 
       - name: Generate trends report
         run: |
@@ -356,7 +438,9 @@ jobs:
           echo "## Current Benchmarks" >> PERFORMANCE_TRENDS.md
           echo "" >> PERFORMANCE_TRENDS.md
           echo "\`\`\`" >> PERFORMANCE_TRENDS.md
-          cat trend-results/full-bench.txt | grep -E "(Benchmarking|time:)" | head -100 >> PERFORMANCE_TRENDS.md
+          # `|| true`: head closes the pipe, grep takes SIGPIPE, and this
+          # workflow runs with pipefail.
+          grep -E "(Benchmarking|time:)" trend-results/full-bench.txt | head -100 >> PERFORMANCE_TRENDS.md || true
           echo "\`\`\`" >> PERFORMANCE_TRENDS.md
 
       - name: Upload trends report

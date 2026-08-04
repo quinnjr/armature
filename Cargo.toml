@@ -597,79 +597,11 @@ path = "examples/techempower_server.rs"
 
 # Benchmarks
 [[bench]]
-name = "core_benchmarks"
-harness = false
-
-[[bench]]
-name = "security_benchmarks"
-harness = false
-
-[[bench]]
-name = "validation_benchmarks"
-harness = false
-
-[[bench]]
-name = "data_benchmarks"
-harness = false
-
-[[bench]]
-name = "internal_overhead_benchmarks"
-harness = false
-
-[[bench]]
-name = "resilience_benchmarks"
-harness = false
-
-[[bench]]
-name = "cache_benchmarks"
-harness = false
-
-[[bench]]
-name = "auth_benchmarks"
-harness = false
-
-[[bench]]
-name = "ratelimit_benchmarks"
-harness = false
-
-[[bench]]
-name = "storage_benchmarks"
-harness = false
-
-[[bench]]
-name = "http_client_benchmarks"
-harness = false
-
-[[bench]]
-name = "simd_parser_benchmarks"
-harness = false
-
-[[bench]]
-name = "json_benchmarks"
-harness = false
-
-[[bench]]
-name = "arena_benchmarks"
-harness = false
-
-[[bench]]
-name = "body_benchmarks"
-harness = false
-
-[[bench]]
-name = "pipeline_benchmarks"
-harness = false
-
-[[bench]]
 name = "database_benchmarks"
 harness = false
 
 [[bench]]
 name = "memory_benchmarks"
-harness = false
-
-[[bench]]
-name = "micro_benchmarks"
 harness = false
 
 # Benchmark Examples
@@ -689,3 +621,9 @@ path = "examples/rhai_app.rs"
 [[bin]]
 name = "http-benchmark"
 path = "benches/http_benchmark_runner.rs"
+# Cargo runs bins as bench and test targets by default. This one is the
+# cross-framework HTTP load generator: it shells out to oha/wrk against
+# ports 3000-3008 and writes benchmark_results.md into the CWD. An
+# unfiltered `cargo bench -p armature-framework` would execute it.
+bench = false
+test = false

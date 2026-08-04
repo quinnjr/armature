@@ -17,34 +17,46 @@ on:
       benchmark:
         description: 'Benchmark to profile'
         required: false
-        default: 'internal_overhead_benchmarks'
+        default: 'internal_overhead'
         type: choice
         options:
-          - internal_overhead_benchmarks
-          - core_benchmarks
-          - json_benchmarks
-          - simd_parser_benchmarks
+          - internal_overhead
+          - core
+          - json
+          - simd_parser
           - all
       duration:
-        description: 'Profile duration (seconds)'
+        description: 'Profile duration (seconds, digits only)'
         required: false
         default: '30'
         type: string
   pull_request:
     branches: [main, develop]
     paths:
-      - 'armature-core/src/**'
+      # `armature-core` is a submodule: in THIS repo it is a single gitlink
+      # entry, so `armature-core/**` globs can never match. A change to core
+      # (source or benches) reaches here as a bump of the gitlink itself.
+      - 'armature-core'
       - 'benches/**'
+      - '.github/workflows/flamegraph.yml'
   schedule:
     # Weekly on Sunday at 2am UTC
     - cron: '0 2 * * 0'
 
+# No job here writes to the repo; both compile and run PR-authored code.
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
+
+# Several steps below pipe into `tee`. GitHub's implicit shell is `bash -e`
+# without pipefail, which would let a failed `cargo bench` be masked by tee's
+# exit 0. Naming bash explicitly selects `bash --noprofile --norc -eo pipefail`.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # ============================================================================
@@ -83,9 +95,19 @@ jobs:
       - name: Build release binaries
         run: |
           cargo build --release --features full
-          cargo build --release --bench internal_overhead_benchmarks --features full
-          cargo build --release --bench core_benchmarks --features full 2>/dev/null || true
-          cargo build --release --bench json_benchmarks --features full 2>/dev/null || true
+          # Benchmarks live in the crates they measure, hence the `-p` scoping.
+          # These are tolerated failures, but the reason must reach the log:
+          # a wrong `-p`/`--bench` pair is exactly what a silenced stderr hides.
+          cargo build --release -p armature-core --bench internal_overhead
+          cargo build --release -p armature-core --bench core || true
+          cargo build --release -p armature-core --bench json || true
+          cargo build --release -p armature-core --bench simd_parser || true
+
+      # Unconditional: the four profiling steps below are each gated on a
+      # different `benchmark` input, so creating this inside any one of them
+      # leaves the others writing into a directory that does not exist.
+      - name: Create flamegraph output directory
+        run: mkdir -p flamegraphs
 
       - name: Configure kernel for profiling
         run: |
@@ -93,45 +115,77 @@ jobs:
           echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || true
 
-      - name: Generate internal_overhead_benchmarks flamegraph
-        if: ${{ github.event.inputs.benchmark == 'internal_overhead_benchmarks' || github.event.inputs.benchmark == 'all' || github.event_name != 'workflow_dispatch' }}
+      - name: Generate internal_overhead flamegraph
+        if: ${{ github.event.inputs.benchmark == 'internal_overhead' || github.event.inputs.benchmark == 'all' || github.event_name != 'workflow_dispatch' }}
+        env:
+          DURATION: ${{ github.event.inputs.duration || '30' }}
         run: |
-          mkdir -p flamegraphs
+          # Bound through env, not template splicing: a `workflow_dispatch`
+          # string input interpolated straight into `run:` is a shell-injection
+          # sink. Validate before use — `timeout` only accepts a number anyway.
+          [[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "::error::duration must be digits"; exit 1; }
 
           # Try to use perf-based flamegraph first
-          timeout ${{ github.event.inputs.duration || '30' }}s \
-            cargo flamegraph --bench internal_overhead_benchmarks --features full \
-            -o flamegraphs/internal_overhead_benchmarks.svg \
+          timeout "${DURATION}s" \
+            cargo flamegraph -p armature-core --bench internal_overhead \
+            -o flamegraphs/internal_overhead.svg \
             -- --bench "routing" 2>&1 || {
               # Fallback: use dtrace/sampling if perf not available
               echo "Perf unavailable, trying alternative profiling..."
-              cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 10 2>&1 | tee flamegraphs/internal_overhead_benchmarks.txt || true
+              cargo bench -p armature-core --bench internal_overhead -- --profile-time 10 2>&1 | tee flamegraphs/internal_overhead.txt || true
             }
 
-      - name: Generate core_benchmarks flamegraph
-        if: ${{ github.event.inputs.benchmark == 'core_benchmarks' || github.event.inputs.benchmark == 'all' }}
+      - name: Generate core flamegraph
+        if: ${{ github.event.inputs.benchmark == 'core' || github.event.inputs.benchmark == 'all' }}
+        env:
+          DURATION: ${{ github.event.inputs.duration || '30' }}
         run: |
-          timeout ${{ github.event.inputs.duration || '30' }}s \
-            cargo flamegraph --bench core_benchmarks --features full \
-            -o flamegraphs/core_benchmarks.svg 2>&1 || true
+          [[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "::error::duration must be digits"; exit 1; }
+          timeout "${DURATION}s" \
+            cargo flamegraph -p armature-core --bench core \
+            -o flamegraphs/core.svg 2>&1 || true
 
       - name: Generate JSON benchmarks flamegraph
-        if: ${{ github.event.inputs.benchmark == 'json_benchmarks' || github.event.inputs.benchmark == 'all' }}
+        if: ${{ github.event.inputs.benchmark == 'json' || github.event.inputs.benchmark == 'all' }}
+        env:
+          DURATION: ${{ github.event.inputs.duration || '30' }}
         run: |
-          timeout ${{ github.event.inputs.duration || '30' }}s \
-            cargo flamegraph --bench json_benchmarks --features full \
-            -o flamegraphs/json_benchmarks.svg 2>&1 || true
+          [[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "::error::duration must be digits"; exit 1; }
+          timeout "${DURATION}s" \
+            cargo flamegraph -p armature-core --bench json \
+            -o flamegraphs/json.svg 2>&1 || true
 
       - name: Generate SIMD parser flamegraph
-        if: ${{ github.event.inputs.benchmark == 'simd_parser_benchmarks' || github.event.inputs.benchmark == 'all' }}
+        if: ${{ github.event.inputs.benchmark == 'simd_parser' || github.event.inputs.benchmark == 'all' }}
+        env:
+          DURATION: ${{ github.event.inputs.duration || '30' }}
         run: |
-          timeout ${{ github.event.inputs.duration || '30' }}s \
-            cargo flamegraph --bench simd_parser_benchmarks --features full \
+          [[ "$DURATION" =~ ^[0-9]+$ ]] || { echo "::error::duration must be digits"; exit 1; }
+          timeout "${DURATION}s" \
+            cargo flamegraph -p armature-core --bench simd_parser \
             -o flamegraphs/simd_parser.svg 2>&1 || true
 
       # ========================================
       # Generate Summary
       # ========================================
+
+      # Every profiling step above ends in `|| true`, so without this gate the
+      # job can produce zero output and still report success.
+      - name: Assert profiling produced output
+        run: |
+          shopt -s nullglob
+          # Non-empty, not merely present: the .txt fallback is written by
+          # `tee`, which creates the file before `cargo bench` produces a
+          # single byte. A 0-byte file is a failed run, not output.
+          produced=()
+          for f in flamegraphs/*.svg flamegraphs/*.txt; do
+            [ -s "$f" ] && produced+=("$f")
+          done
+          if [ ${#produced[@]} -eq 0 ]; then
+            echo "::error::no non-empty flamegraph or profile output was produced"
+            exit 1
+          fi
+          printf 'produced %d artifact(s)\n' "${#produced[@]}"
 
       - name: Create flamegraph summary
         run: |
@@ -248,23 +302,31 @@ jobs:
         run: |
           cargo build --release --features full
           # Create a simple test to profile
-          cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 5 2>&1 > /tmp/pr-profile.txt || true
+          cargo bench -p armature-core --bench internal_overhead -- --profile-time 5 > /tmp/pr-profile.txt 2>&1 || true
 
       - name: Profile base branch
         working-directory: base
         run: |
           cargo build --release --features full || true
-          cargo bench --bench internal_overhead_benchmarks --features full -- --profile-time 5 2>&1 > /tmp/base-profile.txt || true
+          cargo bench -p armature-core --bench internal_overhead -- --profile-time 5 > /tmp/base-profile.txt 2>&1 || true
 
       - name: Generate diff summary
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p diff-report
           echo "# Differential Analysis" > diff-report/README.md
           echo "" >> diff-report/README.md
-          echo "Comparing \`${{ github.head_ref }}\` against \`${{ github.base_ref }}\`" >> diff-report/README.md
+          echo "Comparing \`$HEAD_REF\` against \`$BASE_REF\`" >> diff-report/README.md
           echo "" >> diff-report/README.md
           
           # Compare benchmark outputs
+          if [ ! -s /tmp/pr-profile.txt ] || [ ! -s /tmp/base-profile.txt ]; then
+            echo "::warning::one or both profile captures are empty; the diff below proves nothing"
+            echo "> ⚠️ One or both profile runs produced no output." >> diff-report/README.md
+          fi
+
           if [ -f /tmp/pr-profile.txt ] && [ -f /tmp/base-profile.txt ]; then
             echo "## Benchmark Comparison" >> diff-report/README.md
             echo "\`\`\`" >> diff-report/README.md

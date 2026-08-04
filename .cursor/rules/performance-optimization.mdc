@@ -1,6 +1,6 @@
 ---
 description: Performance optimization and profiling guidelines for Armature
-globs: benches/**/*.rs, examples/*profile*.rs, scripts/*profile*.sh
+globs: benches/**/*.rs, armature-*/benches/**/*.rs, examples/*profile*.rs, scripts/*profile*.sh
 alwaysApply: false
 ---
 
@@ -165,7 +165,7 @@ cargo flamegraph --release --example server
 cargo run --example memory_profile_server --features memory-profiling
 
 # Benchmarks
-cargo bench --bench <name>
+cargo bench -p armature-<crate> --bench <name>
 
 # HTTP load testing
 oha -n 10000 -c 100 http://localhost:3000/

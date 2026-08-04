@@ -11,34 +11,45 @@ Guidelines for performance optimization and benchmarking in the Armature framewo
 ### Running Benchmarks
 
 ```bash
-# Run all benchmarks
-cargo bench
+# Run every suite
+./scripts/run-benchmarks.sh --all
 
-# Run specific benchmark
-cargo bench --bench core_benchmarks
+# Run specific benchmark (always `-p`-scoped to the owning crate)
+cargo bench -p armature-core --bench core
 
 # Run with native CPU optimizations
-cargo bench --profile release-native
+cargo bench -p armature-core --profile release-native
 
 # Run with flamegraph profiling
-cargo bench --profile profiling
+cargo bench -p armature-core --profile profiling
 ```
 
 ### Benchmark Location
 
-All benchmarks are in `benches/`:
+Each benchmark lives in the crate it measures:
 
 ```
-benches/
-├── core_benchmarks.rs        # Core framework benchmarks
-├── security_benchmarks.rs    # Crypto/hashing benchmarks
-├── validation_benchmarks.rs  # Input validation
-├── cache_benchmarks.rs       # Cache operations
-├── auth_benchmarks.rs        # Authentication
-├── json_benchmarks.rs        # JSON parsing/serialization
-├── http_client_benchmarks.rs # HTTP client
-└── framework_comparison.rs   # Compare with Actix/Axum/Warp
+armature-core/benches/        # core, router, arena, body, json, micro,
+                              # pipeline, resilience, simd_parser,
+                              # internal_overhead
+armature-h1/benches/          # parse, write, e2e
+armature-jwt/benches/         # jwt (signing/verification)
+armature-auth/benches/        # auth (hashing, guards, OAuth2)
+armature-validation/benches/  # validation
+armature-cache/benches/       # cache
+armature-cron/benches/        # cron
+armature-queue/benches/       # queue
+armature-ratelimit/benches/   # ratelimit
+armature-storage/benches/     # storage
+armature-http-client/benches/ # http_client
 ```
+
+The root `benches/` keeps only what is not crate-specific: the framework
+comparison servers, the TechEmpower harness, the `http-benchmark` load runner,
+and the `database_benchmarks`/`memory_benchmarks` pattern benchmarks.
+
+Crates with benchmarks set `autobenches = false`, so a new file needs an
+explicit `[[bench]]` entry in that crate's `Cargo.toml`.
 
 ## Writing Benchmarks with Criterion
 
@@ -115,7 +126,7 @@ fn benchmark_async_handler(c: &mut Criterion) {
 cargo install flamegraph
 
 # Generate flamegraph
-cargo flamegraph --bench core_benchmarks -- --bench
+cargo flamegraph -p armature-core --bench core -- --bench
 
 # Or for a running server
 cargo flamegraph --example profiling_server
@@ -136,7 +147,7 @@ The project has comprehensive memory profiling tools:
 cargo build --example memory_profile_server --release --features memory-profiling
 
 # Run memory benchmarks
-cargo bench --bench memory_benchmarks
+cargo bench -p armature-framework --bench memory_benchmarks
 ```
 
 **DHAT Setup:**
@@ -161,7 +172,7 @@ See `docs/memory-profiling-guide.md` for complete documentation.
 
 ```bash
 # Record performance data
-perf record -g cargo bench --bench core_benchmarks
+perf record -g cargo bench -p armature-core --bench core
 
 # Generate report
 perf report
@@ -307,7 +318,7 @@ let (method, path, version) = parse_request_line_simd(bytes)?;
 
 ```bash
 # Run comparison benchmarks
-cargo bench --bench framework_comparison
+cargo run --release --bin http-benchmark -- --all
 ```
 
 ## Memory Optimization
@@ -367,12 +378,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run benchmarks
-        run: cargo bench --bench core_benchmarks -- --save-baseline pr
+        run: cargo bench -p armature-core --bench core -- --save-baseline pr
 
       - name: Compare with main
         run: |
           git checkout main
-          cargo bench --bench core_benchmarks -- --baseline main
+          cargo bench -p armature-core --bench core -- --baseline main
           git checkout -
           critcmp main pr
 ```

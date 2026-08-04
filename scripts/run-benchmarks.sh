@@ -1,6 +1,12 @@
 #!/bin/bash
 # scripts/run-benchmarks.sh
 # Comprehensive benchmark runner for Armature
+#
+# Every criterion benchmark now lives in the crate it measures (armature-core,
+# armature-jwt, armature-cache, ...), so each suite below is a set of
+# `-p <crate> --bench <target>` invocations rather than root-package benches.
+# The root package keeps only the two pattern benches (database access shapes,
+# allocation timing) — see `--patterns`.
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -14,6 +20,54 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Benchmark suites: "icon|label|package|bench-target"
+H1_SUITE=(
+    "🧵|H1 Parse|armature-h1|parse"
+    "✍|H1 Write|armature-h1|write"
+    "🔁|H1 E2E|armature-h1|e2e"
+)
+
+CORE_SUITE=(
+    "🔧|Core|armature-core|core"
+    "🧭|Router|armature-core|router"
+    "🧱|Arena|armature-core|arena"
+    "📦|Body|armature-core|body"
+    "🧾|JSON|armature-core|json"
+    "⚡|Micro|armature-core|micro"
+    "🚰|Pipeline|armature-core|pipeline"
+    "🛡|Resilience|armature-core|resilience"
+    "🔍|SIMD Parser|armature-core|simd_parser"
+    "📈|Internal Overhead|armature-core|internal_overhead"
+)
+
+SECURITY_SUITE=(
+    "🔒|JWT|armature-jwt|jwt"
+    "🔑|Auth|armature-auth|auth"
+)
+
+VALIDATION_SUITE=(
+    "✅|Validation|armature-validation|validation"
+)
+
+DATA_SUITE=(
+    "💾|Cache|armature-cache|cache"
+    "⏰|Cron|armature-cron|cron"
+    "📬|Queue|armature-queue|queue"
+    "🚦|Rate Limit|armature-ratelimit|ratelimit"
+    "🗄|Storage|armature-storage|storage"
+    "🌐|HTTP Client|armature-http-client|http_client"
+)
+
+# Root-package benches. These measure access/allocation *shapes*, not any
+# Armature crate — they are NOT the cross-framework comparison, which lives in
+# benches/comparison_servers/ and runs via the `http-benchmark` bin.
+# Neither imports an `armature_*` symbol (criterion + crossbeam + std only), so
+# they build under the root's default feature set; no `--features` needed.
+PATTERNS_SUITE=(
+    "🗃|Database Patterns|armature-framework|database_benchmarks"
+    "🧮|Memory Patterns|armature-framework|memory_benchmarks"
+)
+
 # Function to display usage
 usage() {
     echo -e "${CYAN}Armature Benchmark Runner${NC}"
@@ -23,12 +77,18 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -a, --all              Run all benchmarks"
-    echo "  -c, --core             Run core benchmarks only"
-    echo "  -s, --security         Run security benchmarks only"
-    echo "  -v, --validation       Run validation benchmarks only"
-    echo "  -d, --data             Run data benchmarks only"
+    echo "  -c, --core             Run armature-core benchmarks only"
+    echo "  -s, --security         Run armature-jwt/armature-auth benchmarks only"
+    echo "  -v, --validation       Run armature-validation benchmarks only"
+    echo "  -d, --data             Run data/infra crate benchmarks only"
+    echo "                         (cache, cron, queue, ratelimit, storage, http-client)"
+    echo "      --h1               Run armature-h1 benchmarks only (parse, write, e2e)"
+    echo "      --patterns         Run root-package pattern benchmarks only"
+    echo "                         (database access shapes, allocation timing)"
+    echo "                         NOT a cross-framework comparison — for that see"
+    echo "                         the http-benchmark runner in benches/README.md"
     echo "  -b, --baseline NAME    Save results as baseline"
-    echo "  -p, --compare NAME     Compare with baseline"
+    echo "      --compare NAME     Compare with baseline"
     echo "  -o, --open             Open HTML report after running"
     echo "  -q, --quick            Quick run (fewer samples)"
     echo "  -h, --help             Show this help message"
@@ -48,6 +108,8 @@ RUN_CORE=false
 RUN_SECURITY=false
 RUN_VALIDATION=false
 RUN_DATA=false
+RUN_H1=false
+RUN_PATTERNS=false
 BASELINE=""
 COMPARE=""
 OPEN_REPORT=false
@@ -76,11 +138,26 @@ while [[ $# -gt 0 ]]; do
             RUN_DATA=true
             shift
             ;;
+        --h1)
+            RUN_H1=true
+            shift
+            ;;
+        --patterns)
+            RUN_PATTERNS=true
+            shift
+            ;;
+        -p)
+            # Everywhere else in this repo `-p` means "package" (cargo's flag).
+            # It used to mean --compare here; refuse rather than silently
+            # comparing against a baseline named after a crate.
+            echo -e "${RED}-p is not a package selector here. Use --compare NAME, or --core/--h1/... to pick a suite.${NC}"
+            exit 1
+            ;;
         -b|--baseline)
             BASELINE="$2"
             shift 2
             ;;
-        -p|--compare)
+        --compare)
             COMPARE="$2"
             shift 2
             ;;
@@ -103,7 +180,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # If no specific benchmark selected, show usage
-if [[ "$RUN_ALL" == false && "$RUN_CORE" == false && "$RUN_SECURITY" == false && "$RUN_VALIDATION" == false && "$RUN_DATA" == false ]]; then
+if [[ "$RUN_ALL" == false && "$RUN_CORE" == false && "$RUN_SECURITY" == false && "$RUN_VALIDATION" == false && "$RUN_DATA" == false && "$RUN_H1" == false && "$RUN_PATTERNS" == false ]]; then
     usage
 fi
 
@@ -112,40 +189,54 @@ echo -e "${CYAN}║   Armature Benchmark Suite Runner     ║${NC}"
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
 echo ""
 
-# Build benchmark options
-BENCH_OPTS=""
+# Build benchmark options (passed through to criterion, after `--`)
+BENCH_OPTS=()
 if [[ "$QUICK" == true ]]; then
-    BENCH_OPTS="$BENCH_OPTS --sample-size 100"
-    echo -e "${YELLOW}⚡ Quick mode enabled (100 samples)${NC}"
+    # criterion's own default is 100 samples with 3s warm-up + 5s measurement,
+    # so a plain `--sample-size 100` would be a no-op. These are genuinely quick.
+    BENCH_OPTS+=(--sample-size 20 --warm-up-time 1 --measurement-time 2)
+    echo -e "${YELLOW}⚡ Quick mode enabled (20 samples, 1s warm-up, 2s measurement)${NC}"
 fi
 
 if [[ -n "$BASELINE" ]]; then
-    BENCH_OPTS="$BENCH_OPTS --save-baseline $BASELINE"
+    BENCH_OPTS+=(--save-baseline "$BASELINE")
     echo -e "${GREEN}💾 Saving baseline as: $BASELINE${NC}"
 fi
 
 if [[ -n "$COMPARE" ]]; then
-    BENCH_OPTS="$BENCH_OPTS --baseline $COMPARE"
+    BENCH_OPTS+=(--baseline "$COMPARE")
     echo -e "${BLUE}📊 Comparing with baseline: $COMPARE${NC}"
 fi
 
 echo ""
 
-# Function to run a benchmark
+# Run one benchmark target, given an "icon|label|package|bench" entry.
 run_benchmark() {
-    local name=$1
-    local bench_name=$2
-    local icon=$3
+    local icon label pkg bench
+    IFS='|' read -r icon label pkg bench <<< "$1"
 
-    echo -e "${PURPLE}${icon} Running ${name}...${NC}"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    if cargo bench --bench "$bench_name" $BENCH_OPTS; then
-        echo -e "${GREEN}✅ ${name} completed${NC}\n"
-    else
-        echo -e "${RED}❌ ${name} failed${NC}\n"
+    if [[ -z "$pkg" || -z "$bench" ]]; then
+        echo -e "${RED}malformed suite entry (need icon|label|package|bench): '$1'${NC}"
         exit 1
     fi
+
+    echo -e "${PURPLE}${icon} Running ${label} (${pkg})...${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if cargo bench -p "$pkg" --bench "$bench" -- "${BENCH_OPTS[@]}"; then
+        echo -e "${GREEN}✅ ${label} completed${NC}\n"
+    else
+        echo -e "${RED}❌ ${label} failed${NC}\n"
+        exit 1
+    fi
+}
+
+# Run every entry in a suite
+run_suite() {
+    local entry
+    for entry in "$@"; do
+        run_benchmark "$entry"
+    done
 }
 
 # Run benchmarks
@@ -153,25 +244,35 @@ START_TIME=$(date +%s)
 
 if [[ "$RUN_ALL" == true ]]; then
     echo -e "${CYAN}Running all benchmark suites...${NC}\n"
-    run_benchmark "Core Benchmarks" "core_benchmarks" "🔧"
-    run_benchmark "Security Benchmarks" "security_benchmarks" "🔒"
-    run_benchmark "Validation Benchmarks" "validation_benchmarks" "✅"
-    run_benchmark "Data Benchmarks" "data_benchmarks" "💾"
+    run_suite "${CORE_SUITE[@]}"
+    run_suite "${H1_SUITE[@]}"
+    run_suite "${SECURITY_SUITE[@]}"
+    run_suite "${VALIDATION_SUITE[@]}"
+    run_suite "${DATA_SUITE[@]}"
+    run_suite "${PATTERNS_SUITE[@]}"
 else
     if [[ "$RUN_CORE" == true ]]; then
-        run_benchmark "Core Benchmarks" "core_benchmarks" "🔧"
+        run_suite "${CORE_SUITE[@]}"
     fi
 
     if [[ "$RUN_SECURITY" == true ]]; then
-        run_benchmark "Security Benchmarks" "security_benchmarks" "🔒"
+        run_suite "${SECURITY_SUITE[@]}"
     fi
 
     if [[ "$RUN_VALIDATION" == true ]]; then
-        run_benchmark "Validation Benchmarks" "validation_benchmarks" "✅"
+        run_suite "${VALIDATION_SUITE[@]}"
     fi
 
     if [[ "$RUN_DATA" == true ]]; then
-        run_benchmark "Data Benchmarks" "data_benchmarks" "💾"
+        run_suite "${DATA_SUITE[@]}"
+    fi
+
+    if [[ "$RUN_H1" == true ]]; then
+        run_suite "${H1_SUITE[@]}"
+    fi
+
+    if [[ "$RUN_PATTERNS" == true ]]; then
+        run_suite "${PATTERNS_SUITE[@]}"
     fi
 fi
 
@@ -227,5 +328,3 @@ if [[ -d "$BASELINE_DIR" ]]; then
 fi
 
 echo -e "${CYAN}════════════════════════════════════════${NC}"
-
-

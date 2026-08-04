@@ -1,146 +1,99 @@
 # Armature Benchmark Suite
 
-Comprehensive performance benchmarks for all major components of the Armature framework,
-including comparisons with other popular Rust web frameworks.
+Performance benchmarks for the Armature framework, plus the cross-framework
+comparison harness.
 
-## Overview
+## Where the benchmarks live
 
-The benchmark suite measures performance across **16 categories**:
+Every criterion benchmark is owned by the crate it measures, so it moves with
+that crate's repository and runs from that crate's `Cargo.toml`. This directory
+holds only what is genuinely cross-cutting: the framework-comparison servers,
+the TechEmpower harness, the HTTP load-test runner, and two pattern benchmarks
+that exercise no Armature code at all.
 
-### Core Framework Benchmarks
-1. **Core Benchmarks** - HTTP request/response, routing, middleware, status codes
-2. **Security Benchmarks** - JWT operations (sign, verify, algorithms)
-3. **Validation Benchmarks** - Form validation, email, URL, patterns
-4. **Data Benchmarks** - Queue jobs, cron expressions
-5. **Internal Overhead Benchmarks** - Armature's own request/response, routing, DI, and handler dispatch overhead (not a cross-framework comparison — see [Framework Comparison](#framework-comparison) below for that)
-6. **Memory Benchmarks** - Allocation patterns, leak detection, object pools
+### Per-crate benchmarks
 
-### Infrastructure Benchmarks
-6. **Resilience Benchmarks** - Circuit breaker, retry, bulkhead, timeout, fallback
-7. **HTTP Client Benchmarks** - Client config, retry, circuit breaker, request building
-8. **Storage Benchmarks** - File validation, multipart, local/S3 storage
-9. **Cache Benchmarks** - Memory cache, TTL, serialization, concurrent access
-10. **Redis Benchmarks** - Config, keys, serialization, commands, pub/sub
+| Crate | Bench targets | Measures |
+|-------|---------------|----------|
+| `armature-core` | `core`, `router`, `arena`, `body`, `json`, `micro`, `pipeline`, `resilience`, `simd_parser`, `internal_overhead` | Request/response construction, routing, arena allocation, body handling, JSON, SIMD parsing, resilience primitives, DI and handler dispatch overhead |
+| `armature-h1` | `parse`, `write`, `e2e` | HTTP/1.1 parsing, serialization and end-to-end round-trip |
+| `armature-jwt` | `jwt` | Token signing and verification across algorithms |
+| `armature-auth` | `auth` | Password hashing, API keys, guards, OAuth2, session IDs |
+| `armature-validation` | `validation` | Email/URL/string/numeric validators, pattern matching |
+| `armature-cache` | `cache` | Cache keys, in-memory and tiered stores, TTL, concurrent access |
+| `armature-cron` | `cron` | Cron expression parsing and presets |
+| `armature-queue` | `queue` | Job and config construction, priorities, payload serialization |
+| `armature-ratelimit` | `ratelimit` | Token bucket, sliding window, concurrent and hot-key workloads |
+| `armature-storage` | `storage` | File validation, metadata, local storage, uploaded-file handling |
+| `armature-http-client` | `http_client` | Client config, retry, circuit breaker, request building |
 
-### Application Benchmarks
-11. **Auth Benchmarks** - Password hashing, API keys, guards, OAuth2, session IDs
-12. **Mail Benchmarks** - Email building, attachments, templates, SMTP config
-13. **Session Benchmarks** - Session ID generation, data management, cookie parsing
-14. **Rate Limit Benchmarks** - Token bucket, sliding window, concurrent access
+Target names say what they measure (`jwt`, `cache`, `simd_parser`). The two
+benches that stayed in the root package keep their historical `_benchmarks`
+suffix — that inconsistency is deliberate and bounded to those two.
 
-## Quick Start
+Run one with `-p`:
 
 ```bash
-# Run all benchmarks
-cargo bench
-
-# Run internal overhead benchmarks
-cargo bench --bench internal_overhead_benchmarks
-
-# Run HTTP benchmark server
-cargo run --release --example benchmark_server
-
-# Run comparison tool (requires oha or wrk)
-cargo run --release --bin http-benchmark -- --framework armature
+cargo bench -p armature-core --bench internal_overhead
+cargo bench -p armature-jwt  --bench jwt
+cargo bench -p armature-cache --bench cache
 ```
 
-## Running Benchmarks
-
-### Run All Benchmarks
+Filter within a target by passing a name after `--`:
 
 ```bash
-cargo bench
+cargo bench -p armature-core --bench internal_overhead -- routing
+cargo bench -p armature-core --bench json -- large
 ```
 
-### Run Specific Benchmark Suite
+### Root-package benchmarks
+
+Two benchmarks stay in the root package because they measure patterns rather
+than any Armature crate:
+
+| Bench target | Measures |
+|--------------|----------|
+| `database_benchmarks` | TechEmpower-shaped access patterns against an in-memory mock pool — no real driver or I/O |
+| `memory_benchmarks` | Allocation *timing* for string/vec/map/pointer shapes and pooling — wall-clock only, not leak detection |
+
+Neither imports an `armature_*` symbol — they are `criterion` + `crossbeam` +
+`std` only — so they build under the root's default feature set:
 
 ```bash
-# === Core Framework Benchmarks ===
-# Core HTTP and routing
-cargo bench --bench core_benchmarks
-
-# Security (JWT)
-cargo bench --bench security_benchmarks
-
-# Validation
-cargo bench --bench validation_benchmarks
-
-# Data processing (queue, cron)
-cargo bench --bench data_benchmarks
-
-# Internal overhead (micro-benchmarks)
-cargo bench --bench internal_overhead_benchmarks
-
-# Memory allocation patterns and leak detection
-cargo bench --bench memory_benchmarks
-
-# === Infrastructure Benchmarks ===
-# Resilience patterns (circuit breaker, retry, bulkhead)
-cargo bench --bench resilience_benchmarks
-
-# HTTP Client operations
-cargo bench --bench http_client_benchmarks
-
-# File storage and validation
-cargo bench --bench storage_benchmarks
-
-# Caching operations
-cargo bench --bench cache_benchmarks
-
-# Redis operations
-cargo bench --bench redis_benchmarks
-
-# === Application Benchmarks ===
-# Authentication operations
-cargo bench --bench auth_benchmarks
-
-# Email operations
-cargo bench --bench mail_benchmarks
-
-# Session management
-cargo bench --bench session_benchmarks
-
-# Rate limiting
-cargo bench --bench ratelimit_benchmarks
+cargo bench -p armature-framework --bench database_benchmarks
+cargo bench -p armature-framework --bench memory_benchmarks
 ```
 
-### Run Specific Benchmark
+### Everything at once
+
+`scripts/run-benchmarks.sh` wraps the per-crate invocations into suites:
 
 ```bash
-# Run only JWT benchmarks
-cargo bench --bench security_benchmarks jwt
-
-# Run only routing benchmarks
-cargo bench --bench internal_overhead_benchmarks routing
-
-# Run only JSON operations
-cargo bench --bench internal_overhead_benchmarks json_operations
+./scripts/run-benchmarks.sh --all            # every suite
+./scripts/run-benchmarks.sh --core --open    # armature-core, then open the report
+./scripts/run-benchmarks.sh --h1             # armature-h1 parse/write/e2e
+./scripts/run-benchmarks.sh --security       # jwt + auth
+./scripts/run-benchmarks.sh --validation     # armature-validation
+./scripts/run-benchmarks.sh --data           # cache, cron, queue, ratelimit, storage, http-client
+./scripts/run-benchmarks.sh --patterns       # root database/memory pattern benches
+./scripts/run-benchmarks.sh --all --baseline v0.3.0
 ```
 
 ## Framework Comparison
 
-### Micro-Benchmarks (Internal Overhead Only)
+The per-crate benchmarks measure Armature's own internals; none of them compare
+against another framework. Cross-framework numbers come from two trees, both
+out-of-workspace (each declares its own `[workspace]`) and both compile-checked
+by CI's `out-of-workspace-checks` job:
 
-The `internal_overhead_benchmarks` benchmark measures Armature's own internal
-operations — it does **not** compare against any other framework. For an
-actual cross-framework comparison, see "HTTP Benchmarks" and "Comparison
-Servers" below.
-
-- **Request Creation** - Building HttpRequest objects
-- **Response Creation** - Building HttpResponse with JSON
-- **JSON Operations** - Serialize/deserialize performance
-- **Routing** - Route matching with 10-500 routes
-- **Middleware** - Middleware creation overhead
-- **DI Resolution** - Dependency injection container performance
-- **Handler Invocation** - Async handler execution
-
-```bash
-cargo bench --bench internal_overhead_benchmarks
-```
+- `benches/comparison_servers/` — the Rust baselines (actix, axum, warp, rocket,
+  a raw hyper h1 server) plus the Node.js servers, driven by the
+  `http-benchmark` runner below.
+- `benchmarks/comparison/` — the non-Rust competitors that need their own
+  toolchains (Go fiber/gin, ASP.NET Core, Spring Boot, NestJS), with its own
+  `run_benchmarks.sh` and checked-in `results/`.
 
 ### HTTP Benchmarks
-
-For real HTTP performance, use the benchmark runner:
 
 ```bash
 # Start Armature benchmark server
@@ -235,141 +188,6 @@ View HTML reports:
 open target/criterion/report/index.html
 ```
 
-## Benchmark Categories
-
-### Core Benchmarks (`core_benchmarks.rs`)
-
-- **HTTP Request Creation** - Creating HttpRequest instances
-- **HTTP Response Creation** - ok(), with_json(), with_body()
-- **JSON Parsing** - Deserializing request bodies
-- **Form Parsing** - URL-encoded form data
-- **Middleware Chain** - Processing with 1, 5, 10, 20 middleware
-- **Routing** - Route matching with 100 routes
-- **Status Codes** - Status code lookups and checks
-- **Error Handling** - Error creation and status mapping
-
-### Security Benchmarks (`security_benchmarks.rs`)
-
-- Token signing (HS256, HS384, HS512)
-- Token verification
-- Algorithm comparison
-
-### Validation Benchmarks (`validation_benchmarks.rs`)
-
-- **Email Validation** - Valid and invalid emails
-- **URL Validation** - Various URL formats
-- **String Validators** - MinLength, MaxLength, IsAlpha, etc.
-- **Numeric Validators** - Min, Max, InRange, IsPositive
-- **Pattern Matching** - Regex validation
-
-### Data Benchmarks (`data_benchmarks.rs`)
-
-- **Queue Jobs** - Job creation, serialization
-- **Cron Expressions** - Parsing, next execution
-
-### Internal Overhead Benchmarks (`internal_overhead_benchmarks.rs`)
-
-Measures Armature's own internal overhead only — not a cross-framework
-comparison.
-
-- **Request/Response** - Object creation overhead
-- **JSON** - Serialization with small/medium/large payloads
-- **Routing** - Route matching with 10/50/100/500 routes
-- **DI** - Container operations, service resolution
-- **Handlers** - Async handler invocation patterns
-- **Full Cycle** - Complete request handling
-
-### Memory Benchmarks (`memory_benchmarks.rs`)
-
-- **String Allocations** - Small, medium, large strings, formatting, concatenation
-- **Vec Allocations** - With/without capacity, clone, nested vectors
-- **HashMap Allocations** - With/without capacity, string keys, clone
-- **Smart Pointers** - Box, Arc, Rc allocation and cloning
-- **Request/Response** - Simulated HTTP object allocation patterns
-- **Object Pool** - Pool vs direct allocation comparison
-- **Leak Patterns** - Bounded vs unbounded cache, weak references
-- **Allocation Sizes** - Various sizes from 64B to 64KB
-- **Drop Timing** - Deallocation performance for various structures
-
-### Resilience Benchmarks (`resilience_benchmarks.rs`)
-
-- **Circuit Breaker** - Creation, state checks, recording success/failure
-- **Retry** - Config creation, backoff calculation
-- **Bulkhead** - Creation, permit acquisition, stats
-- **Timeout** - Creation, wrap operations
-- **Fallback** - Single and chained fallbacks
-- **Combined Patterns** - Full resilience stack overhead
-
-### HTTP Client Benchmarks (`http_client_benchmarks.rs`)
-
-- **Configuration** - Default, builder, full config
-- **Retry Config** - None, default, backoff strategies
-- **Circuit Breaker** - State checks, recording
-- **Request Building** - GET, POST, headers
-- **Response Processing** - Status checks, URL parsing
-
-### Storage Benchmarks (`storage_benchmarks.rs`)
-
-- **File Validation** - Size, MIME type, extension checks
-- **File Metadata** - Filename sanitization, key generation, checksums
-- **Local Storage** - Config, storage creation
-- **Uploaded File** - Clone, extension, MIME parsing
-- **Bytes Operations** - Creation, slicing
-
-### Cache Benchmarks (`cache_benchmarks.rs`)
-
-- **Cache Keys** - Simple, formatted, hashed keys
-- **Memory Cache** - Create, set, get (hit/miss), delete, exists
-- **TTL Management** - Set with various TTLs
-- **Serialization** - JSON serialize/deserialize for cache values
-- **Concurrent Access** - Mixed read/write workloads
-
-### Auth Benchmarks (`auth_benchmarks.rs`)
-
-- **Password Hashing** - Hash short/long passwords, verify
-- **API Key** - Generate, parse, compare
-- **Auth Guards** - Role/permission checking
-- **User Context** - Creation, cloning
-- **OAuth2** - Token creation, serialization
-- **Session ID** - UUID generation, random bytes, hex encoding
-
-### Redis Benchmarks (`redis_benchmarks.rs`)
-
-- **Configuration** - Default, builder, full config, URL parsing
-- **Key Generation** - Simple, formatted, complex, batch keys
-- **Value Serialization** - Small/medium/large JSON
-- **Command Building** - GET, SET, HSET, MGET, pipeline
-- **Pub/Sub** - Channel names, message serialization
-- **Lua Scripts** - Simple and complex scripts
-
-### Mail Benchmarks (`mail_benchmarks.rs`)
-
-- **Email Address** - Creation, parsing, validation
-- **Email Building** - Simple, HTML, multiple recipients, headers
-- **Attachments** - Small/medium, MIME type detection
-- **Templates** - Engine creation, registration, rendering
-- **SMTP Config** - Basic, from environment
-- **Email Serialization** - Simple/complex emails
-
-### Session Benchmarks (`session_benchmarks.rs`)
-
-- **Session ID** - UUID, random bytes, validation
-- **Configuration** - Default, custom, cookie building
-- **Session Data** - Create, get, insert, remove, contains
-- **Serialization** - Simple/complex session data
-- **Cookie Parsing** - Extract session ID, parse all cookies
-- **Memory Store** - Create, get (hit/miss), delete
-
-### Rate Limit Benchmarks (`ratelimit_benchmarks.rs`)
-
-- **Configuration** - Basic, per-route, builder
-- **Key Generation** - IP, user, route, complex keys
-- **Memory Limiter** - Create, check, remaining, reset
-- **Sliding Window** - Timestamp, window calculation
-- **Token Bucket** - Creation, consumption, refill
-- **Response Headers** - Rate limit headers, retry-after
-- **Concurrent Access** - Mixed workload, hot keys
-
 ## Performance Targets
 
 ### Target Latencies (p50)
@@ -386,11 +204,9 @@ comparison.
 | Circuit Breaker Check | < 50ns | State lookup |
 | Bulkhead Acquire | < 100ns | Semaphore acquire |
 | Cache Get (memory) | < 500ns | DashMap lookup |
-| Session ID Generate | < 1μs | UUID v4 |
 | Rate Limit Check | < 100ns | Counter increment |
 | File Validation | < 1μs | Size + MIME check |
 | API Key Generate | < 5μs | Random bytes + encoding |
-| Email Build (simple) | < 500ns | String allocation |
 
 ### Throughput Targets
 
@@ -455,25 +271,28 @@ Criterion automatically detects:
 ```bash
 # Run baseline
 git checkout main
-cargo bench -- --save-baseline main
+./scripts/run-benchmarks.sh --all --baseline main
 
 # Test changes
 git checkout feature-branch
-cargo bench -- --baseline main
+./scripts/run-benchmarks.sh --all --compare main
 ```
 
 ## Adding New Benchmarks
 
-### 1. Create Benchmark File
+Add the benchmark to the crate it measures — not to the root package.
+
+### 1. Create the benchmark file in that crate
+
+`armature-<crate>/benches/my_bench.rs`:
 
 ```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_my_feature(c: &mut Criterion) {
     c.bench_function("my_feature", |b| {
-        b.iter(|| {
-            my_function(black_box(input))
-        })
+        b.iter(|| my_function(black_box(input)))
     });
 }
 
@@ -481,19 +300,42 @@ criterion_group!(benches, bench_my_feature);
 criterion_main!(benches);
 ```
 
-### 2. Add to `Cargo.toml`
+### 2. Declare it in that crate's `Cargo.toml`
+
+Crates with benchmarks set `autobenches = false`, so a new file is not picked up
+until it is declared:
 
 ```toml
 [[bench]]
-name = "my_benchmarks"
+name = "my_bench"
 harness = false
 ```
+
+Add `criterion` to that crate's `[dev-dependencies]` if it isn't there yet.
 
 ### 3. Run
 
 ```bash
-cargo bench --bench my_benchmarks
+cargo bench -p armature-<crate> --bench my_bench
 ```
+
+### 4. Wire it into CI if it should gate regressions
+
+Lint coverage is automatic: `.github/workflows/ci.yml` derives the crate list
+from `cargo metadata`, one invocation per crate, so a new benchmark-owning
+crate is picked up with no edit.
+
+Everything else is explicit, and these are all the places:
+
+| File | What to add |
+|---|---|
+| `scripts/run-benchmarks.sh` | a suite entry (`"icon\|label\|package\|bench"`) |
+| `.github/workflows/benchmark.yml` | a step, if it should be baseline-tracked; and `-p <crate>` in the weekly trend job |
+| `scripts/benchmark-compare.sh` | `-p <crate>` in `BENCH_PACKAGES` |
+| `benches/README.md` | a row in the per-crate table above |
+
+`scripts/pgo-build.sh` is deliberately *not* on that list — its workload is a
+curated hot-path subset, not everything.
 
 ## Best Practices
 
@@ -520,7 +362,7 @@ For detailed profiling:
 
 ```bash
 # CPU profiling with flamegraph
-cargo flamegraph --bench core_benchmarks
+cargo flamegraph -p armature-core --bench core
 
 # Memory profiling with DHAT
 ./scripts/memory-profile.sh dhat 30
@@ -532,12 +374,13 @@ cargo flamegraph --bench core_benchmarks
 ./scripts/memory-profile.sh heaptrack 30
 
 # Cachegrind
-valgrind --tool=cachegrind target/release/deps/core_benchmarks-*
+valgrind --tool=cachegrind target/release/deps/core-*
 ```
 
 ### Memory Leak Detection
 
-Use the memory profiling server for leak detection:
+`memory_benchmarks` times allocation shapes; it does not detect leaks. Use the
+memory profiling server for that:
 
 ```bash
 # Build with memory profiling
@@ -559,14 +402,17 @@ See `docs/memory-profiling-guide.md` for comprehensive documentation.
 
 ```bash
 cargo clean
-cargo bench
+cargo bench -p armature-core
 ```
+
+If a new file under `benches/` is ignored, it is missing a `[[bench]]` entry —
+the benchmark-owning crates set `autobenches = false` on purpose.
 
 ### Inconsistent Results
 
 - Close other applications
 - Disable CPU scaling: `sudo cpupower frequency-set --governor performance`
-- Run multiple iterations: `cargo bench -- --sample-size 1000`
+- Run multiple iterations: `cargo bench -p armature-core -- --sample-size 1000`
 
 ### HTTP Benchmark Issues
 
@@ -586,11 +432,11 @@ cargo bench
 **Quick Commands:**
 
 ```bash
-# Run all benchmarks
-cargo bench
+# Run every suite
+./scripts/run-benchmarks.sh --all
 
 # Run internal overhead benchmarks
-cargo bench --bench internal_overhead_benchmarks
+cargo bench -p armature-core --bench internal_overhead
 
 # HTTP benchmarks
 cargo run --release --example benchmark_server
@@ -600,7 +446,7 @@ oha -z 10s -c 50 http://localhost:3000/
 cargo run --release --bin http-benchmark -- --all
 
 # Generate HTML report
-cargo bench && open target/criterion/report/index.html
+./scripts/run-benchmarks.sh --all && open target/criterion/report/index.html
 ```
 
 **Performance Expectations:**

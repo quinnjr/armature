@@ -15,7 +15,7 @@
 //! server.
 //!
 //! ```bash
-//! cargo bench --bench memory_benchmarks
+//! cargo bench -p armature-framework --bench memory_benchmarks
 //! ```
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

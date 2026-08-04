@@ -131,6 +131,37 @@ jobs:
             -A dead_code \
             -A clippy::useless_vec \
             -A clippy::unwrap_or_default
+      # Criterion benchmarks are owned by the crates they measure, so the
+      # root-package `--all-targets` run above no longer reaches them.
+      #
+      # ONE CRATE PER INVOCATION, deliberately. Cargo unifies a dependency's
+      # features across every package named in a single `-p` selection, so a
+      # combined run lets one crate's `criterion = { features = ["async_tokio"] }`
+      # silently satisfy a sibling whose own manifest omits it. These are
+      # separately published crates: each must build from its own manifest
+      # alone. A combined invocation is structurally blind to that, and it is
+      # exactly how the async_tokio breakage reached review. Do not "simplify"
+      # this back into one command.
+      #
+      # No allow-list: unlike the root package, every bench here is clean under
+      # strict `-D warnings`, and the per-crate cargo-husky pre-commit hooks
+      # already gate on the strict form.
+      - name: Run Clippy on per-crate benchmarks
+        run: |
+          set -euo pipefail
+          # Derived, not hand-listed: `git ls-files` cannot see these files
+          # (they live inside submodules), so ask cargo which packages actually
+          # declare a bench target. A new benchmark-owning crate is picked up
+          # with no edit here.
+          crates=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select([.targets[].kind[]] | index("bench")) | .name' \
+            | grep -v '^armature-framework$' | sort)
+          test -n "$crates" || { echo "::error::no bench-owning crates found"; exit 1; }
+          for crate in $crates; do
+            echo "::group::clippy --benches -p $crate"
+            cargo clippy --benches -p "$crate" -- -D warnings
+            echo "::endgroup::"
+          done
 
   clippy-saml:
     name: Clippy (with SAML)

@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Benchmarks moved into the crates they measure.** The root package no longer
+  owns one 19-target benchmark suite: `core`, `arena`, `body`, `json`, `micro`,
+  `pipeline`, `resilience`, `simd_parser` and `internal_overhead` now live in
+  `armature-core`; the rest moved to `armature-jwt`, `armature-auth`,
+  `armature-validation`, `armature-cache`, `armature-ratelimit`,
+  `armature-storage` and `armature-http-client`; and `data_benchmarks` split
+  into `armature-cron`'s `cron` and `armature-queue`'s `queue`. Every benchmark
+  is now run `-p`-scoped (`cargo bench -p armature-core --bench json`), and
+  `scripts/run-benchmarks.sh` groups them into suites. The root `benches/`
+  keeps only what is not crate-specific: the cross-framework comparison servers,
+  the TechEmpower harness, the `http-benchmark` load runner, and the
+  `database_benchmarks`/`memory_benchmarks` pattern benchmarks.
+
 - **`armature-framework` `0.4.0` → `0.5.0`.** The facade re-exports
   `MethodExtractor` (renamed from `extractors::Method` to stop colliding with
   the re-exported `Method` enum), so its prelude changed with `armature-core`
