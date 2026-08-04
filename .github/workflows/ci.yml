@@ -544,16 +544,18 @@ jobs:
   # ============================================================================
   # OUT-OF-WORKSPACE CRATES
   #
-  # armature-fuzz, benches/comparison_servers/* and benchmarks/comparison each
-  # declare their own `[workspace]`, so a workspace-wide `cargo check` never
-  # touches them and they can reference an API that no longer exists — all
-  # three had accumulated exactly that. Each is checked from its own manifest
-  # here. The `http-benchmark` bin lives in the root package but no job built
-  # it either, so it is checked alongside them.
+  # benches/comparison_servers/* and benchmarks/comparison each declare their
+  # own `[workspace]`, so a workspace-wide `cargo check` never touches them and
+  # they can reference an API that no longer exists — both had accumulated
+  # exactly that. Each is checked from its own manifest here. The
+  # `http-benchmark` bin lives in the root package but no job built it either,
+  # so it is checked alongside them.
   #
-  # armature-fuzz is `cargo check`ed on nightly rather than fuzzed: this only
-  # needs to prove the targets still compile against armature-core. Actually
-  # running them is what the fuzz-smoke job below is for.
+  # The `<crate>/fuzz` crates are deliberately absent. `cargo check` on a fuzz
+  # target proves only that it compiles, and that is exactly the gap that let
+  # `armature-core`'s `routing` target sit broken until it was first actually
+  # run. Each crate's own repository fuzzes its targets now, and the fuzz-smoke
+  # job below runs them here, which subsumes checking that they build.
   # ============================================================================
 
   out-of-workspace-checks:
@@ -565,8 +567,6 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check armature-fuzz targets
-        run: cargo check --manifest-path armature-fuzz/Cargo.toml --all-targets
       - name: cargo check hyper h1 baseline server
         run: >-
           cargo check --manifest-path

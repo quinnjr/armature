@@ -23,6 +23,7 @@ members = [
     "armature-queue",
     "armature-opentelemetry",
     "armature-security",
+    "armature-session",
     "armature-acme",
     "armature-ratelimit",
     "armature-compression",
@@ -94,7 +95,7 @@ homepage = "https://quinnjr.github.io/armature"
 
 [package]
 name = "armature-framework"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.94.1"
 autobenches = false  # Disable auto-discovery, use explicit [[bench]] only
@@ -127,25 +128,25 @@ name = "armature"
 path = "src/lib.rs"
 
 [dependencies]
-armature-core = { path = "armature-core", version = "0" }
-armature-proc-macro = { path = "armature-proc-macro", version = "0" }
-armature-graphql = { path = "armature-graphql", version = "0", optional = true }
-armature-config = { path = "armature-config", version = "0", optional = true }
-armature-jwt = { path = "armature-jwt", version = "0", optional = true }
-armature-auth = { path = "armature-auth", version = "0", optional = true }
-armature-testing = { path = "armature-testing", version = "0", optional = true }
-armature-validation = { path = "armature-validation", version = "0", optional = true }
-armature-openapi = { path = "armature-openapi", version = "0", optional = true }
-armature-cache = { path = "armature-cache", version = "0", optional = true }
-armature-cron = { path = "armature-cron", version = "0", optional = true }
-armature-queue = { path = "armature-queue", version = "0", optional = true }
-armature-opentelemetry = { path = "armature-opentelemetry", version = "0", optional = true }
-armature-security = { path = "armature-security", version = "0", optional = true }
-armature-acme = { path = "armature-acme", version = "0", optional = true }
-armature-ratelimit = { path = "armature-ratelimit", version = "0", optional = true }
-armature-compression = { path = "armature-compression", version = "0", optional = true }
-armature-webhooks = { path = "armature-webhooks", version = "0", optional = true }
-armature-messaging = { path = "armature-messaging", version = "0", optional = true }
+armature-core = { path = "armature-core", version = "0.8" }
+armature-proc-macro = { path = "armature-proc-macro", version = "0.3" }
+armature-graphql = { path = "armature-graphql", version = "0.4", optional = true }
+armature-config = { path = "armature-config", version = "0.3", optional = true }
+armature-jwt = { path = "armature-jwt", version = "0.2", optional = true }
+armature-auth = { path = "armature-auth", version = "0.2", optional = true }
+armature-testing = { path = "armature-testing", version = "0.3", optional = true }
+armature-validation = { path = "armature-validation", version = "0.3", optional = true }
+armature-openapi = { path = "armature-openapi", version = "0.2", optional = true }
+armature-cache = { path = "armature-cache", version = "0.4", optional = true }
+armature-cron = { path = "armature-cron", version = "0.3", optional = true }
+armature-queue = { path = "armature-queue", version = "0.4", optional = true }
+armature-opentelemetry = { path = "armature-opentelemetry", version = "0.3", optional = true }
+armature-security = { path = "armature-security", version = "0.2", optional = true }
+armature-acme = { path = "armature-acme", version = "0.2", optional = true }
+armature-ratelimit = { path = "armature-ratelimit", version = "0.3", optional = true }
+armature-compression = { path = "armature-compression", version = "0.2", optional = true }
+armature-webhooks = { path = "armature-webhooks", version = "0.3", optional = true }
+armature-messaging = { path = "armature-messaging", version = "0.4", optional = true }
 
 # Re-export core functionality
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
@@ -244,8 +245,8 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 regex = "1.12"
 # Needed by macro_utils_example: it exercises the declarative macros from
 # armature-macros and the proc macros from armature-macros-utils directly.
-armature-macros = { path = "armature-macros", version = "0" }
-armature-macros-utils = { path = "armature-macros-utils", version = "0" }
+armature-macros = { path = "armature-macros", version = "0.2" }
+armature-macros-utils = { path = "armature-macros-utils", version = "0.3" }
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks"] }
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json"] }
@@ -627,3 +628,76 @@ path = "benches/http_benchmark_runner.rs"
 # unfiltered `cargo bench -p armature-framework` would execute it.
 bench = false
 test = false
+
+# Every crate here is also published, and each one now depends on its siblings
+# by version rather than by path so that it builds standalone in its own
+# repository. Inside this workspace that would resolve them from crates.io and
+# quietly ignore the working tree, so they are pointed back at the submodules.
+# A change in one crate is therefore seen by every crate that depends on it,
+# which is what makes this repo the integration pass over the split.
+[patch.crates-io]
+armature-acme = { path = "armature-acme" }
+armature-admin = { path = "armature-admin" }
+armature-analytics = { path = "armature-analytics" }
+armature-app = { path = "armature-app" }
+armature-audit = { path = "armature-audit" }
+armature-auth = { path = "armature-auth" }
+armature-aws = { path = "armature-aws" }
+armature-azure = { path = "armature-azure" }
+armature-azure-functions = { path = "armature-azure-functions" }
+armature-cache = { path = "armature-cache" }
+armature-cli = { path = "armature-cli" }
+armature-cloudrun = { path = "armature-cloudrun" }
+armature-collab = { path = "armature-collab" }
+armature-compression = { path = "armature-compression" }
+armature-config = { path = "armature-config" }
+armature-core = { path = "armature-core" }
+armature-cqrs = { path = "armature-cqrs" }
+armature-cron = { path = "armature-cron" }
+armature-diesel = { path = "armature-diesel" }
+armature-discovery = { path = "armature-discovery" }
+armature-distributed = { path = "armature-distributed" }
+armature-events = { path = "armature-events" }
+armature-eventsourcing = { path = "armature-eventsourcing" }
+armature-features = { path = "armature-features" }
+armature-ferron = { path = "armature-ferron" }
+armature-files = { path = "armature-files" }
+armature-gcp = { path = "armature-gcp" }
+armature-graphql = { path = "armature-graphql" }
+armature-graphql-client = { path = "armature-graphql-client" }
+armature-graphql-macros = { path = "armature-graphql-macros" }
+armature-grpc = { path = "armature-grpc" }
+armature-h1 = { path = "armature-h1" }
+armature-http-client = { path = "armature-http-client" }
+armature-i18n = { path = "armature-i18n" }
+armature-jwt = { path = "armature-jwt" }
+armature-lambda = { path = "armature-lambda" }
+armature-log = { path = "armature-log" }
+armature-macros = { path = "armature-macros" }
+armature-macros-utils = { path = "armature-macros-utils" }
+armature-mail = { path = "armature-mail" }
+armature-mcp = { path = "armature-mcp" }
+armature-messaging = { path = "armature-messaging" }
+armature-metrics = { path = "armature-metrics" }
+armature-openapi = { path = "armature-openapi" }
+armature-opensearch = { path = "armature-opensearch" }
+armature-opentelemetry = { path = "armature-opentelemetry" }
+armature-payments = { path = "armature-payments" }
+armature-proc-macro = { path = "armature-proc-macro" }
+armature-push = { path = "armature-push" }
+armature-queue = { path = "armature-queue" }
+armature-ratelimit = { path = "armature-ratelimit" }
+armature-redis = { path = "armature-redis" }
+armature-rhai = { path = "armature-rhai" }
+armature-seaorm = { path = "armature-seaorm" }
+armature-security = { path = "armature-security" }
+armature-session = { path = "armature-session" }
+armature-siem = { path = "armature-siem" }
+armature-storage = { path = "armature-storage" }
+armature-tenancy = { path = "armature-tenancy" }
+armature-testing = { path = "armature-testing" }
+armature-testkit = { path = "armature-testkit" }
+armature-toon = { path = "armature-toon" }
+armature-validation = { path = "armature-validation" }
+armature-webhooks = { path = "armature-webhooks" }
+armature-websocket = { path = "armature-websocket" }

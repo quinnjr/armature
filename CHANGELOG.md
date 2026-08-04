@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-04
+
+### Fixed
+
+- **Sibling requirements name a minor instead of `0`.** Every dependency on
+  another armature crate was declared `version = "0"`, which under Cargo's 0.x
+  rules matches any release ever made. Edition 2024 selects the MSRV-aware
+  resolver, so a consumer declaring an older `rust-version` was handed the
+  oldest version satisfying it — a project on 1.89 resolving `armature-core =
+  "0"` got `armature-core 0.2.3`, while an explicit `armature-core = "0.8"`
+  alongside it pulled 0.8.2, putting two copies of core in one graph and
+  failing on `armature_core::crypto`, which 0.2.3 does not have. 0.5.0 declared
+  all 21 of its siblings this way, so the meta-crate resolved `armature-auth
+  0.1.2`, `armature-graphql 0.2.0` and `armature-jwt 0.1.1` against current
+  everything else. Each 0.x minor here is breaking, so the requirement now
+  names one.
+
 ## [Unreleased]
 
 > As of 2026-07-30, per-crate changes are recorded in each crate's own
