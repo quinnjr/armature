@@ -102,10 +102,6 @@
 	path = armature-files
 	url = https://github.com/quinnjr/armature-files.git
 	branch = main
-[submodule "armature-fuzz"]
-	path = armature-fuzz
-	url = https://github.com/quinnjr/armature-fuzz.git
-	branch = main
 [submodule "armature-gcp"]
 	path = armature-gcp
 	url = https://github.com/quinnjr/armature-gcp.git
