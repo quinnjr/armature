@@ -15,13 +15,13 @@ rust-version = "1.94.1"
 # *different*, unrelated crate is published under the bare name `armature` —
 # so the dependency needs an explicit `package = "armature-framework"` or
 # Cargo will resolve the wrong crate entirely.
-armature = { package = "armature-framework", version = "0.5", features = ["auth", "jwt", "validation"] }
+armature = { package = "armature-framework", version = "0.6", features = ["auth", "jwt", "validation"] }
 # Both requirements pin the exact minor. 0.x minors are breaking under
 # Cargo's caret rules and this project treats them that way, so a bare "0"
-# would let a user resolve armature-core 0.9 against armature-framework 0.4
+# would let a user resolve armature-core 0.9 against armature-framework 0.5
 # and get a template that does not compile.
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
-armature-core = "0.8"
+armature-core = "0.9"
 
 # Async trait for middleware
 async-trait = "0.1"

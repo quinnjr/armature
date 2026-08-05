@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-05
+
+### Changed
+
+- **`armature-core` requirement moved `0.8` → `0.9` (breaking).**
+  `src/lib.rs` opens with `pub use armature_core::*;` — a glob re-export, so
+  every type `armature-core` exposes is part of *this* crate's public API and
+  `armature-core` is a public dependency of `armature-framework`. Under
+  Cargo's 0.x caret rules each `0.x` minor is a breaking boundary, so
+  `armature-core 0.9.0` (itself forced by `armature-h1` crossing 0.2 → 0.3, a
+  public dependency of core by the same re-export argument) is breaking for
+  anyone naming an `armature_core` type through the `armature` facade: the
+  0.8 and 0.9 types are distinct and do not unify. That is why the minor moves
+  here rather than the patch — a `0.5.2` would have handed 0.5.x consumers an
+  incompatible public API through a compatible-looking requirement.
+
 ## [0.5.1] - 2026-08-04
 
 ### Fixed

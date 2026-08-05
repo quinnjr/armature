@@ -367,12 +367,16 @@ jobs:
           # armature-core gates HTTP/3 (quinn/h3), io_uring, self-signed cert
           # generation (rcgen), and simd-json behind non-default features
           # that no root `full`/`full-with-saml` feature reaches. This row
-          # closes that gap by exercising it with --all-features. `default =
-          # []`, so `--no-default-features` would be identical to the plain
-          # default build already covered by the root `full` jobs and the
-          # coverage job; minimal is skipped.
+          # closes that gap by exercising it with --all-features.
+          #
+          # `default = ["h1-backend"]`, so the minimal step is *not* skippable
+          # here: `--no-default-features` is the only build in this workflow
+          # that compiles the hyper HTTP/1.1 serve path (the
+          # `#[cfg(not(feature = "h1-backend"))]` `listen_*_hyper` methods).
+          # That path is the documented rollback from armature-h1, so it has
+          # to be built and linted, not merely assumed to still compile.
           - crate: armature-core
-            minimal: ""
+            minimal: "--no-default-features"
           # armature-h1 gates its rustls acceptor and ALPN/h2c dispatch behind
           # the `tls` feature, which no root feature reaches. `default = []`,
           # so minimal is skipped as identical to the plain default build.
