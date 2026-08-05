@@ -1,0 +1,675 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>WebSockets &amp; SSE - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/websocket-sse.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/websocket-sse.html"><meta property="og:title" content="WebSockets &#38; SSE - Armature Rust Framework Docs"><meta property="og:description" content="This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/websocket-sse.html"><meta name="twitter:title" content="WebSockets &#38; SSE - Armature Rust Framework Docs"><meta name="twitter:description" content="This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/websocket-sse.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/websocket-sse.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"WebSockets & SSE","item":"https://quinnjr.github.io/armature/docs/websocket-sse"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/websocket-sse","headline":"WebSockets & SSE","name":"WebSockets & SSE","description":"This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication.","url":"https://quinnjr.github.io/armature/docs/websocket-sse","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Real-Time","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/websocket-sse"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse" class="active"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>WebSocket and Server-Sent Events Guide</h1>
+<p>This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication.</p>
+<h2>Overview</h2>
+<p>Armature provides built-in support for two real-time communication patterns:</p>
+<ol>
+<li><strong>WebSockets</strong> - Full-duplex, bidirectional communication</li>
+<li><strong>Server-Sent Events (SSE)</strong> - Server-to-client streaming</li>
+</ol>
+<h2>WebSocket Support</h2>
+<p>WebSocket support lives in the standalone <code>armature-websocket</code> crate. It is a
+genuine <code>tokio-tungstenite</code>-based server: it binds its own TCP listener,
+performs the WebSocket upgrade handshake, and manages connections and rooms
+directly. It runs <em>alongside</em> your Armature HTTP application rather than as
+an upgrade path off an existing HTTP route — the two share state (e.g. a
+<code>RoomManager</code>) so an HTTP endpoint and a real WebSocket client can interact
+with the same rooms.</p>
+<p>The runnable reference for everything in this section is
+<a href="../examples/websocket_chat.rs"><code>examples/websocket_chat.rs</code></a>, a chat server
+that was built against and tested with a real WebSocket client. Run it with:</p>
+<pre><code class="language-bash">cargo run --example websocket_chat
+</code></pre>
+<h3>Core Components</h3>
+<h4>Message</h4>
+<p>The wire-level message type. It carries a <code>message_type</code> and a <code>payload</code>, with
+constructors and helpers for each kind:</p>
+<pre><code class="language-rust">use armature_websocket::Message;
+
+let text = Message::text("Hello!");
+let binary = Message::binary(vec![1, 2, 3]);
+let json = Message::json(&amp;my_value)?; // serializes to a Text message
+
+// Inspecting a received message
+if let Some(text) = message.as_text() {
+    // ...
+}
+let bytes: &amp;[u8] = message.as_bytes();
+message.is_text();
+message.is_binary();
+message.is_ping();
+message.is_pong();
+message.is_close();
+
+// Deserializing a JSON payload
+let value: MyType = message.parse_json()?;
+</code></pre>
+<h4>Connection</h4>
+<p>A handle to a single, live WebSocket connection. Connections are created
+internally by the server as clients connect; you get one back from a
+<code>RoomManager</code> by connection ID:</p>
+<pre><code class="language-rust">use armature_websocket::RoomManager;
+
+if let Some(connection) = room_manager.get_connection(connection_id) {
+    connection.send_text("Private message")?;
+    connection.send_json(&amp;payload)?;
+    connection.is_open();
+    connection.close();
+}
+</code></pre>
+<p><code>Connection::send</code>, <code>send_text</code>, <code>send_binary</code>, and <code>send_json</code> are all
+synchronous — they hand the message to an internal channel that a background
+writer task drains, so there is no <code>.await</code> on the send side.</p>
+<h4>Room and RoomManager</h4>
+<p><code>Room</code> tracks membership for a single named room; <code>RoomManager</code> owns every
+room and connection and is the type you actually interact with:</p>
+<pre><code class="language-rust">use armature_websocket::RoomManager;
+use std::sync::Arc;
+
+let rooms = Arc::new(RoomManager::new());
+
+// Membership
+rooms.join_room(connection_id, "lobby")?;   // creates "lobby" if needed
+rooms.leave_room(connection_id, "lobby")?;
+
+// Broadcasting
+let sent = rooms.broadcast_to_room("lobby", Message::text("hi"))?;           // -&gt; usize delivered
+let sent = rooms.broadcast_to_room_except("lobby", message, connection_id)?; // skip the sender
+let sent = rooms.broadcast_all(message);                                     // every connection, every room
+
+// Inspecting a room
+if let Some(room) = rooms.get_room("lobby") {
+    let member_count = room.len();
+    let member_ids = room.members();
+}
+
+// Bookkeeping
+rooms.room_ids();
+rooms.connection_ids();
+rooms.connection_count();
+rooms.room_count();
+</code></pre>
+<p><code>join_room</code>/<code>leave_room</code>/<code>broadcast_to_room</code>/<code>broadcast_to_room_except</code> are all
+synchronous and return a <code>WebSocketResult&lt;T&gt;</code> (<code>Err(WebSocketError::RoomNotFound(_))</code>
+or <code>Err(WebSocketError::ConnectionNotFound(_))</code> on bad IDs) — there is no <code>.await</code>.</p>
+<h4>WebSocketHandler</h4>
+<p>Your application logic lives in a <code>WebSocketHandler</code> implementation. Only
+<code>on_message</code> is required; the rest have no-op or sensible default
+implementations:</p>
+<pre><code class="language-rust">use armature_websocket::{Message, WebSocketError, WebSocketHandler};
+use async_trait::async_trait;
+
+#[derive(Clone, Default)]
+struct ChatHandler;
+
+#[async_trait]
+impl WebSocketHandler for ChatHandler {
+    async fn on_connect(&amp;self, connection_id: &amp;str) {
+        println!("{connection_id} connected");
+    }
+
+    async fn on_message(&amp;self, connection_id: &amp;str, message: Message) {
+        // Handle an incoming frame (see examples/websocket_chat.rs for a
+        // full join/chat/leave protocol built on top of this).
+    }
+
+    async fn on_disconnect(&amp;self, connection_id: &amp;str) {
+        println!("{connection_id} disconnected");
+    }
+
+    async fn on_error(&amp;self, connection_id: &amp;str, error: &amp;WebSocketError) {
+        eprintln!("{connection_id} error: {error}");
+    }
+}
+</code></pre>
+<p><code>armature_websocket::LoggingHandler</code> is a ready-made no-op handler that just
+logs connect/message/disconnect events, useful for smoke-testing a server.</p>
+<h4>WebSocketServer</h4>
+<p>Ties a <code>WebSocketHandler</code> to a bound TCP listener and drives the accept loop:</p>
+<pre><code class="language-rust">use armature_websocket::{RoomManager, WebSocketServerBuilder};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+let bind_addr: SocketAddr = "0.0.0.0:3006".parse().unwrap();
+let server = WebSocketServerBuilder::new()
+    .bind_addr(bind_addr)
+    .max_message_size(64 * 1024)
+    .build(ChatHandler::default());
+
+// The server owns a RoomManager; clone the Arc out so other parts of your
+// app (e.g. an HTTP controller) can join/broadcast into the same rooms.
+let rooms: Arc&lt;RoomManager&gt; = Arc::clone(server.room_manager());
+
+tokio::spawn(async move {
+    if let Err(e) = server.run().await {
+        eprintln!("WebSocket server error: {e}");
+    }
+});
+</code></pre>
+<h3>Usage Example</h3>
+<p>The pattern below mirrors <code>examples/websocket_chat.rs</code>: a real
+<code>WebSocketServer</code> running next to the Armature HTTP application, sharing one
+<code>RoomManager</code> so an HTTP-posted message reaches connected WebSocket clients
+and vice versa.</p>
+<h4>1. Define the handler</h4>
+<pre><code class="language-rust">use armature_websocket::{Message, RoomManager, WebSocketError, WebSocketHandler};
+use async_trait::async_trait;
+use std::sync::{Arc, OnceLock};
+
+static CHAT_ROOMS: OnceLock&lt;Arc&lt;RoomManager&gt;&gt; = OnceLock::new();
+
+fn chat_rooms() -&gt; &amp;'static Arc&lt;RoomManager&gt; {
+    CHAT_ROOMS.get().expect("WebSocket server must be started first")
+}
+
+#[derive(Clone, Default)]
+struct ChatHandler;
+
+#[async_trait]
+impl WebSocketHandler for ChatHandler {
+    async fn on_message(&amp;self, connection_id: &amp;str, message: Message) {
+        let Some(text) = message.as_text() else { return };
+        // Parse `text` into your own protocol and call
+        // chat_rooms().join_room(...) / .broadcast_to_room(...) as needed.
+    }
+
+    async fn on_disconnect(&amp;self, connection_id: &amp;str) {
+        // RoomManager::unregister_connection (called by the server right
+        // after this hook returns) already removes the connection from
+        // every room it was a member of.
+    }
+}
+</code></pre>
+<h4>2. Start the WebSocket server and publish its RoomManager</h4>
+<pre><code class="language-rust">use armature_websocket::WebSocketServerBuilder;
+use std::net::SocketAddr;
+
+fn start_ws_server() {
+    let bind_addr = SocketAddr::from(([0, 0, 0, 0], 3006));
+    let server = WebSocketServerBuilder::new()
+        .bind_addr(bind_addr)
+        .build(ChatHandler::default());
+
+    CHAT_ROOMS
+        .set(Arc::clone(server.room_manager()))
+        .expect("start_ws_server must only be called once");
+
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+}
+</code></pre>
+<h4>3. Create an injectable service and controller that share the same rooms</h4>
+<pre><code class="language-rust">use armature::prelude::*;
+
+#[injectable]
+#[derive(Default, Clone)]
+struct ChatService;
+
+impl ChatService {
+    async fn broadcast_to_room(&amp;self, room: &amp;str, text: &amp;str) -&gt; Result&lt;usize, Error&gt; {
+        let payload = Message::text(text);
+        match chat_rooms().broadcast_to_room(room, payload) {
+            Ok(sent) =&gt; Ok(sent),
+            Err(WebSocketError::RoomNotFound(_)) =&gt; Ok(0), // no clients yet, not an error
+            Err(e) =&gt; Err(Error::Internal(e.to_string())),
+        }
+    }
+}
+
+#[controller("/chat")]
+#[derive(Default, Clone)]
+struct ChatController {
+    chat_service: ChatService,
+}
+
+#[routes]
+impl ChatController {
+    #[post("/:room/message")]
+    async fn send_message(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        let room = req.param("room").ok_or_else(|| Error::Validation("Missing room".into()))?;
+        let body: serde_json::Value = req.json()?;
+        let delivered = self.chat_service.broadcast_to_room(room, &amp;body.to_string()).await?;
+        HttpResponse::json(&amp;serde_json::json!({ "delivered_to": delivered }))
+    }
+}
+</code></pre>
+<h4>4. Register in the module and start both servers</h4>
+<pre><code class="language-rust">#[module(
+    providers: [ChatService],
+    controllers: [ChatController]
+)]
+#[derive(Default, Clone)]
+struct AppModule;
+
+#[tokio::main]
+async fn main() {
+    start_ws_server();
+
+    let app = Application::create::&lt;AppModule&gt;().await;
+    app.listen(3005).await.unwrap();
+}
+</code></pre>
+<p>See <code>examples/websocket_chat.rs</code> for the complete, working version of this
+example, including a full JSON-based join/chat/leave protocol.</p>
+<h3>Broadcasting Patterns</h3>
+<h4>Room-based Broadcasting</h4>
+<pre><code class="language-rust">// Send to everyone in a specific room
+let sent = rooms.broadcast_to_room("room-1", Message::json(&amp;event)?)?;
+</code></pre>
+<h4>Targeted Messaging</h4>
+<pre><code class="language-rust">// Send to one specific, already-connected client
+if let Some(connection) = rooms.get_connection(connection_id) {
+    connection.send_text("Private message")?;
+}
+</code></pre>
+<h4>Excluding the Sender</h4>
+<pre><code class="language-rust">// Notify everyone in the room except the connection that triggered it
+let sent = rooms.broadcast_to_room_except("room-1", Message::json(&amp;event)?, connection_id)?;
+</code></pre>
+<h4>Global Broadcasting</h4>
+<pre><code class="language-rust">// Broadcast to every connection on the server, regardless of room
+let sent = rooms.broadcast_all(Message::json(&amp;event)?);
+</code></pre>
+<h2>Server-Sent Events (SSE)</h2>
+<h3>Core Components</h3>
+<h4>ServerSentEvent</h4>
+<p>Represents an SSE event:</p>
+<pre><code class="language-rust">// Simple message
+let event = ServerSentEvent::new("Hello".to_string());
+
+// Typed event
+let event = ServerSentEvent::with_event(
+    "user_joined".to_string(),
+    "Alice joined".to_string()
+);
+
+// Full event
+let event = ServerSentEvent::full(
+    "123".to_string(),        // ID
+    "notification".to_string(), // Event type
+    "You have mail".to_string(), // Data
+    5000                        // Retry (ms)
+);
+</code></pre>
+<h4>SseStream</h4>
+<p>Single client SSE stream:</p>
+<pre><code class="language-rust">let (stream, receiver) = SseStream::new();
+
+// Send events
+stream.send_message("Hello".to_string()).await?;
+stream.send_event("update".to_string(), "Data".to_string()).await?;
+stream.send_json(&amp;data).await?;
+
+// Keep-alive
+stream.send_keep_alive().await?;
+</code></pre>
+<h4>SseBroadcaster</h4>
+<p>Broadcast SSE to multiple clients:</p>
+<pre><code class="language-rust">let broadcaster = Arc::new(SseBroadcaster::new());
+
+// Register clients
+let stream1 = broadcaster.register().await;
+let stream2 = broadcaster.register().await;
+
+// Broadcast to all
+broadcaster.broadcast_message("Update".to_string()).await?;
+broadcaster.broadcast_json(&amp;data).await?;
+
+// Get client count
+let count = broadcaster.client_count().await;
+
+// Auto keep-alive
+broadcaster.clone().start_keep_alive(Duration::from_secs(30));
+</code></pre>
+<h3>Usage Example</h3>
+<h4>1. Create an SSE Service</h4>
+<pre><code class="language-rust">#[injectable]
+#[derive(Clone)]
+struct StockTickerService {
+    broadcaster: Arc&lt;SseBroadcaster&gt;,
+}
+
+impl Default for StockTickerService {
+    fn default() -&gt; Self {
+        let broadcaster = Arc::new(SseBroadcaster::new());
+
+        // Start broadcasting stock prices
+        let broadcaster_clone = broadcaster.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+            loop {
+                interval.tick().await;
+
+                let price = StockPrice {
+                    symbol: "AAPL".to_string(),
+                    price: 150.0,
+                };
+
+                let event = ServerSentEvent::with_event(
+                    "price".to_string(),
+                    serde_json::to_string(&amp;price).unwrap(),
+                );
+
+                let _ = broadcaster_clone.broadcast(event).await;
+            }
+        });
+
+        // Start keep-alive
+        broadcaster.clone().start_keep_alive(Duration::from_secs(15));
+
+        Self { broadcaster }
+    }
+}
+</code></pre>
+<h4>2. Create an SSE Controller</h4>
+<pre><code class="language-rust">#[controller("/events")]
+#[derive(Default, Clone)]
+struct EventsController {
+    stock_ticker: StockTickerService,
+}
+
+impl EventsController {
+    async fn subscribe_stocks(&amp;self) -&gt; ReceiverStream&lt;Result&lt;String, Error&gt;&gt; {
+        self.stock_ticker.broadcaster.register().await
+    }
+}
+</code></pre>
+<h3>Client-Side Usage</h3>
+<h4>JavaScript</h4>
+<pre><code class="language-javascript">// Connect to SSE endpoint
+const source = new EventSource('http://localhost:3000/events/stocks');
+
+// Listen for specific events
+source.addEventListener('price', (event) =&gt; {
+    const data = JSON.parse(event.data);
+    console.log('Stock price:', data);
+});
+
+// Listen for all events
+source.onmessage = (event) =&gt; {
+    console.log('Message:', event.data);
+};
+
+// Handle errors
+source.onerror = (error) =&gt; {
+    console.error('SSE error:', error);
+};
+
+// Close connection
+source.close();
+</code></pre>
+<h4>curl</h4>
+<pre><code class="language-bash"># Subscribe to SSE stream (-N for no buffering)
+curl -N http://localhost:3000/events/stocks
+</code></pre>
+<h2>Comparison: WebSocket vs SSE</h2>
+<h3>Use WebSockets When:</h3>
+<p>✅ You need bidirectional communication
+✅ Low latency is critical
+✅ Binary data transfer is required
+✅ Building chat applications
+✅ Real-time collaborative editing
+✅ Gaming or interactive applications</p>
+<h3>Use SSE When:</h3>
+<p>✅ Server → Client communication only
+✅ Text-based data is sufficient
+✅ Simple implementation needed
+✅ Automatic reconnection desired
+✅ Event streaming (stocks, notifications)
+✅ Progress updates
+✅ Live feeds</p>
+<h2>Best Practices</h2>
+<h3>WebSocket Best Practices</h3>
+<ol>
+<li><strong>Connection Management</strong></li>
+</ol>
+<p><code>RoomManager</code> already tracks every registered connection and its room
+memberships for you (<code>register_connection</code>/<code>unregister_connection</code>, called by
+<code>WebSocketServer</code> itself). Keep any <em>application-level</em> per-connection state
+(like <code>examples/websocket_chat.rs</code>'s <code>Session</code>) in your own map keyed by
+connection ID, and clean it up in <code>on_disconnect</code>:</p>
+<pre><code class="language-rust">// Application-level session state, separate from RoomManager's own bookkeeping
+let mut sessions: HashMap&lt;String, Session&gt; = HashMap::new();
+
+// Clean up in WebSocketHandler::on_disconnect
+sessions.remove(connection_id);
+</code></pre>
+<ol>
+<li><strong>Error Handling</strong></li>
+</ol>
+<pre><code class="language-rust">// Connection::send_text is synchronous - no `.await`
+if let Err(e) = connection.send_text(msg) {
+    eprintln!("Failed to send: {}", e);
+    // The connection is almost certainly closed/dead; no need to manually
+    // remove it from RoomManager - on_disconnect + unregister_connection
+    // handles that once the server's connection loop notices.
+}
+</code></pre>
+<ol>
+<li><strong>Rate Limiting</strong></li>
+</ol>
+<pre><code class="language-rust">// Limit message rate
+let mut last_message = Instant::now();
+if last_message.elapsed() &lt; Duration::from_millis(100) {
+    return Err(Error::Validation("Too many messages".into()));
+}
+</code></pre>
+<ol>
+<li><strong>Authentication</strong></li>
+</ol>
+<pre><code class="language-rust">// Validate before allowing a connection to join a room, e.g. as part of
+// handling a `join` message in WebSocketHandler::on_message.
+fn validate_connection(token: &amp;str) -&gt; Result&lt;UserId, Error&gt; {
+    verify_token(token)
+}
+</code></pre>
+<h3>SSE Best Practices</h3>
+<ol>
+<li><strong>Keep-Alive</strong></li>
+</ol>
+<pre><code class="language-rust">// Send periodic keep-alive
+broadcaster.start_keep_alive(Duration::from_secs(30));
+</code></pre>
+<ol>
+<li><strong>Event IDs</strong></li>
+</ol>
+<pre><code class="language-rust">// Use IDs for resumability
+let mut id = 0;
+loop {
+    id += 1;
+    let event = ServerSentEvent {
+        id: Some(id.to_string()),
+        event: Some("update".into()),
+        data: "...".into(),
+        retry: None,
+    };
+}
+</code></pre>
+<ol>
+<li><strong>Retry Configuration</strong></li>
+</ol>
+<pre><code class="language-rust">// Set retry interval
+let event = ServerSentEvent {
+    retry: Some(5000), // 5 seconds
+    ..Default::default()
+};
+</code></pre>
+<ol>
+<li><strong>Clean Up Disconnected Clients</strong></li>
+</ol>
+<pre><code class="language-rust">// Remove closed connections periodically
+let mut clients = broadcaster.clients.write().await;
+clients.retain(|tx| !tx.is_closed());
+</code></pre>
+<h2>Performance Considerations</h2>
+<h3>WebSocket Performance</h3>
+<ul>
+<li><strong>Memory:</strong> ~2KB per connection</li>
+<li><strong>CPU:</strong> Minimal when idle</li>
+<li><strong>Latency:</strong> &lt; 1ms typically</li>
+<li><strong>Throughput:</strong> Depends on message size</li>
+</ul>
+<h3>SSE Performance</h3>
+<ul>
+<li><strong>Memory:</strong> ~1KB per client</li>
+<li><strong>CPU:</strong> Low overhead</li>
+<li><strong>Latency:</strong> 1-2ms typically</li>
+<li><strong>Throughput:</strong> Limited by HTTP/1.1</li>
+</ul>
+<h3>Scaling</h3>
+<h4>Horizontal Scaling</h4>
+<p>Use Redis pub/sub for multi-server setups:</p>
+<pre><code class="language-rust">// Subscribe to Redis channel
+let mut pubsub = redis_client.get_async_connection().await?;
+pubsub.subscribe("chat:room1").await?;
+
+// Forward to WebSocket clients in the matching local room. RoomManager's
+// broadcast methods are synchronous, so no `.await` here.
+let mut stream = pubsub.on_message();
+while let Some(msg) = stream.next().await {
+    let payload: String = msg.get_payload()?;
+    rooms.broadcast_to_room("room1", Message::text(payload))?;
+}
+</code></pre>
+<h4>Connection Limits</h4>
+<pre><code class="language-rust">// Limit connections per room. Room::len() is synchronous.
+const MAX_CONNECTIONS: usize = 1000;
+
+if let Some(room) = rooms.get_room(room_id) {
+    if room.len() &gt;= MAX_CONNECTIONS {
+        return Err(Error::Internal("Room full".into()));
+    }
+}
+</code></pre>
+<h2>Testing</h2>
+<h3>Unit Testing</h3>
+<p><code>Connection</code>s are created internally by <code>WebSocketServer</code> as clients connect
+(there is no public constructor), so exercising room/broadcast logic in a
+unit test means spinning up a real server on a loopback port and connecting
+with a WebSocket client, exactly like <code>armature-websocket</code>'s own test suite
+does:</p>
+<pre><code class="language-rust">use armature_websocket::{Message, WebSocketServerBuilder};
+use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn test_websocket_broadcast() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = WebSocketServerBuilder::new()
+        .bind_addr(addr)
+        .build(ChatHandler::default());
+    let rooms = Arc::clone(server.room_manager());
+
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let url = format!("ws://{addr}");
+    let (mut ws1, _) = tokio_tungstenite::connect_async(&amp;url).await.unwrap();
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&amp;url).await.unwrap();
+
+    // Wait for both connections to register, then join them to a room
+    // (in a real handler this happens in response to a client message).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for id in rooms.connection_ids() {
+        rooms.join_room(&amp;id, "test").unwrap();
+    }
+
+    assert_eq!(rooms.get_room("test").unwrap().len(), 2);
+
+    let sent = rooms.broadcast_to_room("test", Message::text("Hello")).unwrap();
+    assert_eq!(sent, 2);
+}
+</code></pre>
+<h3>Integration Testing</h3>
+<pre><code class="language-rust">#[tokio::test]
+async fn test_sse_stream() {
+    let broadcaster = Arc::new(SseBroadcaster::new());
+    let mut stream = broadcaster.register().await;
+
+    // Broadcast message
+    broadcaster.broadcast_message("Test".to_string()).await.unwrap();
+
+    // Receive message
+    let msg = stream.next().await.unwrap().unwrap();
+    assert!(msg.contains("Test"));
+}
+</code></pre>
+<h2>Troubleshooting</h2>
+<h3>WebSocket Issues</h3>
+<p><strong>Connection fails:</strong></p>
+<ul>
+<li>Check HTTP → WebSocket upgrade</li>
+<li>Verify protocol headers</li>
+<li>Check firewall/proxy settings</li>
+</ul>
+<p><strong>Messages not received:</strong></p>
+<ul>
+<li>Verify connection is open</li>
+<li>Check error logs</li>
+<li>Test with simple echo server</li>
+</ul>
+<h3>SSE Issues</h3>
+<p><strong>Stream disconnects:</strong></p>
+<ul>
+<li>Implement keep-alive</li>
+<li>Check server timeout settings</li>
+<li>Verify HTTP/1.1 support</li>
+</ul>
+<p><strong>Messages delayed:</strong></p>
+<ul>
+<li>Disable response buffering</li>
+<li>Use <code>Content-Type: text/event-stream</code></li>
+<li>Check network conditions</li>
+</ul>
+<h2>Future Enhancements</h2>
+<p>Planned features:</p>
+<ul>
+<li><input disabled type="checkbox" /> <code>#[websocket]</code> decorator for automatic upgrade</li>
+<li><input disabled type="checkbox" /> <code>#[sse]</code> decorator for streaming responses</li>
+<li><input disabled type="checkbox" /> Built-in authentication middleware</li>
+<li><input disabled type="checkbox" /> Rate limiting decorators</li>
+<li><input disabled type="checkbox" /> Redis adapter for clustering</li>
+<li><input disabled type="checkbox" /> Compression support</li>
+<li><input disabled type="checkbox" /> GraphQL subscription support</li>
+</ul>
+<h2>Summary</h2>
+<p>Armature provides comprehensive real-time communication support:</p>
+<p>✅ <strong>WebSocket</strong> - Full-duplex communication with rooms and broadcasting
+✅ <strong>SSE</strong> - Efficient server-to-client streaming
+✅ <strong>Type-Safe</strong> - Compile-time verified message types
+✅ <strong>Easy to Use</strong> - Simple, intuitive APIs
+✅ <strong>Scalable</strong> - Designed for production use
+✅ <strong>Well-Tested</strong> - Comprehensive test coverage</p>
+<p>Both WebSocket and SSE integrate seamlessly with Armature's dependency injection system, making it easy to build real-time features into your applications.</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

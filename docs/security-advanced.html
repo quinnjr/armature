@@ -1,0 +1,234 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Advanced Security - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/security-advanced.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/security-advanced.html"><meta property="og:title" content="Advanced Security - Armature Rust Framework Docs"><meta property="og:description" content="Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/security-advanced.html"><meta name="twitter:title" content="Advanced Security - Armature Rust Framework Docs"><meta name="twitter:description" content="Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/security-advanced.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/security-advanced.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Advanced Security","item":"https://quinnjr.github.io/armature/docs/security-advanced"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/security-advanced","headline":"Advanced Security","name":"Advanced Security","description":"Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing.","url":"https://quinnjr.github.io/armature/docs/security-advanced","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Security","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/security-advanced"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced" class="active"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Advanced Security Guide</h1>
+<p>Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#cors">CORS (Cross-Origin Resource Sharing)</a></li>
+<li><a href="#csp">Content Security Policy (CSP)</a></li>
+<li><a href="#hsts">HSTS (HTTP Strict Transport Security)</a></li>
+<li><a href="#request-signing">Request Signing with HMAC</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#security-checklist">Security Checklist</a></li>
+</ul>
+<h2>Overview</h2>
+<p>Armature provides enterprise-grade security features to protect your applications from common web vulnerabilities and attacks.</p>
+<h3>Security Features</h3>
+<ul>
+<li>✅ <strong>Granular CORS Control</strong> - Origin patterns, method restrictions, credential handling</li>
+<li>✅ <strong>Content Security Policy</strong> - Prevent XSS attacks with CSP directives</li>
+<li>✅ <strong>HSTS</strong> - Force HTTPS with preload support</li>
+<li>✅ <strong>Request Signing</strong> - HMAC-SHA256 verification with replay protection</li>
+<li>✅ <strong>Security Headers</strong> - 11+ security headers automatically applied</li>
+<li>✅ <strong>Rate Limiting</strong> - Token bucket and sliding window algorithms</li>
+</ul>
+<h2>CORS</h2>
+<h3>Basic Configuration</h3>
+<pre><code class="language-rust">use armature_security::cors::CorsConfig;
+
+// Strict production CORS
+let cors = CorsConfig::new()
+    .allow_origin("https://app.example.com")
+    .allow_origin("https://admin.example.com")
+    .allow_methods(vec!["GET", "POST", "PUT", "DELETE"])
+    .allow_headers(vec!["Content-Type", "Authorization"])
+    .allow_credentials(true)
+    .max_age(3600); // 1 hour preflight cache
+</code></pre>
+<h3>Origin Patterns (Regex)</h3>
+<p>Allow multiple subdomains with regex patterns:</p>
+<pre><code class="language-rust">let cors = CorsConfig::new()
+    // Allow all subdomains of example.com
+    .allow_origin_regex(r"https://.*\.example\.com").unwrap()
+    // Allow multiple TLDs
+    .allow_origin_regex(r"https://app\.(com|net|org)").unwrap();
+</code></pre>
+<h3>Development vs Production</h3>
+<pre><code class="language-rust">// ❌ Development only - allows all origins
+let cors = CorsConfig::permissive();
+
+// ✅ Production - specific origins only
+let cors = CorsConfig::new()
+    .allow_origin("https://app.example.com")
+    .allow_credentials(true);
+</code></pre>
+<h2>CSP</h2>
+<h3>Basic Configuration</h3>
+<pre><code class="language-rust">use armature_security::content_security_policy::CspConfig;
+
+let csp = CspConfig::new()
+    .default_src(vec!["'self'".to_string()])
+    .script_src(vec![
+        "'self'".to_string(),
+        "https://cdn.example.com".to_string()
+    ])
+    .style_src(vec![
+        "'self'".to_string(),
+        "https://fonts.googleapis.com".to_string()
+    ])
+    .img_src(vec![
+        "'self'".to_string(),
+        "data:".to_string(),
+        "https:".to_string()
+    ]);
+</code></pre>
+<h3>CSP Directives</h3>
+<p>Common directives:</p>
+<ul>
+<li><code>default-src</code> - Fallback for all directives</li>
+<li><code>script-src</code> - JavaScript sources</li>
+<li><code>style-src</code> - CSS sources</li>
+<li><code>img-src</code> - Image sources</li>
+<li><code>font-src</code> - Font sources</li>
+<li><code>connect-src</code> - AJAX, WebSocket, EventSource</li>
+<li><code>frame-src</code> - iframe sources</li>
+</ul>
+<h2>HSTS</h2>
+<h3>Basic Configuration</h3>
+<pre><code class="language-rust">use armature_security::hsts::HstsConfig;
+
+let hsts = HstsConfig::new(31536000) // 1 year in seconds
+    .include_subdomains(true)
+    .preload(true);
+</code></pre>
+<h3>Gradual Rollout</h3>
+<p>Start with a shorter max-age and increase:</p>
+<pre><code class="language-rust">// Week 1: 1 week
+let hsts = HstsConfig::new(604800);
+
+// Week 2: 1 month
+let hsts = HstsConfig::new(2592000);
+
+// Week 3+: 1 year
+let hsts = HstsConfig::new(31536000);
+</code></pre>
+<h2>Request Signing</h2>
+<h3>Basic Setup</h3>
+<pre><code class="language-rust">use armature_security::request_signing::{RequestSigner, RequestVerifier};
+
+// Server-side: Verify incoming requests
+let verifier = RequestVerifier::new("shared-secret")
+    .with_max_age(300); // 5 minutes
+
+// Client-side: Sign outgoing requests
+let signer = RequestSigner::new("shared-secret");
+</code></pre>
+<h3>Verifying Requests</h3>
+<pre><code class="language-rust">match verifier.verify(method, path, body, timestamp, signature) {
+    Ok(true) =&gt; println!("Valid signature"),
+    Ok(false) =&gt; println!("Invalid signature"),
+    Err(e) =&gt; println!("Verification error: {}", e),
+}
+</code></pre>
+<h3>Middleware</h3>
+<p>Automatically verify all requests:</p>
+<pre><code class="language-rust">use armature_security::request_signing::RequestSigningMiddleware;
+
+let signing = RequestSigningMiddleware::new("shared-secret")
+    .with_max_age(300)
+    .skip_path("/health")
+    .skip_path("/metrics");
+
+let app = Application::new()
+    .middleware(Arc::new(signing))
+    .build();
+</code></pre>
+<h2>Best Practices</h2>
+<h3>Security Checklist</h3>
+<ul>
+<li><input disabled type="checkbox" /> Use HTTPS in production (required for HSTS)</li>
+<li><input disabled type="checkbox" /> Configure strict CORS (no wildcards in production)</li>
+<li><input disabled type="checkbox" /> Enable HSTS with <code>includeSubDomains</code> and <code>preload</code></li>
+<li><input disabled type="checkbox" /> Implement Content Security Policy</li>
+<li><input disabled type="checkbox" /> Use request signing for API authentication</li>
+<li><input disabled type="checkbox" /> Enable all security headers</li>
+<li><input disabled type="checkbox" /> Set up rate limiting</li>
+<li><input disabled type="checkbox" /> Keep secrets secure (use environment variables)</li>
+<li><input disabled type="checkbox" /> Rotate secrets regularly</li>
+<li><input disabled type="checkbox" /> Monitor CSP reports</li>
+</ul>
+<h3>Production Security Stack</h3>
+<pre><code class="language-rust">use armature_security::*;
+use armature_ratelimit::*;
+
+// 1. Security Headers
+let security = SecurityMiddleware::default();
+
+// 2. CORS
+let cors = CorsConfig::new()
+    .allow_origin("https://app.example.com")
+    .allow_methods(vec!["GET", "POST", "PUT", "DELETE"])
+    .allow_credentials(true);
+
+// 3. Rate Limiting
+let rate_limit = RateLimitMiddleware::new(100, 60); // 100 req/min
+
+// 4. Request Signing
+let signing = RequestSigningMiddleware::new(std::env::var("API_SECRET")?);
+
+let app = Application::new()
+    .middleware(Arc::new(security))
+    .middleware(Arc::new(rate_limit))
+    .middleware(Arc::new(signing))
+    .build();
+</code></pre>
+<h2>Summary</h2>
+<h3>Key Takeaways</h3>
+<ol>
+<li><strong>CORS</strong>: Use specific origins in production, never wildcards with credentials</li>
+<li><strong>CSP</strong>: Start with report-only mode, gradually tighten</li>
+<li><strong>HSTS</strong>: Start with short max-age, increase over time</li>
+<li><strong>Request Signing</strong>: Use unique secrets, rotate regularly</li>
+<li><strong>Defense in Depth</strong>: Combine multiple security layers</li>
+</ol>
+<h3>Security Levels</h3>
+<p><strong>Basic</strong> (Minimum):</p>
+<ul>
+<li>Security headers (default middleware)</li>
+<li>HTTPS in production</li>
+<li>Basic CORS</li>
+</ul>
+<p><strong>Intermediate</strong>:</p>
+<ul>
+<li>Custom CSP policy</li>
+<li>HSTS with subdomains</li>
+<li>Rate limiting</li>
+</ul>
+<p><strong>Advanced</strong>:</p>
+<ul>
+<li>Request signing</li>
+<li>CSP with nonces</li>
+<li>HSTS preload</li>
+<li>Origin patterns</li>
+<li>Comprehensive monitoring</li>
+</ul>
+<hr />
+<p><strong>Security is not optional!</strong> Start with defaults and customize as needed. 🔒</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

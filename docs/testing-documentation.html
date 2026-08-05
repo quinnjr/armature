@@ -1,0 +1,448 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Testing Best Practices - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Comprehensive documentation testing for the Armature framework."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/testing-documentation.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/testing-documentation.html"><meta property="og:title" content="Testing Best Practices - Armature Rust Framework Docs"><meta property="og:description" content="Comprehensive documentation testing for the Armature framework."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/testing-documentation.html"><meta name="twitter:title" content="Testing Best Practices - Armature Rust Framework Docs"><meta name="twitter:description" content="Comprehensive documentation testing for the Armature framework."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/testing-documentation.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/testing-documentation.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Testing Best Practices","item":"https://quinnjr.github.io/armature/docs/testing-documentation"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/testing-documentation","headline":"Testing Best Practices","name":"Testing Best Practices","description":"Comprehensive documentation testing for the Armature framework.","url":"https://quinnjr.github.io/armature/docs/testing-documentation","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Testing","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/testing-documentation"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation" class="active"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Documentation Testing</h1>
+<p>Comprehensive documentation testing for the Armature framework.</p>
+<h2>Overview</h2>
+<p>All code examples in documentation are tested automatically using Rust's built-in doc test feature. This ensures that all examples compile correctly and run as expected.</p>
+<h2>Documentation Test Coverage</h2>
+<h3>Total Documentation Tests: 25</h3>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Doc Tests</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>armature-jwt</td>
+<td>5</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-cache</td>
+<td>5</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-config</td>
+<td>3</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-validation</td>
+<td>3</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-cron</td>
+<td>3</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-queue</td>
+<td>2</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-core</td>
+<td>1</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-security</td>
+<td>1</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-openapi</td>
+<td>1</td>
+<td>✅ Pass</td>
+</tr>
+<tr>
+<td>armature-opentelemetry</td>
+<td>1</td>
+<td>✅ Pass</td>
+</tr>
+</tbody></table>
+<h3>Ignored Tests: 4</h3>
+<p>Some tests use <code>ignore</code> attribute for:</p>
+<ul>
+<li>Examples requiring external dependencies</li>
+<li>Examples with complex setup requirements</li>
+<li>HTTPS examples requiring certificates</li>
+</ul>
+<h2>Running Documentation Tests</h2>
+<h3>Test All Documentation</h3>
+<pre><code class="language-bash">cargo test --doc --all
+</code></pre>
+<h3>Test Specific Package</h3>
+<pre><code class="language-bash">cargo test --doc --package armature-jwt
+cargo test --doc --package armature-config
+cargo test --doc --package armature-validation
+</code></pre>
+<h3>Show Documentation Test Output</h3>
+<pre><code class="language-bash">cargo test --doc --all -- --nocapture
+</code></pre>
+<h2>Documentation Examples by Module</h2>
+<h3>JWT Authentication (<code>armature-jwt</code>)</h3>
+<p><strong>5 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Basic JWT token creation and verification</li>
+<li>Custom claims with user data</li>
+<li>Token signing and verification</li>
+<li>Standard claims usage</li>
+<li>JwtManager API methods</li>
+</ul>
+<pre><code class="language-rust">use armature_jwt::{JwtConfig, JwtManager, StandardClaims};
+
+let config = JwtConfig::new("secret".to_string());
+let manager = JwtManager::new(config)?;
+
+let claims = StandardClaims::new()
+    .with_subject("user123".to_string())
+    .with_expiration(3600);
+
+let token = manager.sign(&amp;claims)?;
+let decoded: StandardClaims = manager.verify(&amp;token)?;
+</code></pre>
+<h3>Configuration Management (<code>armature-config</code>)</h3>
+<p><strong>3 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Basic configuration management</li>
+<li>Environment variable loading</li>
+<li>Type conversions (string, int, float, bool)</li>
+<li>Nested configuration keys</li>
+</ul>
+<pre><code class="language-rust">use armature_config::ConfigManager;
+
+let manager = ConfigManager::new();
+manager.set("app.name", "MyApp")?;
+manager.set("app.port", 3000i64)?;
+
+let name: String = manager.get("app.name")?;
+let port: i64 = manager.get("app.port")?;
+</code></pre>
+<h3>Validation Framework (<code>armature-validation</code>)</h3>
+<p><strong>3 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Basic validation with built-in validators</li>
+<li>Validation rules builder pattern</li>
+<li>Number validation (min, max, range, positive)</li>
+<li>String validation (email, length, format)</li>
+</ul>
+<pre><code class="language-rust">use armature_validation::{Validate, ValidationError, NotEmpty, IsEmail};
+
+impl Validate for UserInput {
+    fn validate(&amp;self) -&gt; Result&lt;(), Vec&lt;ValidationError&gt;&gt; {
+        let mut errors = Vec::new();
+        if let Err(e) = NotEmpty::validate(&amp;self.name, "name") {
+            errors.push(e);
+        }
+        if let Err(e) = IsEmail::validate(&amp;self.email, "email") {
+            errors.push(e);
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+}
+</code></pre>
+<h3>Cache Management (<code>armature-cache</code>)</h3>
+<p><strong>5 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Redis cache initialization</li>
+<li>Basic get/set operations</li>
+<li>TTL management</li>
+<li>Namespaced caching</li>
+<li>Cache manager usage</li>
+</ul>
+<h3>Cron Scheduling (<code>armature-cron</code>)</h3>
+<p><strong>3 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Cron expression parsing</li>
+<li>Job scheduling</li>
+<li>Scheduler management</li>
+</ul>
+<h3>Queue System (<code>armature-queue</code>)</h3>
+<p><strong>2 doc tests</strong></p>
+<p>Examples cover:</p>
+<ul>
+<li>Job queue creation</li>
+<li>Job enqueuing</li>
+<li>Worker management</li>
+</ul>
+<h3>Security Middleware (<code>armature-security</code>)</h3>
+<p><strong>1 doc test</strong></p>
+<p>Example covers:</p>
+<ul>
+<li>SecurityMiddleware configuration</li>
+<li>HSTS, CSP, and other security headers</li>
+<li>Default vs. custom security settings</li>
+</ul>
+<h2>Documentation Quality Standards</h2>
+<p>All documentation examples must:</p>
+<h3>✅ Compile Successfully</h3>
+<ul>
+<li>All examples must compile without errors</li>
+<li>Use proper imports and type annotations</li>
+<li>Include necessary error handling</li>
+</ul>
+<h3>✅ Be Self-Contained</h3>
+<ul>
+<li>Include all necessary imports</li>
+<li>Provide complete, runnable code</li>
+<li>Use <code># fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt;</code> for error handling</li>
+</ul>
+<h3>✅ Demonstrate Real Usage</h3>
+<ul>
+<li>Show realistic use cases</li>
+<li>Include proper error handling</li>
+<li>Demonstrate best practices</li>
+</ul>
+<h3>✅ Be Tested Automatically</h3>
+<ul>
+<li>Run as part of CI/CD pipeline</li>
+<li>Fail build if examples don't compile</li>
+<li>Verified on every commit</li>
+</ul>
+<h2>Doc Test Attributes</h2>
+<h3><code>no_run</code></h3>
+<p>For examples that compile but shouldn't execute:</p>
+<pre><code class="language-rust">/// ```no_run
+/// use armature_framework::prelude::*;
+/// let app = Application::create::&lt;AppModule&gt;().await;
+/// app.listen(3000).await.unwrap();
+/// ```
+</code></pre>
+<h3><code>ignore</code></h3>
+<p>For examples that should be excluded from testing:</p>
+<pre><code class="language-rust">/// ```ignore
+/// // This example requires external setup
+/// ```
+</code></pre>
+<h3><code>should_panic</code></h3>
+<p>For examples demonstrating error conditions:</p>
+<pre><code class="language-rust">/// ```should_panic
+/// panic!("This should fail");
+/// ```
+</code></pre>
+<h2>Module-Level Documentation</h2>
+<h3>Format</h3>
+<pre><code class="language-rust">//! # Module Name
+//!
+//! Brief module description.
+//!
+//! # Examples
+//!
+//! ```
+//! use module_name::Feature;
+//!
+//! # fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+//! let feature = Feature::new();
+//! feature.do_something()?;
+//! # Ok(())
+//! # }
+//! ```
+</code></pre>
+<h3>Best Practices</h3>
+<ol>
+<li><strong>Start with <code>//!</code> for module docs</strong></li>
+<li><strong>Include at least one working example</strong></li>
+<li><strong>Show the most common use case</strong></li>
+<li><strong>Keep examples concise but complete</strong></li>
+<li><strong>Test examples automatically</strong></li>
+</ol>
+<h2>Method-Level Documentation</h2>
+<h3>Format</h3>
+<pre><code class="language-rust">/// Brief description of what this method does.
+///
+/// # Arguments
+///
+/// * `arg1` - Description of arg1
+/// * `arg2` - Description of arg2
+///
+/// # Returns
+///
+/// Description of return value.
+///
+/// # Errors
+///
+/// Description of possible errors.
+///
+/// # Examples
+///
+/// ```
+/// use module_name::Type;
+///
+/// # fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+/// let instance = Type::new();
+/// instance.method(arg1, arg2)?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn method(&amp;self, arg1: Type1, arg2: Type2) -&gt; Result&lt;ReturnType, Error&gt; {
+    // Implementation
+}
+</code></pre>
+<h2>Testing Strategy</h2>
+<h3>Local Testing</h3>
+<p>Before committing:</p>
+<pre><code class="language-bash"># Test all documentation
+cargo test --doc --all
+
+# Test specific module
+cargo test --doc --package armature-jwt
+
+# Show all test output
+cargo test --doc --all -- --nocapture
+</code></pre>
+<h3>CI/CD Integration</h3>
+<p>Documentation tests run as part of the CI pipeline:</p>
+<pre><code class="language-yaml">- name: Test Documentation
+  run: cargo test --doc --all
+</code></pre>
+<h3>Pre-commit Hook</h3>
+<p>Add to <code>.git/hooks/pre-commit</code>:</p>
+<pre><code class="language-bash">#!/bin/sh
+cargo test --doc --all || exit 1
+</code></pre>
+<h2>Continuous Improvement</h2>
+<h3>Goals</h3>
+<ul>
+<li>✅ 100% of public APIs have doc comments</li>
+<li>✅ All modules have at least one code example</li>
+<li>✅ All code examples compile and run</li>
+<li>✅ Examples demonstrate real-world usage</li>
+<li>⏳ Expand examples to cover edge cases</li>
+<li>⏳ Add more advanced usage examples</li>
+<li>⏳ Include troubleshooting examples</li>
+</ul>
+<h3>Metrics</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Current</th>
+<th>Goal</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Doc test count</td>
+<td>25</td>
+<td>50+</td>
+</tr>
+<tr>
+<td>Modules with examples</td>
+<td>10</td>
+<td>20</td>
+</tr>
+<tr>
+<td>Example pass rate</td>
+<td>100%</td>
+<td>100%</td>
+</tr>
+<tr>
+<td>Public API coverage</td>
+<td>~80%</td>
+<td>100%</td>
+</tr>
+</tbody></table>
+<h2>Common Patterns</h2>
+<h3>Error Handling in Examples</h3>
+<pre><code class="language-rust">/// # Examples
+///
+/// ```
+/// use module::Type;
+///
+/// # fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+/// let result = Type::try_new()?;
+/// # Ok(())
+/// # }
+/// ```
+</code></pre>
+<h3>Hidden Setup Code</h3>
+<p>Use <code>#</code> to hide setup code:</p>
+<pre><code class="language-rust">/// ```
+/// # use module::Type;
+/// # fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+/// let value = Type::new();
+/// // User sees this
+/// value.do_something()?;
+/// # Ok(())
+/// # }
+/// ```
+</code></pre>
+<h3>Testing Private Items</h3>
+<p>Private items aren't tested by default:</p>
+<pre><code class="language-rust">#[cfg(test)]
+mod tests {
+    /// This will be tested
+    /// ```
+    /// assert!(true);
+    /// ```
+    fn private_function() {}
+}
+</code></pre>
+<h2>Troubleshooting</h2>
+<h3>Example Doesn't Compile</h3>
+<ol>
+<li>Check imports are correct</li>
+<li>Verify types match</li>
+<li>Add error handling if needed</li>
+<li>Use <code># fn main() -&gt; Result&lt;...&gt;</code> wrapper</li>
+</ol>
+<h3>Example Compiles But Fails</h3>
+<ol>
+<li>Check assertion logic</li>
+<li>Verify example data is valid</li>
+<li>Ensure dependencies are available</li>
+<li>Consider using <code>no_run</code> if appropriate</li>
+</ol>
+<h3>Example Takes Too Long</h3>
+<ol>
+<li>Use <code>no_run</code> for long-running examples</li>
+<li>Simplify the example</li>
+<li>Mock expensive operations</li>
+<li>Use timeouts if necessary</li>
+</ol>
+<h2>Summary</h2>
+<p>Documentation testing ensures that all code examples in the Armature framework:</p>
+<ul>
+<li>✅ <strong>Compile correctly</strong> - No broken examples</li>
+<li>✅ <strong>Run successfully</strong> - Examples actually work</li>
+<li>✅ <strong>Stay up-to-date</strong> - Tests fail when APIs change</li>
+<li>✅ <strong>Serve as integration tests</strong> - Real usage verification</li>
+<li>✅ <strong>Provide confidence</strong> - Users can trust the documentation</li>
+</ul>
+<p><strong>Total: 25 passing documentation tests across 10 packages</strong> 🎉</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

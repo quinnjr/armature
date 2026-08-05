@@ -1,0 +1,366 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Compression - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="HTTP response compression middleware for the Armature framework."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/compression.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/compression.html"><meta property="og:title" content="Compression - Armature Rust Framework Docs"><meta property="og:description" content="HTTP response compression middleware for the Armature framework."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/compression.html"><meta name="twitter:title" content="Compression - Armature Rust Framework Docs"><meta name="twitter:description" content="HTTP response compression middleware for the Armature framework."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/compression.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/compression.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Compression","item":"https://quinnjr.github.io/armature/docs/compression"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/compression","headline":"Compression","name":"Compression","description":"HTTP response compression middleware for the Armature framework.","url":"https://quinnjr.github.io/armature/docs/compression","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"HTTP","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/compression"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression" class="active"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Compression Module</h1>
+<p>HTTP response compression middleware for the Armature framework.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#installation">Installation</a></li>
+<li><a href="#usage">Usage</a></li>
+<li><a href="#configuration">Configuration</a></li>
+<li><a href="#compression-algorithms">Compression Algorithms</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#api-reference">API Reference</a></li>
+<li><a href="#summary">Summary</a></li>
+</ul>
+<h2>Overview</h2>
+<p>The <code>armature-compression</code> module provides middleware that automatically compresses HTTP responses to reduce bandwidth and improve page load times. It supports multiple compression algorithms and intelligently selects the best one based on client capabilities.</p>
+<h2>Features</h2>
+<ul>
+<li>✅ Multiple compression algorithms (gzip, brotli, zstd)</li>
+<li>✅ Automatic algorithm selection based on <code>Accept-Encoding</code></li>
+<li>✅ Configurable compression levels</li>
+<li>✅ Minimum size thresholds to avoid compressing small responses</li>
+<li>✅ Content-type aware compression (text, JSON, etc.)</li>
+<li>✅ Proper <code>Content-Encoding</code> and <code>Vary</code> header handling</li>
+<li>✅ Feature flags for each algorithm to minimize binary size</li>
+</ul>
+<h2>Installation</h2>
+<p>Add the compression feature to your <code>Cargo.toml</code>:</p>
+<pre><code class="language-toml">[dependencies]
+armature-framework = { version = "0.1", features = ["compression"] }
+</code></pre>
+<p>Or use specific compression algorithms:</p>
+<pre><code class="language-toml">[dependencies]
+armature-compression = { version = "0.1", features = ["gzip", "brotli"] }
+</code></pre>
+<h3>Available Features</h3>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>gzip</code></td>
+<td>Enable gzip compression</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>brotli</code></td>
+<td>Enable brotli compression</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>zstd</code></td>
+<td>Enable zstd compression</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><code>full</code></td>
+<td>Enable all algorithms</td>
+<td>❌</td>
+</tr>
+</tbody></table>
+<h2>Usage</h2>
+<h3>Basic Usage</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_compression::CompressionMiddleware;
+
+fn main() {
+    let mut chain = MiddlewareChain::new();
+
+    // Add compression with default settings (auto-select algorithm)
+    chain.use_middleware(CompressionMiddleware::new());
+}
+</code></pre>
+<h3>With Custom Configuration</h3>
+<pre><code class="language-rust">use armature_compression::{CompressionMiddleware, CompressionConfig, CompressionAlgorithm};
+
+let config = CompressionConfig::builder()
+    .algorithm(CompressionAlgorithm::Brotli)  // Force brotli
+    .level(4)                                  // Compression level
+    .min_size(1024)                           // Only compress &gt; 1KB
+    .build();
+
+let middleware = CompressionMiddleware::with_config(config);
+</code></pre>
+<h3>Quick Algorithm Selection</h3>
+<pre><code class="language-rust">use armature_compression::{CompressionMiddleware, CompressionConfig};
+
+// Use gzip
+let gzip = CompressionConfig::builder().gzip().build();
+
+// Use brotli
+let brotli = CompressionConfig::builder().brotli().build();
+
+// Use zstd (requires "zstd" feature)
+let zstd = CompressionConfig::builder().zstd().build();
+
+// Disable compression
+let none = CompressionConfig::builder().no_compression().build();
+</code></pre>
+<h2>Configuration</h2>
+<h3>CompressionConfig Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>algorithm</code></td>
+<td><code>CompressionAlgorithm</code></td>
+<td><code>Auto</code></td>
+<td>Which algorithm to use</td>
+</tr>
+<tr>
+<td><code>level</code></td>
+<td><code>u32</code></td>
+<td>Algorithm default</td>
+<td>Compression level</td>
+</tr>
+<tr>
+<td><code>min_size</code></td>
+<td><code>usize</code></td>
+<td><code>860</code></td>
+<td>Minimum response size to compress</td>
+</tr>
+<tr>
+<td><code>compressible_types</code></td>
+<td><code>Vec&lt;String&gt;</code></td>
+<td>See below</td>
+<td>Content types to compress</td>
+</tr>
+<tr>
+<td><code>compress_encoded</code></td>
+<td><code>bool</code></td>
+<td><code>false</code></td>
+<td>Compress already-encoded responses</td>
+</tr>
+</tbody></table>
+<h3>Default Compressible Types</h3>
+<p>The middleware compresses these content types by default:</p>
+<ul>
+<li><code>text/*</code> (HTML, CSS, JavaScript, plain text)</li>
+<li><code>application/json</code></li>
+<li><code>application/javascript</code></li>
+<li><code>application/xml</code></li>
+<li><code>image/svg+xml</code></li>
+<li><code>application/wasm</code></li>
+<li>Various font types</li>
+</ul>
+<h3>Adding Custom Types</h3>
+<pre><code class="language-rust">let config = CompressionConfig::builder()
+    .add_compressible_type("application/custom+json")
+    .add_compressible_type("text/vnd.custom")
+    .build();
+</code></pre>
+<h2>Compression Algorithms</h2>
+<h3>Algorithm Comparison</h3>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Ratio</th>
+<th>Speed</th>
+<th>Browser Support</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Brotli</strong></td>
+<td>Best</td>
+<td>Slower</td>
+<td>Chrome, Firefox, Edge, Safari</td>
+</tr>
+<tr>
+<td><strong>Zstd</strong></td>
+<td>Very Good</td>
+<td>Fastest</td>
+<td>Limited (Chrome 123+)</td>
+</tr>
+<tr>
+<td><strong>Gzip</strong></td>
+<td>Good</td>
+<td>Fast</td>
+<td>Universal</td>
+</tr>
+</tbody></table>
+<h3>Auto-Selection Priority</h3>
+<p>When using <code>CompressionAlgorithm::Auto</code>, the middleware selects based on <code>Accept-Encoding</code>:</p>
+<ol>
+<li><strong>Brotli</strong> (<code>br</code>) - Preferred for best compression</li>
+<li><strong>Zstd</strong> (<code>zstd</code>) - If available and no brotli</li>
+<li><strong>Gzip</strong> (<code>gzip</code>) - Universal fallback</li>
+</ol>
+<h3>Compression Levels</h3>
+<p>Each algorithm has its own level range:</p>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Min</th>
+<th>Max</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Gzip</td>
+<td>1</td>
+<td>9</td>
+<td>6</td>
+<td>Higher = smaller but slower</td>
+</tr>
+<tr>
+<td>Brotli</td>
+<td>0</td>
+<td>11</td>
+<td>4</td>
+<td>4-6 recommended for web</td>
+</tr>
+<tr>
+<td>Zstd</td>
+<td>1</td>
+<td>22</td>
+<td>3</td>
+<td>Fast default, 19+ for archives</td>
+</tr>
+</tbody></table>
+<h2>Best Practices</h2>
+<h3>1. Use Auto Selection</h3>
+<p>For most applications, auto-selection provides the best results:</p>
+<pre><code class="language-rust">// Let the middleware choose based on Accept-Encoding
+let middleware = CompressionMiddleware::new();
+</code></pre>
+<h3>2. Set Appropriate Minimum Size</h3>
+<p>Don't compress tiny responses (overhead may exceed savings):</p>
+<pre><code class="language-rust">let config = CompressionConfig::builder()
+    .min_size(860)  // Typical MTU - good default
+    .build();
+</code></pre>
+<h3>3. Choose Level Based on Use Case</h3>
+<pre><code class="language-rust">// API server: prioritize speed
+let config = CompressionConfig::builder()
+    .gzip()
+    .level(1)  // Fast compression
+    .build();
+
+// Static assets: prioritize size
+let config = CompressionConfig::builder()
+    .brotli()
+    .level(9)  // Better compression (slower)
+    .build();
+</code></pre>
+<h3>4. Don't Compress Already-Compressed Content</h3>
+<p>Images (JPEG, PNG), videos, and archives are already compressed. The default content type list excludes these.</p>
+<h2>Common Pitfalls</h2>
+<ul>
+<li>❌ <strong>Don't</strong> compress binary content (images, videos, PDFs)</li>
+<li>❌ <strong>Don't</strong> use maximum compression levels for dynamic content</li>
+<li>❌ <strong>Don't</strong> compress responses smaller than ~1KB</li>
+<li>✅ <strong>Do</strong> let the middleware handle <code>Content-Encoding</code> headers</li>
+<li>✅ <strong>Do</strong> use auto-selection for broad browser compatibility</li>
+</ul>
+<h2>API Reference</h2>
+<h3>CompressionMiddleware</h3>
+<pre><code class="language-rust">impl CompressionMiddleware {
+    /// Create with default settings
+    pub fn new() -&gt; Self;
+
+    /// Create with custom configuration
+    pub fn with_config(config: CompressionConfig) -&gt; Self;
+
+    /// Get configuration reference
+    pub fn config(&amp;self) -&gt; &amp;CompressionConfig;
+}
+</code></pre>
+<h3>CompressionConfig</h3>
+<pre><code class="language-rust">impl CompressionConfig {
+    /// Create with defaults
+    pub fn new() -&gt; Self;
+
+    /// Create a builder
+    pub fn builder() -&gt; CompressionConfigBuilder;
+
+    /// Get effective compression level
+    pub fn effective_level(&amp;self) -&gt; u32;
+
+    /// Check if content type should be compressed
+    pub fn should_compress_content_type(&amp;self, ct: &amp;str) -&gt; bool;
+
+    /// Check if size meets threshold
+    pub fn should_compress_size(&amp;self, size: usize) -&gt; bool;
+}
+</code></pre>
+<h3>CompressionAlgorithm</h3>
+<pre><code class="language-rust">pub enum CompressionAlgorithm {
+    Auto,    // Select based on Accept-Encoding
+    Gzip,    // gzip compression
+    Brotli,  // brotli compression
+    Zstd,    // zstd compression
+    None,    // No compression
+}
+
+impl CompressionAlgorithm {
+    /// Get Content-Encoding header value
+    pub fn encoding_name(&amp;self) -&gt; Option&lt;&amp;'static str&gt;;
+
+    /// Check if feature is enabled
+    pub fn is_available(&amp;self) -&gt; bool;
+
+    /// Select from Accept-Encoding header
+    pub fn select_from_accept_encoding(header: &amp;str) -&gt; Self;
+
+    /// Compress data
+    pub fn compress(&amp;self, data: &amp;[u8], level: u32) -&gt; Result&lt;Vec&lt;u8&gt;&gt;;
+}
+</code></pre>
+<h2>Summary</h2>
+<p><strong>Key Points:</strong></p>
+<ol>
+<li>Use <code>CompressionMiddleware::new()</code> for auto-selection</li>
+<li>Configure with <code>CompressionConfig::builder()</code> for custom settings</li>
+<li>Default settings work well for most web applications</li>
+<li>Brotli provides best compression, gzip has widest support</li>
+<li>Set appropriate <code>min_size</code> to avoid compressing tiny responses</li>
+</ol>
+<p><strong>Quick Start:</strong></p>
+<pre><code class="language-rust">use armature_compression::CompressionMiddleware;
+
+let mut chain = MiddlewareChain::new();
+chain.use_middleware(CompressionMiddleware::new());
+</code></pre>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

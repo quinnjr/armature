@@ -1,0 +1,545 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Lifecycle Hooks - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/lifecycle-hooks.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/lifecycle-hooks.html"><meta property="og:title" content="Lifecycle Hooks - Armature Rust Framework Docs"><meta property="og:description" content="Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/lifecycle-hooks.html"><meta name="twitter:title" content="Lifecycle Hooks - Armature Rust Framework Docs"><meta name="twitter:description" content="Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/lifecycle-hooks.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/lifecycle-hooks.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Lifecycle Hooks","item":"https://quinnjr.github.io/armature/docs/lifecycle-hooks"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/lifecycle-hooks","headline":"Lifecycle Hooks","name":"Lifecycle Hooks","description":"Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle.","url":"https://quinnjr.github.io/armature/docs/lifecycle-hooks","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Core Concepts","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/lifecycle-hooks"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks" class="active"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Lifecycle Hooks</h1>
+<p>Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle. This is inspired by NestJS and provides similar functionality for Rust web applications.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#available-hooks">Available Hooks</a></li>
+<li><a href="#hook-execution-order">Hook Execution Order</a></li>
+<li><a href="#usage">Usage</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#examples">Examples</a></li>
+</ul>
+<hr />
+<h2>Overview</h2>
+<p>Lifecycle hooks enable you to perform operations like:</p>
+<ul>
+<li><strong>Initialization</strong>: Connect to databases, start background tasks</li>
+<li><strong>Cleanup</strong>: Close connections, flush caches, stop workers</li>
+<li><strong>Monitoring</strong>: Log application state changes</li>
+<li><strong>Resource Management</strong>: Acquire and release resources safely</li>
+</ul>
+<p>All lifecycle hooks are <strong>async</strong> and return a <code>LifecycleResult</code>:</p>
+<pre><code class="language-rust">pub type LifecycleResult = Result&lt;(), Box&lt;dyn std::error::Error + Send + Sync&gt;&gt;;
+</code></pre>
+<hr />
+<h2>Available Hooks</h2>
+<h3>OnModuleInit</h3>
+<p>Called after a module's dependencies are resolved but before the application is fully bootstrapped.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait OnModuleInit: Send + Sync {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult;
+}
+</code></pre>
+<p><strong>Use cases:</strong></p>
+<ul>
+<li>Initialize database connections</li>
+<li>Load configuration</li>
+<li>Set up caches</li>
+<li>Start background tasks specific to the module</li>
+</ul>
+<h3>OnModuleDestroy</h3>
+<p>Called before a module is destroyed during application shutdown.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait OnModuleDestroy: Send + Sync {
+    async fn on_module_destroy(&amp;self) -&gt; LifecycleResult;
+}
+</code></pre>
+<p><strong>Use cases:</strong></p>
+<ul>
+<li>Close database connections</li>
+<li>Flush caches</li>
+<li>Stop background tasks</li>
+<li>Clean up temporary resources</li>
+</ul>
+<h3>OnApplicationBootstrap</h3>
+<p>Called after all modules have been initialized and the application is fully ready.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait OnApplicationBootstrap: Send + Sync {
+    async fn on_application_bootstrap(&amp;self) -&gt; LifecycleResult;
+}
+</code></pre>
+<p><strong>Use cases:</strong></p>
+<ul>
+<li>Perform post-initialization setup</li>
+<li>Start global services</li>
+<li>Log application readiness</li>
+<li>Trigger initial data synchronization</li>
+</ul>
+<h3>OnApplicationShutdown</h3>
+<p>Called during graceful application shutdown.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait OnApplicationShutdown: Send + Sync {
+    async fn on_application_shutdown(&amp;self, signal: Option&lt;String&gt;) -&gt; LifecycleResult;
+}
+</code></pre>
+<p><strong>Use cases:</strong></p>
+<ul>
+<li>Gracefully terminate long-running operations</li>
+<li>Send final metrics/logs</li>
+<li>Notify external systems of shutdown</li>
+<li>Save application state</li>
+</ul>
+<h3>BeforeApplicationShutdown</h3>
+<p>Called before the main shutdown hooks, allowing for pre-shutdown operations.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait BeforeApplicationShutdown: Send + Sync {
+    async fn before_application_shutdown(&amp;self, signal: Option&lt;String&gt;) -&gt; LifecycleResult;
+}
+</code></pre>
+<p><strong>Use cases:</strong></p>
+<ul>
+<li>Stop accepting new requests</li>
+<li>Drain request queues</li>
+<li>Notify load balancers</li>
+<li>Prepare for shutdown</li>
+</ul>
+<hr />
+<h2>Hook Execution Order</h2>
+<h3>Startup Sequence</h3>
+<pre><code>1. Module Registration
+   └─&gt; Providers and controllers registered in DI container
+
+2. OnModuleInit
+   └─&gt; Called for each service/controller (FIFO order)
+
+3. OnApplicationBootstrap
+   └─&gt; Called after all modules initialized (FIFO order)
+
+4. Application Ready
+   └─&gt; Server starts accepting requests
+</code></pre>
+<h3>Shutdown Sequence</h3>
+<pre><code>1. Shutdown Signal Received
+   └─&gt; SIGTERM, SIGINT, or manual shutdown
+
+2. BeforeApplicationShutdown
+   └─&gt; Called for pre-shutdown operations (FIFO order)
+
+3. OnApplicationShutdown
+   └─&gt; Called for graceful shutdown (LIFO/reverse order)
+
+4. OnModuleDestroy
+   └─&gt; Called for cleanup (LIFO/reverse order)
+
+5. Application Terminated
+</code></pre>
+<p><strong>Important</strong>: Destroy and shutdown hooks are called in <strong>reverse order</strong> (LIFO) to ensure proper cleanup of dependencies.</p>
+<hr />
+<h2>Usage</h2>
+<h3>Basic Implementation</h3>
+<p>Implement lifecycle hooks on your services or controllers:</p>
+<pre><code class="language-rust">use armature_core::{Provider, lifecycle::{OnModuleInit, OnModuleDestroy}};
+use async_trait::async_trait;
+
+struct DatabaseService {
+    connection: Option&lt;Connection&gt;,
+}
+
+impl Provider for DatabaseService {}
+
+#[async_trait]
+impl OnModuleInit for DatabaseService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        println!("Connecting to database...");
+        // Initialize database connection
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnModuleDestroy for DatabaseService {
+    async fn on_module_destroy(&amp;self) -&gt; LifecycleResult {
+        println!("Closing database connection...");
+        // Close database connection
+        Ok(())
+    }
+}
+</code></pre>
+<h3>Registration with Lifecycle Manager</h3>
+<pre><code class="language-rust">use armature_core::LifecycleManager;
+use std::sync::Arc;
+
+let lifecycle = LifecycleManager::new();
+let db_service = Arc::new(DatabaseService { connection: None });
+
+// Register hooks
+lifecycle.register_on_init("DatabaseService".to_string(), db_service.clone()).await;
+lifecycle.register_on_destroy("DatabaseService".to_string(), db_service).await;
+</code></pre>
+<h3>Integration with Application</h3>
+<p>The lifecycle manager is integrated into <code>Application</code>:</p>
+<pre><code class="language-rust">use armature_core::Application;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Create application (hooks are called automatically)
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    // Application runs...
+
+    // Graceful shutdown
+    app.shutdown(Some("SIGTERM".to_string())).await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>Error Handling</h3>
+<p>Lifecycle hooks can return errors, which are collected and reported:</p>
+<pre><code class="language-rust">#[async_trait]
+impl OnModuleInit for MyService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        if let Err(e) = self.connect().await {
+            return Err(format!("Failed to connect: {}", e).into());
+        }
+        Ok(())
+    }
+}
+</code></pre>
+<p>Errors don't stop the application lifecycle - all hooks are called, and errors are logged:</p>
+<pre><code>🔄 Calling module initialization hooks...
+  ✗ MyService: onModuleInit() failed: Failed to connect: Connection refused
+  ✓ OtherService: onModuleInit() completed
+</code></pre>
+<hr />
+<h2>Best Practices</h2>
+<h3>✅ Do's</h3>
+<ol>
+<li><strong>Keep hooks fast</strong>: Lifecycle hooks should complete quickly</li>
+<li><strong>Handle errors gracefully</strong>: Return meaningful errors</li>
+<li><strong>Use appropriate hooks</strong>: Choose the right hook for your use case</li>
+<li><strong>Clean up resources</strong>: Always implement both init and destroy if needed</li>
+<li><strong>Log operations</strong>: Provide visibility into what's happening</li>
+<li><strong>Make hooks idempotent</strong>: Hooks should be safe to call multiple times</li>
+</ol>
+<h3>❌ Don'ts</h3>
+<ol>
+<li><strong>Don't perform long-running operations</strong>: Startup should be fast</li>
+<li><strong>Don't ignore errors</strong>: Always handle and return errors properly</li>
+<li><strong>Don't assume order</strong>: Don't rely on specific hook execution order</li>
+<li><strong>Don't block</strong>: Use async operations, not blocking I/O</li>
+<li><strong>Don't panic</strong>: Return errors instead of panicking</li>
+</ol>
+<h3>Idempotency Example</h3>
+<pre><code class="language-rust">struct CacheService {
+    initialized: Arc&lt;RwLock&lt;bool&gt;&gt;,
+}
+
+#[async_trait]
+impl OnModuleInit for CacheService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        let mut init = self.initialized.write().await;
+
+        // Guard against multiple initializations
+        if *init {
+            println!("Cache already initialized, skipping");
+            return Ok(());
+        }
+
+        // Initialize cache
+        println!("Initializing cache...");
+        *init = true;
+        Ok(())
+    }
+}
+</code></pre>
+<hr />
+<h2>Examples</h2>
+<h3>Example 1: Database Connection Service</h3>
+<pre><code class="language-rust">use armature_core::{Provider, lifecycle::{OnModuleInit, OnModuleDestroy}};
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+struct DatabaseService {
+    connection_string: String,
+    pool: Arc&lt;RwLock&lt;Option&lt;ConnectionPool&gt;&gt;&gt;,
+}
+
+impl Provider for DatabaseService {}
+
+#[async_trait]
+impl OnModuleInit for DatabaseService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        println!("📊 Connecting to database: {}", self.connection_string);
+
+        // Create connection pool
+        let pool = create_pool(&amp;self.connection_string).await?;
+        *self.pool.write().await = Some(pool);
+
+        println!("✅ Database connection established");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnModuleDestroy for DatabaseService {
+    async fn on_module_destroy(&amp;self) -&gt; LifecycleResult {
+        println!("📊 Closing database connections...");
+
+        // Close pool
+        if let Some(pool) = self.pool.write().await.take() {
+            pool.close().await?;
+        }
+
+        println!("✅ Database connections closed");
+        Ok(())
+    }
+}
+</code></pre>
+<h3>Example 2: Background Worker</h3>
+<pre><code class="language-rust">use armature_core::{Provider, lifecycle::{OnApplicationBootstrap, OnApplicationShutdown}};
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+struct WorkerService {
+    running: Arc&lt;RwLock&lt;bool&gt;&gt;,
+    handle: Arc&lt;RwLock&lt;Option&lt;tokio::task::JoinHandle&lt;()&gt;&gt;&gt;&gt;,
+}
+
+impl Provider for WorkerService {}
+
+#[async_trait]
+impl OnApplicationBootstrap for WorkerService {
+    async fn on_application_bootstrap(&amp;self) -&gt; LifecycleResult {
+        println!("🔄 Starting background worker...");
+
+        *self.running.write().await = true;
+        let running = self.running.clone();
+
+        let handle = tokio::spawn(async move {
+            while *running.read().await {
+                // Do work
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        });
+
+        *self.handle.write().await = Some(handle);
+        println!("✅ Background worker started");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnApplicationShutdown for WorkerService {
+    async fn on_application_shutdown(&amp;self, signal: Option&lt;String&gt;) -&gt; LifecycleResult {
+        if let Some(sig) = signal {
+            println!("🛑 Stopping worker (signal: {})...", sig);
+        } else {
+            println!("🛑 Stopping worker...");
+        }
+
+        // Signal worker to stop
+        *self.running.write().await = false;
+
+        // Wait for worker to finish
+        if let Some(handle) = self.handle.write().await.take() {
+            handle.await?;
+        }
+
+        println!("✅ Worker stopped gracefully");
+        Ok(())
+    }
+}
+</code></pre>
+<h3>Example 3: Health Check Service</h3>
+<pre><code class="language-rust">use armature_core::{Provider, lifecycle::{OnApplicationBootstrap, BeforeApplicationShutdown}};
+use async_trait::async_trait;
+
+struct HealthCheckService {
+    endpoint: String,
+}
+
+impl Provider for HealthCheckService {}
+
+#[async_trait]
+impl OnApplicationBootstrap for HealthCheckService {
+    async fn on_application_bootstrap(&amp;self) -&gt; LifecycleResult {
+        println!("✅ Application ready - health checks enabled");
+
+        // Notify load balancer that we're ready
+        self.notify_ready().await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BeforeApplicationShutdown for HealthCheckService {
+    async fn before_application_shutdown(&amp;self, _signal: Option&lt;String&gt;) -&gt; LifecycleResult {
+        println!("⚠️  Marking application as unhealthy...");
+
+        // Notify load balancer to stop sending traffic
+        self.notify_shutting_down().await?;
+
+        // Wait for existing connections to drain
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        println!("✅ Application marked unhealthy, connections drained");
+        Ok(())
+    }
+}
+</code></pre>
+<h3>Example 4: Multiple Hooks on One Service</h3>
+<p>A service can implement multiple lifecycle hooks:</p>
+<pre><code class="language-rust">struct ComprehensiveService {
+    name: String,
+    initialized: Arc&lt;RwLock&lt;bool&gt;&gt;,
+}
+
+impl Provider for ComprehensiveService {}
+
+#[async_trait]
+impl OnModuleInit for ComprehensiveService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        println!("{}: Module initialization", self.name);
+        *self.initialized.write().await = true;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnApplicationBootstrap for ComprehensiveService {
+    async fn on_application_bootstrap(&amp;self) -&gt; LifecycleResult {
+        println!("{}: Application bootstrap complete", self.name);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BeforeApplicationShutdown for ComprehensiveService {
+    async fn before_application_shutdown(&amp;self, signal: Option&lt;String&gt;) -&gt; LifecycleResult {
+        println!("{}: Preparing for shutdown: {:?}", self.name, signal);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnApplicationShutdown for ComprehensiveService {
+    async fn on_application_shutdown(&amp;self, _signal: Option&lt;String&gt;) -&gt; LifecycleResult {
+        println!("{}: Shutting down", self.name);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OnModuleDestroy for ComprehensiveService {
+    async fn on_module_destroy(&amp;self) -&gt; LifecycleResult {
+        println!("{}: Module cleanup", self.name);
+        *self.initialized.write().await = false;
+        Ok(())
+    }
+}
+</code></pre>
+<hr />
+<h2>Signal Handling</h2>
+<p>The lifecycle system supports passing shutdown signals to hooks:</p>
+<pre><code class="language-rust">use tokio::signal;
+
+async fn run_with_signal_handling(app: Application) -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Wait for shutdown signal
+    tokio::select! {
+        _ = signal::ctrl_c() =&gt; {
+            println!("Received Ctrl+C");
+            app.shutdown(Some("SIGINT".to_string())).await?;
+        }
+        _ = wait_for_sigterm() =&gt; {
+            println!("Received SIGTERM");
+            app.shutdown(Some("SIGTERM".to_string())).await?;
+        }
+    }
+
+    Ok(())
+}
+</code></pre>
+<hr />
+<h2>Testing Lifecycle Hooks</h2>
+<p>You can test lifecycle hooks directly:</p>
+<pre><code class="language-rust">#[tokio::test]
+async fn test_service_lifecycle() {
+    let service = Arc::new(MyService::new());
+
+    // Test initialization
+    assert!(service.on_module_init().await.is_ok());
+    assert!(service.is_initialized().await);
+
+    // Test cleanup
+    assert!(service.on_module_destroy().await.is_ok());
+    assert!(!service.is_initialized().await);
+}
+</code></pre>
+<hr />
+<h2>Advanced Usage</h2>
+<h3>Conditional Hooks</h3>
+<p>You can implement conditional logic in hooks:</p>
+<pre><code class="language-rust">#[async_trait]
+impl OnModuleInit for MyService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        if std::env::var("SKIP_INIT").is_ok() {
+            println!("Skipping initialization (SKIP_INIT set)");
+            return Ok(());
+        }
+
+        // Normal initialization
+        self.initialize().await?;
+        Ok(())
+    }
+}
+</code></pre>
+<h3>Timeout Protection</h3>
+<p>Add timeouts to prevent hooks from hanging:</p>
+<pre><code class="language-rust">use tokio::time::{timeout, Duration};
+
+#[async_trait]
+impl OnModuleInit for MyService {
+    async fn on_module_init(&amp;self) -&gt; LifecycleResult {
+        match timeout(Duration::from_secs(30), self.initialize()).await {
+            Ok(Ok(())) =&gt; Ok(()),
+            Ok(Err(e)) =&gt; Err(e),
+            Err(_) =&gt; Err("Initialization timeout".into()),
+        }
+    }
+}
+</code></pre>
+<hr />
+<h2>Summary</h2>
+<p>Lifecycle hooks in Armature provide a powerful way to manage application state and resources:</p>
+<ul>
+<li>✅ <strong>5 hook types</strong> for different lifecycle phases</li>
+<li>✅ <strong>Async by default</strong> for modern Rust applications</li>
+<li>✅ <strong>Error handling</strong> with Result types</li>
+<li>✅ <strong>Automatic execution</strong> by the Application</li>
+<li>✅ <strong>FIFO/LIFO ordering</strong> for proper initialization and cleanup</li>
+<li>✅ <strong>Signal support</strong> for graceful shutdown</li>
+<li>✅ <strong>Testable</strong> lifecycle logic</li>
+</ul>
+<p>Use lifecycle hooks to build robust, maintainable Rust web applications with proper resource management! 🚀</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

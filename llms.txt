@@ -1,0 +1,158 @@
+# Armature Framework
+
+> Armature is a batteries-included web framework for Rust that brings the
+> architecture of NestJS and Angular to the Rust ecosystem: dependency
+> injection, decorator macros, modules, guards, interceptors and pipes, plus
+> built-in authentication, validation, caching, job queues and GraphQL.
+
+Version: 0.6.0 (pre-1.0; the public API can change between minor versions)
+Language: Rust 2024 edition, MSRV 1.94.1
+Runtime: Tokio + Hyper, async throughout
+License: Apache-2.0
+Repository: https://github.com/quinnjr/armature
+Crate: https://crates.io/crates/armature
+API reference: https://docs.rs/armature
+Documentation last updated: 2026-08-05
+
+## What Armature is for
+
+Building production HTTP APIs and microservices in Rust when you want the
+structure of an opinionated framework — DI container, module graph,
+declarative routing, guards for authorization — rather than assembling those
+yourself on top of a lower-level library. It is a peer of Actix-web, Axum and
+Rocket at the HTTP layer, and a peer of NestJS in the shape of its
+application architecture.
+
+## Key facts
+
+- Routing is declarative via proc macros: `#[controller]`, `#[get]`, `#[post]`,
+  `#[put]`, `#[delete]`, `#[patch]`, `#[options]`, `#[head]`, `#[query]`.
+- The HTTP QUERY method (a safe method that carries a request body) is
+  supported end to end, including body-keyed response caching.
+- Dependency injection is field-based: declare a service type as a struct
+  field and it is injected; services are singletons shared via `Arc`.
+- Guards fail closed. A role or permission guard requires a verified user
+  context attached by an authentication layer; it denies when none is present.
+- The workspace is 60+ crates, feature-gated. `full` enables everything except
+  SAML; `full-with-saml` additionally enables SAML (needs libxmlsec1).
+- TLS is rustls-only; no OpenSSL/native-tls dependency.
+
+## Documentation
+
+### Getting Started
+
+- [Overview](https://quinnjr.github.io/armature/docs): Armature is a batteries-included Rust web framework with NestJS-style dependency injection, decorator macros, modules, guards and interceptors. Start here.
+- [Micro-Framework Mode](https://quinnjr.github.io/armature/docs/micro-framework-guide): A lightweight, Actix-style API for building web applications without the full module/controller system.
+- [Project Templates](https://quinnjr.github.io/armature/docs/project-templates): Armature provides starter templates to help you quickly bootstrap new projects. Each template is designed for a specific use case and includes best…
+- [Configuration](https://quinnjr.github.io/armature/docs/config-guide): This guide explains how to use the configuration system in Armature, inspired by NestJS's @nestjs/config.
+- [Macros Overview](https://quinnjr.github.io/armature/docs/macro-overview): Complete reference for all macros available in Armature.
+
+### Core Concepts
+
+- [Dependency Injection](https://quinnjr.github.io/armature/docs/di-guide): This guide explains how dependency injection works in Armature and how to use it effectively.
+- [Lifecycle Hooks](https://quinnjr.github.io/armature/docs/lifecycle-hooks): Armature provides a comprehensive lifecycle hook system that allows you to execute code at specific points during the application lifecycle.
+
+### Routing
+
+- [Route Groups](https://quinnjr.github.io/armature/docs/route-groups): Comprehensive guide to organizing routes with Route Groups in Armature.
+- [Route Constraints](https://quinnjr.github.io/armature/docs/route-constraints): Comprehensive guide to validating route parameters with Route Constraints in Armature.
+- [Request Extractors](https://quinnjr.github.io/armature/docs/request-extractors): Type-safe extraction of data from HTTP requests using extractors and helper macros.
+- [Middleware](https://quinnjr.github.io/armature/docs/use-middleware): Armature provides the #[use_middleware] decorator for applying middleware to individual route handlers or entire controllers.
+- [Guards & Interceptors](https://quinnjr.github.io/armature/docs/guards-interceptors): Armature provides a powerful middleware system through Guards and Interceptors, inspired by Angular and NestJS.
+- [Using Guards](https://quinnjr.github.io/armature/docs/use-guard): Armature provides the #[use_guard] and #[guard] decorators for protecting routes with authorization checks.
+
+### HTTP
+
+- [HTTP Errors](https://quinnjr.github.io/armature/docs/http-status-errors): Armature provides comprehensive HTTP status code support and structured error handling for building robust web applications.
+- [Timeouts](https://quinnjr.github.io/armature/docs/request-timeouts): This guide covers configuring request timeouts, body size limits, and other server settings in Armature.
+- [Streaming](https://quinnjr.github.io/armature/docs/streaming-responses): Armature provides comprehensive support for streaming HTTP responses, enabling efficient delivery of large data sets, real-time data, and chunked transfers.
+- [Compression](https://quinnjr.github.io/armature/docs/compression): HTTP response compression middleware for the Armature framework.
+- [HTTPS & TLS](https://quinnjr.github.io/armature/docs/https-guide): Complete guide to adding HTTPS/TLS support to your Armature applications.
+- [SSL Certificates](https://quinnjr.github.io/armature/docs/acme-certificates): Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly…
+
+### Security
+
+- [Authentication](https://quinnjr.github.io/armature/docs/auth-guide): Complete guide to authentication and authorization in Armature using armature-auth.
+- [OAuth2 & Social Login](https://quinnjr.github.io/armature/docs/oauth2-providers): Complete guide to using OAuth2/OIDC providers with Armature authentication.
+- [Sessions](https://quinnjr.github.io/armature/docs/session-guide): Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends.
+- [Rate Limiting](https://quinnjr.github.io/armature/docs/rate-limiting): Rate limiting protects your API from abuse and ensures fair usage across all clients. The armature-ratelimit crate provides a comprehensive,…
+- [Security Best Practices](https://quinnjr.github.io/armature/docs/security-guide): Comprehensive security middleware for Armature - inspired by Helmet for Express.js.
+- [Advanced Security](https://quinnjr.github.io/armature/docs/security-advanced): Comprehensive guide to advanced security features in Armature including CORS, CSP, HSTS, and request signing.
+
+### API Features
+
+- [API Versioning](https://quinnjr.github.io/armature/docs/api-versioning): Armature provides comprehensive API versioning support with multiple strategies for version extraction and flexible version management.
+- [Pagination & Filtering](https://quinnjr.github.io/armature/docs/pagination-filtering): Comprehensive guide to pagination, sorting, filtering, search, and field selection in Armature.
+- [Content Negotiation](https://quinnjr.github.io/armature/docs/content-negotiation): This guide covers HTTP content negotiation in Armature, allowing your server to serve different representations of resources based on client preferences.
+- [HTTP Caching](https://quinnjr.github.io/armature/docs/response-caching): This guide covers HTTP response caching in Armature, including Cache-Control headers, in-memory caching, and cache invalidation.
+- [ETags](https://quinnjr.github.io/armature/docs/etag-conditional): This guide covers HTTP ETag generation and conditional request handling in Armature, enabling efficient caching and optimistic concurrency control.
+- [OpenAPI/Swagger](https://quinnjr.github.io/armature/docs/openapi-guide): Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI.
+
+### Data & Caching
+
+- [Caching Strategies](https://quinnjr.github.io/armature/docs/cache-improvements): Advanced caching features for Armature including tag-based invalidation, multi-tier caching, and cache decorators.
+- [Redis](https://quinnjr.github.io/armature/docs/redis-guide): Armature provides a unified Redis integration through armature-redis with connection pooling, pub/sub, and dependency injection.
+
+### Background Jobs
+
+- [Job Queues](https://quinnjr.github.io/armature/docs/queue-guide): Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend.
+- [Scheduled Tasks](https://quinnjr.github.io/armature/docs/cron-guide): Armature provides a robust cron job scheduler for running periodic tasks in your application.
+- [Graceful Shutdown](https://quinnjr.github.io/armature/docs/graceful-shutdown): Comprehensive guide to implementing graceful shutdown in Armature applications.
+
+### Real-Time
+
+- [WebSockets & SSE](https://quinnjr.github.io/armature/docs/websocket-sse): This guide explains how to use WebSockets and Server-Sent Events (SSE) in Armature for real-time communication.
+- [Webhooks](https://quinnjr.github.io/armature/docs/webhooks): Webhook orchestration for sending and receiving HTTP callbacks in the Armature framework.
+
+### GraphQL
+
+- [GraphQL](https://quinnjr.github.io/armature/docs/graphql-guide): This guide explains how to use GraphQL with the Armature framework, inspired by NestJS's @nestjs/graphql.
+- [GraphQL Config](https://quinnjr.github.io/armature/docs/graphql-config): Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection.
+
+### Cloud & Deployment
+
+- [Cloud SDKs](https://quinnjr.github.io/armature/docs/cloud-providers): Armature provides unified cloud provider integrations for AWS, GCP, and Azure with dynamic service loading and dependency injection.
+- [Deployment Guide](https://quinnjr.github.io/armature/docs/deployment-guide): This guide covers deploying Armature applications to production environments.
+- [Docker](https://quinnjr.github.io/armature/docs/docker-guide): This guide covers containerizing Armature applications with Docker for consistent, portable deployments.
+- [Kubernetes](https://quinnjr.github.io/armature/docs/kubernetes-guide): This guide covers deploying and operating Armature applications on Kubernetes.
+- [Scaling](https://quinnjr.github.io/armature/docs/scaling-guide): This guide covers strategies for scaling Armature applications to handle increased load.
+
+### Observability
+
+- [Logging](https://quinnjr.github.io/armature/docs/logging-guide): Comprehensive guide to Armature's logging system with JSON output by default and configurable pretty printing for development.
+- [Debug Logging](https://quinnjr.github.io/armature/docs/debug-logging): Comprehensive guide to debug logging throughout the Armature framework.
+- [Health Checks](https://quinnjr.github.io/armature/docs/health-check): Application health monitoring and Kubernetes probe support for Armature applications.
+- [Metrics](https://quinnjr.github.io/armature/docs/metrics-guide): Comprehensive guide to collecting and exposing metrics in Armature using Prometheus.
+- [Grafana Dashboards](https://quinnjr.github.io/armature/docs/grafana-dashboards): Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background…
+- [OpenTelemetry](https://quinnjr.github.io/armature/docs/opentelemetry-guide): Comprehensive observability for Armature applications with distributed tracing, metrics, and logging.
+- [Error Tracking](https://quinnjr.github.io/armature/docs/error-correlation): Comprehensive error correlation and distributed tracing for tracking errors across services and request chains.
+- [Audit Logging](https://quinnjr.github.io/armature/docs/audit-guide): Comprehensive guide to audit logging and compliance in Armature.
+
+### Testing
+
+- [Testing](https://quinnjr.github.io/armature/docs/testing-guide): Comprehensive testing utilities for Armature framework applications.
+- [Coverage](https://quinnjr.github.io/armature/docs/testing-coverage): Complete guide to testing practices, coverage measurement, and quality standards for Armature applications.
+- [Testing Best Practices](https://quinnjr.github.io/armature/docs/testing-documentation): Comprehensive documentation testing for the Armature framework.
+
+### Performance
+
+- [CPU Profiling](https://quinnjr.github.io/armature/docs/profiling-guide): Profile an Armature service with perf, flamegraph and pprof: capture a CPU profile, read the flame graph, and find the hot path in a Rust web handler.
+
+### Benchmarks
+
+- [vs Actix vs Axum](https://quinnjr.github.io/armature/docs/framework-comparison): Comprehensive performance benchmarks and feature comparison between Armature's micro-framework and the leading Rust web frameworks.
+- [vs Node.js](https://quinnjr.github.io/armature/docs/armature-vs-nodejs): Armature vs Node.js Frameworks Benchmark Guide
+- [vs Next.js](https://quinnjr.github.io/armature/docs/armature-vs-nextjs): A comprehensive guide for benchmarking Armature as a backend API compared to Next.js API routes, both serving a Next.js frontend.
+
+## Site pages
+
+- [Home](https://quinnjr.github.io/armature/): what Armature is, at a glance.
+- [Getting Started](https://quinnjr.github.io/armature/getting-started): install, scaffold and run a first API.
+- [Comparisons](https://quinnjr.github.io/armature/comparisons): Armature against Actix-web, Axum, Rocket, NestJS and Express.
+- [Roadmap](https://quinnjr.github.io/armature/roadmap): shipped, in progress and planned.
+- [FAQ](https://quinnjr.github.io/armature/faq): common questions, answered.
+
+## Optional
+
+- [Full documentation text](https://quinnjr.github.io/armature/llms-full.txt): every guide concatenated as plain markdown, for ingestion in one request.
+- [Releases](https://github.com/quinnjr/armature/releases): per-crate changelogs live in each crate's CHANGELOG.md.

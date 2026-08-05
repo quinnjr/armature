@@ -1,0 +1,516 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>HTTPS &amp; TLS - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Complete guide to adding HTTPS/TLS support to your Armature applications."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/https-guide.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/https-guide.html"><meta property="og:title" content="HTTPS &#38; TLS - Armature Rust Framework Docs"><meta property="og:description" content="Complete guide to adding HTTPS/TLS support to your Armature applications."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/https-guide.html"><meta name="twitter:title" content="HTTPS &#38; TLS - Armature Rust Framework Docs"><meta name="twitter:description" content="Complete guide to adding HTTPS/TLS support to your Armature applications."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/https-guide.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/https-guide.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"HTTPS & TLS","item":"https://quinnjr.github.io/armature/docs/https-guide"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/https-guide","headline":"HTTPS & TLS","name":"HTTPS & TLS","description":"Complete guide to adding HTTPS/TLS support to your Armature applications.","url":"https://quinnjr.github.io/armature/docs/https-guide","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"HTTP","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/https-guide"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide" class="active"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>HTTPS/TLS Guide</h1>
+<p>Complete guide to adding HTTPS/TLS support to your Armature applications.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#certificate-management">Certificate Management</a></li>
+<li><a href="#production-deployment">Production Deployment</a></li>
+<li><a href="#http-to-https-redirect">HTTP to HTTPS Redirect</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+<h2>Overview</h2>
+<p>Armature provides built-in HTTPS/TLS support using <code>rustls</code>, a modern TLS library written in Rust. This enables secure communication between clients and your server.</p>
+<h3>Features</h3>
+<ul>
+<li>✅ TLS 1.2 and TLS 1.3 support</li>
+<li>✅ HTTP/2 and HTTP/1.1 ALPN</li>
+<li>✅ Certificate loading from PEM files</li>
+<li>✅ Self-signed certificates for development</li>
+<li>✅ HTTP to HTTPS automatic redirect</li>
+<li>✅ Zero-copy TLS with tokio-rustls</li>
+</ul>
+<h2>Quick Start</h2>
+<h3>Development (Self-Signed Certificates)</h3>
+<p>For local development, you can use automatically generated self-signed certificates:</p>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+
+#[module()]
+#[derive(Default)]
+struct AppModule;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    // Generate self-signed certificate (development only!)
+    let tls_config = TlsConfig::self_signed(&amp;["localhost", "127.0.0.1"])?;
+
+    // Start HTTPS server
+    app.listen_https(8443, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<p><strong>Build with the <code>self-signed-certs</code> feature:</strong></p>
+<pre><code class="language-bash">cargo run --features self-signed-certs
+</code></pre>
+<p><strong>Test:</strong></p>
+<pre><code class="language-bash">curl -k https://localhost:8443/
+</code></pre>
+<blockquote>
+<p>⚠️ <strong>Warning</strong>: Self-signed certificates should NEVER be used in production!</p>
+</blockquote>
+<h3>Production (Real Certificates)</h3>
+<p>For production, use certificates from a trusted Certificate Authority:</p>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+
+#[module()]
+#[derive(Default)]
+struct AppModule;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    // Load real certificates
+    let tls_config = TlsConfig::from_pem_files(
+        "/etc/ssl/certs/your-cert.pem",
+        "/etc/ssl/private/your-key.pem"
+    )?;
+
+    // Start HTTPS server
+    app.listen_https(443, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h2>Certificate Management</h2>
+<h3>Loading from Files</h3>
+<p>The most common approach is to load certificates from PEM files:</p>
+<pre><code class="language-rust">use armature_core::TlsConfig;
+
+// Load from file paths
+let tls_config = TlsConfig::from_pem_files("cert.pem", "key.pem")?;
+</code></pre>
+<h3>Loading from Memory</h3>
+<p>You can also load certificates from byte arrays:</p>
+<pre><code class="language-rust">use armature_core::TlsConfig;
+
+let cert_pem = include_bytes!("../certs/cert.pem");
+let key_pem = include_bytes!("../certs/key.pem");
+
+let tls_config = TlsConfig::from_pem_bytes(cert_pem, key_pem)?;
+</code></pre>
+<h3>Certificate Formats</h3>
+<p>Armature accepts certificates in <strong>PEM format</strong>:</p>
+<ul>
+<li><strong>Certificate</strong>: <code>cert.pem</code> or <code>fullchain.pem</code></li>
+<li><strong>Private Key</strong>: <code>key.pem</code> or <code>privkey.pem</code></li>
+</ul>
+<p><strong>Example PEM Certificate:</strong></p>
+<pre><code>-----BEGIN CERTIFICATE-----
+MIIDXTCCAkWgAwIBAgIJAKJ...
+...
+-----END CERTIFICATE-----
+</code></pre>
+<p><strong>Example PEM Private Key:</strong></p>
+<pre><code>-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0...
+...
+-----END PRIVATE KEY-----
+</code></pre>
+<h3>Generating Development Certificates</h3>
+<h4>Using OpenSSL</h4>
+<pre><code class="language-bash">openssl req -x509 -newkey rsa:4096 \
+  -keyout key.pem -out cert.pem \
+  -days 365 -nodes \
+  -subj "/CN=localhost"
+</code></pre>
+<h4>Using mkcert (Recommended for Development)</h4>
+<p><a href="https://github.com/FiloSottile/mkcert">mkcert</a> automatically creates and installs a local CA:</p>
+<pre><code class="language-bash"># Install mkcert
+brew install mkcert  # macOS
+# or: choco install mkcert  # Windows
+# or: apt install mkcert  # Ubuntu
+
+# Install local CA
+mkcert -install
+
+# Generate certificate
+mkcert localhost 127.0.0.1 ::1
+</code></pre>
+<p>This creates <code>localhost+2.pem</code> and <code>localhost+2-key.pem</code>.</p>
+<h2>Production Deployment</h2>
+<h3>Let's Encrypt (Recommended)</h3>
+<p><a href="https://letsencrypt.org/">Let's Encrypt</a> provides free, automated TLS certificates.</p>
+<h4>Using Certbot</h4>
+<pre><code class="language-bash"># Install certbot
+sudo apt install certbot  # Ubuntu/Debian
+
+# Get certificate
+sudo certbot certonly --standalone -d yourdomain.com
+
+# Certificates will be in:
+# /etc/letsencrypt/live/yourdomain.com/fullchain.pem
+# /etc/letsencrypt/live/yourdomain.com/privkey.pem
+</code></pre>
+<h4>Using Armature</h4>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    let tls_config = TlsConfig::from_pem_files(
+        "/etc/letsencrypt/live/yourdomain.com/fullchain.pem",
+        "/etc/letsencrypt/live/yourdomain.com/privkey.pem"
+    )?;
+
+    app.listen_https(443, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>Certificate Renewal</h3>
+<p>Let's Encrypt certificates expire every 90 days. Set up automatic renewal:</p>
+<pre><code class="language-bash"># Test renewal
+sudo certbot renew --dry-run
+
+# Add to crontab for automatic renewal
+sudo crontab -e
+# Add: 0 0 * * * certbot renew --quiet &amp;&amp; systemctl restart your-app
+</code></pre>
+<h3>File Permissions</h3>
+<p>Ensure proper permissions for certificate files:</p>
+<pre><code class="language-bash"># Certificate (public) - readable by all
+chmod 644 /etc/ssl/certs/your-cert.pem
+
+# Private key - readable only by owner
+chmod 600 /etc/ssl/private/your-key.pem
+chown root:root /etc/ssl/private/your-key.pem
+</code></pre>
+<h2>HTTP to HTTPS Redirect</h2>
+<p>Automatically redirect HTTP traffic to HTTPS:</p>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    let tls_config = TlsConfig::from_pem_files("cert.pem", "key.pem")?;
+
+    // Configure HTTPS with HTTP redirect
+    let https_config = HttpsConfig::new("0.0.0.0:443", tls_config)
+        .with_http_redirect("0.0.0.0:80");
+
+    // This starts both:
+    // - HTTPS server on port 443
+    // - HTTP server on port 80 (redirects to HTTPS)
+    app.listen_with_config(https_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>HTTP server listens on port 80</li>
+<li>All requests receive a <code>301 Moved Permanently</code> response</li>
+<li><code>Location</code> header points to the HTTPS URL</li>
+<li>Client automatically follows redirect to HTTPS</li>
+</ol>
+<p><strong>Example redirect response:</strong></p>
+<pre><code class="language-http">HTTP/1.1 301 Moved Permanently
+Location: https://example.com/path
+</code></pre>
+<h2>Best Practices</h2>
+<h3>Security</h3>
+<ol>
+<li><p><strong>Never Use Self-Signed Certs in Production</strong></p>
+<pre><code class="language-rust">#[cfg(debug_assertions)]
+let tls = TlsConfig::self_signed(&amp;["localhost"])?;
+
+#[cfg(not(debug_assertions))]
+let tls = TlsConfig::from_pem_files("cert.pem", "key.pem")?;
+</code></pre>
+</li>
+<li><p><strong>Protect Private Keys</strong></p>
+<ul>
+<li>Store in secure locations (e.g., <code>/etc/ssl/private/</code>)</li>
+<li>Use <code>chmod 600</code> to restrict access</li>
+<li>Never commit to version control</li>
+<li>Consider using secrets management (Vault, AWS Secrets Manager)</li>
+</ul>
+</li>
+<li><p><strong>Use Strong Certificates</strong></p>
+<ul>
+<li>RSA 2048-bit minimum (4096-bit recommended)</li>
+<li>Or ECDSA P-256 or P-384</li>
+<li>From trusted Certificate Authorities</li>
+</ul>
+</li>
+<li><p><strong>Keep Certificates Updated</strong></p>
+<ul>
+<li>Monitor expiration dates</li>
+<li>Automate renewal</li>
+<li>Test renewal process</li>
+</ul>
+</li>
+</ol>
+<h3>Configuration</h3>
+<ol>
+<li><p><strong>Environment-Based Config</strong></p>
+<pre><code class="language-rust">use std::env;
+
+let cert_path = env::var("TLS_CERT_PATH")
+    .unwrap_or_else(|_| "/etc/ssl/certs/cert.pem".to_string());
+
+let key_path = env::var("TLS_KEY_PATH")
+    .unwrap_or_else(|_| "/etc/ssl/private/key.pem".to_string());
+
+let tls_config = TlsConfig::from_pem_files(cert_path, key_path)?;
+</code></pre>
+</li>
+<li><p><strong>Graceful Error Handling</strong></p>
+<pre><code class="language-rust">let tls_config = match TlsConfig::from_pem_files("cert.pem", "key.pem") {
+    Ok(config) =&gt; config,
+    Err(e) =&gt; {
+        eprintln!("Failed to load TLS certificates: {}", e);
+        eprintln!("Make sure cert.pem and key.pem exist and are readable");
+        return Err(e);
+    }
+};
+</code></pre>
+</li>
+<li><p><strong>Use Standard Ports</strong></p>
+<ul>
+<li>HTTPS: port 443</li>
+<li>HTTP: port 80 (for redirects only)</li>
+</ul>
+</li>
+</ol>
+<h3>Performance</h3>
+<ol>
+<li><p><strong>HTTP/2 is Enabled by Default</strong></p>
+<ul>
+<li>Armature automatically negotiates HTTP/2 via ALPN</li>
+<li>Falls back to HTTP/1.1 if needed</li>
+</ul>
+</li>
+<li><p><strong>TLS Session Resumption</strong></p>
+<ul>
+<li>rustls handles session resumption automatically</li>
+<li>Reduces handshake overhead for repeat connections</li>
+</ul>
+</li>
+<li><p><strong>Connection Pooling</strong></p>
+<ul>
+<li>Use keep-alive connections</li>
+<li>Let clients reuse TLS sessions</li>
+</ul>
+</li>
+</ol>
+<h2>Troubleshooting</h2>
+<h3>Certificate Errors</h3>
+<p><strong>Problem</strong>: <code>Failed to create TLS config: invalid certificate</code></p>
+<p><strong>Solutions:</strong></p>
+<ul>
+<li>Verify certificate is in PEM format</li>
+<li>Check certificate is not expired: <code>openssl x509 -in cert.pem -noout -dates</code></li>
+<li>Ensure certificate matches private key:<pre><code class="language-bash">openssl x509 -noout -modulus -in cert.pem | openssl md5
+openssl rsa -noout -modulus -in key.pem | openssl md5
+# MD5 hashes should match
+</code></pre>
+</li>
+</ul>
+<h3>Permission Errors</h3>
+<p><strong>Problem</strong>: <code>Failed to open key file: Permission denied</code></p>
+<p><strong>Solutions:</strong></p>
+<pre><code class="language-bash"># Check file permissions
+ls -l key.pem
+
+# Fix permissions
+chmod 600 key.pem
+
+# Or run with appropriate user
+sudo -u www-data ./your-app
+</code></pre>
+<h3>Port Binding Errors</h3>
+<p><strong>Problem</strong>: <code>Address already in use (os error 98)</code></p>
+<p><strong>Solutions:</strong></p>
+<pre><code class="language-bash"># Check what's using the port
+sudo lsof -i :443
+
+# Kill the process
+sudo kill &lt;PID&gt;
+
+# Or use a different port for testing
+# app.listen_https(8443, tls_config).await?;
+</code></pre>
+<h3>Browser Warnings</h3>
+<p><strong>Problem</strong>: Browser shows "Your connection is not private"</p>
+<p><strong>Solutions:</strong></p>
+<ul>
+<li><strong>Development</strong>: Expected with self-signed certs, click "Advanced" → "Proceed"</li>
+<li><strong>Production</strong>: Use certificates from a trusted CA (Let's Encrypt)</li>
+<li><strong>Testing</strong>: Import self-signed cert into browser's trusted certificates</li>
+</ul>
+<h3>TLS Handshake Failures</h3>
+<p><strong>Problem</strong>: <code>TLS handshake failed: ...</code></p>
+<p><strong>Solutions:</strong></p>
+<ul>
+<li>Check client supports TLS 1.2/1.3</li>
+<li>Verify certificate chain is complete (use <code>fullchain.pem</code>, not just <code>cert.pem</code>)</li>
+<li>Test with OpenSSL:<pre><code class="language-bash">openssl s_client -connect localhost:443 -servername localhost
+</code></pre>
+</li>
+</ul>
+<h2>Examples</h2>
+<h3>Basic HTTPS Server</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+
+#[derive(Default)]
+pub struct ApiService;
+
+#[injectable]
+impl ApiService {
+    pub fn get_data(&amp;self) -&gt; String {
+        "Secure data".to_string()
+    }
+}
+
+pub struct ApiController {
+    api_service: std::sync::Arc&lt;ApiService&gt;,
+}
+
+#[controller("/api")]
+impl ApiController {
+    pub fn new(api_service: std::sync::Arc&lt;ApiService&gt;) -&gt; Self {
+        Self { api_service }
+    }
+
+    #[get("/data")]
+    pub async fn get_data(&amp;self, _req: HttpRequest) -&gt; Result&lt;HttpResponse&gt; {
+        let data = self.api_service.get_data();
+        Ok(HttpResponse::ok().with_json(&amp;serde_json::json!({
+            "data": data,
+            "secure": true
+        }))?)
+    }
+}
+
+#[module({
+    providers: [ApiService],
+    controllers: [ApiController],
+})]
+pub struct AppModule {}
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    #[cfg(feature = "self-signed-certs")]
+    let tls_config = TlsConfig::self_signed(&amp;["localhost"])?;
+
+    #[cfg(not(feature = "self-signed-certs"))]
+    let tls_config = TlsConfig::from_pem_files("cert.pem", "key.pem")?;
+
+    app.listen_https(8443, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>HTTPS with Environment Config</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use std::env;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    // Load config from environment
+    let cert_path = env::var("TLS_CERT_PATH")?;
+    let key_path = env::var("TLS_KEY_PATH")?;
+    let port: u16 = env::var("HTTPS_PORT")
+        .unwrap_or_else(|_| "443".to_string())
+        .parse()?;
+
+    let tls_config = TlsConfig::from_pem_files(cert_path, key_path)?;
+
+    println!("Starting HTTPS server on port {}", port);
+    app.listen_https(port, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>Full Production Setup</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use std::env;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    // Load environment variables
+    dotenv::dotenv().ok();
+
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    let domain = env::var("DOMAIN")?;
+    let cert_dir = env::var("CERT_DIR").unwrap_or_else(|_| "/etc/letsencrypt/live".to_string());
+
+    let cert_path = format!("{}/{}/fullchain.pem", cert_dir, domain);
+    let key_path = format!("{}/{}/privkey.pem", cert_dir, domain);
+
+    let tls_config = TlsConfig::from_pem_files(cert_path, key_path)?;
+
+    let https_config = HttpsConfig::new("0.0.0.0:443", tls_config)
+        .with_http_redirect("0.0.0.0:80");
+
+    println!("🔒 Starting production HTTPS server");
+    println!("   Domain: {}", domain);
+    println!("   HTTPS: https://{}", domain);
+    println!("   HTTP redirect enabled");
+
+    app.listen_with_config(https_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h2>Summary</h2>
+<p><strong>Key Takeaways:</strong></p>
+<ol>
+<li>✅ Use <code>TlsConfig::self_signed()</code> for development</li>
+<li>✅ Use <code>TlsConfig::from_pem_files()</code> for production</li>
+<li>✅ Get free certificates from Let's Encrypt</li>
+<li>✅ Enable HTTP to HTTPS redirect with <code>HttpsConfig</code></li>
+<li>✅ Protect private keys with proper permissions</li>
+<li>✅ Automate certificate renewal</li>
+<li>✅ Use environment variables for configuration</li>
+</ol>
+<p><strong>Never:</strong></p>
+<ul>
+<li>❌ Use self-signed certificates in production</li>
+<li>❌ Commit private keys to version control</li>
+<li>❌ Use weak keys (&lt; 2048 bits)</li>
+<li>❌ Ignore certificate expiration</li>
+</ul>
+<p>HTTPS is essential for modern web applications. With Armature's built-in support, securing your application is straightforward and follows Rust best practices.</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

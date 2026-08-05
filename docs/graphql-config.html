@@ -1,0 +1,413 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>GraphQL Config - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/graphql-config.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/graphql-config.html"><meta property="og:title" content="GraphQL Config - Armature Rust Framework Docs"><meta property="og:description" content="Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/graphql-config.html"><meta name="twitter:title" content="GraphQL Config - Armature Rust Framework Docs"><meta name="twitter:description" content="Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/graphql-config.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/graphql-config.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"GraphQL Config","item":"https://quinnjr.github.io/armature/docs/graphql-config"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/graphql-config","headline":"GraphQL Config","name":"GraphQL Config","description":"Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection.","url":"https://quinnjr.github.io/armature/docs/graphql-config","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"GraphQL","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/graphql-config"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config" class="active"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h2>GraphQL Configuration and Documentation</h2>
+<p>Armature's GraphQL module provides comprehensive configuration options for controlling playgrounds, documentation endpoints, and schema introspection.</p>
+<hr />
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#configuration">Configuration</a></li>
+<li><a href="#graphql-config-options">GraphQL Config Options</a></li>
+<li><a href="#development-vs-production">Development vs Production</a></li>
+<li><a href="#schema-documentation">Schema Documentation</a></li>
+<li><a href="#playground-options">Playground Options</a></li>
+<li><a href="#security-considerations">Security Considerations</a></li>
+<li><a href="#examples">Examples</a></li>
+</ul>
+<hr />
+<h2>Configuration</h2>
+<h3>Basic Configuration</h3>
+<pre><code class="language-rust">use armature_graphql::GraphQLConfig;
+
+// Default configuration (playgrounds enabled)
+let config = GraphQLConfig::new("/graphql");
+
+// Development configuration (all features enabled)
+let config = GraphQLConfig::development("/graphql");
+
+// Production configuration (playgrounds disabled)
+let config = GraphQLConfig::production("/graphql");
+</code></pre>
+<hr />
+<h2>GraphQL Config Options</h2>
+<h3>Available Options</h3>
+<pre><code class="language-rust">pub struct GraphQLConfig {
+    /// GraphQL endpoint path
+    pub endpoint: String,
+
+    /// Enable GraphQL Playground (interactive GraphQL IDE)
+    pub enable_playground: bool,
+
+    /// Playground endpoint path (if enabled)
+    pub playground_endpoint: String,
+
+    /// Enable GraphiQL (lighter alternative to Playground)
+    pub enable_graphiql: bool,
+
+    /// GraphiQL endpoint path (if enabled)
+    pub graphiql_endpoint: String,
+
+    /// Enable schema documentation endpoint
+    pub enable_schema_docs: bool,
+
+    /// Schema documentation endpoint path
+    pub schema_docs_endpoint: String,
+
+    /// Enable introspection queries (required for playgrounds and docs)
+    pub enable_introspection: bool,
+
+    /// Maximum query depth (0 = unlimited)
+    pub max_depth: usize,
+
+    /// Maximum query complexity (0 = unlimited)
+    pub max_complexity: usize,
+
+    /// Enable query validation
+    pub enable_validation: bool,
+
+    /// Enable Apollo Tracing
+    pub enable_tracing: bool,
+}
+</code></pre>
+<h3>Builder Pattern</h3>
+<pre><code class="language-rust">let config = GraphQLConfig::new("/api/graphql")
+    .with_playground(true)
+    .with_graphiql(false)
+    .with_schema_docs(true)
+    .with_introspection(true)
+    .with_max_depth(10)
+    .with_max_complexity(100)
+    .with_validation(true)
+    .with_tracing(false);
+</code></pre>
+<hr />
+<h2>Development vs Production</h2>
+<h3>Development Configuration</h3>
+<p>Enable all features for the best developer experience:</p>
+<pre><code class="language-rust">let config = GraphQLConfig::development("/graphql");
+
+// Equivalent to:
+let config = GraphQLConfig::new("/graphql")
+    .with_playground(true)
+    .with_graphiql(true)
+    .with_schema_docs(true)
+    .with_introspection(true)
+    .with_tracing(true);
+</code></pre>
+<p><strong>Features enabled:</strong></p>
+<ul>
+<li>✅ GraphQL Playground</li>
+<li>✅ GraphiQL</li>
+<li>✅ Schema documentation</li>
+<li>✅ Introspection queries</li>
+<li>✅ Apollo tracing</li>
+</ul>
+<h3>Production Configuration</h3>
+<p>Disable playgrounds and introspection for security:</p>
+<pre><code class="language-rust">let config = GraphQLConfig::production("/graphql");
+
+// Equivalent to:
+let config = GraphQLConfig::new("/graphql")
+    .with_playground(false)
+    .with_graphiql(false)
+    .with_schema_docs(false)
+    .with_introspection(false);
+</code></pre>
+<p><strong>Features disabled:</strong></p>
+<ul>
+<li>❌ GraphQL Playground</li>
+<li>❌ GraphiQL</li>
+<li>❌ Schema documentation (can be enabled separately)</li>
+<li>❌ Introspection queries</li>
+</ul>
+<hr />
+<h2>Schema Documentation</h2>
+<h3>Documentation Endpoint</h3>
+<p>Armature generates beautiful, interactive schema documentation:</p>
+<pre><code class="language-rust">use armature_graphql::{generate_schema_docs_html, Schema};
+
+let html = generate_schema_docs_html(
+    &amp;schema,
+    "/graphql",      // GraphQL endpoint
+    "My API"         // API title
+);
+</code></pre>
+<h3>Features of Schema Documentation</h3>
+<ol>
+<li><p><strong>Interactive Schema Viewer</strong></p>
+<ul>
+<li>Browse types, queries, mutations, subscriptions</li>
+<li>Syntax highlighting for SDL</li>
+<li>Copy schema to clipboard</li>
+</ul>
+</li>
+<li><p><strong>Getting Started Guide</strong></p>
+<ul>
+<li>API endpoint information</li>
+<li>Example queries</li>
+<li>Integration instructions</li>
+</ul>
+</li>
+<li><p><strong>Example Queries</strong></p>
+<ul>
+<li>Introspection queries</li>
+<li>Type information queries</li>
+<li>Common patterns</li>
+</ul>
+</li>
+<li><p><strong>Beautiful UI</strong></p>
+<ul>
+<li>Modern, responsive design</li>
+<li>Tabbed interface</li>
+<li>Professional styling</li>
+</ul>
+</li>
+</ol>
+<h3>Accessing Documentation</h3>
+<p>Once enabled, access documentation at:</p>
+<ul>
+<li><strong>Schema Docs</strong>: <code>http://localhost:3000/graphql/schema</code></li>
+<li><strong>SDL Download</strong>: <code>http://localhost:3000/graphql/schema.graphql</code></li>
+</ul>
+<hr />
+<h2>Playground Options</h2>
+<h3>GraphQL Playground</h3>
+<p>Full-featured GraphQL IDE with:</p>
+<ul>
+<li>Query editor with syntax highlighting</li>
+<li>Variable editor</li>
+<li>Response viewer</li>
+<li>Schema documentation sidebar</li>
+<li>Query history</li>
+<li>Multiple tabs</li>
+</ul>
+<pre><code class="language-rust">// Enable Playground
+let config = GraphQLConfig::new("/graphql")
+    .with_playground(true)
+    .with_playground_endpoint("/graphql/playground");
+</code></pre>
+<p><strong>Access at</strong>: <code>http://localhost:3000/graphql/playground</code></p>
+<h3>GraphiQL</h3>
+<p>Lighter alternative with:</p>
+<ul>
+<li>Query editor</li>
+<li>Variable support</li>
+<li>Schema explorer</li>
+<li>Query execution</li>
+<li>Faster load times</li>
+</ul>
+<pre><code class="language-rust">// Enable GraphiQL
+let config = GraphQLConfig::new("/graphql")
+    .with_graphiql(true)
+    .with_graphiql_endpoint("/graphql/graphiql");
+</code></pre>
+<p><strong>Access at</strong>: <code>http://localhost:3000/graphql/graphiql</code></p>
+<h3>Disabling Playgrounds</h3>
+<p>For production environments:</p>
+<pre><code class="language-rust">let config = GraphQLConfig::production("/graphql");
+// Playgrounds are disabled by default
+</code></pre>
+<p>Or selectively disable:</p>
+<pre><code class="language-rust">let config = GraphQLConfig::new("/graphql")
+    .with_playground(false)
+    .with_graphiql(false);
+</code></pre>
+<hr />
+<h2>Security Considerations</h2>
+<h3>Introspection Queries</h3>
+<p>Introspection allows clients to query the GraphQL schema structure. While useful for development, it can expose your API structure in production.</p>
+<p><strong>Recommendation</strong>: Disable introspection in production:</p>
+<pre><code class="language-rust">let config = if cfg!(debug_assertions) {
+    GraphQLConfig::development("/graphql")
+} else {
+    GraphQLConfig::production("/graphql")
+};
+</code></pre>
+<h3>Query Complexity Limits</h3>
+<p>Prevent abuse with complexity limits:</p>
+<pre><code class="language-rust">let config = GraphQLConfig::new("/graphql")
+    .with_max_depth(10)          // Limit query depth
+    .with_max_complexity(100);   // Limit overall complexity
+</code></pre>
+<h3>Playground Access Control</h3>
+<p>Implement authentication for playgrounds in production:</p>
+<pre><code class="language-rust">#[get("/playground")]
+async fn playground(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    // Check authentication
+    if !is_authenticated(&amp;req) {
+        return Err(Error::Unauthorized);
+    }
+
+    // Only allow in development or for authorized users
+    if !cfg!(debug_assertions) &amp;&amp; !is_admin(&amp;req) {
+        return Err(Error::Forbidden);
+    }
+
+    Ok(/* playground HTML */)
+}
+</code></pre>
+<hr />
+<h2>Examples</h2>
+<h3>Example 1: Development Setup</h3>
+<pre><code class="language-rust">use armature_graphql::GraphQLConfig;
+
+let config = GraphQLConfig::development("/graphql");
+
+// All features enabled for development
+assert!(config.enable_playground);
+assert!(config.enable_graphiql);
+assert!(config.enable_schema_docs);
+assert!(config.enable_introspection);
+</code></pre>
+<h3>Example 2: Production Setup</h3>
+<pre><code class="language-rust">let config = GraphQLConfig::production("/graphql");
+
+// Playgrounds disabled for security
+assert!(!config.enable_playground);
+assert!(!config.enable_graphiql);
+assert!(!config.enable_introspection);
+</code></pre>
+<h3>Example 3: Custom Configuration</h3>
+<pre><code class="language-rust">let config = GraphQLConfig::new("/api/v1/graphql")
+    .with_playground(false)           // Disable Playground
+    .with_graphiql(true)              // Enable GraphiQL
+    .with_schema_docs(true)           // Enable documentation
+    .with_introspection(true)         // Enable introspection
+    .with_max_depth(15)               // Limit depth
+    .with_max_complexity(200)         // Limit complexity
+    .with_tracing(false);             // Disable tracing
+</code></pre>
+<h3>Example 4: Environment-Based Configuration</h3>
+<pre><code class="language-rust">use std::env;
+
+let config = match env::var("ENV").unwrap_or_default().as_str() {
+    "production" =&gt; GraphQLConfig::production("/graphql"),
+    "staging" =&gt; GraphQLConfig::new("/graphql")
+        .with_playground(true)
+        .with_introspection(true)
+        .with_schema_docs(false),
+    _ =&gt; GraphQLConfig::development("/graphql"),
+};
+</code></pre>
+<h3>Example 5: Full Controller Implementation</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_graphql::*;
+
+#[controller("/graphql")]
+struct GraphQLController {
+    schema: Schema&lt;Query, Mutation, Subscription&gt;,
+    config: GraphQLConfig,
+}
+
+impl GraphQLController {
+    #[post("/")]
+    async fn execute(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        // Execute GraphQL query
+        // ...
+    }
+
+    #[get("/playground")]
+    async fn playground(&amp;self, _req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        if !self.config.enable_playground {
+            return Err(Error::NotFound);
+        }
+
+        let html = graphql_playground_html(&amp;self.config.endpoint);
+        Ok(HttpResponse::ok()
+            .with_header("Content-Type", "text/html")
+            .with_body(html.into_bytes()))
+    }
+
+    #[get("/schema")]
+    async fn schema_docs(&amp;self, _req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        if !self.config.enable_schema_docs {
+            return Err(Error::NotFound);
+        }
+
+        let html = generate_schema_docs_html(&amp;self.schema, &amp;self.config.endpoint, "My API");
+        Ok(HttpResponse::ok()
+            .with_header("Content-Type", "text/html")
+            .with_body(html.into_bytes()))
+    }
+}
+</code></pre>
+<hr />
+<h2>Best Practices</h2>
+<ol>
+<li><p><strong>Use Environment-Based Config</strong></p>
+<ul>
+<li>Development: All features enabled</li>
+<li>Staging: Selective features</li>
+<li>Production: Minimal features</li>
+</ul>
+</li>
+<li><p><strong>Protect Sensitive Endpoints</strong></p>
+<ul>
+<li>Add authentication to playgrounds</li>
+<li>Use rate limiting</li>
+<li>Monitor access logs</li>
+</ul>
+</li>
+<li><p><strong>Enable Documentation Selectively</strong></p>
+<ul>
+<li>Public APIs: Enable schema docs</li>
+<li>Internal APIs: Disable in production</li>
+<li>Authenticated APIs: Require auth</li>
+</ul>
+</li>
+<li><p><strong>Set Complexity Limits</strong></p>
+<ul>
+<li>Prevent denial-of-service attacks</li>
+<li>Limit query depth</li>
+<li>Monitor query complexity</li>
+</ul>
+</li>
+<li><p><strong>Use HTTPS in Production</strong></p>
+<ul>
+<li>Encrypt GraphQL traffic</li>
+<li>Protect sensitive data</li>
+<li>Enable CORS appropriately</li>
+</ul>
+</li>
+</ol>
+<hr />
+<h2>Summary</h2>
+<p>Armature's GraphQL configuration provides:</p>
+<p>✅ <strong>Flexible playground options</strong> (Playground, GraphiQL)
+✅ <strong>Interactive schema documentation</strong>
+✅ <strong>Development vs production configurations</strong>
+✅ <strong>Security controls</strong> (introspection, complexity limits)
+✅ <strong>Customizable endpoints</strong>
+✅ <strong>Easy integration</strong> with Armature framework</p>
+<p>For complete examples, see:</p>
+<ul>
+<li><code>examples/graphql_with_docs.rs</code></li>
+<li><code>examples/graphql_api.rs</code></li>
+<li><code>examples/graphql_programmatic.rs</code></li>
+</ul>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

@@ -1,0 +1,670 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Job Queues - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/queue-guide.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/queue-guide.html"><meta property="og:title" content="Job Queues - Armature Rust Framework Docs"><meta property="og:description" content="Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/queue-guide.html"><meta name="twitter:title" content="Job Queues - Armature Rust Framework Docs"><meta name="twitter:description" content="Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/queue-guide.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/queue-guide.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Job Queues","item":"https://quinnjr.github.io/armature/docs/queue-guide"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/queue-guide","headline":"Job Queues","name":"Job Queues","description":"Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend.","url":"https://quinnjr.github.io/armature/docs/queue-guide","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Background Jobs","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/queue-guide"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide" class="active"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Job Queue Guide</h1>
+<p>Armature provides a robust job queue system for background processing of asynchronous tasks using Redis as the backend.</p>
+<h2>Features</h2>
+<ul>
+<li>✅ Redis-backed persistence</li>
+<li>✅ Automatic retries with exponential backoff</li>
+<li>✅ Job priorities (Low, Normal, High, Critical)</li>
+<li>✅ Delayed/scheduled jobs</li>
+<li>✅ Dead letter queue for failed jobs</li>
+<li>✅ Job progress tracking</li>
+<li>✅ Multiple queues support</li>
+<li>✅ Concurrent worker pools</li>
+<li>✅ Job timeouts</li>
+<li>✅ Type-safe job data with JSON</li>
+</ul>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#basic-usage">Basic Usage</a></li>
+<li><a href="#job-lifecycle">Job Lifecycle</a></li>
+<li><a href="#job-priorities">Job Priorities</a></li>
+<li><a href="#delayed-jobs">Delayed Jobs</a></li>
+<li><a href="#retries-and-error-handling">Retries and Error Handling</a></li>
+<li><a href="#worker-configuration">Worker Configuration</a></li>
+<li><a href="#multiple-queues">Multiple Queues</a></li>
+<li><a href="#job-progress-tracking">Job Progress Tracking</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#integration-with-armature">Integration with Armature</a></li>
+</ul>
+<h2>Basic Usage</h2>
+<h3>Creating a Queue</h3>
+<pre><code class="language-rust">use armature_queue::*;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), QueueError&gt; {
+    // Connect to Redis
+    let queue = Queue::new("redis://localhost:6379", "default").await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>Enqueuing Jobs</h3>
+<pre><code class="language-rust">// Simple job
+let job_id = queue.enqueue(
+    "send_email",
+    serde_json::json!({
+        "to": "user@example.com",
+        "subject": "Welcome!",
+        "body": "Thanks for signing up"
+    })
+).await?;
+
+println!("Enqueued job: {}", job_id);
+</code></pre>
+<h3>Processing Jobs with Workers</h3>
+<pre><code class="language-rust">// Create a worker
+let mut worker = Worker::new(queue.clone());
+
+// Register job handlers
+worker.register_handler("send_email", |job| {
+    Box::pin(async move {
+        let to = job.data["to"].as_str().unwrap();
+        let subject = job.data["subject"].as_str().unwrap();
+
+        // Send email logic here
+        println!("Sending email to {}: {}", to, subject);
+
+        Ok(())
+    })
+});
+
+// Start processing
+worker.start().await?;
+
+// Keep running
+tokio::signal::ctrl_c().await?;
+
+// Graceful shutdown
+worker.stop().await?;
+</code></pre>
+<h2>Job Lifecycle</h2>
+<h3>Job States</h3>
+<pre><code class="language-rust">pub enum JobState {
+    Pending,    // Waiting to be processed
+    Processing, // Currently being processed
+    Completed,  // Successfully completed
+    Failed,     // Failed but will retry
+    Dead,       // Failed permanently (max retries exceeded)
+}
+</code></pre>
+<h3>Job Flow</h3>
+<pre><code>┌──────────┐
+│ Enqueue  │
+└────┬─────┘
+     ▼
+┌──────────┐
+│ Pending  │ ◄─────────┐
+└────┬─────┘           │
+     ▼                 │ Retry
+┌──────────┐           │ (with backoff)
+│Processing│           │
+└────┬─────┘           │
+     ▼                 │
+┌──────────┐    ┌──────┴───┐
+│Completed │    │  Failed  │
+└──────────┘    └────┬─────┘
+                     ▼
+                ┌─────────┐
+                │  Dead   │
+                │  (DLQ)  │
+                └─────────┘
+</code></pre>
+<h2>Job Priorities</h2>
+<h3>Priority Levels</h3>
+<pre><code class="language-rust">pub enum JobPriority {
+    Low = 0,       // Lowest priority
+    Normal = 1,    // Default priority
+    High = 2,      // High priority
+    Critical = 3,  // Highest priority
+}
+</code></pre>
+<h3>Using Priorities</h3>
+<pre><code class="language-rust">// Create a high-priority job
+let urgent_job = Job::new(
+    "default",
+    "send_alert",
+    serde_json::json!({
+        "message": "System critical alert"
+    })
+).with_priority(JobPriority::Critical);
+
+queue.enqueue_job(urgent_job).await?;
+</code></pre>
+<h3>Priority Behavior</h3>
+<ul>
+<li>Workers process higher priority jobs first</li>
+<li>Jobs within the same priority are processed in FIFO order</li>
+<li>Critical jobs are processed before all others</li>
+</ul>
+<h2>Delayed Jobs</h2>
+<h3>Schedule for Later</h3>
+<pre><code class="language-rust">use chrono::{Utc, Duration};
+
+// Schedule for a specific time
+let scheduled_time = Utc::now() + Duration::hours(2);
+let job = Job::new(
+    "default",
+    "send_reminder",
+    serde_json::json!({"user_id": 123})
+).schedule_at(scheduled_time);
+
+queue.enqueue_job(job).await?;
+
+// Schedule after a delay
+let job = Job::new(
+    "default",
+    "cleanup_temp_files",
+    serde_json::json!({})
+).schedule_after(Duration::minutes(30));
+
+queue.enqueue_job(job).await?;
+</code></pre>
+<h3>How Delayed Jobs Work</h3>
+<ul>
+<li>Delayed jobs are stored separately until their scheduled time</li>
+<li>The queue automatically moves ready jobs to the pending queue</li>
+<li>Workers poll for ready jobs at regular intervals</li>
+</ul>
+<h2>Retries and Error Handling</h2>
+<h3>Automatic Retries</h3>
+<pre><code class="language-rust">// Configure max retry attempts
+let job = Job::new(
+    "default",
+    "fetch_api_data",
+    serde_json::json!({"url": "https://api.example.com/data"})
+).with_max_attempts(5);
+
+queue.enqueue_job(job).await?;
+</code></pre>
+<h3>Exponential Backoff</h3>
+<p>Jobs are retried with exponential backoff:</p>
+<ul>
+<li>1st retry: 1 second delay</li>
+<li>2nd retry: 2 seconds delay</li>
+<li>3rd retry: 4 seconds delay</li>
+<li>4th retry: 8 seconds delay</li>
+<li>And so on (max 1 hour)</li>
+</ul>
+<h3>Handling Failures in Handlers</h3>
+<pre><code class="language-rust">worker.register_handler("risky_operation", |job| {
+    Box::pin(async move {
+        match perform_operation().await {
+            Ok(result) =&gt; {
+                // Success
+                Ok(())
+            }
+            Err(e) if e.is_retryable() =&gt; {
+                // Temporary error, allow retry
+                Err(QueueError::ExecutionFailed(e.to_string()))
+            }
+            Err(e) =&gt; {
+                // Permanent error, mark as dead
+                Err(QueueError::ExecutionFailed(
+                    format!("Permanent failure: {}", e)
+                ))
+            }
+        }
+    })
+});
+</code></pre>
+<h3>Dead Letter Queue</h3>
+<p>Failed jobs that exceed max retries are moved to the dead letter queue:</p>
+<pre><code class="language-rust">// Jobs in DLQ can be inspected and manually requeued if needed
+// They are kept for debugging purposes
+</code></pre>
+<h2>Worker Configuration</h2>
+<h3>Custom Worker Config</h3>
+<pre><code class="language-rust">use std::time::Duration;
+
+let config = WorkerConfig {
+    // Number of jobs to process concurrently
+    concurrency: 5,
+
+    // How often to poll for new jobs
+    poll_interval: Duration::from_secs(1),
+
+    // Maximum time a job can run
+    job_timeout: Duration::from_secs(300), // 5 minutes
+
+    // Whether to log job execution
+    log_execution: true,
+};
+
+let worker = Worker::with_config(queue, config);
+</code></pre>
+<h3>Concurrency</h3>
+<ul>
+<li>Each worker can process multiple jobs concurrently</li>
+<li>Set concurrency based on your workload and resources</li>
+<li>Multiple workers can process the same queue</li>
+</ul>
+<h3>Timeouts</h3>
+<ul>
+<li>Jobs that exceed the timeout are marked as failed</li>
+<li>The timeout applies to the entire job execution</li>
+<li>Configure based on your job characteristics</li>
+</ul>
+<h2>Multiple Queues</h2>
+<h3>Creating Separate Queues</h3>
+<pre><code class="language-rust">// High-priority queue for critical tasks
+let critical_queue = Queue::new("redis://localhost:6379", "critical").await?;
+
+// Default queue for normal tasks
+let default_queue = Queue::new("redis://localhost:6379", "default").await?;
+
+// Background queue for low-priority tasks
+let background_queue = Queue::new("redis://localhost:6379", "background").await?;
+</code></pre>
+<h3>Dedicated Workers</h3>
+<pre><code class="language-rust">// Worker for critical jobs
+let mut critical_worker = Worker::with_config(
+    critical_queue,
+    WorkerConfig {
+        concurrency: 10,
+        ..Default::default()
+    }
+);
+
+// Worker for background jobs
+let mut background_worker = Worker::with_config(
+    background_queue,
+    WorkerConfig {
+        concurrency: 2,
+        ..Default::default()
+    }
+);
+
+critical_worker.start().await?;
+background_worker.start().await?;
+</code></pre>
+<h2>Job Progress Tracking</h2>
+<h3>Updating Progress</h3>
+<pre><code class="language-rust">worker.register_handler("long_running_task", |mut job| {
+    Box::pin(async move {
+        // Update progress
+        job.update_progress(25, Some("Processing step 1".to_string()));
+
+        // Do work...
+        step_1().await?;
+
+        job.update_progress(50, Some("Processing step 2".to_string()));
+        step_2().await?;
+
+        job.update_progress(75, Some("Processing step 3".to_string()));
+        step_3().await?;
+
+        job.update_progress(100, Some("Complete".to_string()));
+
+        Ok(())
+    })
+});
+</code></pre>
+<h3>Checking Job Status</h3>
+<pre><code class="language-rust">// Get job status
+if let Some(job) = queue.get_job(job_id).await? {
+    println!("Job state: {:?}", job.status.state);
+    println!("Progress: {}%", job.status.progress);
+
+    if let Some(msg) = job.status.message {
+        println!("Message: {}", msg);
+    }
+}
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. Idempotent Handlers</h3>
+<p>Make job handlers idempotent (safe to retry):</p>
+<pre><code class="language-rust">worker.register_handler("create_user", |job| {
+    Box::pin(async move {
+        let email = job.data["email"].as_str().unwrap();
+
+        // Check if already exists
+        if user_exists(email).await? {
+            println!("User already exists, skipping");
+            return Ok(());
+        }
+
+        // Create user
+        create_user(email).await?;
+
+        Ok(())
+    })
+});
+</code></pre>
+<h3>2. Small, Focused Jobs</h3>
+<pre><code class="language-rust">// ❌ Bad: Monolithic job
+queue.enqueue("process_order", serde_json::json!({
+    "order_id": 123,
+    "tasks": ["validate", "charge", "ship", "email", "sms"]
+})).await?;
+
+// ✅ Good: Separate jobs
+queue.enqueue("validate_order", serde_json::json!({"order_id": 123})).await?;
+queue.enqueue("charge_order", serde_json::json!({"order_id": 123})).await?;
+queue.enqueue("ship_order", serde_json::json!({"order_id": 123})).await?;
+queue.enqueue("send_confirmation", serde_json::json!({"order_id": 123})).await?;
+</code></pre>
+<h3>3. Store Minimal Data</h3>
+<pre><code class="language-rust">// ❌ Bad: Storing large data in job
+queue.enqueue("process_image", serde_json::json!({
+    "image_data": base64_encoded_image // Large!
+})).await?;
+
+// ✅ Good: Store reference
+queue.enqueue("process_image", serde_json::json!({
+    "image_url": "s3://bucket/image.jpg"
+})).await?;
+</code></pre>
+<h3>4. Handle Partial Failures</h3>
+<pre><code class="language-rust">worker.register_handler("batch_process", |job| {
+    Box::pin(async move {
+        let items = job.data["items"].as_array().unwrap();
+        let mut errors = Vec::new();
+
+        for item in items {
+            if let Err(e) = process_item(item).await {
+                errors.push(e);
+                // Continue processing other items
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(QueueError::ExecutionFailed(
+                format!("Partial failure: {:?}", errors)
+            ))
+        }
+    })
+});
+</code></pre>
+<h3>5. Monitor Queue Metrics</h3>
+<pre><code class="language-rust">// Periodically check queue health
+tokio::spawn(async move {
+    loop {
+        let size = queue.size().await.unwrap_or(0);
+
+        if size &gt; 1000 {
+            eprintln!("WARNING: Queue backlog is high: {} jobs", size);
+            // Alert operations team
+        }
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+});
+</code></pre>
+<h3>6. Graceful Shutdown</h3>
+<p><code>worker.stop()</code> itself waits for in-flight jobs to finish before returning --
+no extra <code>sleep()</code> needed. Internally it flips the running flag, then gives
+every worker task a grace period (defaulting to <code>WorkerConfig::job_timeout</code>)
+to notice the flag and return on its own once its current handler call
+completes, only force-aborting any task still running after that grace
+period elapses as a last resort.</p>
+<pre><code class="language-rust">#[tokio::main]
+async fn main() -&gt; Result&lt;(), QueueError&gt; {
+    let mut worker = Worker::new(queue);
+
+    // Register handlers...
+
+    worker.start().await?;
+
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+
+    println!("Shutting down worker...");
+    // Waits (up to `job_timeout`) for in-flight jobs to complete before
+    // returning; only force-aborts stragglers once that grace period elapses.
+    worker.stop().await?;
+
+    println!("Shutdown complete");
+    Ok(())
+}
+</code></pre>
+<p>Use <a href="https://docs.rs/armature-queue/latest/armature_queue/worker/struct.Worker.html#method.stop_with_timeout"><code>Worker::stop_with_timeout</code></a> instead of <code>stop()</code> to control the grace
+period explicitly -- e.g. to give in-flight jobs longer (or shorter) than the
+configured <code>job_timeout</code> to finish before they are force-aborted:</p>
+<pre><code class="language-rust"># use armature_queue::*;
+# use std::time::Duration;
+# async fn example(mut worker: Worker) -&gt; QueueResult&lt;()&gt; {
+// Give in-flight jobs up to 60 seconds to finish before force-killing them.
+worker.stop_with_timeout(Duration::from_secs(60)).await?;
+# Ok(())
+# }
+</code></pre>
+<h2>Integration with Armature</h2>
+<h3>Using DI for Queue Service</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_queue::*;
+
+#[injectable]
+struct QueueService {
+    queue: Arc&lt;Queue&gt;,
+}
+
+impl QueueService {
+    pub async fn new() -&gt; Result&lt;Self, QueueError&gt; {
+        let queue = Queue::new("redis://localhost:6379", "default").await?;
+        Ok(Self {
+            queue: Arc::new(queue),
+        })
+    }
+
+    pub async fn enqueue_email(&amp;self, to: &amp;str, subject: &amp;str) -&gt; Result&lt;JobId, QueueError&gt; {
+        self.queue.enqueue(
+            "send_email",
+            serde_json::json!({
+                "to": to,
+                "subject": subject
+            })
+        ).await
+    }
+}
+
+#[controller("/api/users")]
+struct UserController {
+    queue_service: QueueService,
+}
+
+#[routes]
+impl UserController {
+    #[post("/register")]
+    async fn register(&amp;self, #[body] data: UserDto) -&gt; Result&lt;Json&lt;Response&gt;, Error&gt; {
+        // Save user to database...
+
+        // Enqueue welcome email
+        self.queue_service
+            .enqueue_email(&amp;data.email, "Welcome!")
+            .await
+            .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+        Ok(Json(Response { success: true }))
+    }
+}
+</code></pre>
+<h3>Background Worker Service</h3>
+<pre><code class="language-rust">#[injectable]
+struct WorkerService {
+    worker: Arc&lt;RwLock&lt;Worker&gt;&gt;,
+}
+
+impl WorkerService {
+    pub async fn new(queue: Queue) -&gt; Self {
+        let mut worker = Worker::new(queue);
+
+        // Register all handlers
+        worker.register_handler("send_email", |job| {
+            Box::pin(async move {
+                send_email_impl(job.data).await
+            })
+        });
+
+        worker.register_handler("process_image", |job| {
+            Box::pin(async move {
+                process_image_impl(job.data).await
+            })
+        });
+
+        Self {
+            worker: Arc::new(RwLock::new(worker)),
+        }
+    }
+
+    pub async fn start(&amp;self) -&gt; Result&lt;(), QueueError&gt; {
+        let mut worker = self.worker.write().await;
+        worker.start().await
+    }
+
+    pub async fn stop(&amp;self) -&gt; Result&lt;(), QueueError&gt; {
+        let mut worker = self.worker.write().await;
+        worker.stop().await
+    }
+}
+
+#[module]
+struct AppModule {
+    providers: vec![QueueService::provider(), WorkerService::provider()],
+}
+</code></pre>
+<h3>Queue Management Endpoints</h3>
+<pre><code class="language-rust">#[controller("/api/queue")]
+struct QueueController {
+    queue: QueueService,
+}
+
+#[routes]
+impl QueueController {
+    #[get("/stats")]
+    async fn get_stats(&amp;self) -&gt; Result&lt;Json&lt;QueueStats&gt;, Error&gt; {
+        let size = self.queue.queue.size().await
+            .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+        Ok(Json(QueueStats {
+            pending_jobs: size,
+            queue_name: "default".to_string(),
+        }))
+    }
+
+    #[get("/job/:id")]
+    async fn get_job(&amp;self, #[param] id: String) -&gt; Result&lt;Json&lt;Job&gt;, Error&gt; {
+        let job_id = id.parse()
+            .map_err(|_| Error::BadRequest("Invalid job ID".to_string()))?;
+
+        let job = self.queue.queue.get_job(job_id).await
+            .map_err(|e| Error::InternalServerError(e.to_string()))?
+            .ok_or_else(|| Error::NotFound("Job not found".to_string()))?;
+
+        Ok(Json(job))
+    }
+}
+</code></pre>
+<h2>Common Patterns</h2>
+<h3>Email Queue</h3>
+<pre><code class="language-rust">worker.register_handler("send_email", |job| {
+    Box::pin(async move {
+        let to = job.data["to"].as_str().ok_or_else(||
+            QueueError::ExecutionFailed("Missing 'to' field".to_string())
+        )?;
+
+        let subject = job.data["subject"].as_str().ok_or_else(||
+            QueueError::ExecutionFailed("Missing 'subject' field".to_string())
+        )?;
+
+        let body = job.data["body"].as_str().unwrap_or("");
+
+        // Send email via SMTP or API
+        send_email(to, subject, body).await
+            .map_err(|e| QueueError::ExecutionFailed(e.to_string()))?;
+
+        Ok(())
+    })
+});
+</code></pre>
+<h3>Image Processing Queue</h3>
+<pre><code class="language-rust">worker.register_handler("process_image", |job| {
+    Box::pin(async move {
+        let url = job.data["url"].as_str().unwrap();
+
+        // Download image
+        let image_data = download_image(url).await?;
+
+        // Process (resize, compress, etc.)
+        let processed = process_image(image_data).await?;
+
+        // Upload to storage
+        let new_url = upload_image(processed).await?;
+
+        println!("Image processed: {}", new_url);
+
+        Ok(())
+    })
+});
+</code></pre>
+<h3>Scheduled Reports</h3>
+<pre><code class="language-rust">// Enqueue daily report generation
+let tomorrow_9am = Utc::now()
+    .date()
+    .and_hms(9, 0, 0) + Duration::days(1);
+
+let job = Job::new(
+    "reports",
+    "generate_daily_report",
+    serde_json::json!({
+        "report_type": "sales",
+        "date": Utc::now().format("%Y-%m-%d").to_string()
+    })
+).schedule_at(tomorrow_9am);
+
+queue.enqueue_job(job).await?;
+</code></pre>
+<h2>Summary</h2>
+<p>The Armature queue system provides:</p>
+<ul>
+<li>✅ <strong>Redis-backed reliability</strong> for persistent job storage</li>
+<li>✅ <strong>Automatic retries</strong> with exponential backoff</li>
+<li>✅ <strong>Priority queues</strong> for important jobs</li>
+<li>✅ <strong>Delayed execution</strong> for scheduled tasks</li>
+<li>✅ <strong>Concurrent processing</strong> with worker pools</li>
+<li>✅ <strong>Job tracking</strong> with progress updates</li>
+<li>✅ <strong>Dead letter queue</strong> for failed jobs</li>
+<li>✅ <strong>Type-safe</strong> job data with JSON</li>
+</ul>
+<p>Perfect for:</p>
+<ul>
+<li>Email sending</li>
+<li>Image/video processing</li>
+<li>Report generation</li>
+<li>Data synchronization</li>
+<li>Batch operations</li>
+<li>Webhook delivery</li>
+<li>Scheduled tasks</li>
+<li>Any asynchronous work</li>
+</ul>
+<p>For more examples, see <code>examples/queue_jobs.rs</code>.</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

@@ -1,0 +1,643 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>OpenTelemetry - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Comprehensive observability for Armature applications with distributed tracing, metrics, and logging."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/opentelemetry-guide.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/opentelemetry-guide.html"><meta property="og:title" content="OpenTelemetry - Armature Rust Framework Docs"><meta property="og:description" content="Comprehensive observability for Armature applications with distributed tracing, metrics, and logging."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/opentelemetry-guide.html"><meta name="twitter:title" content="OpenTelemetry - Armature Rust Framework Docs"><meta name="twitter:description" content="Comprehensive observability for Armature applications with distributed tracing, metrics, and logging."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/opentelemetry-guide.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/opentelemetry-guide.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"OpenTelemetry","item":"https://quinnjr.github.io/armature/docs/opentelemetry-guide"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/opentelemetry-guide","headline":"OpenTelemetry","name":"OpenTelemetry","description":"Comprehensive observability for Armature applications with distributed tracing, metrics, and logging.","url":"https://quinnjr.github.io/armature/docs/opentelemetry-guide","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Observability","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/opentelemetry-guide"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide" class="active"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>OpenTelemetry Integration Guide</h1>
+<p>Comprehensive observability for Armature applications with distributed tracing, metrics, and logging.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#configuration">Configuration</a></li>
+<li><a href="#tracing">Tracing</a></li>
+<li><a href="#metrics">Metrics</a></li>
+<li><a href="#exporters">Exporters</a></li>
+<li><a href="#middleware">Middleware</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#examples">Examples</a></li>
+</ul>
+<h2>Overview</h2>
+<p>The <code>armature-opentelemetry</code> module provides comprehensive observability for your Armature applications using the OpenTelemetry standard. It automatically instruments HTTP requests, collects metrics, and enables distributed tracing across your services.</p>
+<h3>Why OpenTelemetry?</h3>
+<ul>
+<li><strong>Vendor-neutral</strong>: Works with Jaeger, Zipkin, Prometheus, Grafana, and more</li>
+<li><strong>Industry standard</strong>: CNCF graduated project with wide adoption</li>
+<li><strong>Comprehensive</strong>: Traces, metrics, and logs in one framework</li>
+<li><strong>Distributed tracing</strong>: Follow requests across microservices</li>
+<li><strong>Performance insights</strong>: Identify bottlenecks and optimize</li>
+</ul>
+<h2>Features</h2>
+<p>✅ <strong>Automatic HTTP Instrumentation</strong></p>
+<ul>
+<li>Traces every HTTP request automatically</li>
+<li>Captures method, path, status, duration</li>
+<li>Propagates trace context across services</li>
+</ul>
+<p>✅ <strong>Distributed Tracing</strong></p>
+<ul>
+<li>W3C Trace Context propagation</li>
+<li>Parent-child span relationships</li>
+<li>Service mesh compatible</li>
+</ul>
+<p>✅ <strong>Metrics Collection</strong></p>
+<ul>
+<li>Request counts</li>
+<li>Request durations (histograms)</li>
+<li>Active requests (gauges)</li>
+<li>Custom business metrics</li>
+</ul>
+<p>✅ <strong>Multiple Exporters</strong></p>
+<ul>
+<li>OTLP (OpenTelemetry Protocol) — works with any OTLP-compatible backend, including Jaeger (v1.35+) and Prometheus (via a Collector)</li>
+<li>Zipkin</li>
+</ul>
+<p>Note: dedicated <code>jaeger</code> and <code>prometheus</code> exporters were discontinued upstream and are not available as <code>armature-opentelemetry</code> features. Use OTLP instead — see <a href="#exporters">Exporters</a>.</p>
+<p>✅ <strong>Flexible Configuration</strong></p>
+<ul>
+<li>Environment-based config</li>
+<li>Code-based builder pattern</li>
+<li>Sampling strategies</li>
+<li>Resource attributes</li>
+</ul>
+<h2>Quick Start</h2>
+<h3>Installation</h3>
+<p>Add to your <code>Cargo.toml</code>:</p>
+<pre><code class="language-toml">[dependencies]
+armature-framework = { version = "0.1", features = ["opentelemetry"] }
+
+# Choose exporters (available features: "otlp" [default], "zipkin", "full")
+armature-opentelemetry = { version = "0.1", features = ["otlp", "zipkin"] }
+</code></pre>
+<h3>Basic Setup</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_opentelemetry::*;
+
+#[module()]
+#[derive(Default)]
+struct AppModule;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Initialize telemetry
+    let telemetry = TelemetryBuilder::new("my-service")
+        .with_version("1.0.0")
+        .with_environment("production")
+        .with_otlp_endpoint("http://localhost:4317")
+        .with_tracing()
+        .with_metrics()
+        .build()
+        .await?;
+
+    // Create application
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    // Run server
+    app.listen(3000).await?;
+
+    // Shutdown gracefully
+    telemetry.shutdown().await?;
+    Ok(())
+}
+</code></pre>
+<h3>Running with Docker</h3>
+<p>Start Jaeger all-in-one (includes OTLP collector):</p>
+<pre><code class="language-bash">docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+</code></pre>
+<p>View traces at: <a href="http://localhost:16686">http://localhost:16686</a></p>
+<h2>Configuration</h2>
+<h3>Builder Pattern</h3>
+<pre><code class="language-rust">let telemetry = TelemetryBuilder::new("my-service")
+    // Service info
+    .with_version("1.0.0")
+    .with_namespace("production")
+    .with_environment("us-west-2")
+
+    // Enable features
+    .with_tracing()
+    .with_metrics()
+
+    // Exporter config
+    .with_otlp_endpoint("http://collector:4317")
+
+    // Sampling
+    .with_sampling_ratio(0.1)  // Sample 10% of traces
+
+    // Custom attributes
+    .with_attribute("team", "platform")
+    .with_attribute("cluster", "k8s-prod")
+
+    .build()
+    .await?;
+</code></pre>
+<h3>Configuration Struct</h3>
+<pre><code class="language-rust">use armature_opentelemetry::*;
+
+let config = TelemetryConfig {
+    service_name: "my-service".to_string(),
+    service_version: Some("1.0.0".to_string()),
+    environment: Some("production".to_string()),
+    enable_tracing: true,
+    enable_metrics: true,
+    tracing: TracingConfig {
+        exporter: TracingExporter::Otlp,
+        otlp_endpoint: Some("http://localhost:4317".to_string()),
+        sampling_ratio: 1.0,
+        max_attributes_per_span: 128,
+        max_events_per_span: 128,
+    },
+    metrics: MetricsConfig {
+        exporter: MetricsExporter::Otlp,
+        otlp_endpoint: Some("http://localhost:4317".to_string()),
+        collection_interval_secs: 60,
+    },
+    resource_attributes: vec![
+        ("team".to_string(), "platform".to_string()),
+    ],
+};
+
+let telemetry = TelemetryBuilder::new("my-service")
+    .with_config(config)
+    .build()
+    .await?;
+</code></pre>
+<h3>Environment Variables</h3>
+<pre><code class="language-bash">export OTEL_SERVICE_NAME="my-service"
+export OTEL_SERVICE_VERSION="1.0.0"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+export OTEL_TRACES_SAMPLER="parentbased_traceidratio"
+export OTEL_TRACES_SAMPLER_ARG="0.1"
+</code></pre>
+<h2>Tracing</h2>
+<h3>Automatic Tracing</h3>
+<p>HTTP requests are automatically traced when using the middleware:</p>
+<pre><code class="language-rust">let app = Application::new(container, router)
+    .with_middleware(telemetry.middleware());
+</code></pre>
+<p>Each request creates a span with:</p>
+<ul>
+<li>HTTP method</li>
+<li>Request path</li>
+<li>Status code</li>
+<li>Duration</li>
+<li>Request/response headers</li>
+<li>User agent</li>
+</ul>
+<h3>Manual Spans</h3>
+<p>Create custom spans for specific operations:</p>
+<pre><code class="language-rust">use armature_opentelemetry::*;
+
+async fn process_order(order_id: u64) -&gt; Result&lt;(), Error&gt; {
+    // Create a span
+    let span = trace_span!("process_order",
+        "order.id" =&gt; order_id.to_string(),
+        "order.priority" =&gt; "high"
+    );
+
+    // Do work...
+
+    // Add events
+    span_event!("order_validated");
+    span_event!("payment_processed", "amount" =&gt; "99.99");
+
+    Ok(())
+}
+</code></pre>
+<h3>Span Macros</h3>
+<pre><code class="language-rust">// Create a simple span
+let span = trace_span!("my_operation");
+
+// Create with attributes
+let span = trace_span!("database_query",
+    "db.system" =&gt; "postgresql",
+    "db.statement" =&gt; "SELECT * FROM users"
+);
+
+// Add attribute to current span
+span_attribute!("user.id", user_id.to_string());
+
+// Record event
+span_event!("cache_miss");
+
+// Record event with attributes
+span_event!("item_processed",
+    "item.id" =&gt; item_id.to_string(),
+    "item.status" =&gt; "complete"
+);
+</code></pre>
+<h3>Distributed Tracing</h3>
+<p>Trace context is automatically propagated via HTTP headers:</p>
+<pre><code class="language-rust">use armature_opentelemetry::HeaderInjector;
+
+async fn call_downstream_service() {
+    let client = reqwest::Client::new();
+    let mut headers = HashMap::new();
+
+    // Inject trace context into headers
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(
+            &amp;opentelemetry::Context::current(),
+            &amp;mut HeaderInjector(&amp;mut headers)
+        );
+    });
+
+    // Make request with propagated context
+    client.get("http://downstream/api")
+        .headers(/* convert headers */)
+        .send()
+        .await?;
+}
+</code></pre>
+<h2>Metrics</h2>
+<h3>HTTP Metrics</h3>
+<p>Automatically collected when using the middleware:</p>
+<ul>
+<li><code>http.server.request.count</code> - Total requests (counter)</li>
+<li><code>http.server.request.duration</code> - Request duration in seconds (histogram)</li>
+<li><code>http.server.active_requests</code> - Currently active requests (gauge)</li>
+</ul>
+<p>All metrics include labels:</p>
+<ul>
+<li><code>http.method</code> - Request method</li>
+<li><code>http.route</code> - Request path</li>
+<li><code>http.status_code</code> - Response status</li>
+</ul>
+<h3>Custom Metrics</h3>
+<pre><code class="language-rust">use armature_opentelemetry::*;
+use opentelemetry::metrics::*;
+
+// Get meter
+let meter = get_meter("my-service");
+
+// Counter
+let orders_counter = meter
+    .u64_counter("orders.total")
+    .with_description("Total orders processed")
+    .build();
+
+orders_counter.add(1, &amp;[
+    KeyValue::new("order.type", "premium"),
+    KeyValue::new("order.status", "completed"),
+]);
+
+// Gauge
+let queue_size = meter
+    .i64_up_down_counter("queue.size")
+    .with_description("Current queue size")
+    .build();
+
+queue_size.add(10, &amp;[]);
+queue_size.add(-2, &amp;[]);  // Decrement
+
+// Histogram
+let processing_time = meter
+    .f64_histogram("processing.duration")
+    .with_description("Processing duration in seconds")
+    .with_unit("s")
+    .build();
+
+processing_time.record(0.523, &amp;[
+    KeyValue::new("operation", "image_resize"),
+]);
+</code></pre>
+<h3>Business Metrics</h3>
+<pre><code class="language-rust">#[derive(Clone)]
+struct OrderService {
+    meter: opentelemetry::metrics::Meter,
+    orders_total: Counter&lt;u64&gt;,
+    revenue_total: Histogram&lt;f64&gt;,
+}
+
+impl OrderService {
+    fn new() -&gt; Self {
+        let meter = get_meter("order-service");
+
+        let orders_total = meter
+            .u64_counter("orders.total")
+            .build();
+
+        let revenue_total = meter
+            .f64_histogram("revenue.total")
+            .with_unit("USD")
+            .build();
+
+        Self { meter, orders_total, revenue_total }
+    }
+
+    async fn create_order(&amp;self, amount: f64) -&gt; Result&lt;(), Error&gt; {
+        // Process order...
+
+        // Record metrics
+        self.orders_total.add(1, &amp;[
+            KeyValue::new("region", "us-west"),
+        ]);
+
+        self.revenue_total.record(amount, &amp;[
+            KeyValue::new("currency", "USD"),
+        ]);
+
+        Ok(())
+    }
+}
+</code></pre>
+<h2>Exporters</h2>
+<h3>OTLP (Recommended)</h3>
+<p>OpenTelemetry Protocol - works with multiple backends:</p>
+<pre><code class="language-rust">let telemetry = TelemetryBuilder::new("my-service")
+    .with_otlp_endpoint("http://collector:4317")
+    .with_tracing()
+    .with_metrics()
+    .build()
+    .await?;
+</code></pre>
+<p>Backends that support OTLP:</p>
+<ul>
+<li><strong>Jaeger</strong> (v1.35+)</li>
+<li><strong>Grafana Tempo</strong></li>
+<li><strong>Grafana Cloud</strong></li>
+<li><strong>Honeycomb</strong></li>
+<li><strong>New Relic</strong></li>
+<li><strong>Datadog</strong></li>
+<li><strong>AWS X-Ray</strong></li>
+</ul>
+<h3>Jaeger</h3>
+<p>The dedicated Jaeger exporter was discontinued upstream and is not available as an
+<code>armature-opentelemetry</code> feature. (<code>TracingExporter::Jaeger</code> still exists as a config
+enum variant for backward-compatible deserialization, but initializing tracing with it
+always returns a config error telling you to use OTLP instead.)</p>
+<p>Jaeger has native OTLP ingestion (v1.35+), so export via OTLP instead:</p>
+<pre><code class="language-rust">let config = TelemetryConfig {
+    tracing: TracingConfig {
+        exporter: TracingExporter::Otlp,
+        otlp_endpoint: Some("localhost:4317".to_string()),
+        ..Default::default()
+    },
+    ..TelemetryConfig::new("my-service")
+};
+</code></pre>
+<p>See <a href="#running-with-docker">Running with Docker</a> for a Jaeger all-in-one container with
+its OTLP receiver enabled.</p>
+<h3>Zipkin</h3>
+<p>Export to Zipkin:</p>
+<pre><code class="language-toml">[dependencies]
+armature-opentelemetry = { version = "0.1", features = ["zipkin"] }
+</code></pre>
+<pre><code class="language-rust">let config = TelemetryConfig {
+    tracing: TracingConfig {
+        exporter: TracingExporter::Zipkin,
+        zipkin_endpoint: Some("http://localhost:9411/api/v2/spans".to_string()),
+        ..Default::default()
+    },
+    ..TelemetryConfig::new("my-service")
+};
+</code></pre>
+<h3>Prometheus</h3>
+<p>The dedicated Prometheus exporter was discontinued upstream and is not available as an
+<code>armature-opentelemetry</code> feature. (<code>MetricsExporter::Prometheus</code> still exists as a
+config enum variant for backward-compatible deserialization, but initializing metrics
+with it always returns a config error telling you to use OTLP instead.)</p>
+<p>Export via OTLP to a Prometheus remote-write endpoint, or to an OpenTelemetry Collector
+configured with a <code>prometheus</code>/<code>prometheusremotewrite</code> exporter, instead:</p>
+<pre><code class="language-rust">let telemetry = TelemetryBuilder::new("my-service")
+    .with_otlp_endpoint("http://collector:4317")
+    .with_metrics()
+    .build()
+    .await?;
+</code></pre>
+<p>Configure the Collector to expose a <code>/metrics</code> scrape endpoint (or remote-write to your
+Prometheus server) — <code>armature-opentelemetry</code> no longer serves that endpoint itself.</p>
+<h2>Middleware</h2>
+<h3>Automatic Instrumentation</h3>
+<p>The telemetry middleware automatically:</p>
+<ol>
+<li><strong>Creates spans</strong> for each request</li>
+<li><strong>Extracts trace context</strong> from incoming headers</li>
+<li><strong>Injects trace context</strong> for distributed tracing</li>
+<li><strong>Records metrics</strong> (count, duration, active requests)</li>
+<li><strong>Captures errors</strong> and sets span status</li>
+</ol>
+<h3>Usage</h3>
+<pre><code class="language-rust">let app = Application::new(container, router)
+    .with_middleware(telemetry.middleware());
+</code></pre>
+<h3>Multiple Middleware</h3>
+<p>Combine with other middleware:</p>
+<pre><code class="language-rust">let app = Application::new(container, router)
+    .with_middleware(CorsMiddleware::permissive())
+    .with_middleware(telemetry.middleware())  // Should be early in chain
+    .with_middleware(AuthMiddleware::new());
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. Use Semantic Conventions</h3>
+<p>Follow OpenTelemetry semantic conventions for attribute names:</p>
+<pre><code class="language-rust">// ✅ Good - semantic convention
+span_attribute!("http.method", "GET");
+span_attribute!("db.system", "postgresql");
+span_attribute!("messaging.system", "rabbitmq");
+
+// ❌ Bad - custom names
+span_attribute!("method", "GET");
+span_attribute!("database", "postgres");
+</code></pre>
+<p>See: <a href="https://opentelemetry.io/docs/specs/semconv/">https://opentelemetry.io/docs/specs/semconv/</a></p>
+<h3>2. Sample Appropriately</h3>
+<p>Don't trace everything in production:</p>
+<pre><code class="language-rust">// Development - trace everything
+.with_sampling_ratio(1.0)
+
+// Staging - trace 50%
+.with_sampling_ratio(0.5)
+
+// Production - trace 10%
+.with_sampling_ratio(0.1)
+
+// High-traffic production - trace 1%
+.with_sampling_ratio(0.01)
+</code></pre>
+<h3>3. Add Context</h3>
+<p>Include relevant business context:</p>
+<pre><code class="language-rust">span_attribute!("user.id", user_id.to_string());
+span_attribute!("tenant.id", tenant_id.to_string());
+span_attribute!("order.id", order_id.to_string());
+span_attribute!("feature.flag", "new_checkout");
+</code></pre>
+<h3>4. Record Important Events</h3>
+<pre><code class="language-rust">span_event!("cache_hit");
+span_event!("retry_attempt", "attempt" =&gt; "2");
+span_event!("threshold_exceeded", "value" =&gt; "1000");
+</code></pre>
+<h3>5. Graceful Shutdown</h3>
+<p>Always shutdown telemetry to flush data:</p>
+<pre><code class="language-rust">tokio::select! {
+    _ = app.listen(3000) =&gt; {},
+    _ = tokio::signal::ctrl_c() =&gt; {
+        println!("Shutting down...");
+        telemetry.shutdown().await?;
+    }
+}
+</code></pre>
+<h3>6. Resource Attributes</h3>
+<p>Add deployment metadata:</p>
+<pre><code class="language-rust">let telemetry = TelemetryBuilder::new("my-service")
+    .with_version(env!("CARGO_PKG_VERSION"))
+    .with_environment("production")
+    .with_namespace("payments")
+    .with_attribute("k8s.pod.name", std::env::var("POD_NAME")?)
+    .with_attribute("k8s.node.name", std::env::var("NODE_NAME")?)
+    .with_attribute("region", "us-west-2")
+    .build()
+    .await?;
+</code></pre>
+<h2>Examples</h2>
+<h3>Complete Application</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_framework::armature_opentelemetry::*;
+
+#[derive(Clone)]
+#[injectable]
+struct UserService;
+
+impl UserService {
+    async fn create_user(&amp;self, name: String) -&gt; Result&lt;u64, Error&gt; {
+        span_attribute!("user.name", name);
+        span_event!("user_created");
+        Ok(42)
+    }
+}
+
+#[controller("/api/users")]
+struct UserController {
+    user_service: UserService,
+}
+
+impl UserController {
+    #[post("/")]
+    async fn create(
+        &amp;self,
+        #[Body] body: Json&lt;serde_json::Value&gt;,
+    ) -&gt; Result&lt;Json&lt;serde_json::Value&gt;, Error&gt; {
+        let name = body.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::BadRequest("name required".to_string()))?;
+
+        let id = self.user_service.create_user(name.to_string()).await?;
+
+        Ok(Json(serde_json::json!({ "id": id })))
+    }
+}
+
+#[module]
+struct AppModule;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let telemetry = TelemetryBuilder::new("user-service")
+        .with_version("1.0.0")
+        .with_environment("production")
+        .with_otlp_endpoint("http://localhost:4317")
+        .with_tracing()
+        .with_metrics()
+        .build()
+        .await?;
+
+    let app = Application::create::&lt;AppModule&gt;().await;
+
+    tokio::select! {
+        _ = app.listen(3000) =&gt; {},
+        _ = tokio::signal::ctrl_c() =&gt; {
+            telemetry.shutdown().await?;
+        }
+    }
+
+    Ok(())
+}
+</code></pre>
+<h3>Kubernetes Deployment</h3>
+<pre><code class="language-yaml">apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-config
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_SERVICE_NAME: "user-service"
+  OTEL_SERVICE_VERSION: "1.0.0"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: user-service
+        image: user-service:1.0.0
+        envFrom:
+        - configMapRef:
+            name: otel-config
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+</code></pre>
+<h2>Summary</h2>
+<p><strong>Key Features:</strong></p>
+<ul>
+<li>✅ Automatic HTTP tracing with middleware</li>
+<li>✅ Built-in metrics collection</li>
+<li>✅ OTLP and Zipkin exporters (OTLP works with any OTLP-compatible backend, including Jaeger and Prometheus)</li>
+<li>✅ Distributed tracing with context propagation</li>
+<li>✅ Flexible configuration and builder API</li>
+<li>✅ Production-ready with sampling strategies</li>
+</ul>
+<p><strong>When to Use:</strong></p>
+<ul>
+<li>Microservices architectures</li>
+<li>Production debugging</li>
+<li>Performance monitoring</li>
+<li>Distributed tracing</li>
+<li>SLA/SLO tracking</li>
+</ul>
+<p><strong>Next Steps:</strong></p>
+<ol>
+<li>Start with OTLP + Jaeger for development</li>
+<li>Add sampling for production (10% or less)</li>
+<li>Include business metrics</li>
+<li>Set up alerting based on metrics</li>
+<li>Create dashboards for visualization</li>
+</ol>
+<p>Happy observability! 🔭📊</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

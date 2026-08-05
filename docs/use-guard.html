@@ -1,0 +1,623 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Using Guards - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Armature provides the #[use_guard] and #[guard] decorators for protecting routes with authorization checks."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/use-guard.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/use-guard.html"><meta property="og:title" content="Using Guards - Armature Rust Framework Docs"><meta property="og:description" content="Armature provides the #[use_guard] and #[guard] decorators for protecting routes with authorization checks."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/use-guard.html"><meta name="twitter:title" content="Using Guards - Armature Rust Framework Docs"><meta name="twitter:description" content="Armature provides the #[use_guard] and #[guard] decorators for protecting routes with authorization checks."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/use-guard.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/use-guard.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Using Guards","item":"https://quinnjr.github.io/armature/docs/use-guard"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/use-guard","headline":"Using Guards","name":"Using Guards","description":"Armature provides the #[use_guard] and #[guard] decorators for protecting routes with authorization checks.","url":"https://quinnjr.github.io/armature/docs/use-guard","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Routing","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/use-guard"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard" class="active"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Use Guard Decorator Guide</h1>
+<p>Armature provides the <code>#[use_guard]</code> and <code>#[guard]</code> decorators for protecting routes with authorization checks. Guards determine whether a request should be allowed to proceed before the handler executes.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#guards-vs-middleware">Guards vs Middleware</a></li>
+<li><a href="#basic-usage">Basic Usage</a></li>
+<li><a href="#multiple-guards">Multiple Guards</a></li>
+<li><a href="#guard-with-configuration">Guard with Configuration</a></li>
+<li><a href="#controller-level-guards">Controller-Level Guards</a></li>
+<li><a href="#built-in-guards">Built-in Guards</a></li>
+<li><a href="#custom-guards">Custom Guards</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#api-reference">API Reference</a></li>
+<li><a href="#summary">Summary</a></li>
+</ul>
+<h2>Overview</h2>
+<p>Guards are authorization checks that run before a route handler. They answer the question: "Should this request be allowed to proceed?"</p>
+<ul>
+<li><strong>Return <code>Ok(true)</code></strong> → Request proceeds to handler</li>
+<li><strong>Return <code>Ok(false)</code></strong> → Request is denied (403 Forbidden)</li>
+<li><strong>Return <code>Err(e)</code></strong> → Request fails with the error</li>
+</ul>
+<h2>Features</h2>
+<ul>
+<li>✅ Route-level guard protection</li>
+<li>✅ Controller-level guard inheritance</li>
+<li>✅ Multiple guard chaining (all must pass)</li>
+<li>✅ Type-safe guard configuration</li>
+<li>✅ Access to request context (headers, params)</li>
+<li>✅ Works with all HTTP method decorators</li>
+</ul>
+<h2>Guards vs Middleware</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Guards</th>
+<th>Middleware</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Purpose</td>
+<td>Authorization (allow/deny)</td>
+<td>Request/Response processing</td>
+</tr>
+<tr>
+<td>Return</td>
+<td><code>Result&lt;bool, Error&gt;</code></td>
+<td><code>Result&lt;HttpResponse, Error&gt;</code></td>
+</tr>
+<tr>
+<td>Response modification</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Short-circuit on deny</td>
+<td>Yes</td>
+<td>Optional</td>
+</tr>
+<tr>
+<td>Use case</td>
+<td>Auth, permissions, rate limiting</td>
+<td>Logging, CORS, compression</td>
+</tr>
+</tbody></table>
+<p><strong>Use guards when</strong> you need to allow or deny access.
+<strong>Use middleware when</strong> you need to process requests/responses.</p>
+<h2>Basic Usage</h2>
+<h3>Simple Type-Based Guard</h3>
+<p>When your guard implements <code>Default</code>:</p>
+<pre><code class="language-rust">use armature_framework::{get, use_guard};
+use armature_core::{HttpRequest, HttpResponse, Error, guard::AuthenticationGuard};
+
+#[use_guard(AuthenticationGuard)]
+#[get("/protected")]
+async fn protected_endpoint(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok().with_json(&amp;serde_json::json!({
+        "message": "You have access!"
+    }))?)
+}
+</code></pre>
+<h3>Guard Order</h3>
+<p>Guards are checked in order. If any guard fails, subsequent guards are not checked:</p>
+<pre><code class="language-rust">#[use_guard(AuthenticationGuard, AdminGuard)]
+#[get("/admin")]
+async fn admin_endpoint(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    // Only reaches here if BOTH guards pass
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h2>Multiple Guards</h2>
+<p>Chain multiple guards - all must pass:</p>
+<pre><code class="language-rust">use armature_framework::{get, use_guard};
+use armature_core::{
+    HttpRequest, HttpResponse, Error,
+    guard::{AuthenticationGuard, RolesGuard}
+};
+
+#[derive(Default)]
+struct PremiumGuard;
+
+#[async_trait::async_trait]
+impl armature_core::guard::Guard for PremiumGuard {
+    async fn can_activate(
+        &amp;self,
+        context: &amp;armature_core::guard::GuardContext
+    ) -&gt; Result&lt;bool, Error&gt; {
+        // Check if user has premium subscription
+        Ok(context.get_header("x-premium-user").is_some())
+    }
+}
+
+#[use_guard(AuthenticationGuard, PremiumGuard)]
+#[get("/premium-content")]
+async fn premium_content(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h2>Guard with Configuration</h2>
+<p>Use <code>#[guard(...)]</code> for guards that need configuration:</p>
+<pre><code class="language-rust">use armature_framework::{get, guard};
+use armature_core::{HttpRequest, HttpResponse, Error, guard::ApiKeyGuard};
+
+#[guard(ApiKeyGuard::new(vec!["secret-key-1".into(), "secret-key-2".into()]))]
+#[get("/api/data")]
+async fn api_data(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h3>Combining Type and Instance Guards</h3>
+<pre><code class="language-rust">use armature_framework::{get, guard};
+use armature_core::{
+    HttpRequest, HttpResponse, Error,
+    guard::{AuthenticationGuard, RolesGuard}
+};
+
+#[guard(
+    AuthenticationGuard,
+    RolesGuard::new(vec!["admin".into(), "moderator".into()])
+)]
+#[get("/moderation")]
+async fn moderation_panel(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h2>Controller-Level Guards</h2>
+<p>Apply guards to all routes in a controller:</p>
+<pre><code class="language-rust">use armature_framework::{controller, get, post, guard};
+use armature_core::{HttpRequest, HttpResponse, Error, guard::AuthenticationGuard};
+
+#[guard(AuthenticationGuard)]
+#[controller("/api/users")]
+struct UserController;
+
+impl UserController {
+    // All routes require authentication
+
+    #[get("")]
+    async fn list_users(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        Ok(HttpResponse::ok())
+    }
+
+    #[get("/:id")]
+    async fn get_user(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        Ok(HttpResponse::ok())
+    }
+
+    #[post("")]
+    async fn create_user(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        Ok(HttpResponse::created())
+    }
+}
+</code></pre>
+<h3>Combining Controller and Route Guards</h3>
+<p>Route guards add to controller guards:</p>
+<pre><code class="language-rust">use armature_framework::{controller, get, guard, use_guard};
+use armature_core::{
+    HttpRequest, HttpResponse, Error,
+    guard::AuthenticationGuard
+};
+
+#[derive(Default)]
+struct AdminGuard;
+
+#[async_trait::async_trait]
+impl armature_core::guard::Guard for AdminGuard {
+    async fn can_activate(
+        &amp;self,
+        context: &amp;armature_core::guard::GuardContext
+    ) -&gt; Result&lt;bool, Error&gt; {
+        // Check for admin role
+        Ok(context.get_header("x-user-role")
+            .map(|r| r == "admin")
+            .unwrap_or(false))
+    }
+}
+
+#[guard(AuthenticationGuard)]  // All routes require auth
+#[controller("/api")]
+struct ApiController;
+
+impl ApiController {
+    #[get("/public")]
+    async fn public_data(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        // Only needs AuthenticationGuard
+        Ok(HttpResponse::ok())
+    }
+
+    #[use_guard(AdminGuard)]  // Additional guard
+    #[get("/admin")]
+    async fn admin_data(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        // Needs AuthenticationGuard + AdminGuard
+        Ok(HttpResponse::ok())
+    }
+}
+</code></pre>
+<h2>Built-in Guards</h2>
+<p>Armature provides several built-in guards:</p>
+<table>
+<thead>
+<tr>
+<th>Guard</th>
+<th>Purpose</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AuthenticationGuard</code></td>
+<td>Check for Bearer token</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>RolesGuard</code></td>
+<td>Check user roles</td>
+<td>❌ (needs roles)</td>
+</tr>
+<tr>
+<td><code>ApiKeyGuard</code></td>
+<td>Validate API keys</td>
+<td>❌ (needs keys)</td>
+</tr>
+<tr>
+<td><code>CustomGuard&lt;F&gt;</code></td>
+<td>Custom predicate</td>
+<td>❌ (needs fn)</td>
+</tr>
+</tbody></table>
+<h3>AuthenticationGuard</h3>
+<p>Checks for <code>Authorization: Bearer &lt;token&gt;</code> header:</p>
+<pre><code class="language-rust">#[use_guard(AuthenticationGuard)]
+#[get("/me")]
+async fn get_current_user(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    let token = req.headers.get("authorization")
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap(); // Safe after guard passes
+
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h3>RolesGuard</h3>
+<p>Checks for specific roles (requires role extraction logic):</p>
+<pre><code class="language-rust">#[guard(RolesGuard::new(vec!["admin".into()]))]
+#[get("/admin/settings")]
+async fn admin_settings(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h3>ApiKeyGuard</h3>
+<p>Validates <code>X-API-Key</code> header:</p>
+<pre><code class="language-rust">#[guard(ApiKeyGuard::new(vec![
+    "key-production".into(),
+    "key-staging".into()
+]))]
+#[get("/api/v1/data")]
+async fn api_data(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    Ok(HttpResponse::ok())
+}
+</code></pre>
+<h2>Custom Guards</h2>
+<p>Create custom guards by implementing the <code>Guard</code> trait:</p>
+<pre><code class="language-rust">use armature_core::{Error, guard::{Guard, GuardContext}};
+use async_trait::async_trait;
+
+/// Rate limiting guard
+pub struct RateLimitGuard {
+    max_requests: u32,
+}
+
+impl RateLimitGuard {
+    pub fn new(max_requests: u32) -&gt; Self {
+        Self { max_requests }
+    }
+}
+
+#[async_trait]
+impl Guard for RateLimitGuard {
+    async fn can_activate(&amp;self, context: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+        // Get client identifier (IP, API key, etc.)
+        let client_id = context.get_header("x-client-id")
+            .cloned()
+            .unwrap_or_else(|| "anonymous".into());
+
+        // Check rate limit (implement your logic)
+        let request_count = get_request_count(&amp;client_id).await;
+
+        if request_count &gt;= self.max_requests {
+            Err(Error::TooManyRequests(format!(
+                "Rate limit exceeded: {} requests",
+                self.max_requests
+            )))
+        } else {
+            increment_request_count(&amp;client_id).await;
+            Ok(true)
+        }
+    }
+}
+</code></pre>
+<h3>Guard with Request Data Access</h3>
+<p>Guards have full access to the request context:</p>
+<pre><code class="language-rust">pub struct OwnershipGuard;
+
+impl Default for OwnershipGuard {
+    fn default() -&gt; Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Guard for OwnershipGuard {
+    async fn can_activate(&amp;self, context: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+        // Access path parameters
+        let resource_id = context.get_param("id")
+            .ok_or_else(|| Error::BadRequest("Missing resource ID".into()))?;
+
+        // Access headers
+        let user_id = context.get_header("x-user-id")
+            .ok_or_else(|| Error::Unauthorized("Missing user ID".into()))?;
+
+        // Check ownership
+        let resource = fetch_resource(resource_id).await?;
+
+        if resource.owner_id == *user_id {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden("You don't own this resource".into()))
+        }
+    }
+}
+</code></pre>
+<h3>IP Whitelist Guard</h3>
+<pre><code class="language-rust">pub struct IpWhitelistGuard {
+    allowed_ips: Vec&lt;String&gt;,
+}
+
+impl IpWhitelistGuard {
+    pub fn new(ips: Vec&lt;String&gt;) -&gt; Self {
+        Self { allowed_ips: ips }
+    }
+}
+
+#[async_trait]
+impl Guard for IpWhitelistGuard {
+    async fn can_activate(&amp;self, context: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+        let client_ip = context.get_header("x-forwarded-for")
+            .or_else(|| context.get_header("x-real-ip"))
+            .ok_or_else(|| Error::BadRequest("Cannot determine client IP".into()))?;
+
+        if self.allowed_ips.contains(client_ip) {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(format!(
+                "IP {} not in whitelist",
+                client_ip
+            )))
+        }
+    }
+}
+</code></pre>
+<h3>Time-Based Guard</h3>
+<pre><code class="language-rust">use chrono::{Local, Timelike};
+
+pub struct BusinessHoursGuard;
+
+impl Default for BusinessHoursGuard {
+    fn default() -&gt; Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Guard for BusinessHoursGuard {
+    async fn can_activate(&amp;self, _context: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+        let now = Local::now();
+        let hour = now.hour();
+
+        // Allow access only during business hours (9 AM - 5 PM)
+        if hour &gt;= 9 &amp;&amp; hour &lt; 17 {
+            Ok(true)
+        } else {
+            Err(Error::Forbidden(
+                "This endpoint is only available during business hours".into()
+            ))
+        }
+    }
+}
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. Keep Guards Focused</h3>
+<p>Each guard should check one thing:</p>
+<pre><code class="language-rust">// ✅ Good: Single responsibility
+pub struct AuthenticationGuard;  // Only checks auth
+pub struct AdminRoleGuard;       // Only checks admin role
+pub struct ResourceOwnerGuard;   // Only checks ownership
+
+// ❌ Bad: Multiple responsibilities
+pub struct EverythingGuard;  // Checks auth + role + ownership + ...
+</code></pre>
+<h3>2. Use Descriptive Errors</h3>
+<pre><code class="language-rust">// ✅ Good: Helpful error messages
+Err(Error::Forbidden("Admin role required to access this resource".into()))
+Err(Error::Unauthorized("API key expired".into()))
+
+// ❌ Bad: Generic errors
+Err(Error::Forbidden("Access denied".into()))
+</code></pre>
+<h3>3. Order Guards Logically</h3>
+<pre><code class="language-rust">// ✅ Good: Check auth before permissions
+#[use_guard(AuthenticationGuard, AdminGuard)]
+
+// ❌ Bad: Checking permissions before auth
+#[use_guard(AdminGuard, AuthenticationGuard)]
+</code></pre>
+<h3>4. Implement Default for Simple Guards</h3>
+<pre><code class="language-rust">// ✅ Good: Allows #[use_guard(MyGuard)]
+impl Default for MyGuard {
+    fn default() -&gt; Self {
+        Self
+    }
+}
+
+// Then use as:
+#[use_guard(MyGuard)]
+</code></pre>
+<h3>5. Use Configuration for Complex Guards</h3>
+<pre><code class="language-rust">// ✅ Good: Use #[guard(...)] for configured guards
+#[guard(RolesGuard::new(vec!["admin".into()]))]
+
+// Instead of:
+// #[use_guard(RolesGuard)]  // Won't work without Default
+</code></pre>
+<h2>Common Pitfalls</h2>
+<h3>❌ Guard Without Default</h3>
+<pre><code class="language-rust">// This will fail if RolesGuard doesn't implement Default
+#[use_guard(RolesGuard)]  // Error!
+
+// Use #[guard(...)] instead for configured guards
+#[guard(RolesGuard::new(vec!["admin".into()]))]  // Works!
+</code></pre>
+<h3>❌ Returning <code>Ok(false)</code> Without Error</h3>
+<pre><code class="language-rust">// Bad: Returns generic 403
+async fn can_activate(&amp;self, _ctx: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+    Ok(false)  // User gets "Access denied by guard"
+}
+
+// Good: Return specific error
+async fn can_activate(&amp;self, _ctx: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+    Err(Error::Forbidden("Premium subscription required".into()))
+}
+</code></pre>
+<h3>❌ Heavy Operations in Guards</h3>
+<pre><code class="language-rust">// Bad: Database query on every request
+async fn can_activate(&amp;self, ctx: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+    let user = db.fetch_user_with_all_relations().await?;  // Expensive!
+    Ok(user.has_permission("admin"))
+}
+
+// Good: Use cached data or lightweight checks
+async fn can_activate(&amp;self, ctx: &amp;GuardContext) -&gt; Result&lt;bool, Error&gt; {
+    // Check JWT claims instead of database
+    let role = ctx.get_header("x-user-role");
+    Ok(role == Some(&amp;"admin".into()))
+}
+</code></pre>
+<h2>API Reference</h2>
+<h3>Decorators</h3>
+<table>
+<thead>
+<tr>
+<th>Decorator</th>
+<th>Target</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>#[use_guard(Type, ...)]</code></td>
+<td>Function</td>
+<td>Apply guards by type (requires Default)</td>
+</tr>
+<tr>
+<td><code>#[guard(expr, ...)]</code></td>
+<td>Function/Struct</td>
+<td>Apply guard instances with configuration</td>
+</tr>
+</tbody></table>
+<h3>GuardContext Methods</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>get_header(name)</code></td>
+<td>Get request header by name</td>
+</tr>
+<tr>
+<td><code>get_param(name)</code></td>
+<td>Get path parameter by name</td>
+</tr>
+<tr>
+<td><code>request</code></td>
+<td>Access full <code>HttpRequest</code></td>
+</tr>
+</tbody></table>
+<h3>Built-in Guard Types</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Constructor</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AuthenticationGuard</code></td>
+<td>(unit struct)</td>
+<td>Bearer token check</td>
+</tr>
+<tr>
+<td><code>RolesGuard</code></td>
+<td><code>new(roles: Vec&lt;String&gt;)</code></td>
+<td>Role-based access</td>
+</tr>
+<tr>
+<td><code>ApiKeyGuard</code></td>
+<td><code>new(keys: Vec&lt;String&gt;)</code></td>
+<td>API key validation</td>
+</tr>
+<tr>
+<td><code>CustomGuard&lt;F&gt;</code></td>
+<td><code>new(predicate)</code></td>
+<td>Custom predicate</td>
+</tr>
+</tbody></table>
+<h2>Summary</h2>
+<p><strong>Key Points:</strong></p>
+<ol>
+<li><strong><code>#[use_guard(Type)]</code></strong> for guards implementing <code>Default</code></li>
+<li><strong><code>#[guard(expr)]</code></strong> for guards with configuration</li>
+<li>Guards return <code>Result&lt;bool, Error&gt;</code>:<ul>
+<li><code>Ok(true)</code> → Allow</li>
+<li><code>Ok(false)</code> → Deny (generic 403)</li>
+<li><code>Err(e)</code> → Deny with specific error</li>
+</ul>
+</li>
+<li>All guards must pass (AND logic)</li>
+<li>Guards run in order; first failure stops execution</li>
+<li>Use guards for authorization, middleware for processing</li>
+</ol>
+<p><strong>Quick Reference:</strong></p>
+<pre><code class="language-rust">// Simple guard (Default required)
+#[use_guard(AuthenticationGuard)]
+#[get("/protected")]
+async fn protected(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; { ... }
+
+// Configured guard
+#[guard(ApiKeyGuard::new(vec!["key1".into()]))]
+#[get("/api")]
+async fn api(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; { ... }
+
+// Multiple guards
+#[use_guard(AuthenticationGuard, AdminGuard)]
+#[get("/admin")]
+async fn admin(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; { ... }
+
+// Controller-level guard
+#[guard(AuthenticationGuard)]
+#[controller("/api")]
+struct ApiController;
+</code></pre>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

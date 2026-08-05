@@ -1,0 +1,651 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Macros Overview - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Complete reference for all macros available in Armature."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/macro-overview.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/macro-overview.html"><meta property="og:title" content="Macros Overview - Armature Rust Framework Docs"><meta property="og:description" content="Complete reference for all macros available in Armature."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/macro-overview.html"><meta name="twitter:title" content="Macros Overview - Armature Rust Framework Docs"><meta name="twitter:description" content="Complete reference for all macros available in Armature."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/macro-overview.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/macro-overview.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Macros Overview","item":"https://quinnjr.github.io/armature/docs/macro-overview"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/macro-overview","headline":"Macros Overview","name":"Macros Overview","description":"Complete reference for all macros available in Armature.","url":"https://quinnjr.github.io/armature/docs/macro-overview","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Getting Started","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/macro-overview"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview" class="active"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Armature Macros Overview</h1>
+<p>Complete reference for all macros available in Armature.</p>
+<h2>Three Macro Crates</h2>
+<p>Armature provides macros through three complementary crates:</p>
+<h3>1. armature-macro (Procedural Attributes)</h3>
+<p><strong>Purpose</strong>: Decorators for routes, controllers, and dependency injection</p>
+<p><strong>Type</strong>: Proc-macro attributes (<code>#[decorator]</code>)</p>
+<p><strong>Key Features</strong>:</p>
+<ul>
+<li>HTTP method decorators (<code>#[get]</code>, <code>#[post]</code>, etc.)</li>
+<li>Controller and module organization</li>
+<li>Timeout and body limit decorators</li>
+<li>Cache decorators</li>
+<li>Injectable and DI integration</li>
+</ul>
+<h3>2. armature-macros (Declarative)</h3>
+<p><strong>Purpose</strong>: Pattern-based macros for common operations</p>
+<p><strong>Type</strong>: Declarative macros (<code>macro_rules!</code>)</p>
+<p><strong>Key Features</strong>:</p>
+<ul>
+<li>Quick response creation (<code>ok_json!</code>, <code>created_json!</code>, etc.)</li>
+<li>Parameter extraction (<code>path_param!</code>, <code>query_param!</code>)</li>
+<li>Error responses (<code>bad_request!</code>, <code>not_found!</code>)</li>
+<li>Validation helpers (<code>guard!</code>, <code>validation_error!</code>)</li>
+<li>Utility macros (<code>json_object!</code>, <code>paginated_response!</code>)</li>
+</ul>
+<h3>3. armature-macros-utils (Procedural Utilities)</h3>
+<p><strong>Purpose</strong>: Additional procedural macros for convenience</p>
+<p><strong>Type</strong>: Proc-macros</p>
+<p><strong>Key Features</strong>:</p>
+<ul>
+<li>Response builders (<code>json!</code>, <code>html!</code>, <code>text!</code>, <code>redirect!</code>)</li>
+<li>Validation macros (<code>validate!</code>, <code>validate_email!</code>)</li>
+<li>Model derives (<code>#[derive(Model)]</code>, <code>#[derive(ApiModel)]</code>)</li>
+<li>Test helpers (<code>test_request!</code>, <code>assert_json!</code>)</li>
+<li>Error handling (<code>bail!</code>, <code>ensure!</code>)</li>
+</ul>
+<h2>Complete Macro List</h2>
+<h3>Route Decorators (armature-macro)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Purpose</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>#[get]</code></td>
+<td>GET route</td>
+<td><code>#[get("/users")]</code></td>
+</tr>
+<tr>
+<td><code>#[post]</code></td>
+<td>POST route</td>
+<td><code>#[post("/users")]</code></td>
+</tr>
+<tr>
+<td><code>#[put]</code></td>
+<td>PUT route</td>
+<td><code>#[put("/users/:id")]</code></td>
+</tr>
+<tr>
+<td><code>#[delete]</code></td>
+<td>DELETE route</td>
+<td><code>#[delete("/users/:id")]</code></td>
+</tr>
+<tr>
+<td><code>#[patch]</code></td>
+<td>PATCH route</td>
+<td><code>#[patch("/users/:id")]</code></td>
+</tr>
+<tr>
+<td><code>#[controller]</code></td>
+<td>Controller class</td>
+<td><code>#[controller("/api")]</code></td>
+</tr>
+<tr>
+<td><code>#[module]</code></td>
+<td>Module organization</td>
+<td><code>#[module(providers = [...])]</code></td>
+</tr>
+<tr>
+<td><code>#[injectable]</code></td>
+<td>DI injectable</td>
+<td><code>#[injectable]</code></td>
+</tr>
+<tr>
+<td><code>#[timeout]</code></td>
+<td>Request timeout</td>
+<td><code>#[timeout(30)]</code></td>
+</tr>
+<tr>
+<td><code>#[body_limit]</code></td>
+<td>Body size limit</td>
+<td><code>#[body_limit("10mb")]</code></td>
+</tr>
+<tr>
+<td><code>#[cache]</code></td>
+<td>Result caching</td>
+<td><code>#[cache(ttl = 300)]</code></td>
+</tr>
+</tbody></table>
+<h3>Response Macros (armature-macros)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Status</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ok_json!()</code></td>
+<td>200</td>
+<td>Success JSON response</td>
+</tr>
+<tr>
+<td><code>created_json!()</code></td>
+<td>201</td>
+<td>Created JSON response</td>
+</tr>
+<tr>
+<td><code>json_response!()</code></td>
+<td>Custom</td>
+<td>Custom status JSON</td>
+</tr>
+<tr>
+<td><code>bad_request!()</code></td>
+<td>400</td>
+<td>Bad request error</td>
+</tr>
+<tr>
+<td><code>not_found!()</code></td>
+<td>404</td>
+<td>Not found error</td>
+</tr>
+<tr>
+<td><code>internal_error!()</code></td>
+<td>500</td>
+<td>Server error</td>
+</tr>
+</tbody></table>
+<h3>Parameter Extraction (armature-macros)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Purpose</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>path_param!(req, "id")</code></td>
+<td>Single path param</td>
+<td><code>T</code> (parsed)</td>
+</tr>
+<tr>
+<td><code>path_params!(req, "id": i64, ...)</code></td>
+<td>Multiple path params</td>
+<td><code>(T1, T2, ...)</code></td>
+</tr>
+<tr>
+<td><code>query_param!(req, "page")</code></td>
+<td>Query parameter</td>
+<td><code>Option&lt;T&gt;</code></td>
+</tr>
+<tr>
+<td><code>header!(req, "Auth")</code></td>
+<td>Header value</td>
+<td><code>Result&lt;&amp;String&gt;</code></td>
+</tr>
+</tbody></table>
+<h3>Validation (armature-macros)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>validate!(condition)</code></td>
+<td>Validate condition</td>
+</tr>
+<tr>
+<td><code>validate_required!(field)</code></td>
+<td>Check required field</td>
+</tr>
+<tr>
+<td><code>validate_email!(email)</code></td>
+<td>Validate email format</td>
+</tr>
+<tr>
+<td><code>guard!(cond, msg)</code></td>
+<td>Guard with 403 error</td>
+</tr>
+<tr>
+<td><code>validation_error!(msg)</code></td>
+<td>Create validation error</td>
+</tr>
+</tbody></table>
+<h3>Utilities (armature-macros)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>json_object!{}</code></td>
+<td>Build JSON object</td>
+</tr>
+<tr>
+<td><code>paginated_response!()</code></td>
+<td>Create paginated response</td>
+</tr>
+<tr>
+<td><code>log_error!(msg)</code></td>
+<td>Log and return error</td>
+</tr>
+<tr>
+<td><code>routes!{}</code></td>
+<td>Define multiple routes</td>
+</tr>
+</tbody></table>
+<h3>Procedural Utilities (armature-macros-utils)</h3>
+<table>
+<thead>
+<tr>
+<th>Macro</th>
+<th>Type</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>json!()</code></td>
+<td>Proc</td>
+<td>JSON response</td>
+</tr>
+<tr>
+<td><code>html!()</code></td>
+<td>Proc</td>
+<td>HTML response</td>
+</tr>
+<tr>
+<td><code>text!()</code></td>
+<td>Proc</td>
+<td>Text response</td>
+</tr>
+<tr>
+<td><code>redirect!()</code></td>
+<td>Proc</td>
+<td>Redirect response</td>
+</tr>
+<tr>
+<td><code>validate!()</code></td>
+<td>Proc</td>
+<td>Validate expression</td>
+</tr>
+<tr>
+<td><code>bail!()</code></td>
+<td>Proc</td>
+<td>Return with error</td>
+</tr>
+<tr>
+<td><code>ensure!()</code></td>
+<td>Proc</td>
+<td>Ensure condition</td>
+</tr>
+<tr>
+<td><code>#[derive(Model)]</code></td>
+<td>Derive</td>
+<td>Model traits</td>
+</tr>
+<tr>
+<td><code>#[derive(ApiModel)]</code></td>
+<td>Derive</td>
+<td>API model traits</td>
+</tr>
+<tr>
+<td><code>#[derive(Resource)]</code></td>
+<td>Derive</td>
+<td>Database resource</td>
+</tr>
+<tr>
+<td><code>test_request!()</code></td>
+<td>Proc</td>
+<td>Create test request</td>
+</tr>
+<tr>
+<td><code>assert_json!()</code></td>
+<td>Proc</td>
+<td>Assert JSON equality</td>
+</tr>
+<tr>
+<td><code>assert_status!()</code></td>
+<td>Proc</td>
+<td>Assert HTTP status</td>
+</tr>
+</tbody></table>
+<h2>Quick Reference by Use Case</h2>
+<h3>Building Routes</h3>
+<pre><code class="language-rust">use armature_macro::{controller, get, post, put, delete};
+use armature_macros::prelude::*;
+
+#[controller("/api/users")]
+pub struct UserController;
+
+impl UserController {
+    #[get("/")]
+    async fn list(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        ok_json!({ "users": [] })
+    }
+
+    #[get("/:id")]
+    async fn get(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        let id: i64 = path_param!(req, "id")?;
+        ok_json!({ "id": id })
+    }
+
+    #[post("/")]
+    async fn create(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        created_json!({ "id": 1 })
+    }
+}
+</code></pre>
+<h3>Parameter Extraction</h3>
+<pre><code class="language-rust">// Path parameters
+let id: i64 = path_param!(req, "id")?;
+let (user_id, post_id) = path_params!(req, "user_id": i64, "post_id": i64)?;
+
+// Query parameters
+let page: u32 = query_param!(req, "page").unwrap_or(1);
+let limit: u32 = query_param!(req, "limit").unwrap_or(20);
+
+// Headers
+let auth: &amp;String = header!(req, "Authorization")?;
+</code></pre>
+<h3>Validation</h3>
+<pre><code class="language-rust">// Field validation
+validate_required!(name);
+validate_email!(email);
+validate!(age &gt;= 18);
+
+// Authorization guard
+guard!(user.is_admin(), "Admin required");
+
+// Custom validation
+if !is_valid(&amp;data) {
+    return validation_error!("Invalid data format");
+}
+</code></pre>
+<h3>Error Responses</h3>
+<pre><code class="language-rust">// Quick error returns
+return bad_request!("Invalid input");
+return not_found!("User not found");
+return internal_error!("Database error");
+
+// With formatting
+return not_found!("User {} not found", user_id);
+return bad_request!("Field '{}' is required", field);
+</code></pre>
+<h3>Testing</h3>
+<pre><code class="language-rust">#[tokio::test]
+async fn test_get_user() {
+    let req = test_request!(GET "/users/1");
+    let resp = get_user(req).await.unwrap();
+
+    assert_status!(resp, 200);
+    assert_json!(resp, { "id": 1 });
+}
+</code></pre>
+<h2>Macro Categories Summary</h2>
+<h3>By Frequency of Use</h3>
+<p><strong>Very Common (Use Daily)</strong>:</p>
+<ul>
+<li><code>ok_json!()</code> - Success responses</li>
+<li><code>path_param!()</code> - Path parameter extraction</li>
+<li><code>#[get]</code>, <code>#[post]</code>, etc. - Route decorators</li>
+<li><code>created_json!()</code> - Creation responses</li>
+<li><code>bad_request!()</code>, <code>not_found!()</code> - Error responses</li>
+</ul>
+<p><strong>Common (Use Regularly)</strong>:</p>
+<ul>
+<li><code>query_param!()</code> - Query parameters</li>
+<li><code>guard!()</code> - Authorization checks</li>
+<li><code>validate_email!()</code> - Email validation</li>
+<li><code>#[controller]</code> - Controller organization</li>
+<li><code>paginated_response!()</code> - Pagination</li>
+</ul>
+<p><strong>Occasional (Use When Needed)</strong>:</p>
+<ul>
+<li><code>#[timeout]</code>, <code>#[body_limit]</code> - Request limits</li>
+<li><code>#[cache]</code> - Result caching</li>
+<li><code>json_object!{}</code> - JSON building</li>
+<li><code>log_error!()</code> - Error logging</li>
+<li><code>#[derive(Model)]</code> - Model generation</li>
+</ul>
+<p><strong>Advanced (Special Cases)</strong>:</p>
+<ul>
+<li><code>#[module]</code> - Module organization</li>
+<li><code>#[injectable]</code> - DI configuration</li>
+<li><code>routes!{}</code> - Bulk route definition</li>
+<li><code>#[derive(Resource)]</code> - Database models</li>
+<li>Test helpers - Testing utilities</li>
+</ul>
+<h2>Code Reduction Examples</h2>
+<h3>Example 1: User Creation</h3>
+<p><strong>Without Macros (45 lines)</strong>:</p>
+<pre><code class="language-rust">async fn create_user(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    let name = req.path_params.get("name")
+        .ok_or_else(|| Error::BadRequest("Missing name".to_string()))?;
+    let email = req.path_params.get("email")
+        .ok_or_else(|| Error::BadRequest("Missing email".to_string()))?;
+
+    if name.is_empty() {
+        return Err(Error::Validation("Name is required".to_string()));
+    }
+
+    let email_regex = regex::Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
+    if !email_regex.is_match(email) {
+        return Err(Error::Validation("Invalid email format".to_string()));
+    }
+
+    let user = match db.create_user(name, email).await {
+        Ok(u) =&gt; u,
+        Err(e) =&gt; {
+            tracing::error!("Failed to create user: {}", e);
+            return Err(Error::InternalServerError("Database error".to_string()));
+        }
+    };
+
+    let json = serde_json::json!({
+        "id": user.id,
+        "name": user.name,
+        "email": user.email
+    });
+
+    let mut response = HttpResponse::created();
+    response.body = serde_json::to_vec(&amp;json)
+        .map_err(|e| Error::Serialization(e.to_string()))?;
+    response.headers.insert(
+        "Content-Type".to_string(),
+        "application/json".to_string()
+    );
+
+    Ok(response)
+}
+</code></pre>
+<p><strong>With Macros (18 lines - 60% reduction)</strong>:</p>
+<pre><code class="language-rust">async fn create_user(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    let name: String = path_param!(req, "name")?;
+    let email: String = path_param!(req, "email")?;
+
+    validate_required!(name);
+    validate_email!(email);
+
+    let user = db.create_user(name, email).await
+        .map_err(|e| log_error!("Failed to create user: {}", e))?;
+
+    created_json!({
+        "id": user.id,
+        "name": user.name,
+        "email": user.email
+    })
+}
+</code></pre>
+<h3>Example 2: List with Pagination</h3>
+<p><strong>Without Macros (30 lines)</strong>:</p>
+<pre><code class="language-rust">async fn list_users(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    let page = req.query_params.get("page")
+        .and_then(|p| p.parse::&lt;u32&gt;().ok())
+        .unwrap_or(1);
+
+    let limit = req.query_params.get("limit")
+        .and_then(|l| l.parse::&lt;u32&gt;().ok())
+        .unwrap_or(20)
+        .min(100);
+
+    let users = db.list_users(page, limit).await?;
+    let total = db.count_users().await?;
+
+    let json = serde_json::json!({
+        "data": users,
+        "pagination": {
+            "page": page,
+            "total": total,
+            "per_page": users.len()
+        }
+    });
+
+    let mut response = HttpResponse::ok();
+    response.body = serde_json::to_vec(&amp;json)?;
+    response.headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+    Ok(response)
+}
+</code></pre>
+<p><strong>With Macros (11 lines - 63% reduction)</strong>:</p>
+<pre><code class="language-rust">async fn list_users(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    let page: u32 = query_param!(req, "page").unwrap_or(1);
+    let limit: u32 = query_param!(req, "limit").unwrap_or(20).min(100);
+
+    let users = db.list_users(page, limit).await?;
+    let total = db.count_users().await?;
+
+    paginated_response!(users, page, total)
+}
+</code></pre>
+<h2>Performance Impact</h2>
+<p><strong>Compile Time</strong>: Macros are expanded at compile time</p>
+<ul>
+<li>Zero runtime overhead</li>
+<li>Type checking at compile time</li>
+<li>Same performance as hand-written code</li>
+</ul>
+<p><strong>Code Size</strong>: Significant reduction</p>
+<ul>
+<li>30-60% less boilerplate</li>
+<li>Better readability</li>
+<li>Easier maintenance</li>
+</ul>
+<p><strong>Developer Experience</strong>:</p>
+<ul>
+<li>Faster development</li>
+<li>Fewer errors</li>
+<li>Consistent patterns</li>
+<li>Better documentation</li>
+</ul>
+<h2>Best Practices</h2>
+<h3>1. Import via Prelude</h3>
+<pre><code class="language-rust">// Instead of individual imports
+use armature_macros::{ok_json, not_found, path_param, guard};
+
+// Use prelude
+use armature_macros::prelude::*;
+</code></pre>
+<h3>2. Combine Decorators</h3>
+<pre><code class="language-rust">#[timeout(30)]
+#[body_limit("5mb")]
+#[cache(ttl = 300)]
+#[post("/process")]
+async fn handler(req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+    // Handler code
+}
+</code></pre>
+<h3>3. Type-Safe Extraction</h3>
+<pre><code class="language-rust">// Explicit types for clarity
+let id: i64 = path_param!(req, "id")?;
+let page: u32 = query_param!(req, "page").unwrap_or(1);
+
+// Let compiler infer when obvious
+let name = path_param!(req, "name")?;  // Infers String
+</code></pre>
+<h3>4. Consistent Error Handling</h3>
+<pre><code class="language-rust">// Use macro error responses for consistency
+match result {
+    Some(data) =&gt; ok_json!(data),
+    None =&gt; not_found!("Resource not found"),
+}
+
+// Not mixed styles
+match result {
+    Some(data) =&gt; ok_json!(data),
+    None =&gt; Err(Error::NotFound("...".to_string())),  // ❌ Inconsistent
+}
+</code></pre>
+<h2>Migration Guide</h2>
+<h3>From Manual Response Creation</h3>
+<p><strong>Before</strong>:</p>
+<pre><code class="language-rust">let mut response = HttpResponse::ok();
+response.body = serde_json::to_vec(&amp;data)?;
+response.headers.insert("Content-Type".to_string(), "application/json".to_string());
+Ok(response)
+</code></pre>
+<p><strong>After</strong>:</p>
+<pre><code class="language-rust">ok_json!(data)
+</code></pre>
+<h3>From Manual Parameter Extraction</h3>
+<p><strong>Before</strong>:</p>
+<pre><code class="language-rust">let id = req.path_params.get("id")
+    .ok_or_else(|| Error::BadRequest("Missing id".to_string()))?
+    .parse::&lt;i64&gt;()
+    .map_err(|_| Error::BadRequest("Invalid id".to_string()))?;
+</code></pre>
+<p><strong>After</strong>:</p>
+<pre><code class="language-rust">let id: i64 = path_param!(req, "id")?;
+</code></pre>
+<h3>From Manual Validation</h3>
+<p><strong>Before</strong>:</p>
+<pre><code class="language-rust">if email.is_empty() {
+    return Err(Error::Validation("Email required".to_string()));
+}
+let email_regex = Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
+if !email_regex.is_match(&amp;email) {
+    return Err(Error::Validation("Invalid email".to_string()));
+}
+</code></pre>
+<p><strong>After</strong>:</p>
+<pre><code class="language-rust">validate_required!(email);
+validate_email!(email);
+</code></pre>
+<h2>Summary</h2>
+<p>Armature's macro system provides:</p>
+<p>✅ <strong>3 complementary macro crates</strong>
+✅ <strong>30+ useful macros</strong>
+✅ <strong>30-60% code reduction</strong>
+✅ <strong>Zero runtime overhead</strong>
+✅ <strong>Type-safe abstractions</strong>
+✅ <strong>Consistent patterns</strong>
+✅ <strong>Better readability</strong></p>
+<p>The macros are designed to work together seamlessly, creating a powerful
+and ergonomic development experience while maintaining type safety and
+performance.</p>
+<p>For detailed guides, see:</p>
+<ul>
+<li><a href="https://github.com/quinnjr/armature/blob/main/docs/guides/macros-guide.md">Macros Guide</a></li>
+<li><a href="https://github.com/quinnjr/armature/blob/main/armature-macros/README.md">armature-macros README</a></li>
+<li><a href="https://github.com/quinnjr/armature/blob/main/armature-macros-utils/README.md">armature-macros-utils README</a></li>
+</ul>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

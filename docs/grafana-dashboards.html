@@ -1,0 +1,402 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Grafana Dashboards - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background…"><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/grafana-dashboards.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/grafana-dashboards.html"><meta property="og:title" content="Grafana Dashboards - Armature Rust Framework Docs"><meta property="og:description" content="Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background…"><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/grafana-dashboards.html"><meta name="twitter:title" content="Grafana Dashboards - Armature Rust Framework Docs"><meta name="twitter:description" content="Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background…"><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/grafana-dashboards.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/grafana-dashboards.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Grafana Dashboards","item":"https://quinnjr.github.io/armature/docs/grafana-dashboards"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/grafana-dashboards","headline":"Grafana Dashboards","name":"Grafana Dashboards","description":"Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background…","url":"https://quinnjr.github.io/armature/docs/grafana-dashboards","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Observability","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/grafana-dashboards"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards" class="active"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Grafana Dashboards</h1>
+<p>Pre-built Grafana dashboards for comprehensive monitoring of your Armature applications. Visualize HTTP metrics, authentication, caching, and background job processing in real-time.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#available-dashboards">Available Dashboards</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#application-overview-dashboard">Application Overview Dashboard</a></li>
+<li><a href="#auth--security-dashboard">Auth &amp; Security Dashboard</a></li>
+<li><a href="#cache--redis-dashboard">Cache &amp; Redis Dashboard</a></li>
+<li><a href="#queues--jobs-dashboard">Queues &amp; Jobs Dashboard</a></li>
+<li><a href="#docker-compose-setup">Docker Compose Setup</a></li>
+<li><a href="#setting-up-alerts">Setting Up Alerts</a></li>
+<li><a href="#metric-reference">Metric Reference</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-documentation">Related Documentation</a></li>
+</ul>
+<hr />
+<h2>Overview</h2>
+<ul>
+<li><strong>Application Overview</strong> - Request rates, latency, error rates, and resource usage at a glance</li>
+<li><strong>Auth &amp; Security</strong> - Login attempts, JWT tokens, rate limiting, and security events</li>
+<li><strong>Cache &amp; Redis</strong> - Hit rates, connection pools, and operation latency</li>
+<li><strong>Queues &amp; Jobs</strong> - Job throughput, queue depth, and cron task monitoring</li>
+</ul>
+<hr />
+<h2>Available Dashboards</h2>
+<p>Armature provides four pre-built Grafana dashboards in <code>templates/grafana/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Dashboard</th>
+<th>File</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Application Overview</td>
+<td><code>armature-overview.json</code></td>
+<td>High-level health and performance metrics</td>
+</tr>
+<tr>
+<td>Auth &amp; Security</td>
+<td><code>armature-auth-security.json</code></td>
+<td>Authentication flows and security monitoring</td>
+</tr>
+<tr>
+<td>Cache &amp; Redis</td>
+<td><code>armature-cache-redis.json</code></td>
+<td>Caching effectiveness and Redis performance</td>
+</tr>
+<tr>
+<td>Queues &amp; Jobs</td>
+<td><code>armature-queues-jobs.json</code></td>
+<td>Background job processing and cron tasks</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Quick Start</h2>
+<p>Get dashboards running in under 5 minutes:</p>
+<h3>1. Enable Metrics in Your App</h3>
+<p>Ensure your Armature application exposes Prometheus metrics:</p>
+<pre><code class="language-rust">// main.rs
+use armature::prelude::*;
+use armature_core::metrics::MetricsConfig;
+
+#[tokio::main]
+async fn main() {
+    // Enable Prometheus metrics endpoint
+    let metrics = MetricsConfig::builder()
+        .enabled(true)
+        .endpoint("/metrics")
+        .include_default_labels(true)
+        .build();
+
+    let app = Application::builder()
+        .metrics(metrics)
+        .build();
+
+    app.listen(3000).await.unwrap();
+}
+
+// Metrics are now available at GET /metrics
+</code></pre>
+<h3>2. Configure Prometheus</h3>
+<p>Add your Armature app as a scrape target:</p>
+<pre><code class="language-yaml"># prometheus.yml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'armature'
+    static_configs:
+      - targets: ['your-app:3000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # For multiple instances
+  - job_name: 'armature-prod'
+    static_configs:
+      - targets:
+        - 'api-1:3000'
+        - 'api-2:3000'
+        - 'api-3:3000'
+</code></pre>
+<h3>3. Import Dashboards</h3>
+<p>Import the JSON files into Grafana:</p>
+<ol>
+<li>Open Grafana → <strong>Dashboards</strong> → <strong>Import</strong></li>
+<li>Upload the JSON file from <code>templates/grafana/</code></li>
+<li>Select your Prometheus data source</li>
+<li>Click <strong>Import</strong></li>
+</ol>
+<hr />
+<h2>Application Overview Dashboard</h2>
+<p>The main dashboard for monitoring application health:</p>
+<h3>Top Row Stats</h3>
+<ul>
+<li><strong>Request Rate</strong> — HTTP requests per second</li>
+<li><strong>P95 Latency</strong> — 95th percentile response time (threshold: 100ms yellow, 500ms red)</li>
+<li><strong>Error Rate</strong> — Percentage of 5xx responses (threshold: 1% yellow, 5% red)</li>
+<li><strong>Active Instances</strong> — Number of running application instances</li>
+<li><strong>CPU Usage</strong> — Average CPU utilization (threshold: 70% yellow, 90% red)</li>
+<li><strong>Memory Usage</strong> — Average memory utilization (threshold: 70% yellow, 90% red)</li>
+</ul>
+<h3>HTTP Metrics Panels</h3>
+<ul>
+<li><strong>Request Rate by Method</strong> — GET, POST, PUT, DELETE breakdown</li>
+<li><strong>Request Rate by Status</strong> — 2xx (green), 4xx (yellow), 5xx (red)</li>
+<li><strong>Response Time Percentiles</strong> — p50, p90, p95, p99 over time</li>
+<li><strong>Top 10 Endpoints</strong> — Highest traffic endpoints</li>
+</ul>
+<h3>System Resources Panels</h3>
+<ul>
+<li><strong>CPU by Instance</strong> — Per-instance CPU tracking</li>
+<li><strong>Memory by Instance</strong> — Per-instance memory in bytes</li>
+<li><strong>Tokio Runtime Threads</strong> — Worker and blocking thread counts</li>
+<li><strong>Active HTTP Connections</strong> — Open connection count</li>
+</ul>
+<hr />
+<h2>Auth &amp; Security Dashboard</h2>
+<p>Monitor authentication and security events:</p>
+<h3>Authentication Metrics</h3>
+<ul>
+<li>Successful/Failed Logins (5-minute rolling)</li>
+<li>Active Sessions count</li>
+<li>JWT Tokens Issued rate</li>
+<li>JWT Validation Failures</li>
+<li>OAuth Callbacks by provider</li>
+</ul>
+<h3>Rate Limiting</h3>
+<ul>
+<li>Allowed vs rejected requests</li>
+<li>Top rate-limited endpoints</li>
+</ul>
+<h3>Security Events</h3>
+<ul>
+<li>Events by type</li>
+<li>Blocked requests by reason</li>
+<li>Top failed login IPs (24h table)</li>
+</ul>
+<hr />
+<h2>Cache &amp; Redis Dashboard</h2>
+<p>Track caching effectiveness and Redis performance:</p>
+<h3>Cache Overview</h3>
+<ul>
+<li>Cache Hit Rate (threshold: &lt;90% yellow, &lt;70% red)</li>
+<li>Cache Ops/sec</li>
+<li>Cache Entries count</li>
+<li>Cache Memory usage</li>
+<li>P95 Latency</li>
+<li>Evictions count</li>
+</ul>
+<h3>Multi-Tier Caching</h3>
+<ul>
+<li>L1 vs L2 hit rates</li>
+<li>Operations by type (GET/SET/DELETE)</li>
+</ul>
+<h3>Redis Metrics</h3>
+<ul>
+<li>Connection pool (active/idle)</li>
+<li>Command latency (p50/p95/p99)</li>
+<li>Top commands</li>
+</ul>
+<hr />
+<h2>Queues &amp; Jobs Dashboard</h2>
+<p>Monitor background job processing:</p>
+<h3>Queue Overview</h3>
+<ul>
+<li>Pending Jobs (threshold: 100 yellow, 500 red)</li>
+<li>Processing Jobs</li>
+<li>Throughput (jobs/sec)</li>
+<li>Failure Rate (threshold: 1% yellow, 5% red)</li>
+<li>Dead Letter Queue</li>
+<li>Active Workers</li>
+</ul>
+<h3>Latency</h3>
+<ul>
+<li>Processing duration by job type</li>
+<li>Wait time (queue latency)</li>
+</ul>
+<h3>Scheduled Tasks</h3>
+<ul>
+<li>Cron executions by task/status</li>
+<li>Task duration (P95)</li>
+<li>Retries by type</li>
+<li>Failures by error</li>
+</ul>
+<hr />
+<h2>Docker Compose Setup</h2>
+<p>Full monitoring stack with Docker Compose:</p>
+<pre><code class="language-yaml"># docker-compose.monitoring.yml
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./templates/grafana:/var/lib/grafana/dashboards/armature
+      - ./grafana-provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+  your-app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - METRICS_ENABLED=true
+
+volumes:
+  prometheus_data:
+  grafana_data:
+</code></pre>
+<hr />
+<h2>Setting Up Alerts</h2>
+<p>Configure Grafana alerts for critical thresholds:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Warning</th>
+<th>Critical</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>P95 Latency</td>
+<td>&gt; 100ms</td>
+<td>&gt; 500ms</td>
+</tr>
+<tr>
+<td>Error Rate</td>
+<td>&gt; 1%</td>
+<td>&gt; 5%</td>
+</tr>
+<tr>
+<td>CPU Usage</td>
+<td>&gt; 70%</td>
+<td>&gt; 90%</td>
+</tr>
+<tr>
+<td>Memory Usage</td>
+<td>&gt; 70%</td>
+<td>&gt; 90%</td>
+</tr>
+<tr>
+<td>Cache Hit Rate</td>
+<td>&lt; 90%</td>
+<td>&lt; 70%</td>
+</tr>
+<tr>
+<td>Queue Depth</td>
+<td>&gt; 100</td>
+<td>&gt; 500</td>
+</tr>
+<tr>
+<td>Job Failure Rate</td>
+<td>&gt; 1%</td>
+<td>&gt; 5%</td>
+</tr>
+<tr>
+<td>Dead Letter Queue</td>
+<td>&gt; 10</td>
+<td>&gt; 50</td>
+</tr>
+</tbody></table>
+<p>To create alerts in Grafana:</p>
+<ol>
+<li>Edit the panel you want to alert on</li>
+<li>Go to the <strong>Alert</strong> tab</li>
+<li>Click <strong>Create alert rule</strong></li>
+<li>Configure thresholds and notification channels</li>
+</ol>
+<hr />
+<h2>Metric Reference</h2>
+<p>These metric names are expected by the dashboards:</p>
+<h3>HTTP Metrics</h3>
+<pre><code class="language-text">http_requests_total{method, status, endpoint}
+http_request_duration_seconds_bucket{le, endpoint}
+http_connections_active
+</code></pre>
+<h3>Authentication Metrics</h3>
+<pre><code class="language-text">auth_login_attempts_total{status}
+auth_active_sessions
+auth_jwt_tokens_issued_total
+auth_jwt_validation_failures_total
+auth_oauth_callbacks_total{provider}
+ratelimit_requests_total{status, endpoint}
+</code></pre>
+<h3>Cache Metrics</h3>
+<pre><code class="language-text">cache_hits_total{tier}
+cache_misses_total{tier}
+cache_operations_total{operation}
+cache_entries_total
+cache_memory_bytes
+cache_evictions_total{reason}
+</code></pre>
+<h3>Queue Metrics</h3>
+<pre><code class="language-text">queue_jobs_pending{queue}
+queue_jobs_processing{queue}
+queue_jobs_completed_total{queue}
+queue_jobs_failed_total{queue, error_type}
+queue_jobs_dead_letter{queue}
+queue_workers_active
+</code></pre>
+<hr />
+<h2>Troubleshooting</h2>
+<h3>No Data Displayed</h3>
+<ol>
+<li><strong>Verify metrics endpoint</strong> — <code>curl http://your-app:3000/metrics</code></li>
+<li><strong>Check Prometheus targets</strong> — Status → Targets in Prometheus UI</li>
+<li><strong>Verify job label</strong> — Ensure <code>$job</code> variable matches your prometheus.yml</li>
+<li><strong>Check data source</strong> — Test connection in Grafana data sources</li>
+</ol>
+<h3>Missing Metrics</h3>
+<p>Enable the features that expose the metrics you need:</p>
+<pre><code class="language-rust">// Enable all features that export metrics
+let app = Application::builder()
+    .metrics(MetricsConfig::default())      // HTTP metrics
+    .cache(CacheConfig::default())          // Cache metrics
+    .queue(QueueConfig::default())          // Queue metrics
+    .auth(AuthConfig::default())            // Auth metrics
+    .build();
+</code></pre>
+<hr />
+<h2>Related Documentation</h2>
+<ul>
+<li><a href="/armature/docs/metrics-guide">Prometheus Metrics</a> — Configure metrics export in your application</li>
+<li><a href="/armature/docs/health-check">Health Checks</a> — Kubernetes-ready health probes</li>
+<li><a href="/armature/docs/opentelemetry-guide">OpenTelemetry</a> — Distributed tracing and observability</li>
+</ul>
+<h3>See Also</h3>
+<ul>
+<li><a href="/armature/docs/logging-guide">Logging Guide</a></li>
+<li><a href="/armature/docs/error-correlation">Error Tracking</a></li>
+<li><a href="/armature/docs/docker-guide">Docker Deployment</a></li>
+</ul>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

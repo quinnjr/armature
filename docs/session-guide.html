@@ -1,0 +1,687 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>Sessions - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/session-guide.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/session-guide.html"><meta property="og:title" content="Sessions - Armature Rust Framework Docs"><meta property="og:description" content="Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/session-guide.html"><meta name="twitter:title" content="Sessions - Armature Rust Framework Docs"><meta name="twitter:description" content="Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/session-guide.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/session-guide.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"Sessions","item":"https://quinnjr.github.io/armature/docs/session-guide"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/session-guide","headline":"Sessions","name":"Sessions","description":"Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends.","url":"https://quinnjr.github.io/armature/docs/session-guide","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Security","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/session-guide"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide" class="active"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>Session Storage Guide</h1>
+<p>Server-side session storage for Armature framework with Redis, Memcached, and CouchDB backends.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#important-stateless-architecture-preferred">Important: Stateless Architecture Preferred</a></li>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#installation">Installation</a></li>
+<li><a href="#when-to-use-sessions">When to Use Sessions</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#session-backends">Session Backends</a></li>
+<li><a href="#session-api">Session API</a></li>
+<li><a href="#integration-with-handlers">Integration with Handlers</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#migration-from-sessions-to-jwt">Migration from Sessions to JWT</a></li>
+<li><a href="#api-reference">API Reference</a></li>
+<li><a href="#summary">Summary</a></li>
+</ul>
+<h2>Important: Stateless Architecture Preferred</h2>
+<blockquote>
+<p>⚠️ <strong>Armature strongly recommends stateless architecture using JWT tokens instead of server-side sessions.</strong></p>
+</blockquote>
+<h3>Why Stateless?</h3>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Stateless (JWT)</th>
+<th>Sessions</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Scalability</strong></td>
+<td>✅ Any server handles any request</td>
+<td>❌ Requires shared session store</td>
+</tr>
+<tr>
+<td><strong>Performance</strong></td>
+<td>✅ No session lookups</td>
+<td>❌ External store on every request</td>
+</tr>
+<tr>
+<td><strong>Reliability</strong></td>
+<td>✅ No session store to fail</td>
+<td>❌ Session store is SPOF</td>
+</tr>
+<tr>
+<td><strong>Cloud-Native</strong></td>
+<td>✅ Perfect for K8s/serverless</td>
+<td>❌ Requires stateful infrastructure</td>
+</tr>
+<tr>
+<td><strong>Security</strong></td>
+<td>✅ No session hijacking</td>
+<td>❌ Session vulnerabilities possible</td>
+</tr>
+</tbody></table>
+<h3>Preferred Approach: JWT Authentication</h3>
+<pre><code class="language-rust">use armature_jwt::JwtManager;
+
+// Create token at login - contains all user info
+let token = jwt_manager.create_token(UserClaims {
+    user_id: user.id,
+    email: user.email,
+    roles: user.roles,
+})?;
+
+// Client stores token (localStorage, cookie, etc.)
+// Server validates on each request - no session lookup needed
+let claims = jwt_manager.verify_token(&amp;token)?;
+</code></pre>
+<p>See the <a href="https://github.com/quinnjr/armature/blob/main/docs/stateless-architecture.md">Stateless Architecture Guide</a> for comprehensive details.</p>
+<h2>Overview</h2>
+<p>The <code>armature-session</code> module provides server-side session storage for cases where sessions are absolutely necessary. It supports multiple backends with a unified API.</p>
+<p><strong>Use this module only when:</strong></p>
+<ul>
+<li>Integrating with legacy systems requiring sessions</li>
+<li>Compliance mandates server-side session tracking</li>
+<li>You need immediate session invalidation</li>
+<li>Storing large amounts of temporary user data</li>
+</ul>
+<h2>Features</h2>
+<ul>
+<li>✅ <strong>Redis backend</strong> - High-performance, default option</li>
+<li>✅ <strong>Memcached backend</strong> - Optional, feature-gated</li>
+<li>✅ <strong>CouchDB backend</strong> - Document-based sessions</li>
+<li>✅ Unified <code>SessionStore</code> trait across all backends</li>
+<li>✅ Automatic session expiration</li>
+<li>✅ Session metadata (IP, user agent)</li>
+<li>✅ Configurable TTL with max limits</li>
+<li>✅ Typed session data storage</li>
+</ul>
+<h2>Installation</h2>
+<p>Add to your <code>Cargo.toml</code>:</p>
+<pre><code class="language-toml">[dependencies]
+# Redis only (default)
+armature-session = "0.1"
+
+# With Memcached support
+armature-session = { version = "0.1", features = ["memcached"] }
+
+# With CouchDB support
+armature-session = { version = "0.1", features = ["couchdb"] }
+
+# All backends
+armature-session = { version = "0.1", features = ["full"] }
+</code></pre>
+<p>Or via the main armature crate:</p>
+<pre><code class="language-toml">[dependencies]
+armature-framework = { version = "0.1", features = ["session"] }
+
+# With Memcached
+armature-framework = { version = "0.1", features = ["session", "session-memcached"] }
+</code></pre>
+<h2>When to Use Sessions</h2>
+<h3>✅ Appropriate Use Cases</h3>
+<ol>
+<li><p><strong>Legacy System Integration</strong></p>
+<pre><code class="language-rust">// Old system expects session IDs
+let session = store.create(None).await?;
+legacy_api.set_session_id(&amp;session.id)?;
+</code></pre>
+</li>
+<li><p><strong>Compliance Requirements</strong></p>
+<pre><code class="language-rust">// Audit trail requires server-side session tracking
+session.set("audit_trail", audit_entry)?;
+store.save(&amp;session).await?;
+</code></pre>
+</li>
+<li><p><strong>Immediate Logout (All Devices)</strong></p>
+<pre><code class="language-rust">// Delete all sessions for a user
+for session_id in user_sessions {
+    store.delete(&amp;session_id).await?;
+}
+</code></pre>
+</li>
+<li><p><strong>Large Temporary Data</strong></p>
+<pre><code class="language-rust">// Shopping cart, multi-step wizard data
+session.set("cart", large_cart_data)?;
+session.set("wizard_step", 3)?;
+</code></pre>
+</li>
+</ol>
+<h3>❌ Inappropriate Use Cases</h3>
+<ul>
+<li><strong>Authentication only</strong> → Use JWT</li>
+<li><strong>Simple user identification</strong> → Use JWT</li>
+<li><strong>API authentication</strong> → Use JWT/API keys</li>
+<li><strong>Microservices</strong> → Use JWT for service-to-service</li>
+</ul>
+<h2>Quick Start</h2>
+<h3>Redis Session Store (Default)</h3>
+<pre><code class="language-rust">use armature_session::*;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), SessionError&gt; {
+    // Configure Redis session store
+    let config = SessionConfig::redis("redis://localhost:6379")?
+        .with_namespace("myapp:session")
+        .with_default_ttl(Duration::from_secs(3600))  // 1 hour
+        .with_max_ttl(Duration::from_secs(86400));    // 24 hour max
+
+    let store = RedisSessionStore::new(config).await?;
+
+    // Create a new session
+    let mut session = store.create(None).await?;
+    println!("Session ID: {}", session.id);
+
+    // Store typed data
+    session.set("user_id", 123)?;
+    session.set("username", "alice")?;
+    session.set("roles", vec!["admin", "user"])?;
+    store.save(&amp;session).await?;
+
+    // Retrieve session later
+    if let Some(session) = store.get(&amp;session.id).await? {
+        let user_id: Option&lt;i32&gt; = session.get("user_id");
+        let roles: Option&lt;Vec&lt;String&gt;&gt; = session.get("roles");
+        println!("User: {:?}, Roles: {:?}", user_id, roles);
+    }
+
+    // Delete session (logout)
+    store.delete(&amp;session.id).await?;
+
+    Ok(())
+}
+</code></pre>
+<h2>Session Backends</h2>
+<h3>Redis (Default)</h3>
+<p>High-performance, recommended for most use cases.</p>
+<pre><code class="language-rust">use armature_session::*;
+
+let config = SessionConfig::redis("redis://localhost:6379")?
+    .with_namespace("myapp:session")
+    .with_default_ttl(Duration::from_secs(3600));
+
+let store = RedisSessionStore::new(config).await?;
+</code></pre>
+<p><strong>Pros:</strong></p>
+<ul>
+<li>Very fast (in-memory)</li>
+<li>Automatic expiration (TTL)</li>
+<li>Clustering support</li>
+<li>Persistence options</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>Additional infrastructure</li>
+<li>Memory-based (limited by RAM)</li>
+</ul>
+<h3>Memcached (Feature-gated)</h3>
+<p>Requires <code>memcached</code> feature flag.</p>
+<pre><code class="language-toml">[dependencies]
+armature-session = { version = "0.1", features = ["memcached"] }
+</code></pre>
+<pre><code class="language-rust">use armature_session::*;
+
+let config = SessionConfig::memcached("memcache://localhost:11211")?
+    .with_namespace("myapp:session")
+    .with_default_ttl(Duration::from_secs(3600));
+
+let store = MemcachedSessionStore::new(config).await?;
+</code></pre>
+<p><strong>Pros:</strong></p>
+<ul>
+<li>Simple protocol</li>
+<li>Very fast</li>
+<li>Distributed by design</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>No persistence (volatile)</li>
+<li>No prefix scanning (count/clear_all limited)</li>
+<li>Memory-only</li>
+</ul>
+<h3>CouchDB</h3>
+<p>Document-based sessions for environments already using CouchDB.</p>
+<pre><code class="language-toml">[dependencies]
+armature-session = { version = "0.1", features = ["couchdb"] }
+</code></pre>
+<pre><code class="language-rust">use armature_session::*;
+
+let config = SessionConfig::couchdb("http://localhost:5984", "sessions")?
+    .with_namespace("myapp")
+    .with_default_ttl(Duration::from_secs(3600))
+    .with_auth("admin", "password");
+
+let store = CouchDbSessionStore::new(config).await?;
+</code></pre>
+<p><strong>Setup CouchDB database:</strong></p>
+<pre><code class="language-bash"># Create database
+curl -X PUT http://admin:password@localhost:5984/sessions
+
+# Create view for expiration cleanup
+curl -X PUT http://admin:password@localhost:5984/sessions/_design/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "views": {
+      "by_expiration": {
+        "map": "function(doc) { if(doc.expires_at) emit(doc.expires_at, null); }"
+      }
+    }
+  }'
+</code></pre>
+<p><strong>Pros:</strong></p>
+<ul>
+<li>Persistent storage</li>
+<li>Query capabilities</li>
+<li>Good for document-oriented data</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>Slower than Redis/Memcached</li>
+<li>More complex setup</li>
+<li>Higher resource usage</li>
+</ul>
+<h2>Session API</h2>
+<h3>Session Data Structure</h3>
+<pre><code class="language-rust">pub struct Session {
+    pub id: String,                              // Unique session ID
+    pub data: HashMap&lt;String, serde_json::Value&gt;, // Session data
+    pub created_at: DateTime&lt;Utc&gt;,               // Creation time
+    pub last_accessed_at: DateTime&lt;Utc&gt;,         // Last access time
+    pub expires_at: DateTime&lt;Utc&gt;,               // Expiration time
+    pub user_agent: Option&lt;String&gt;,              // Browser/client info
+    pub ip_address: Option&lt;String&gt;,              // Client IP
+}
+</code></pre>
+<h3>Session Methods</h3>
+<pre><code class="language-rust">// Get typed value
+let user_id: Option&lt;i32&gt; = session.get("user_id");
+
+// Set typed value
+session.set("user_id", 123)?;
+
+// Remove value
+session.remove("temp_data");
+
+// Check if key exists
+if session.contains("user_id") { ... }
+
+// Get all keys
+let keys = session.keys();
+
+// Clear all data
+session.clear();
+
+// Update last accessed time
+session.touch();
+
+// Extend expiration
+session.extend(Duration::from_secs(3600));
+
+// Check if expired
+if session.is_expired() { ... }
+
+// Add metadata
+let session = Session::new(id, ttl)
+    .with_user_agent("Mozilla/5.0...")
+    .with_ip_address("192.168.1.1");
+</code></pre>
+<h3>SessionStore Trait</h3>
+<pre><code class="language-rust">#[async_trait]
+pub trait SessionStore: Send + Sync {
+    // Create new session
+    async fn create(&amp;self, ttl: Option&lt;Duration&gt;) -&gt; SessionResult&lt;Session&gt;;
+
+    // Get session by ID
+    async fn get(&amp;self, session_id: &amp;str) -&gt; SessionResult&lt;Option&lt;Session&gt;&gt;;
+
+    // Save/update session
+    async fn save(&amp;self, session: &amp;Session) -&gt; SessionResult&lt;()&gt;;
+
+    // Delete session
+    async fn delete(&amp;self, session_id: &amp;str) -&gt; SessionResult&lt;()&gt;;
+
+    // Check if session exists
+    async fn exists(&amp;self, session_id: &amp;str) -&gt; SessionResult&lt;bool&gt;;
+
+    // Extend session TTL
+    async fn extend(&amp;self, session_id: &amp;str, ttl: Duration) -&gt; SessionResult&lt;()&gt;;
+
+    // Touch session (update last accessed)
+    async fn touch(&amp;self, session_id: &amp;str) -&gt; SessionResult&lt;()&gt;;
+
+    // Clear all sessions (dangerous!)
+    async fn clear_all(&amp;self) -&gt; SessionResult&lt;()&gt;;
+
+    // Count active sessions
+    async fn count(&amp;self) -&gt; SessionResult&lt;usize&gt;;
+
+    // Cleanup expired sessions
+    async fn cleanup_expired(&amp;self) -&gt; SessionResult&lt;usize&gt;;
+}
+</code></pre>
+<h2>Integration with Handlers</h2>
+<h3>Middleware Approach</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_session::*;
+
+pub struct SessionMiddleware {
+    store: RedisSessionStore,
+}
+
+#[async_trait]
+impl Middleware for SessionMiddleware {
+    async fn handle(&amp;self, mut req: HttpRequest, next: Next) -&gt; Result&lt;HttpResponse, Error&gt; {
+        // Extract session ID from cookie
+        let session_id = req.cookie("session_id");
+
+        if let Some(id) = session_id {
+            if let Some(session) = self.store.get(&amp;id).await? {
+                // Session valid - attach to request
+                req.headers.insert("x-session-id".to_string(), id);
+                req.headers.insert("x-user-id".to_string(),
+                    session.get::&lt;String&gt;("user_id").unwrap_or_default());
+            }
+        }
+
+        next(req).await
+    }
+}
+</code></pre>
+<h3>Controller with Sessions</h3>
+<pre><code class="language-rust">#[controller("/api")]
+struct UserController {
+    session_store: RedisSessionStore,
+}
+
+impl UserController {
+    #[post("/login")]
+    async fn login(
+        &amp;self,
+        #[body] credentials: Body&lt;LoginRequest&gt;,
+    ) -&gt; Result&lt;HttpResponse, Error&gt; {
+        // Validate credentials...
+        let user = validate_user(&amp;credentials)?;
+
+        // Create session
+        let mut session = self.session_store.create(None).await?;
+        session.set("user_id", user.id)?;
+        session.set("roles", user.roles)?;
+        self.session_store.save(&amp;session).await?;
+
+        // Return session ID in cookie
+        HttpResponse::ok()
+            .with_cookie("session_id", &amp;session.id, CookieOptions::secure())
+            .with_json(&amp;LoginResponse { success: true })
+    }
+
+    #[post("/logout")]
+    async fn logout(
+        &amp;self,
+        #[header("Cookie")] cookie: Header,
+    ) -&gt; Result&lt;HttpResponse, Error&gt; {
+        if let Some(session_id) = parse_cookie(&amp;cookie, "session_id") {
+            self.session_store.delete(&amp;session_id).await?;
+        }
+
+        HttpResponse::ok()
+            .with_cleared_cookie("session_id")
+            .with_json(&amp;LogoutResponse { success: true })
+    }
+}
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. Always Set Reasonable TTLs</h3>
+<pre><code class="language-rust">// ✅ Good - Short default, enforced maximum
+let config = SessionConfig::redis("redis://localhost:6379")?
+    .with_default_ttl(Duration::from_secs(3600))   // 1 hour
+    .with_max_ttl(Duration::from_secs(86400));     // 24 hour max
+
+// ❌ Bad - Very long sessions are security risks
+let config = SessionConfig::redis("redis://localhost:6379")?
+    .with_default_ttl(Duration::from_secs(86400 * 30)); // 30 days!
+</code></pre>
+<h3>2. Store Minimal Data in Sessions</h3>
+<pre><code class="language-rust">// ✅ Good - Only essential data
+session.set("user_id", user.id)?;
+session.set("roles", user.roles)?;
+
+// ❌ Bad - Full user object with sensitive data
+session.set("user", full_user_object)?; // Contains password hash!
+</code></pre>
+<h3>3. Use Secure Session IDs</h3>
+<pre><code class="language-rust">// Session IDs are automatically generated as UUIDs
+// Never allow user-provided session IDs
+let session = store.create(None).await?; // ID auto-generated
+</code></pre>
+<h3>4. Regenerate Sessions on Privilege Changes</h3>
+<pre><code class="language-rust">async fn elevate_privileges(
+    store: &amp;impl SessionStore,
+    old_session_id: &amp;str,
+) -&gt; Result&lt;Session, Error&gt; {
+    // Get old session data
+    let old_session = store.get(old_session_id).await?.unwrap();
+
+    // Delete old session
+    store.delete(old_session_id).await?;
+
+    // Create new session with elevated privileges
+    let mut new_session = store.create(None).await?;
+    new_session.set("user_id", old_session.get::&lt;i32&gt;("user_id"))?;
+    new_session.set("is_admin", true)?;
+    store.save(&amp;new_session).await?;
+
+    Ok(new_session)
+}
+</code></pre>
+<h3>5. Clean Up Expired Sessions</h3>
+<pre><code class="language-rust">// Run periodically (cron job)
+async fn cleanup_sessions(store: &amp;impl SessionStore) {
+    match store.cleanup_expired().await {
+        Ok(count) =&gt; println!("Cleaned up {} expired sessions", count),
+        Err(e) =&gt; eprintln!("Session cleanup failed: {}", e),
+    }
+}
+</code></pre>
+<h2>Migration from Sessions to JWT</h2>
+<p>If you're currently using sessions and want to migrate to stateless JWT:</p>
+<h3>Step 1: Add JWT Support</h3>
+<pre><code class="language-rust">use armature_jwt::JwtManager;
+
+let jwt_manager = JwtManager::new(JwtConfig {
+    secret: "your-secret-key",
+    expiration: Duration::from_secs(3600),
+    ..Default::default()
+})?;
+</code></pre>
+<h3>Step 2: Dual Authentication Period</h3>
+<pre><code class="language-rust">async fn authenticate(
+    req: &amp;HttpRequest,
+    session_store: &amp;impl SessionStore,
+    jwt_manager: &amp;JwtManager,
+) -&gt; Result&lt;UserId, Error&gt; {
+    // Try JWT first (new method)
+    if let Some(token) = extract_bearer_token(req) {
+        if let Ok(claims) = jwt_manager.verify_token(token) {
+            return Ok(claims.user_id);
+        }
+    }
+
+    // Fall back to session (legacy)
+    if let Some(session_id) = req.cookie("session_id") {
+        if let Some(session) = session_store.get(&amp;session_id).await? {
+            return Ok(session.get("user_id").unwrap());
+        }
+    }
+
+    Err(Error::Unauthorized)
+}
+</code></pre>
+<h3>Step 3: Issue JWT on Login</h3>
+<pre><code class="language-rust">async fn login(
+    credentials: LoginRequest,
+    jwt_manager: &amp;JwtManager,
+) -&gt; Result&lt;LoginResponse, Error&gt; {
+    let user = validate_user(&amp;credentials)?;
+
+    // Issue JWT instead of creating session
+    let token = jwt_manager.create_token(UserClaims {
+        user_id: user.id,
+        roles: user.roles,
+    })?;
+
+    Ok(LoginResponse { token })
+}
+</code></pre>
+<h3>Step 4: Remove Session Support</h3>
+<p>Once all clients are migrated, remove session dependencies.</p>
+<h2>Common Pitfalls</h2>
+<ul>
+<li>❌ <strong>Don't</strong> use sessions for simple authentication - use JWT</li>
+<li>❌ <strong>Don't</strong> store sensitive data (passwords, keys) in sessions</li>
+<li>❌ <strong>Don't</strong> use very long session TTLs</li>
+<li>❌ <strong>Don't</strong> trust session IDs from untrusted sources</li>
+<li>✅ <strong>Do</strong> regenerate session ID after login</li>
+<li>✅ <strong>Do</strong> set secure cookie flags</li>
+<li>✅ <strong>Do</strong> implement session cleanup</li>
+<li>✅ <strong>Do</strong> consider JWT for new applications</li>
+</ul>
+<h2>API Reference</h2>
+<h3>Types</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Session</code></td>
+<td>Session data structure</td>
+</tr>
+<tr>
+<td><code>SessionConfig</code></td>
+<td>Configuration for session stores</td>
+</tr>
+<tr>
+<td><code>SessionBackend</code></td>
+<td>Enum of backend types</td>
+</tr>
+<tr>
+<td><code>SessionError</code></td>
+<td>Error type for session operations</td>
+</tr>
+<tr>
+<td><code>SessionResult&lt;T&gt;</code></td>
+<td>Result type alias</td>
+</tr>
+</tbody></table>
+<h3>Traits</h3>
+<table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SessionStore</code></td>
+<td>Main trait for session storage backends</td>
+</tr>
+</tbody></table>
+<h3>Structs</h3>
+<table>
+<thead>
+<tr>
+<th>Struct</th>
+<th>Feature</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>RedisSessionStore</code></td>
+<td><code>redis</code> (default)</td>
+<td>Redis-backed sessions</td>
+</tr>
+<tr>
+<td><code>MemcachedSessionStore</code></td>
+<td><code>memcached</code></td>
+<td>Memcached-backed sessions</td>
+</tr>
+<tr>
+<td><code>CouchDbSessionStore</code></td>
+<td><code>couchdb</code></td>
+<td>CouchDB-backed sessions</td>
+</tr>
+</tbody></table>
+<h3>Functions</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>generate_session_id()</code></td>
+<td>Generate a new UUID session ID</td>
+</tr>
+</tbody></table>
+<h2>Summary</h2>
+<p><strong>Key Takeaways:</strong></p>
+<ol>
+<li>⚠️ <strong>Prefer stateless JWT authentication</strong> - Sessions add complexity</li>
+<li>Use sessions only when absolutely necessary (legacy, compliance, immediate logout)</li>
+<li>Redis is the recommended backend for performance</li>
+<li>Memcached requires <code>memcached</code> feature flag</li>
+<li>Always set reasonable TTLs with enforced maximums</li>
+<li>Store minimal data in sessions</li>
+<li>Consider migrating to JWT for new applications</li>
+</ol>
+<p><strong>Quick Reference:</strong></p>
+<pre><code class="language-rust">use armature_session::prelude::*;
+
+// Redis (default)
+let store = RedisSessionStore::new(
+    SessionConfig::redis("redis://localhost:6379")?
+).await?;
+
+// Create session
+let session = store.create(None).await?;
+
+// Store data
+session.set("user_id", 123)?;
+store.save(&amp;session).await?;
+
+// Retrieve
+if let Some(session) = store.get(&amp;session.id).await? {
+    let user_id: Option&lt;i32&gt; = session.get("user_id");
+}
+
+// Delete (logout)
+store.delete(&amp;session.id).await?;
+</code></pre>
+<p><strong>Remember:</strong> If you're starting a new project, use JWT. Sessions are for legacy compatibility and specific use cases only.</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

@@ -1,0 +1,700 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>OpenAPI/Swagger - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/openapi-guide.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/openapi-guide.html"><meta property="og:title" content="OpenAPI/Swagger - Armature Rust Framework Docs"><meta property="og:description" content="Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/openapi-guide.html"><meta name="twitter:title" content="OpenAPI/Swagger - Armature Rust Framework Docs"><meta name="twitter:description" content="Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/openapi-guide.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/openapi-guide.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"OpenAPI/Swagger","item":"https://quinnjr.github.io/armature/docs/openapi-guide"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/openapi-guide","headline":"OpenAPI/Swagger","name":"OpenAPI/Swagger","description":"Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI.","url":"https://quinnjr.github.io/armature/docs/openapi-guide","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"API Features","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/openapi-guide"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide" class="active"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>OpenAPI &amp; Swagger UI Guide</h1>
+<p>Generate OpenAPI 3.0 specifications and serve interactive API documentation with Swagger UI.</p>
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#programmatic-builder">Programmatic Builder</a></li>
+<li><a href="#swagger-ui-integration">Swagger UI Integration</a></li>
+<li><a href="#schema-definition">Schema Definition</a></li>
+<li><a href="#security">Security</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+<li><a href="#examples">Examples</a></li>
+</ul>
+<h2>Overview</h2>
+<p>The <code>armature-openapi</code> module provides tools for generating OpenAPI 3.0 specifications and serving interactive API documentation. It allows you to document your APIs programmatically and serve beautiful, interactive documentation via Swagger UI.</p>
+<h3>Why OpenAPI?</h3>
+<ul>
+<li><strong>Industry Standard</strong>: OpenAPI (formerly Swagger) is the de facto standard for REST API documentation</li>
+<li><strong>Interactive</strong>: Test your API directly from the documentation</li>
+<li><strong>Code Generation</strong>: Generate client SDKs in multiple languages</li>
+<li><strong>Validation</strong>: Validate requests/responses against the specification</li>
+<li><strong>Discoverability</strong>: Make your API easy to understand and use</li>
+</ul>
+<h2>Features</h2>
+<p>✅ <strong>Programmatic Builder</strong></p>
+<ul>
+<li>Fluent API for building OpenAPI specs</li>
+<li>Type-safe specification construction</li>
+<li>Helper functions for common patterns</li>
+</ul>
+<p>✅ <strong>Swagger UI Integration</strong></p>
+<ul>
+<li>Beautiful, interactive API documentation</li>
+<li>Test endpoints directly from the browser</li>
+<li>No configuration required</li>
+</ul>
+<p>✅ <strong>Multiple Export Formats</strong></p>
+<ul>
+<li>JSON export</li>
+<li>YAML export</li>
+<li>HTML (Swagger UI)</li>
+</ul>
+<p>✅ <strong>Full OpenAPI 3.0 Support</strong></p>
+<ul>
+<li>All HTTP methods (GET, POST, PUT, DELETE, PATCH)</li>
+<li>Request/response schemas</li>
+<li>Authentication (Bearer, API Key, OAuth2)</li>
+<li>Tags and organization</li>
+</ul>
+<h2>Quick Start</h2>
+<h3>Installation</h3>
+<p>Add to your <code>Cargo.toml</code>:</p>
+<pre><code class="language-toml">[dependencies]
+armature-framework = { version = "0.1", features = ["openapi"] }
+</code></pre>
+<h3>Basic Example</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_framework::armature_openapi::*;
+
+// Build OpenAPI specification
+let spec = OpenApiBuilder::new("My API", "1.0.0")
+    .description("A wonderful API")
+    .server("http://localhost:3000", None)
+    .tag("users", Some("User endpoints".to_string()))
+    .build();
+
+// Create Swagger UI config
+let config = SwaggerConfig::new("/api-docs", spec);
+
+// Serve Swagger UI
+#[get("/api-docs")]
+async fn swagger_ui(config: SwaggerConfig) -&gt; Result&lt;HttpResponse, Error&gt; {
+    swagger_ui_response(&amp;config)
+}
+</code></pre>
+<h2>Programmatic Builder</h2>
+<h3>Creating a Specification</h3>
+<pre><code class="language-rust">use armature_openapi::*;
+
+let spec = OpenApiBuilder::new("User API", "1.0.0")
+    // Basic info
+    .description("A comprehensive user management API")
+    .terms_of_service("https://example.com/terms")
+
+    // Contact
+    .contact(
+        Some("API Support".to_string()),
+        Some("https://example.com/support".to_string()),
+        Some("support@example.com".to_string()),
+    )
+
+    // License
+    .license("MIT", Some("https://opensource.org/licenses/MIT".to_string()))
+
+    // Servers
+    .server("https://api.example.com", Some("Production".to_string()))
+    .server("http://localhost:3000", Some("Development".to_string()))
+
+    // Tags
+    .tag("users", Some("User management".to_string()))
+    .tag("auth", Some("Authentication".to_string()))
+
+    .build();
+</code></pre>
+<h3>Adding Endpoints</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("API", "1.0.0")
+    .path(
+        "/users",
+        PathItemBuilder::new()
+            .get(
+                OperationBuilder::new()
+                    .summary("List all users")
+                    .description("Returns a paginated list of users")
+                    .tag("users")
+                    .operation_id("listUsers")
+                    .parameter(Parameter {
+                        name: "page".to_string(),
+                        location: ParameterLocation::Query,
+                        description: Some("Page number".to_string()),
+                        required: Some(false),
+                        schema: Some(integer_schema()),
+                    })
+                    .response(
+                        "200",
+                        Response {
+                            description: "Successful response".to_string(),
+                            content: Some({
+                                let mut content = HashMap::new();
+                                content.insert(
+                                    "application/json".to_string(),
+                                    MediaType {
+                                        schema: Some(array_schema(ref_schema("User"))),
+                                    },
+                                );
+                                content
+                            }),
+                        },
+                    )
+                    .build(),
+            )
+            .post(
+                OperationBuilder::new()
+                    .summary("Create a user")
+                    .tag("users")
+                    .operation_id("createUser")
+                    .request_body(RequestBody {
+                        description: Some("User to create".to_string()),
+                        content: {
+                            let mut content = HashMap::new();
+                            content.insert(
+                                "application/json".to_string(),
+                                MediaType {
+                                    schema: Some(ref_schema("User")),
+                                },
+                            );
+                            content
+                        },
+                        required: Some(true),
+                    })
+                    .response(
+                        "201",
+                        Response {
+                            description: "User created".to_string(),
+                            content: Some({
+                                let mut content = HashMap::new();
+                                content.insert(
+                                    "application/json".to_string(),
+                                    MediaType {
+                                        schema: Some(ref_schema("User")),
+                                    },
+                                );
+                                content
+                            }),
+                        },
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+    .build();
+</code></pre>
+<h3>Path Parameters</h3>
+<pre><code class="language-rust">.path(
+    "/users/{id}",
+    PathItemBuilder::new()
+        .get(
+            OperationBuilder::new()
+                .summary("Get user by ID")
+                .tag("users")
+                .parameter(Parameter {
+                    name: "id".to_string(),
+                    location: ParameterLocation::Path,
+                    description: Some("User ID".to_string()),
+                    required: Some(true),
+                    schema: Some(integer_schema()),
+                })
+                .response(
+                    "200",
+                    Response {
+                        description: "User found".to_string(),
+                        content: Some({
+                            let mut content = HashMap::new();
+                            content.insert(
+                                "application/json".to_string(),
+                                MediaType {
+                                    schema: Some(ref_schema("User")),
+                                },
+                            );
+                            content
+                        }),
+                    },
+                )
+                .response(
+                    "404",
+                    Response {
+                        description: "User not found".to_string(),
+                        content: None,
+                    },
+                )
+                .build(),
+        )
+        .build(),
+)
+</code></pre>
+<h2>Schema Definition</h2>
+<h3>Primitive Types</h3>
+<pre><code class="language-rust">use armature_openapi::*;
+
+// String
+let name_schema = string_schema();
+
+// Integer
+let id_schema = integer_schema();
+
+// Number (floating point)
+let price_schema = number_schema();
+
+// Boolean
+let active_schema = boolean_schema();
+</code></pre>
+<h3>Arrays</h3>
+<pre><code class="language-rust">// Array of strings
+let tags_schema = array_schema(string_schema());
+
+// Array of objects
+let users_schema = array_schema(ref_schema("User"));
+</code></pre>
+<h3>Objects</h3>
+<pre><code class="language-rust">let user_schema = object_schema(
+    {
+        let mut props = HashMap::new();
+        props.insert("id".to_string(), integer_schema());
+        props.insert("name".to_string(), string_schema());
+        props.insert("email".to_string(), string_schema());
+        props.insert("age".to_string(), integer_schema());
+        props.insert("active".to_string(), boolean_schema());
+        props
+    },
+    vec![
+        "id".to_string(),
+        "name".to_string(),
+        "email".to_string(),
+    ],
+);
+</code></pre>
+<h3>Nested Objects</h3>
+<pre><code class="language-rust">let address_schema = object_schema(
+    {
+        let mut props = HashMap::new();
+        props.insert("street".to_string(), string_schema());
+        props.insert("city".to_string(), string_schema());
+        props.insert("country".to_string(), string_schema());
+        props
+    },
+    vec!["street".to_string(), "city".to_string()],
+);
+
+let user_with_address = object_schema(
+    {
+        let mut props = HashMap::new();
+        props.insert("id".to_string(), integer_schema());
+        props.insert("name".to_string(), string_schema());
+        props.insert("address".to_string(), address_schema);
+        props
+    },
+    vec!["id".to_string(), "name".to_string()],
+);
+</code></pre>
+<h3>Reusable Schemas</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("API", "1.0.0")
+    // Define schema once
+    .schema("User", object_schema(
+        {
+            let mut props = HashMap::new();
+            props.insert("id".to_string(), integer_schema());
+            props.insert("name".to_string(), string_schema());
+            props.insert("email".to_string(), string_schema());
+            props
+        },
+        vec!["id".to_string(), "name".to_string(), "email".to_string()],
+    ))
+    .schema("Address", object_schema(
+        {
+            let mut props = HashMap::new();
+            props.insert("street".to_string(), string_schema());
+            props.insert("city".to_string(), string_schema());
+            props
+        },
+        vec!["street".to_string(), "city".to_string()],
+    ))
+    // Reference schemas in endpoints
+    .path(
+        "/users",
+        PathItemBuilder::new()
+            .get(
+                OperationBuilder::new()
+                    .summary("List users")
+                    .response(
+                        "200",
+                        Response {
+                            description: "Success".to_string(),
+                            content: Some({
+                                let mut content = HashMap::new();
+                                content.insert(
+                                    "application/json".to_string(),
+                                    MediaType {
+                                        schema: Some(array_schema(ref_schema("User"))),
+                                    },
+                                );
+                                content
+                            }),
+                        },
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+    .build();
+</code></pre>
+<h2>Swagger UI Integration</h2>
+<h3>Basic Setup</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_framework::armature_openapi::*;
+
+#[controller("/api-docs")]
+struct ApiDocsController {
+    config: SwaggerConfig,
+}
+
+impl ApiDocsController {
+    #[get("/")]
+    async fn swagger_ui(&amp;self) -&gt; Result&lt;HttpResponse, Error&gt; {
+        swagger_ui_response(&amp;self.config)
+    }
+
+    #[get("/openapi.json")]
+    async fn openapi_json(&amp;self) -&gt; Result&lt;HttpResponse, Error&gt; {
+        spec_json_response(&amp;self.config)
+    }
+
+    #[get("/openapi.yaml")]
+    async fn openapi_yaml(&amp;self) -&gt; Result&lt;HttpResponse, Error&gt; {
+        spec_yaml_response(&amp;self.config)
+    }
+}
+</code></pre>
+<h3>Custom Title</h3>
+<pre><code class="language-rust">let config = SwaggerConfig::new("/api-docs", spec)
+    .with_title("My Amazing API Documentation");
+</code></pre>
+<h3>Multiple Versions</h3>
+<pre><code class="language-rust">// Version 1
+let spec_v1 = OpenApiBuilder::new("My API", "1.0.0")
+    .server("https://api.example.com/v1", None)
+    .build();
+
+let config_v1 = SwaggerConfig::new("/api-docs/v1", spec_v1);
+
+// Version 2
+let spec_v2 = OpenApiBuilder::new("My API", "2.0.0")
+    .server("https://api.example.com/v2", None)
+    .build();
+
+let config_v2 = SwaggerConfig::new("/api-docs/v2", spec_v2);
+</code></pre>
+<h2>Security</h2>
+<h3>Bearer Authentication (JWT)</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("API", "1.0.0")
+    // Add security scheme
+    .add_bearer_auth("bearer")
+
+    // Apply to specific endpoint
+    .path(
+        "/users",
+        PathItemBuilder::new()
+            .get(
+                OperationBuilder::new()
+                    .summary("List users")
+                    .security({
+                        let mut req = HashMap::new();
+                        req.insert("bearer".to_string(), vec![]);
+                        req
+                    })
+                    .response("200", Response {
+                        description: "Success".to_string(),
+                        content: None,
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .build();
+</code></pre>
+<h3>API Key Authentication</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("API", "1.0.0")
+    .add_api_key_auth(
+        "api_key",
+        "X-API-Key",
+        ApiKeyLocation::Header,
+    )
+    .path(
+        "/users",
+        PathItemBuilder::new()
+            .get(
+                OperationBuilder::new()
+                    .summary("List users")
+                    .security({
+                        let mut req = HashMap::new();
+                        req.insert("api_key".to_string(), vec![]);
+                        req
+                    })
+                    .response("200", Response {
+                        description: "Success".to_string(),
+                        content: None,
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .build();
+</code></pre>
+<h3>OAuth2</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("API", "1.0.0")
+    .security_scheme(
+        "oauth2",
+        SecurityScheme::OAuth2 {
+            flows: OAuthFlows {
+                authorization_code: Some(OAuthFlow {
+                    authorization_url: Some("https://example.com/oauth/authorize".to_string()),
+                    token_url: Some("https://example.com/oauth/token".to_string()),
+                    refresh_url: None,
+                    scopes: {
+                        let mut scopes = HashMap::new();
+                        scopes.insert("read".to_string(), "Read access".to_string());
+                        scopes.insert("write".to_string(), "Write access".to_string());
+                        scopes
+                    },
+                }),
+                ..Default::default()
+            },
+        },
+    )
+    .build();
+</code></pre>
+<h3>Global Security</h3>
+<pre><code class="language-rust">// Apply authentication to all endpoints by default
+let spec = OpenApiBuilder::new("API", "1.0.0")
+    .add_bearer_auth("bearer")
+    .security({
+        let mut req = HashMap::new();
+        req.insert("bearer".to_string(), vec![]);
+        req
+    })
+    .build();
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. Use Descriptive Names</h3>
+<pre><code class="language-rust">// ✅ Good
+.operation_id("getUserById")
+.summary("Get a user by their unique identifier")
+
+// ❌ Bad
+.operation_id("get1")
+.summary("Get")
+</code></pre>
+<h3>2. Provide Examples</h3>
+<pre><code class="language-rust">// Add examples to schemas
+let user_schema = object_schema(
+    {
+        let mut props = HashMap::new();
+        props.insert("id".to_string(), integer_schema());
+        props.insert("name".to_string(), string_schema());
+        props
+    },
+    vec!["id".to_string(), "name".to_string()],
+);
+</code></pre>
+<h3>3. Document Error Responses</h3>
+<pre><code class="language-rust">.response("200", Response {
+    description: "Successful response".to_string(),
+    content: Some(/* ... */),
+})
+.response("400", Response {
+    description: "Invalid request parameters".to_string(),
+    content: None,
+})
+.response("401", Response {
+    description: "Authentication required".to_string(),
+    content: None,
+})
+.response("403", Response {
+    description: "Insufficient permissions".to_string(),
+    content: None,
+})
+.response("404", Response {
+    description: "Resource not found".to_string(),
+    content: None,
+})
+.response("500", Response {
+    description: "Internal server error".to_string(),
+    content: None,
+})
+</code></pre>
+<h3>4. Use Tags for Organization</h3>
+<pre><code class="language-rust">let spec = OpenApiBuilder::new("E-commerce API", "1.0.0")
+    .tag("products", Some("Product catalog".to_string()))
+    .tag("orders", Some("Order management".to_string()))
+    .tag("users", Some("User accounts".to_string()))
+    .tag("auth", Some("Authentication".to_string()))
+    .build();
+</code></pre>
+<h3>5. Version Your API</h3>
+<pre><code class="language-rust">// Include version in URL
+.server("https://api.example.com/v1", Some("Version 1".to_string()))
+.server("https://api.example.com/v2", Some("Version 2".to_string()))
+</code></pre>
+<h3>6. Keep Schemas DRY</h3>
+<pre><code class="language-rust">// Define common schemas once
+let spec = OpenApiBuilder::new("API", "1.0.0")
+    .schema("Error", object_schema(/* ... */))
+    .schema("User", object_schema(/* ... */))
+    .schema("Product", object_schema(/* ... */))
+    // Then reference them
+    .path("/users", /* use ref_schema("User") */)
+    .build();
+</code></pre>
+<h2>Examples</h2>
+<h3>Complete REST API</h3>
+<pre><code class="language-rust">use armature_openapi::*;
+
+let spec = OpenApiBuilder::new("Task Manager API", "1.0.0")
+    .description("A simple task management API")
+    .server("http://localhost:3000", Some("Development".to_string()))
+
+    // Tags
+    .tag("tasks", Some("Task operations".to_string()))
+    .tag("users", Some("User operations".to_string()))
+
+    // Auth
+    .add_bearer_auth("bearer")
+
+    // Schemas
+    .schema("Task", object_schema(
+        {
+            let mut props = HashMap::new();
+            props.insert("id".to_string(), integer_schema());
+            props.insert("title".to_string(), string_schema());
+            props.insert("completed".to_string(), boolean_schema());
+            props
+        },
+        vec!["id".to_string(), "title".to_string()],
+    ))
+
+    // Endpoints
+    .path(
+        "/tasks",
+        PathItemBuilder::new()
+            .get(
+                OperationBuilder::new()
+                    .summary("List tasks")
+                    .tag("tasks")
+                    .security({
+                        let mut req = HashMap::new();
+                        req.insert("bearer".to_string(), vec![]);
+                        req
+                    })
+                    .response("200", Response {
+                        description: "Success".to_string(),
+                        content: Some({
+                            let mut content = HashMap::new();
+                            content.insert(
+                                "application/json".to_string(),
+                                MediaType {
+                                    schema: Some(array_schema(ref_schema("Task"))),
+                                },
+                            );
+                            content
+                        }),
+                    })
+                    .build(),
+            )
+            .post(
+                OperationBuilder::new()
+                    .summary("Create task")
+                    .tag("tasks")
+                    .security({
+                        let mut req = HashMap::new();
+                        req.insert("bearer".to_string(), vec![]);
+                        req
+                    })
+                    .request_body(RequestBody {
+                        description: Some("Task to create".to_string()),
+                        content: {
+                            let mut content = HashMap::new();
+                            content.insert(
+                                "application/json".to_string(),
+                                MediaType {
+                                    schema: Some(ref_schema("Task")),
+                                },
+                            );
+                            content
+                        },
+                        required: Some(true),
+                    })
+                    .response("201", Response {
+                        description: "Created".to_string(),
+                        content: Some({
+                            let mut content = HashMap::new();
+                            content.insert(
+                                "application/json".to_string(),
+                                MediaType {
+                                    schema: Some(ref_schema("Task")),
+                                },
+                            );
+                            content
+                        }),
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+
+    .build();
+</code></pre>
+<h2>Summary</h2>
+<p><strong>Key Features:</strong></p>
+<ul>
+<li>✅ Programmatic OpenAPI 3.0 spec generation</li>
+<li>✅ Interactive Swagger UI documentation</li>
+<li>✅ JSON/YAML export</li>
+<li>✅ Full security scheme support</li>
+<li>✅ Type-safe builders</li>
+</ul>
+<p><strong>When to Use:</strong></p>
+<ul>
+<li>Documenting REST APIs</li>
+<li>Generating client SDKs</li>
+<li>API contract validation</li>
+<li>Developer onboarding</li>
+<li>API discovery</li>
+</ul>
+<p><strong>Next Steps:</strong></p>
+<ol>
+<li>Define your API schemas</li>
+<li>Document each endpoint</li>
+<li>Add security schemes</li>
+<li>Serve Swagger UI</li>
+<li>Export OpenAPI spec</li>
+</ol>
+<p>Happy documenting! 📚✨</p>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

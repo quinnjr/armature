@@ -1,0 +1,564 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>OAuth2 &amp; Social Login - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Complete guide to using OAuth2/OIDC providers with Armature authentication."><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/oauth2-providers.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/oauth2-providers.html"><meta property="og:title" content="OAuth2 &#38; Social Login - Armature Rust Framework Docs"><meta property="og:description" content="Complete guide to using OAuth2/OIDC providers with Armature authentication."><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/oauth2-providers.html"><meta name="twitter:title" content="OAuth2 &#38; Social Login - Armature Rust Framework Docs"><meta name="twitter:description" content="Complete guide to using OAuth2/OIDC providers with Armature authentication."><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/oauth2-providers.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/oauth2-providers.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"OAuth2 & Social Login","item":"https://quinnjr.github.io/armature/docs/oauth2-providers"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/oauth2-providers","headline":"OAuth2 & Social Login","name":"OAuth2 & Social Login","description":"Complete guide to using OAuth2/OIDC providers with Armature authentication.","url":"https://quinnjr.github.io/armature/docs/oauth2-providers","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"Security","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/oauth2-providers"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers" class="active"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>OAuth2 Providers Guide</h1>
+<p>Complete guide to using OAuth2/OIDC providers with Armature authentication.</p>
+<h2>Table of Contents</h2>
+<ol>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#supported-providers">Supported Providers</a></li>
+<li><a href="#google-oauth2">Google OAuth2</a></li>
+<li><a href="#microsoft-entra-azure-ad">Microsoft Entra</a></li>
+<li><a href="#aws-cognito">AWS Cognito</a></li>
+<li><a href="#okta">Okta</a></li>
+<li><a href="#auth0">Auth0</a></li>
+<li><a href="#oauth2-flow">OAuth2 Flow</a></li>
+<li><a href="#complete-example">Complete Example</a></li>
+<li><a href="#best-practices">Best Practices</a></li>
+</ol>
+<h2>Overview</h2>
+<p><code>armature-auth</code> provides built-in support for major enterprise OAuth2 and OIDC identity providers. This allows you to integrate with existing authentication systems without building your own user management.</p>
+<h3>Benefits</h3>
+<ul>
+<li><strong>Single Sign-On (SSO)</strong>: Users authenticate with their existing accounts</li>
+<li><strong>Enterprise Ready</strong>: Integrates with corporate identity providers</li>
+<li><strong>Security</strong>: Leverages battle-tested OAuth2/OIDC protocols</li>
+<li><strong>No User Management</strong>: Delegate user storage to providers</li>
+<li><strong>Multi-Provider</strong>: Support multiple providers simultaneously</li>
+</ul>
+<h2>Supported Providers</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Type</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Google</strong></td>
+<td>Consumer</td>
+<td>Gmail users, Google Workspace</td>
+</tr>
+<tr>
+<td><strong>Microsoft Entra</strong></td>
+<td>Enterprise</td>
+<td>Azure AD, Office 365, Enterprise SSO</td>
+</tr>
+<tr>
+<td><strong>AWS Cognito</strong></td>
+<td>Cloud</td>
+<td>AWS-native applications</td>
+</tr>
+<tr>
+<td><strong>Okta</strong></td>
+<td>Enterprise</td>
+<td>Enterprise SSO, SAML bridge</td>
+</tr>
+<tr>
+<td><strong>Auth0</strong></td>
+<td>Universal</td>
+<td>Multi-provider, custom branding</td>
+</tr>
+</tbody></table>
+<h2>Google OAuth2</h2>
+<h3>Setup</h3>
+<ol>
+<li>Go to <a href="https://console.cloud.google.com/">Google Cloud Console</a></li>
+<li>Create a new project or select existing</li>
+<li>Navigate to "APIs &amp; Services" &gt; "Credentials"</li>
+<li>Create OAuth 2.0 Client ID</li>
+<li>Add authorized redirect URI: <code>http://localhost:3000/auth/google/callback</code></li>
+</ol>
+<h3>Configuration</h3>
+<pre><code class="language-rust">use armature_auth::providers::{GoogleConfig, GoogleProvider};
+
+let config = GoogleConfig::new(
+    "your-client-id.apps.googleusercontent.com".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/google/callback".to_string(),
+);
+
+// Optional: Custom scopes
+let config = config.with_scopes(vec![
+    "openid".to_string(),
+    "email".to_string(),
+    "profile".to_string(),
+    "https://www.googleapis.com/auth/userinfo.profile".to_string(),
+]);
+
+let provider = GoogleProvider::new(config)?;
+</code></pre>
+<h3>User Info</h3>
+<p>Google returns:</p>
+<ul>
+<li><code>sub</code>: Google user ID</li>
+<li><code>email</code>: User's Gmail address</li>
+<li><code>name</code>: Full name</li>
+<li><code>picture</code>: Profile picture URL</li>
+<li><code>email_verified</code>: Email verification status</li>
+</ul>
+<h2>Microsoft Entra (Azure AD)</h2>
+<h3>Setup</h3>
+<ol>
+<li>Go to <a href="https://portal.azure.com/">Azure Portal</a></li>
+<li>Navigate to "Azure Active Directory"</li>
+<li>Select "App registrations" &gt; "New registration"</li>
+<li>Add redirect URI: <code>http://localhost:3000/auth/microsoft/callback</code></li>
+<li>Create a client secret in "Certificates &amp; secrets"</li>
+</ol>
+<h3>Configuration</h3>
+<pre><code class="language-rust">use armature_auth::providers::{MicrosoftEntraConfig, MicrosoftEntraProvider};
+
+// Option 1: Common tenant (any Azure AD account)
+let config = MicrosoftEntraConfig::common(
+    "your-application-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/microsoft/callback".to_string(),
+);
+
+// Option 2: Organizations only (work/school accounts)
+let config = MicrosoftEntraConfig::organizations(
+    "your-application-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/microsoft/callback".to_string(),
+);
+
+// Option 3: Consumers only (personal Microsoft accounts)
+let config = MicrosoftEntraConfig::consumers(
+    "your-application-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/microsoft/callback".to_string(),
+);
+
+// Option 4: Specific tenant
+let config = MicrosoftEntraConfig::new(
+    "your-application-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/microsoft/callback".to_string(),
+    "your-tenant-id".to_string(),
+);
+
+let provider = MicrosoftEntraProvider::new(config)?;
+</code></pre>
+<h3>Tenant Types</h3>
+<ul>
+<li><strong>common</strong>: Any Azure AD account (personal or work/school)</li>
+<li><strong>organizations</strong>: Work or school accounts only</li>
+<li><strong>consumers</strong>: Personal Microsoft accounts only</li>
+<li><strong>{tenant-id}</strong>: Specific Azure AD tenant</li>
+</ul>
+<h3>User Info</h3>
+<p>Microsoft Graph returns:</p>
+<ul>
+<li><code>id</code>: Azure AD user ID (mapped to <code>sub</code>)</li>
+<li><code>userPrincipalName</code>: User's UPN</li>
+<li><code>displayName</code>: Full name</li>
+<li><code>mail</code>: Email address</li>
+<li><code>jobTitle</code>: Job title</li>
+</ul>
+<h2>AWS Cognito</h2>
+<h3>Setup</h3>
+<ol>
+<li>Go to <a href="https://console.aws.amazon.com/cognito/">AWS Console</a></li>
+<li>Create a User Pool</li>
+<li>Configure "App integration" &gt; "App client"</li>
+<li>Enable "Hosted UI"</li>
+<li>Add callback URL: <code>http://localhost:3000/auth/cognito/callback</code></li>
+<li>Note your domain: <code>your-app.auth.{region}.amazoncognito.com</code></li>
+</ol>
+<h3>Configuration</h3>
+<pre><code class="language-rust">use armature_auth::providers::{AwsCognitoConfig, AwsCognitoProvider};
+
+let config = AwsCognitoConfig::new(
+    "your-client-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/cognito/callback".to_string(),
+    "your-app.auth.us-east-1.amazoncognito.com".to_string(),
+    "us-east-1".to_string(),
+);
+
+// Optional: Custom scopes
+let config = config.with_scopes(vec![
+    "openid".to_string(),
+    "email".to_string(),
+    "profile".to_string(),
+    "aws.cognito.signin.user.admin".to_string(),
+]);
+
+let provider = AwsCognitoProvider::new(config)?;
+</code></pre>
+<h3>User Info</h3>
+<p>Cognito returns:</p>
+<ul>
+<li><code>sub</code>: Cognito user UUID</li>
+<li><code>email</code>: User's email</li>
+<li><code>email_verified</code>: Email verification status</li>
+<li>Custom attributes you've configured</li>
+</ul>
+<h2>Okta</h2>
+<h3>Setup</h3>
+<ol>
+<li>Go to <a href="https://your-domain.okta.com/admin">Okta Admin Console</a></li>
+<li>Navigate to "Applications" &gt; "Create App Integration"</li>
+<li>Select "OIDC - OpenID Connect"</li>
+<li>Choose "Web Application"</li>
+<li>Add redirect URI: <code>http://localhost:3000/auth/okta/callback</code></li>
+<li>Note your Okta domain: <code>dev-12345.okta.com</code></li>
+</ol>
+<h3>Configuration</h3>
+<pre><code class="language-rust">use armature_auth::providers::{OktaConfig, OktaProvider};
+
+let config = OktaConfig::new(
+    "your-client-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/okta/callback".to_string(),
+    "dev-12345.okta.com".to_string(),
+);
+
+// Optional: Additional scopes
+let config = config.with_scopes(vec![
+    "openid".to_string(),
+    "email".to_string(),
+    "profile".to_string(),
+    "groups".to_string(), // Include group membership
+]);
+
+let provider = OktaProvider::new(config)?;
+</code></pre>
+<h3>User Info</h3>
+<p>Okta returns:</p>
+<ul>
+<li><code>sub</code>: Okta user ID</li>
+<li><code>email</code>: User's email</li>
+<li><code>name</code>: Full name</li>
+<li><code>preferred_username</code>: Username</li>
+<li><code>groups</code>: Group membership (if requested)</li>
+</ul>
+<h2>Auth0</h2>
+<h3>Setup</h3>
+<ol>
+<li>Go to <a href="https://manage.auth0.com/">Auth0 Dashboard</a></li>
+<li>Navigate to "Applications" &gt; "Create Application"</li>
+<li>Select "Regular Web Applications"</li>
+<li>Add callback URL: <code>http://localhost:3000/auth/auth0/callback</code></li>
+<li>Note your domain: <code>your-tenant.us.auth0.com</code></li>
+</ol>
+<h3>Configuration</h3>
+<pre><code class="language-rust">use armature_auth::providers::{Auth0Config, Auth0Provider};
+
+let config = Auth0Config::new(
+    "your-client-id".to_string(),
+    "your-client-secret".to_string(),
+    "http://localhost:3000/auth/auth0/callback".to_string(),
+    "your-tenant.us.auth0.com".to_string(),
+);
+
+// Optional: API audience for access tokens
+let config = config.with_audience("https://api.example.com".to_string());
+
+// Optional: Custom scopes
+let config = config.with_scopes(vec![
+    "openid".to_string(),
+    "email".to_string(),
+    "profile".to_string(),
+    "offline_access".to_string(), // For refresh tokens
+]);
+
+let provider = Auth0Provider::new(config)?;
+</code></pre>
+<h3>User Info</h3>
+<p>Auth0 returns:</p>
+<ul>
+<li><code>sub</code>: Auth0 user ID (format: <code>provider|id</code>)</li>
+<li><code>email</code>: User's email</li>
+<li><code>name</code>: Full name</li>
+<li><code>picture</code>: Profile picture</li>
+<li><code>email_verified</code>: Email verification</li>
+<li>Custom user metadata</li>
+</ul>
+<h2>OAuth2 Flow</h2>
+<h3>Step 1: Generate Authorization URL</h3>
+<pre><code class="language-rust">use armature_auth::OAuth2Provider;
+
+let (auth_url, csrf_token) = provider.authorization_url()?;
+
+// IMPORTANT: Armature is stateless - no server-side sessions.
+// `csrf_token` (an oauth2::CsrfToken) must be preserved across the redirect
+// so it can be compared against the `state` parameter the provider echoes
+// back on callback. Since there's no server-side session to stash it in,
+// embed it in a signed/encrypted cookie or a signed value passed through
+// the flow (e.g. as part of the state parameter itself).
+
+// Redirect user to auth_url
+response.redirect(auth_url.as_str());
+</code></pre>
+<h3>Step 2: Handle Callback</h3>
+<pre><code class="language-rust">// Extract code and state from query parameters
+let code = request.query("code")?;
+let state = request.query("state")?;
+
+// Verify the state parameter matches the csrf_token generated in Step 1
+// (read back from the signed cookie or wherever it was stored) before
+// trusting the callback.
+//
+// Plain `!=` is acceptable here: state values are single-use and
+// short-lived, so timing side-channels are a much lower risk than for
+// long-lived secrets like TOTP codes or API tokens (which should use a
+// constant-time comparison instead).
+if state != csrf_token.secret().as_str() {
+    return Err(Error::AuthenticationFailed);
+}
+
+// Exchange code for token
+let token = provider.exchange_code(code.to_string()).await?;
+</code></pre>
+<h3>Step 3: Get User Info</h3>
+<pre><code class="language-rust">// Fetch user information
+let user_info = provider.get_user_info(&amp;token).await?;
+
+// Create JWT token (stateless authentication)
+let user_claims = UserClaims {
+    sub: user_info.sub,
+    email: user_info.email.unwrap_or_default(),
+    name: user_info.name,
+};
+
+// Generate JWT instead of session
+let jwt_token = jwt_manager.create_token(user_claims)?;
+
+// Return JWT to client
+// Client stores token and sends it with each request
+// No server-side session needed
+</code></pre>
+<h3>Step 4: Token Refresh</h3>
+<pre><code class="language-rust">// When access token expires
+if let Some(refresh_token) = token.refresh_token {
+    let new_token = provider.refresh_token(refresh_token).await?;
+    // Update stored token
+}
+</code></pre>
+<h2>Complete Example</h2>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_auth::providers::{GoogleConfig, GoogleProvider};
+use armature_auth::OAuth2Provider;
+
+#[controller("/auth")]
+struct AuthController {
+    google_provider: Arc&lt;GoogleProvider&gt;,
+}
+
+impl AuthController {
+    #[get("/google")]
+    async fn google_login(&amp;self) -&gt; Result&lt;Response&gt; {
+        // Generate authorization URL
+        let (auth_url, csrf_token) = self.google_provider
+            .authorization_url()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        // Armature is stateless - there's no server-side session to stash
+        // `csrf_token` in. Persist it (e.g. in a signed/encrypted cookie)
+        // so it can be compared against the `state` query parameter the
+        // provider sends back to the callback route below.
+
+        // Redirect to Google
+        Ok(Response::redirect(auth_url.as_str()))
+    }
+
+    #[get("/google/callback")]
+    async fn google_callback(&amp;self, request: HttpRequest) -&gt; Result&lt;Response&gt; {
+        // Extract authorization code and state
+        let code = request.query_param("code")
+            .ok_or_else(|| Error::BadRequest("Missing code".into()))?;
+        let state = request.query_param("state")
+            .ok_or_else(|| Error::BadRequest("Missing state".into()))?;
+
+        // Verify `state` against the csrf_token persisted during login
+        // before proceeding (omitted here for brevity).
+
+        // Exchange code for token
+        let token = self.google_provider
+            .exchange_code(code.to_string())
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        // Get user info
+        let user_info = self.google_provider
+            .get_user_info(&amp;token)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        // Create user session
+        let user = UserContext::new(user_info.sub)
+            .with_email(user_info.email.unwrap_or_default());
+
+        // In production:
+        // 1. Find or create user in database
+        // 2. Generate JWT token (stateless auth)
+        // 3. Return JWT to client
+        // 4. Client stores JWT and includes in subsequent requests
+
+        Ok(Response::json(serde_json::json!({
+            "user": user,
+            "token": token.access_token
+        })))
+    }
+}
+</code></pre>
+<h2>Best Practices</h2>
+<h3>1. CSRF Protection</h3>
+<p><code>authorization_url()</code> returns a <code>CsrfToken</code> alongside the authorization URL. Persist
+it and verify it against the <code>state</code> parameter the provider echoes back on callback:</p>
+<pre><code class="language-rust">// Generate the authorization URL and its CSRF token
+let (auth_url, csrf_token) = provider.authorization_url()?;
+
+// Persist csrf_token.secret() somewhere that survives the redirect
+// (a signed/encrypted cookie, since Armature keeps no server-side session)
+// before sending the user to auth_url.
+
+// On callback, compare the `state` query parameter against the
+// persisted token before exchanging the code.
+//
+// Plain `!=` is acceptable here: state values are single-use and
+// short-lived, so timing side-channels are a much lower risk than for
+// long-lived secrets like TOTP codes or API tokens (which should use a
+// constant-time comparison instead).
+if state != csrf_token.secret().as_str() {
+    return Err(Error::AuthenticationFailed);
+}
+let token = provider.exchange_code(code).await?;
+</code></pre>
+<p><strong>Note:</strong> Armature is stateless, so there's no server-side session to hold the
+<code>CsrfToken</code> between the redirect and the callback. Store it client-side in a
+signed/encrypted cookie (or otherwise bind it to the redirect) so it can be
+compared against <code>state</code> when the callback arrives.</p>
+<h3>2. Secure Redirect URIs</h3>
+<ul>
+<li>Use HTTPS in production</li>
+<li>Whitelist exact URIs (no wildcards)</li>
+<li>Use separate URIs per environment</li>
+</ul>
+<pre><code class="language-rust">let redirect_url = if cfg!(debug_assertions) {
+    "http://localhost:3000/callback"
+} else {
+    "https://app.example.com/callback"
+};
+</code></pre>
+<h3>3. Token Storage</h3>
+<pre><code class="language-rust">// ✓ Store tokens securely
+let encrypted_token = encrypt(token.access_token)?;
+db.save_user_token(user_id, encrypted_token)?;
+
+// ✓ Use refresh tokens
+if token_expired &amp;&amp; refresh_token.is_some() {
+    let new_token = provider.refresh_token(refresh_token).await?;
+}
+
+// ✗ Don't expose tokens to client
+// ✗ Don't log tokens
+</code></pre>
+<h3>4. Error Handling</h3>
+<pre><code class="language-rust">match provider.exchange_code(code).await {
+    Ok(token) =&gt; { /* Success */ },
+    Err(e) =&gt; {
+        log::error!("OAuth2 error: {}", e);
+        // Show user-friendly message
+        return Err(Error::AuthenticationFailed);
+    }
+}
+</code></pre>
+<h3>5. Multi-Provider Support</h3>
+<pre><code class="language-rust">enum Provider {
+    Google(GoogleProvider),
+    Microsoft(MicrosoftEntraProvider),
+    Okta(OktaProvider),
+}
+
+impl Provider {
+    async fn authenticate(&amp;self, code: String) -&gt; Result&lt;OAuth2Token&gt; {
+        match self {
+            Provider::Google(p) =&gt; p.exchange_code(code).await,
+            Provider::Microsoft(p) =&gt; p.exchange_code(code).await,
+            Provider::Okta(p) =&gt; p.exchange_code(code).await,
+        }
+    }
+}
+</code></pre>
+<h3>6. User Linking</h3>
+<pre><code class="language-rust">async fn link_oauth_user(
+    oauth_sub: String,
+    provider: String,
+    user_info: OAuth2UserInfo,
+) -&gt; Result&lt;User&gt; {
+    // Check if OAuth account already linked
+    if let Some(user) = db.find_by_oauth(provider, oauth_sub).await? {
+        return Ok(user);
+    }
+
+    // Check if email matches existing user
+    if let Some(email) = user_info.email {
+        if let Some(user) = db.find_by_email(&amp;email).await? {
+            // Link OAuth account to existing user
+            db.link_oauth(user.id, provider, oauth_sub).await?;
+            return Ok(user);
+        }
+    }
+
+    // Create new user
+    let user = User::new(user_info);
+    db.save_user(&amp;user).await?;
+    db.link_oauth(user.id, provider, oauth_sub).await?;
+
+    Ok(user)
+}
+</code></pre>
+<h2>Summary</h2>
+<p>The <code>armature-auth</code> OAuth2 provider system offers:</p>
+<ul>
+<li>✅ <strong>5 major providers</strong> out of the box</li>
+<li>✅ <strong>Consistent API</strong> across all providers</li>
+<li>✅ <strong>Type-safe</strong> configuration</li>
+<li>✅ <strong>Async-first</strong> design</li>
+<li>✅ <strong>Production-ready</strong> error handling</li>
+<li>✅ <strong>Extensible</strong> for custom providers</li>
+</ul>
+<p>For more information:</p>
+<ul>
+<li><a href="/armature/docs/auth-guide">Auth Guide</a> - Complete authentication documentation</li>
+<li><a href="https://github.com/quinnjr/armature/blob/main/docs/jwt-guide.md">JWT Guide</a> - JWT token management (coming soon)</li>
+<li><a href="../examples/">Examples</a> - Working code examples</li>
+</ul>
+<h2>See Also</h2>
+<ul>
+<li><a href="https://developers.google.com/identity/protocols/oauth2">Google OAuth2 Documentation</a></li>
+<li><a href="https://docs.microsoft.com/en-us/azure/active-directory/develop/">Microsoft Identity Platform</a></li>
+<li><a href="https://docs.aws.amazon.com/cognito/">AWS Cognito Documentation</a></li>
+<li><a href="https://developer.okta.com/">Okta Developer Documentation</a></li>
+<li><a href="https://auth0.com/docs">Auth0 Documentation</a></li>
+</ul>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>

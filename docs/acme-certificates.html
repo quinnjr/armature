@@ -1,0 +1,522 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><title>SSL Certificates - Armature Rust Framework Docs</title><meta name="viewport" content="width=device-width, initial-scale=1"><!-- Primary Meta Tags --><meta name="description" content="Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly…"><meta name="author" content="Joseph R. Quinn"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"><link rel="canonical" href="https://quinnjr.github.io/armature/docs/acme-certificates.html"><!--
+      Open Graph. Title and description track the page rather than the site:
+      every doc page previously produced an identical share card, and answer
+      engines that read OG tags saw one description for the whole site.
+    --><meta property="og:type" content="article"><meta property="og:url" content="https://quinnjr.github.io/armature/docs/acme-certificates.html"><meta property="og:title" content="SSL Certificates - Armature Rust Framework Docs"><meta property="og:description" content="Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly…"><meta property="og:image" content="https://quinnjr.github.io/armature/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta property="og:site_name" content="Armature Framework"><meta property="og:locale" content="en_US"><meta property="article:modified_time" content="2026-08-05T05:35:08-04:00"><!-- Twitter --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:url" content="https://quinnjr.github.io/armature/docs/acme-certificates.html"><meta name="twitter:title" content="SSL Certificates - Armature Rust Framework Docs"><meta name="twitter:description" content="Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly…"><meta name="twitter:image" content="https://quinnjr.github.io/armature/og-image.png"><meta name="twitter:image:alt" content="Armature Framework - Enterprise Rust Web Framework"><meta name="twitter:creator" content="@quinnjr"><link rel="alternate" hreflang="en" href="https://quinnjr.github.io/armature/docs/acme-certificates.html"><link rel="alternate" hreflang="x-default" href="https://quinnjr.github.io/armature/docs/acme-certificates.html"><!-- An AI-readable summary of the whole site, per llmstxt.org. --><link rel="alternate" type="text/plain" href="/armature/llms.txt" title="LLM-readable site summary"><!-- Favicon and Icons --><link rel="icon" type="image/x-icon" href="/armature/favicon.ico"><link rel="icon" type="image/png" sizes="32x32" href="/armature/assets/icons/icon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/armature/assets/icons/icon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/armature/apple-touch-icon.png"><link rel="manifest" href="/armature/manifest.webmanifest"><meta name="theme-color" content="#CE422B"><meta name="msapplication-TileColor" content="#CE422B"><!-- Preconnect for Performance --><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="dns-prefetch" href="https://github.com"><!-- Google Fonts - Inter & Fira Code --><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"><!-- Structured Data / JSON-LD for Search Engines and LLMs --><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Joseph Quinn","url":"https://github.com/quinnjr","logo":"https://quinnjr.github.io/armature/assets/armature-logo.svg","sameAs":["https://github.com/quinnjr"]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/","inLanguage":"en"}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://quinnjr.github.io/armature/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://quinnjr.github.io/armature/docs"},{"@type":"ListItem","position":3,"name":"SSL Certificates","item":"https://quinnjr.github.io/armature/docs/acme-certificates"}]}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","@id":"https://quinnjr.github.io/armature/docs/acme-certificates","headline":"SSL Certificates","name":"SSL Certificates","description":"Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly…","url":"https://quinnjr.github.io/armature/docs/acme-certificates","inLanguage":"en","dateModified":"2026-08-05T05:35:08-04:00","articleSection":"HTTP","author":{"@type":"Person","name":"Joseph R. Quinn","url":"https://github.com/quinnjr"},"publisher":{"@type":"Organization","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"isPartOf":{"@type":"WebSite","name":"Armature Framework","url":"https://quinnjr.github.io/armature/"},"about":{"@type":"SoftwareApplication","name":"Armature Framework","applicationCategory":"DeveloperApplication"},"proficiencyLevel":"Beginner","mainEntityOfPage":{"@type":"WebPage","@id":"https://quinnjr.github.io/armature/docs/acme-certificates"}}</script><link rel="stylesheet" href="/armature/_astro/_id_.EERgLkMg.css">
+<link rel="stylesheet" href="/armature/_astro/_id_.C4WSLMoq.css">
+<link rel="stylesheet" href="/armature/_astro/comparisons.C9eEaXD8.css"></head> <body> <nav class="fixed top-0 left-0 right-0 z-50 bg-stone-900/95 backdrop-blur-sm shadow-lg border-b border-stone-800"> <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"> <div class="flex items-center h-16"> <!-- Logo --> <div class="flex-shrink-0"> <a href="/armature/" class="text-xl font-bold text-white flex items-center gap-2 hover:text-rust-400 transition-colors"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-8 w-8"> <span>Armature</span> </a> </div> <!-- Desktop Navigation - pushed to right --> <nav class="hidden md:flex items-center gap-1 ml-auto"> <a href="/armature/" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Home </a><a href="/armature/docs" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors text-rust-400"> Docs </a><a href="/armature/comparisons" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Comparisons </a><a href="/armature/roadmap" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Roadmap </a><a href="/armature/getting-started" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> Getting Started </a><a href="/armature/faq" class="text-stone-300 hover:text-white px-3 py-2 text-sm font-medium transition-colors"> FAQ </a> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary ml-4 inline-flex items-center gap-2 px-4 py-2 text-sm"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg>
+GitHub
+</a> </nav> <!-- Mobile menu button --> <div class="md:hidden ml-auto"> <button id="mobile-menu-button" type="button" class="inline-flex items-center justify-center p-2 rounded-lg text-stone-300 hover:text-rust-400 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-rust-500 transition-colors" aria-expanded="false" aria-controls="mobile-menu"> <span class="sr-only">Open menu</span> <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> <svg id="menu-icon-close" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path> </svg> </button> </div> </div> </div> <!-- Mobile menu --> <div id="mobile-menu" class="hidden md:hidden border-t border-stone-800 bg-stone-900"> <div class="px-4 py-4 space-y-2"> <a href="/armature/" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Home </a><a href="/armature/docs" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors bg-rust-900/50 text-rust-400"> Documentation </a><a href="/armature/comparisons" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Comparisons </a><a href="/armature/roadmap" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Roadmap </a><a href="/armature/getting-started" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> Getting Started </a><a href="/armature/faq" class="block px-4 py-3 rounded-lg text-base font-medium text-stone-300 hover:text-white hover:bg-stone-800 transition-colors"> FAQ </a> <div class="pt-2"> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="btn-primary flex items-center justify-center gap-2 w-full"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>Star on GitHub</span> </a> </div> </div> </div> </nav> <!-- Spacer for fixed nav --> <div class="h-16"></div> <script type="module">const t=document.getElementById("mobile-menu-button"),n=document.getElementById("mobile-menu"),o=document.getElementById("menu-icon-open"),d=document.getElementById("menu-icon-close");t?.addEventListener("click",()=>{const e=t.getAttribute("aria-expanded")==="true";t.setAttribute("aria-expanded",String(!e)),n?.classList.toggle("hidden",e),o?.classList.toggle("hidden",!e),d?.classList.toggle("hidden",e)});</script> <main>  <div class="docs-container"> <!-- Sidebar Navigation --> <aside class="docs-sidebar"> <div class="sidebar-content"> <h2>📚 Documentation</h2> <nav> <div class="doc-category"> <h3>Getting Started</h3> <ul> <li> <a href="/armature/docs/readme"> Overview </a> </li><li> <a href="/armature/docs/micro-framework-guide"> Micro-Framework Mode </a> </li><li> <a href="/armature/docs/project-templates"> Project Templates </a> </li><li> <a href="/armature/docs/config-guide"> Configuration </a> </li><li> <a href="/armature/docs/macro-overview"> Macros Overview </a> </li> </ul> </div><div class="doc-category"> <h3>Core Concepts</h3> <ul> <li> <a href="/armature/docs/di-guide"> Dependency Injection </a> </li><li> <a href="/armature/docs/lifecycle-hooks"> Lifecycle Hooks </a> </li> </ul> </div><div class="doc-category"> <h3>Routing</h3> <ul> <li> <a href="/armature/docs/route-groups"> Route Groups </a> </li><li> <a href="/armature/docs/route-constraints"> Route Constraints </a> </li><li> <a href="/armature/docs/request-extractors"> Request Extractors </a> </li><li> <a href="/armature/docs/use-middleware"> Middleware </a> </li><li> <a href="/armature/docs/guards-interceptors"> Guards &amp; Interceptors </a> </li><li> <a href="/armature/docs/use-guard"> Using Guards </a> </li> </ul> </div><div class="doc-category"> <h3>HTTP</h3> <ul> <li> <a href="/armature/docs/http-status-errors"> HTTP Errors </a> </li><li> <a href="/armature/docs/request-timeouts"> Timeouts </a> </li><li> <a href="/armature/docs/streaming-responses"> Streaming </a> </li><li> <a href="/armature/docs/compression"> Compression </a> </li><li> <a href="/armature/docs/https-guide"> HTTPS &amp; TLS </a> </li><li> <a href="/armature/docs/acme-certificates" class="active"> SSL Certificates </a> </li> </ul> </div><div class="doc-category"> <h3>Security</h3> <ul> <li> <a href="/armature/docs/auth-guide"> Authentication </a> </li><li> <a href="/armature/docs/oauth2-providers"> OAuth2 &amp; Social Login </a> </li><li> <a href="/armature/docs/session-guide"> Sessions </a> </li><li> <a href="/armature/docs/rate-limiting"> Rate Limiting </a> </li><li> <a href="/armature/docs/security-guide"> Security Best Practices </a> </li><li> <a href="/armature/docs/security-advanced"> Advanced Security </a> </li> </ul> </div><div class="doc-category"> <h3>API Features</h3> <ul> <li> <a href="/armature/docs/api-versioning"> API Versioning </a> </li><li> <a href="/armature/docs/pagination-filtering"> Pagination &amp; Filtering </a> </li><li> <a href="/armature/docs/content-negotiation"> Content Negotiation </a> </li><li> <a href="/armature/docs/response-caching"> HTTP Caching </a> </li><li> <a href="/armature/docs/etag-conditional"> ETags </a> </li><li> <a href="/armature/docs/openapi-guide"> OpenAPI/Swagger </a> </li> </ul> </div><div class="doc-category"> <h3>Data &amp; Caching</h3> <ul> <li> <a href="/armature/docs/cache-improvements"> Caching Strategies </a> </li><li> <a href="/armature/docs/redis-guide"> Redis </a> </li> </ul> </div><div class="doc-category"> <h3>Background Jobs</h3> <ul> <li> <a href="/armature/docs/queue-guide"> Job Queues </a> </li><li> <a href="/armature/docs/cron-guide"> Scheduled Tasks </a> </li><li> <a href="/armature/docs/graceful-shutdown"> Graceful Shutdown </a> </li> </ul> </div><div class="doc-category"> <h3>Real-Time</h3> <ul> <li> <a href="/armature/docs/websocket-sse"> WebSockets &amp; SSE </a> </li><li> <a href="/armature/docs/webhooks"> Webhooks </a> </li> </ul> </div><div class="doc-category"> <h3>GraphQL</h3> <ul> <li> <a href="/armature/docs/graphql-guide"> GraphQL </a> </li><li> <a href="/armature/docs/graphql-config"> GraphQL Config </a> </li> </ul> </div><div class="doc-category"> <h3>Cloud &amp; Deployment</h3> <ul> <li> <a href="/armature/docs/cloud-providers"> Cloud SDKs </a> </li><li> <a href="/armature/docs/deployment-guide"> Deployment Guide </a> </li><li> <a href="/armature/docs/docker-guide"> Docker </a> </li><li> <a href="/armature/docs/kubernetes-guide"> Kubernetes </a> </li><li> <a href="/armature/docs/scaling-guide"> Scaling </a> </li> </ul> </div><div class="doc-category"> <h3>Observability</h3> <ul> <li> <a href="/armature/docs/logging-guide"> Logging </a> </li><li> <a href="/armature/docs/debug-logging"> Debug Logging </a> </li><li> <a href="/armature/docs/health-check"> Health Checks </a> </li><li> <a href="/armature/docs/metrics-guide"> Metrics </a> </li><li> <a href="/armature/docs/grafana-dashboards"> Grafana Dashboards </a> </li><li> <a href="/armature/docs/opentelemetry-guide"> OpenTelemetry </a> </li><li> <a href="/armature/docs/error-correlation"> Error Tracking </a> </li><li> <a href="/armature/docs/audit-guide"> Audit Logging </a> </li> </ul> </div><div class="doc-category"> <h3>Testing</h3> <ul> <li> <a href="/armature/docs/testing-guide"> Testing </a> </li><li> <a href="/armature/docs/testing-coverage"> Coverage </a> </li><li> <a href="/armature/docs/testing-documentation"> Testing Best Practices </a> </li> </ul> </div><div class="doc-category"> <h3>Performance</h3> <ul> <li> <a href="/armature/docs/profiling-guide"> CPU Profiling </a> </li> </ul> </div><div class="doc-category"> <h3>Benchmarks</h3> <ul> <li> <a href="/armature/docs/framework-comparison"> vs Actix vs Axum </a> </li><li> <a href="/armature/docs/armature-vs-nodejs"> vs Node.js </a> </li><li> <a href="/armature/docs/armature-vs-nextjs"> vs Next.js </a> </li> </ul> </div> </nav> </div> </aside> <!-- Main Content --> <main class="docs-content"> <article class="markdown-content"><h1>ACME Certificate Management</h1>
+<p>Armature's ACME module provides automatic SSL/TLS certificate management using the ACME protocol (Automatic Certificate Management Environment), commonly used with Let's Encrypt.</p>
+<hr />
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#certificate-providers">Certificate Providers</a></li>
+<li><a href="#challenge-types">Challenge Types</a></li>
+<li><a href="#configuration">Configuration</a></li>
+<li><a href="#integration-with-armature">Integration with Armature</a></li>
+<li><a href="#automatic-renewal">Automatic Renewal</a></li>
+<li><a href="#production-deployment">Production Deployment</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#api-reference">API Reference</a></li>
+</ul>
+<hr />
+<h2>Overview</h2>
+<p>ACME (Automatic Certificate Management Environment) is a protocol for automating domain validation and certificate issuance. Armature's ACME module implements this protocol to automatically obtain and renew SSL/TLS certificates from ACME-compliant providers.</p>
+<h3>What is ACME?</h3>
+<ul>
+<li><strong>Automated</strong>: No manual CSR generation or email verification</li>
+<li><strong>Secure</strong>: Domain validation through cryptographic challenges</li>
+<li><strong>Free</strong>: Most providers (like Let's Encrypt) offer free certificates</li>
+<li><strong>Short-lived</strong>: Certificates valid for 90 days, encouraging automation</li>
+</ul>
+<hr />
+<h2>Features</h2>
+<h3>✅ Supported Features</h3>
+<ul>
+<li><strong>Multiple Providers</strong> - Let's Encrypt, ZeroSSL, BuyPass, Google Trust Services</li>
+<li><strong>Challenge Types</strong> - HTTP-01, DNS-01, TLS-ALPN-01</li>
+<li><strong>Account Management</strong> - Register and manage ACME accounts</li>
+<li><strong>External Account Binding</strong> - Support for providers requiring EAB</li>
+<li><strong>Automatic Renewal</strong> - Check and renew before expiration</li>
+<li><strong>Wildcard Certificates</strong> - Using DNS-01 challenges</li>
+<li><strong>Multi-domain Certificates</strong> - Single cert for multiple domains (SAN)</li>
+</ul>
+<hr />
+<h2>Quick Start</h2>
+<h3>1. Add Dependency</h3>
+<pre><code class="language-toml">[dependencies]
+armature-framework = { version = "0.1", features = ["acme"] }
+tokio = { version = "1.35", features = ["full"] }
+</code></pre>
+<h3>2. Basic Usage</h3>
+<pre><code class="language-rust">use armature_acme::{AcmeClient, AcmeConfig};
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Configure for Let's Encrypt staging (testing)
+    let config = AcmeConfig::lets_encrypt_staging(
+        vec!["admin@example.com".to_string()],
+        vec!["example.com".to_string()],
+    ).with_accept_tos(true);
+
+    // Create client and order certificate
+    let mut client = AcmeClient::new(config).await?;
+    let (cert_pem, key_pem) = client.order_certificate().await?;
+
+    // Save certificate and key
+    client.save_certificate(&amp;cert_pem, &amp;key_pem).await?;
+
+    Ok(())
+}
+</code></pre>
+<hr />
+<h2>Certificate Providers</h2>
+<h3>Let's Encrypt (Recommended)</h3>
+<p><strong>Production:</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+);
+</code></pre>
+<p><strong>Staging (Testing):</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_staging(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+);
+</code></pre>
+<p><strong>Features:</strong></p>
+<ul>
+<li>✅ Free</li>
+<li>✅ Widely trusted</li>
+<li>✅ 90-day certificates</li>
+<li>✅ Rate limits: 50 certificates/domain/week</li>
+</ul>
+<h3>ZeroSSL</h3>
+<pre><code class="language-rust">let config = AcmeConfig::zerossl(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+    "your_eab_kid".to_string(),
+    "your_eab_hmac_key".to_string(),
+);
+</code></pre>
+<p><strong>Features:</strong></p>
+<ul>
+<li>✅ Free (with account)</li>
+<li>✅ 90-day certificates</li>
+<li>⚠️ Requires External Account Binding (EAB)</li>
+</ul>
+<h3>BuyPass</h3>
+<pre><code class="language-rust">let config = AcmeConfig::new(
+    "https://api.buypass.com/acme/directory",
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+);
+</code></pre>
+<h3>Google Trust Services</h3>
+<pre><code class="language-rust">let config = AcmeConfig::new(
+    "https://dv.acme-v02.api.pki.goog/directory",
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+);
+</code></pre>
+<hr />
+<h2>Challenge Types</h2>
+<p>ACME uses challenges to prove you control the domain before issuing a certificate.</p>
+<h3>HTTP-01 Challenge (Recommended for single domains)</h3>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>ACME server provides a token</li>
+<li>Your server serves the token at <code>http://yourdomain.com/.well-known/acme-challenge/{token}</code></li>
+<li>ACME server verifies the response</li>
+</ol>
+<p><strong>Configuration:</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(...)
+    .with_challenge_type(ChallengeType::Http01);
+</code></pre>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Port 80 must be accessible</li>
+<li>HTTP server running</li>
+<li>Cannot be used for wildcard certificates</li>
+</ul>
+<p><strong>Example Integration:</strong></p>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_acme::*;
+
+#[controller("/.well-known/acme-challenge")]
+struct AcmeController {
+    challenges: std::sync::Arc&lt;std::sync::Mutex&lt;std::collections::HashMap&lt;String, String&gt;&gt;&gt;,
+}
+
+impl AcmeController {
+    #[get("/:token")]
+    fn serve_challenge(&amp;self, req: HttpRequest) -&gt; Result&lt;HttpResponse, Error&gt; {
+        let token = req.param("token")?;
+        let challenges = self.challenges.lock().unwrap();
+
+        if let Some(key_auth) = challenges.get(token) {
+            Ok(HttpResponse::ok()
+                .with_header("Content-Type", "text/plain")
+                .with_body(key_auth.as_bytes().to_vec()))
+        } else {
+            Err(Error::NotFound)
+        }
+    }
+}
+</code></pre>
+<h3>DNS-01 Challenge (Required for wildcards)</h3>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>ACME server provides a token</li>
+<li>You create a TXT record: <code>_acme-challenge.yourdomain.com</code></li>
+<li>ACME server queries DNS to verify</li>
+</ol>
+<p><strong>Configuration:</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(...)
+    .with_challenge_type(ChallengeType::Dns01);
+</code></pre>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>DNS provider API access</li>
+<li>Ability to create TXT records programmatically</li>
+</ul>
+<p><strong>Wildcard Certificate Example:</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(
+    vec!["admin@example.com".to_string()],
+    vec!["*.example.com".to_string(), "example.com".to_string()],
+)
+.with_challenge_type(ChallengeType::Dns01)
+.with_accept_tos(true);
+</code></pre>
+<h3>TLS-ALPN-01 Challenge</h3>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>ACME server initiates TLS connection on port 443</li>
+<li>Your server presents special certificate with ACME validation data</li>
+<li>ACME server validates the certificate</li>
+</ol>
+<p><strong>Configuration:</strong></p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(...)
+    .with_challenge_type(ChallengeType::TlsAlpn01);
+</code></pre>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Port 443 must be accessible</li>
+<li>TLS server with ALPN support</li>
+</ul>
+<hr />
+<h2>Configuration</h2>
+<h3>Basic Configuration</h3>
+<pre><code class="language-rust">use armature_acme::{AcmeConfig, ChallengeType};
+use std::path::PathBuf;
+
+let config = AcmeConfig::new(
+    "https://acme-v02.api.letsencrypt.org/directory",
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string()],
+);
+</code></pre>
+<h3>Builder Pattern</h3>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(
+    vec!["admin@example.com".to_string()],
+    vec!["example.com".to_string(), "www.example.com".to_string()],
+)
+.with_challenge_type(ChallengeType::Http01)
+.with_cert_dir(PathBuf::from("/etc/letsencrypt/live/example.com"))
+.with_account_dir(PathBuf::from("/etc/letsencrypt/accounts"))
+.with_renew_before_days(30)
+.with_accept_tos(true);
+</code></pre>
+<h3>Configuration Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>directory_url</code></td>
+<td>ACME directory URL</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>contact_email</code></td>
+<td>Contact emails</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>domains</code></td>
+<td>Domains to certify</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>challenge_type</code></td>
+<td>Challenge type</td>
+<td>HTTP-01</td>
+</tr>
+<tr>
+<td><code>cert_dir</code></td>
+<td>Certificate storage</td>
+<td><code>./certs</code></td>
+</tr>
+<tr>
+<td><code>account_dir</code></td>
+<td>Account credentials</td>
+<td><code>./accounts</code></td>
+</tr>
+<tr>
+<td><code>renew_before_days</code></td>
+<td>Renewal threshold</td>
+<td>30 days</td>
+</tr>
+<tr>
+<td><code>accept_tos</code></td>
+<td>Accept ToS</td>
+<td><code>false</code></td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Integration with Armature</h2>
+<h3>Complete HTTPS Server with ACME</h3>
+<pre><code class="language-rust">use armature_framework::prelude::*;
+use armature_acme::{AcmeClient, AcmeConfig};
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // 1. Obtain certificate
+    let acme_config = AcmeConfig::lets_encrypt_production(
+        vec!["admin@example.com".to_string()],
+        vec!["example.com".to_string()],
+    ).with_accept_tos(true);
+
+    let mut acme_client = AcmeClient::new(acme_config).await?;
+    let (cert_pem, key_pem) = acme_client.order_certificate().await?;
+    let (cert_path, key_path) = acme_client.save_certificate(&amp;cert_pem, &amp;key_pem).await?;
+
+    // 2. Configure TLS
+    let tls_config = TlsConfig::from_pem_files(&amp;cert_path, &amp;key_path)?;
+
+    // 3. Start HTTPS server
+    let app = Application::create::&lt;AppModule&gt;().await;
+    app.listen_https(443, tls_config).await?;
+
+    Ok(())
+}
+</code></pre>
+<h3>With HTTP to HTTPS Redirect</h3>
+<pre><code class="language-rust">use armature_core::{Application, HttpsConfig, TlsConfig};
+
+let https_config = HttpsConfig::new("0.0.0.0:443", tls_config)
+    .with_http_redirect("0.0.0.0:80");
+
+app.listen_with_config(https_config).await?;
+</code></pre>
+<hr />
+<h2>Automatic Renewal</h2>
+<p>Certificates from Let's Encrypt expire after 90 days. Armature's ACME client can check and renew certificates automatically.</p>
+<h3>Check if Renewal Needed</h3>
+<pre><code class="language-rust">if acme_client.should_renew("certs/cert.pem").await? {
+    let (cert_pem, key_pem) = acme_client.order_certificate().await?;
+    acme_client.save_certificate(&amp;cert_pem, &amp;key_pem).await?;
+    println!("Certificate renewed!");
+}
+</code></pre>
+<h3>Background Renewal Task</h3>
+<pre><code class="language-rust">use tokio::time::{interval, Duration};
+
+tokio::spawn(async move {
+    let mut ticker = interval(Duration::from_secs(86400)); // Check daily
+
+    loop {
+        ticker.tick().await;
+
+        if acme_client.should_renew("certs/cert.pem").await.unwrap_or(false) {
+            match acme_client.order_certificate().await {
+                Ok((cert_pem, key_pem)) =&gt; {
+                    acme_client.save_certificate(&amp;cert_pem, &amp;key_pem).await.ok();
+                    // TODO: Reload TLS configuration
+                }
+                Err(e) =&gt; eprintln!("Renewal failed: {}", e),
+            }
+        }
+    }
+});
+</code></pre>
+<hr />
+<h2>Production Deployment</h2>
+<h3>1. Test with Staging First</h3>
+<p>Always test with Let's Encrypt staging to avoid rate limits:</p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_staging(...);
+</code></pre>
+<h3>2. Production Configuration</h3>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(
+    vec!["admin@yourdomain.com".to_string()],
+    vec!["yourdomain.com".to_string(), "www.yourdomain.com".to_string()],
+)
+.with_cert_dir(PathBuf::from("/etc/letsencrypt/live/yourdomain.com"))
+.with_renew_before_days(30)
+.with_accept_tos(true);
+</code></pre>
+<h3>3. Certificate Storage</h3>
+<p>Store certificates securely:</p>
+<pre><code>/etc/letsencrypt/
+├── accounts/          # Account credentials
+│   └── acme-v02.api.letsencrypt.org/
+└── live/             # Certificates
+    └── yourdomain.com/
+        ├── cert.pem
+        ├── key.pem
+        └── fullchain.pem
+</code></pre>
+<p>Set appropriate permissions:</p>
+<pre><code class="language-bash">chmod 700 /etc/letsencrypt
+chmod 600 /etc/letsencrypt/live/yourdomain.com/key.pem
+</code></pre>
+<h3>4. Systemd Timer for Renewal</h3>
+<p>Create <code>/etc/systemd/system/cert-renewal.service</code>:</p>
+<pre><code class="language-ini">[Unit]
+Description=Renew ACME Certificates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/your-renewal-script
+</code></pre>
+<p>Create <code>/etc/systemd/system/cert-renewal.timer</code>:</p>
+<pre><code class="language-ini">[Unit]
+Description=Daily certificate renewal check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+</code></pre>
+<p>Enable:</p>
+<pre><code class="language-bash">systemctl enable cert-renewal.timer
+systemctl start cert-renewal.timer
+</code></pre>
+<hr />
+<h2>Troubleshooting</h2>
+<h3>Rate Limits</h3>
+<p><strong>Problem:</strong> <code>Rate limit exceeded</code></p>
+<p><strong>Solution:</strong></p>
+<ul>
+<li>Use staging environment for testing</li>
+<li>Let's Encrypt production limits:<ul>
+<li>50 certificates per domain per week</li>
+<li>5 failed validations per hour</li>
+</ul>
+</li>
+<li>Wait or use a different domain for testing</li>
+</ul>
+<h3>Challenge Validation Failed</h3>
+<p><strong>Problem:</strong> <code>Challenge failed: Connection refused</code></p>
+<p><strong>HTTP-01:</strong></p>
+<ul>
+<li>Ensure port 80 is accessible from internet</li>
+<li>Check firewall rules</li>
+<li>Verify DNS points to your server</li>
+<li>Test: <code>curl http://yourdomain.com/.well-known/acme-challenge/test</code></li>
+</ul>
+<p><strong>DNS-01:</strong></p>
+<ul>
+<li>Verify DNS record propagation: <code>dig TXT _acme-challenge.yourdomain.com</code></li>
+<li>Wait for DNS propagation (can take minutes to hours)</li>
+<li>Check DNS provider API credentials</li>
+</ul>
+<h3>Certificate Not Trusted</h3>
+<p><strong>Problem:</strong> Browser shows "Certificate not trusted"</p>
+<p><strong>Cause:</strong> Using Let's Encrypt staging certificates</p>
+<p><strong>Solution:</strong> Switch to production:</p>
+<pre><code class="language-rust">let config = AcmeConfig::lets_encrypt_production(...);
+</code></pre>
+<h3>Renewal Failures</h3>
+<p><strong>Problem:</strong> Automatic renewal failing</p>
+<p><strong>Solutions:</strong></p>
+<ul>
+<li>Check logs for specific errors</li>
+<li>Verify challenge setup still works</li>
+<li>Ensure sufficient disk space</li>
+<li>Check account credentials haven't expired</li>
+</ul>
+<hr />
+<h2>API Reference</h2>
+<h3><code>AcmeConfig</code></h3>
+<p>Configuration for ACME client.</p>
+<p><strong>Methods:</strong></p>
+<ul>
+<li><code>new(directory_url, contact_email, domains)</code> - Create config</li>
+<li><code>lets_encrypt_production(email, domains)</code> - Let's Encrypt production</li>
+<li><code>lets_encrypt_staging(email, domains)</code> - Let's Encrypt staging</li>
+<li><code>zerossl(email, domains, eab_kid, eab_hmac_key)</code> - ZeroSSL with EAB</li>
+<li><code>with_challenge_type(type)</code> - Set challenge type</li>
+<li><code>with_cert_dir(path)</code> - Set certificate directory</li>
+<li><code>with_account_dir(path)</code> - Set account directory</li>
+<li><code>with_renew_before_days(days)</code> - Set renewal threshold</li>
+<li><code>with_accept_tos(accept)</code> - Accept terms of service</li>
+</ul>
+<h3><code>AcmeClient</code></h3>
+<p>ACME protocol client.</p>
+<p><strong>Methods:</strong></p>
+<ul>
+<li><code>new(config)</code> - Create client</li>
+<li><code>register_account()</code> - Register ACME account</li>
+<li><code>create_order()</code> - Create certificate order</li>
+<li><code>get_challenges(order_url)</code> - Get validation challenges</li>
+<li><code>notify_challenge_ready(challenge_url)</code> - Notify challenge ready</li>
+<li><code>finalize_order(order_url)</code> - Finalize and get certificate</li>
+<li><code>order_certificate()</code> - Complete ordering process</li>
+<li><code>should_renew(cert_path)</code> - Check if renewal needed</li>
+<li><code>save_certificate(cert_pem, key_pem)</code> - Save to files</li>
+</ul>
+<h3><code>ChallengeType</code></h3>
+<p>Challenge type enumeration.</p>
+<p><strong>Variants:</strong></p>
+<ul>
+<li><code>Http01</code> - HTTP-01 challenge (port 80)</li>
+<li><code>Dns01</code> - DNS-01 challenge (DNS TXT record)</li>
+<li><code>TlsAlpn01</code> - TLS-ALPN-01 challenge (port 443)</li>
+</ul>
+<hr />
+<h2>Summary</h2>
+<p>Armature's ACME module provides:</p>
+<p>✅ <strong>Automatic certificate management</strong> with ACME protocol
+✅ <strong>Multiple providers</strong> (Let's Encrypt, ZeroSSL, etc.)
+✅ <strong>All challenge types</strong> (HTTP-01, DNS-01, TLS-ALPN-01)
+✅ <strong>Account management</strong> and External Account Binding
+✅ <strong>Automatic renewal</strong> before expiration
+✅ <strong>Seamless integration</strong> with Armature HTTPS servers
+✅ <strong>Production-ready</strong> with error handling and retry logic</p>
+<p>For more examples, see:</p>
+<ul>
+<li><code>examples/acme_certificate.rs</code></li>
+<li><code>examples/https_server.rs</code></li>
+</ul>
+</article> </main> </div>  </main> <footer class="bg-stone-900 border-t border-stone-800"> <div class="max-w-7xl mx-auto px-8 lg:px-12"> <!-- Main Footer Content --> <div class="py-20 grid grid-cols-1 md:grid-cols-12 gap-12"> <!-- Brand Column --> <div class="md:col-span-4"> <a href="/armature/" class="flex items-center gap-3 mb-6"> <img src="/armature/assets/armature-logo.svg" alt="Armature Logo" class="h-10 w-10"> <span class="text-2xl font-bold text-white">Armature</span> </a> <p class="text-stone-400 leading-relaxed mb-8">
+A modern, type-safe HTTP framework for Rust inspired by Angular and NestJS.
+</p> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-stone-400 hover:text-rust-400 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor" width="1em" height="1em" style="display:inline-block;vertical-align:-0.125em" aria-hidden="true"> <path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM252.8 8c-138.7 0-244.8 105.3-244.8 244 0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1 100-33.2 167.8-128.1 167.8-239 0-138.7-112.5-244-251.2-244zM105.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"></path> </svg> <span>View on GitHub</span> </a> </div> <!-- Links Columns --> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Documentation</h4> <ul class="space-y-4"> <li> <a href="/armature/getting-started" class="text-stone-400 hover:text-rust-400 transition-colors">
+Getting Started
+</a> </li> <li> <a href="/armature/docs" class="text-stone-400 hover:text-rust-400 transition-colors"> Guides </a> </li> <li> <a href="https://docs.rs/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+API Reference
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/tree/develop/examples" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Examples
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Resources</h4> <ul class="space-y-4"> <li> <a href="/armature/comparisons" class="text-stone-400 hover:text-rust-400 transition-colors"> Comparisons </a> </li> <li> <a href="/armature/faq" class="text-stone-400 hover:text-rust-400 transition-colors"> FAQ </a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Changelog
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Community</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+GitHub
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/issues" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Report Issue
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/discussions" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Discussions
+</a> </li> </ul> </div> <div class="md:col-span-2"> <h4 class="text-sm font-semibold text-stone-300 uppercase tracking-wider mb-6">Legal</h4> <ul class="space-y-4"> <li> <a href="https://github.com/quinnjr/armature/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+License (Apache 2.0)
+</a> </li> <li> <a href="https://github.com/quinnjr/armature/blob/main/.github/SECURITY.md" target="_blank" rel="noopener noreferrer" class="text-stone-400 hover:text-rust-400 transition-colors">
+Security Policy
+</a> </li> </ul> </div> </div> <!-- Bottom Bar --> <div class="py-8 border-t border-stone-800 flex flex-col sm:flex-row justify-between items-center gap-4"> <p class="text-stone-500">© 2026 Joseph Quinn. All rights reserved.</p> <p class="text-stone-500 flex items-center gap-2"> <span>Built with</span> <span class="text-rust-500">Rust</span> <span>·</span> <span>Astro</span> <span>·</span> <span>Tailwind CSS</span> </p> </div> </div> </footer> </body></html>
