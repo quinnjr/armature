@@ -20,13 +20,13 @@ armature = { package = "armature-framework", version = "0.6", features = ["graph
 # and get a template that does not compile.
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
 armature-core = "0.9"
-async-graphql = { version = "7.0", features = ["chrono", "uuid"] }
+async-graphql = { version = "7.2", features = ["chrono", "uuid"] }
 
 # Required for controller/module macros
 async-trait = "0.1"
 
 # Runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -43,5 +43,5 @@ dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 
 # UUID
-uuid = { version = "1.6", features = ["v4", "serde"] }
+uuid = { version = "1.26", features = ["v4", "serde"] }
 

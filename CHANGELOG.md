@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Workspace-wide dependency upgrade.** Every member crate moved to the
+  newest releases of its third-party dependencies (`cargo upgrade
+  --incompatible allow`), including jsonwebtoken 11, sea-orm 2.0, sqlx 0.9,
+  compact_str 0.10, simd-json 0.18, reqwest 0.13 and redis 1.7; the AWS SDK
+  stack stays pinned at `aws-smithy-types` 1.6.3. The root package's
+  requirements follow: tokio 1.53, regex 1.13, redis 1.7, fastrand 2.5,
+  uuid 1.26, and the example dev-dependencies jsonwebtoken 11, sea-orm 2.0
+  and sqlx 0.9 — whose feature list changes from the removed
+  `runtime-tokio-rustls` to `runtime-tokio` + `tls-rustls-ring-webpki`. Root
+  `src/`, `examples/`, `tests/` and `benches/` needed no source changes: all
+  61 examples, benches and tests build clippy-clean against the new versions.
+  The standalone `benchmarks/comparison` crate moves axum `0.7` → `0.8`,
+  which its benchmark server builds against unchanged.
+
 ## [0.6.0] - 2026-08-05
 
 ### Changed

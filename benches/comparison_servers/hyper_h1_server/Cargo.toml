@@ -14,7 +14,7 @@ publish = false
 # framework on top of it: the claim under test is about the HTTP/1 layer, and a
 # router in the path would price routing on both sides of the comparison instead.
 [dependencies]
-hyper = { version = "1.10", features = ["server", "http1"] }
+hyper = { version = "1.11", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }

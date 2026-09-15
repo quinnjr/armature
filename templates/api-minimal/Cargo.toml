@@ -19,7 +19,7 @@ armature = { version = "0.6", package = "armature-framework" }
 # armature-core is required directly because armature's macro-expanded code references armature_core:: paths that aren't currently re-exported through the armature facade crate.
 armature-core = "0.9"
 async-trait = "0.1"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
