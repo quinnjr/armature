@@ -1,10 +1,38 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
+import { docs } from '../../lib/docs';
+import { collectionSchema } from '../../lib/seo';
+import { docsLastModified } from '../../lib/docmeta';
 import DocsShell from '../../components/docs/DocsShell.astro';
 import DocsOverview from '../../components/docs/DocsOverview.astro';
+
+const docsCollectionSchema = collectionSchema(
+  {
+    name: 'Armature Framework Documentation',
+    description:
+      'Guides for building production Rust web services with Armature: dependency injection, routing, authentication, GraphQL, caching, background jobs, deployment and observability.',
+    path: '/docs',
+    items: docs.map((doc) => ({
+      name: doc.title,
+      path: doc.id === 'readme' ? '/docs' : `/docs/${doc.id}`,
+    })),
+  },
+  Astro.site,
+);
+const docsModified = docsLastModified() ?? undefined;
 ---
 
-<BaseLayout title="Documentation - Armature">
+<BaseLayout
+  title="Documentation - Armature Rust Web Framework"
+  description="Complete Armature documentation: dependency injection, controllers and routing, guards, middleware, authentication, GraphQL, caching, job queues, deployment and observability for Rust APIs."
+  canonicalPath="/docs"
+  breadcrumbs={[
+    { name: 'Home', path: '/' },
+    { name: 'Documentation', path: '/docs' },
+  ]}
+  schemas={[docsCollectionSchema]}
+  dateModified={docsModified}
+>
   <DocsShell activeId="readme">
     <DocsOverview />
   </DocsShell>

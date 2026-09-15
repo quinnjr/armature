@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
                 // Parse query parameters
-                let query = QueryParams::from_hashmap(&req.query_params);
+                let query = QueryParams::from_hashmap(&req.query().to_hash_map());
 
                 // Get all users
                 let mut users = get_mock_users();
@@ -287,8 +287,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: "/users/cursor".to_string(),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                // Parse cursor pagination
-                let pagination = CursorPagination::from_query_params(&req.query_params);
+                // Read the two parameters directly off the lazy `QueryView`.
+                // `to_hash_map()` would materialize an owned `HashMap` of
+                // every query parameter - allocating a String per key and per
+                // value - only to look up `cursor` and `limit` and drop the
+                // rest.
+                let pagination = CursorPagination::new(
+                    req.query_param("cursor").map(str::to_owned),
+                    req.query_param("limit")
+                        .and_then(|l| l.parse().ok())
+                        .unwrap_or(DEFAULT_PAGE_SIZE),
+                );
 
                 let users = get_mock_users();
 

@@ -96,8 +96,8 @@ pub mod prelude {
         delete,
         // Extractors
         extractors::{
-            Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers, Method, Path,
-            PathParams, Query, RawBody,
+            Body, ContentType, Form, FromRequest, FromRequestNamed, Header, Headers,
+            MethodExtractor, Path, PathParams, Query, RawBody,
         },
         get,
         header,

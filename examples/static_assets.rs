@@ -1,3 +1,16 @@
+//! Serving static assets.
+//!
+//! Mounts five `StaticFileServer` configurations side by side - a basic mount,
+//! an SPA fallback mount, a long-cache CDN mount, a no-cache development mount
+//! and one with custom MIME/header rules - so the caching, fallback and
+//! directory-listing options can be compared against each other on one server.
+//!
+//! ```bash
+//! cargo run --example static_assets
+//!
+//! curl -i 'http://localhost:3000/static/app.js?v=2'
+//! ```
+
 #![allow(dead_code)]
 use armature_core::handler::from_legacy_handler;
 use armature_core::*;
@@ -70,9 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let server = basic_server.clone();
             Box::pin(async move {
-                let path = req.path.trim_start_matches("/static");
+                // `req.path` is the raw request target, so a cache-busting query
+                // (`/static/app.js?v=2`) would be resolved as part of the file
+                // name. `path_only()` is the routing path.
+                let path = req.path_only().trim_start_matches("/static");
                 server
-                    .serve(&HttpRequest::new("GET".to_string(), path.to_string()))
+                    .serve(&HttpRequest::new("GET", path.to_string()))
                     .await
             })
         })),
@@ -93,8 +109,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let server = spa_server.clone();
             Box::pin(async move {
-                let path = req.path.trim_start_matches("/app");
-                let mut spa_req = HttpRequest::new("GET".to_string(), path.to_string());
+                // `req.path` is the raw request target, so a cache-busting query
+                // (`/static/app.js?v=2`) would be resolved as part of the file
+                // name. `path_only()` is the routing path.
+                let path = req.path_only().trim_start_matches("/app");
+                let mut spa_req = HttpRequest::new("GET", path.to_string());
                 // Copy headers for conditional requests
                 spa_req.headers = req.headers.clone();
                 server.serve(&spa_req).await
@@ -119,8 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let server = cdn_server.clone();
             Box::pin(async move {
-                let path = req.path.trim_start_matches("/cdn");
-                let mut cdn_req = HttpRequest::new("GET".to_string(), path.to_string());
+                // `req.path` is the raw request target, so a cache-busting query
+                // (`/static/app.js?v=2`) would be resolved as part of the file
+                // name. `path_only()` is the routing path.
+                let path = req.path_only().trim_start_matches("/cdn");
+                let mut cdn_req = HttpRequest::new("GET", path.to_string());
                 cdn_req.headers = req.headers.clone();
                 server.serve(&cdn_req).await
             })
@@ -142,9 +164,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let server = dev_server.clone();
             Box::pin(async move {
-                let path = req.path.trim_start_matches("/dev");
+                // `req.path` is the raw request target, so a cache-busting query
+                // (`/static/app.js?v=2`) would be resolved as part of the file
+                // name. `path_only()` is the routing path.
+                let path = req.path_only().trim_start_matches("/dev");
                 server
-                    .serve(&HttpRequest::new("GET".to_string(), path.to_string()))
+                    .serve(&HttpRequest::new("GET", path.to_string()))
                     .await
             })
         })),
@@ -174,8 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let server = custom_server.clone();
             Box::pin(async move {
-                let path = req.path.trim_start_matches("/custom");
-                let mut custom_req = HttpRequest::new("GET".to_string(), path.to_string());
+                // `req.path` is the raw request target, so a cache-busting query
+                // (`/static/app.js?v=2`) would be resolved as part of the file
+                // name. `path_only()` is the routing path.
+                let path = req.path_only().trim_start_matches("/custom");
+                let mut custom_req = HttpRequest::new("GET", path.to_string());
                 custom_req.headers = req.headers.clone();
                 server.serve(&custom_req).await
             })

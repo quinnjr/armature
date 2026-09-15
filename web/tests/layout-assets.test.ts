@@ -41,6 +41,13 @@ function getGhPagesBase(): string {
 
 const GH_PAGES_BASE = getGhPagesBase();
 
+/**
+ * Routes emitted by a page module rather than shipped in `public/`.
+ * `llms.txt` is generated from the documentation registry, so asserting it
+ * exists on disk would fail even though the deployed site serves it.
+ */
+const GENERATED_ROUTES = new Set(['/llms.txt', '/llms-full.txt']);
+
 function publicPathFor(reference: string): string {
   // Either an absolute URL (og:image/twitter:image) or a base-relative path
   // already extracted from a `url('/foo')` call (favicon, icons, manifest).
@@ -49,29 +56,38 @@ function publicPathFor(reference: string): string {
   return resolve(PUBLIC_DIR, withoutBase.replace(/^\/+/, ''));
 }
 
+/**
+ * The social image is no longer a hardcoded absolute URL — it is built from a
+ * site-relative path through `absolute()` so it follows `Astro.site` and the
+ * configured base. The asset still has to exist, so recover the path from the
+ * `absolute('/...')` call instead of from the emitted attribute.
+ */
+function socialImagePath(): string {
+  const match = layoutSource.match(/const ogImage = absolute\('([^']+)'/);
+  if (!match) {
+    throw new Error("Could not find the og:image source in BaseLayout.astro — update socialImagePath()");
+  }
+  return match[1];
+}
+
 describe('BaseLayout static asset references', () => {
-  it('og:image and twitter:image point at a file that exists in public/', () => {
-    const ogImage = layoutSource.match(/property="og:image"\s+content="([^"]+)"/);
-    const twitterImage = layoutSource.match(/name="twitter:image"\s+content="([^"]+)"/);
+  it('og:image and twitter:image are both bound to an asset that exists in public/', () => {
+    // Both tags must render the same derived value; a literal URL in either one
+    // would silently stop tracking the deployed base.
+    expect(layoutSource).toContain('<meta property="og:image" content={ogImage} />');
+    expect(layoutSource).toContain('<meta name="twitter:image" content={ogImage} />');
 
-    expect(ogImage, 'og:image meta tag not found in BaseLayout.astro').not.toBeNull();
-    expect(twitterImage, 'twitter:image meta tag not found in BaseLayout.astro').not.toBeNull();
-
-    const ogPath = publicPathFor(ogImage![1]);
-    const twitterPath = publicPathFor(twitterImage![1]);
-
-    expect(existsSync(ogPath), `og:image asset missing: ${ogImage![1]} -> ${ogPath}`).toBe(true);
-    expect(existsSync(twitterPath), `twitter:image asset missing: ${twitterImage![1]} -> ${twitterPath}`).toBe(true);
+    const path = publicPathFor(socialImagePath());
+    expect(existsSync(path), `og:image asset missing: ${socialImagePath()} -> ${path}`).toBe(true);
   });
 
   it('og:image is a 1200x630 PNG matching the declared og:image:width/height', () => {
-    const ogImage = layoutSource.match(/property="og:image"\s+content="([^"]+)"/);
     const width = layoutSource.match(/property="og:image:width"\s+content="(\d+)"/);
     const height = layoutSource.match(/property="og:image:height"\s+content="(\d+)"/);
     expect(width).not.toBeNull();
     expect(height).not.toBeNull();
 
-    const ogPath = publicPathFor(ogImage![1]);
+    const ogPath = publicPathFor(socialImagePath());
     const buf = readFileSync(ogPath);
     // PNG signature + IHDR chunk: width/height are big-endian u32s at offset 16/20.
     expect(buf.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
@@ -90,8 +106,21 @@ describe('BaseLayout static asset references', () => {
     expect(urlCalls).toContain('/manifest.webmanifest');
 
     for (const ref of urlCalls) {
+      if (GENERATED_ROUTES.has(ref)) continue;
       const path = publicPathFor(ref);
       expect(existsSync(path), `asset missing: ${ref} -> ${path}`).toBe(true);
+    }
+  });
+
+  it('every generated route the layout links to is backed by a page module', () => {
+    const urlCalls = new Set([...layoutSource.matchAll(/href=\{url\('([^']+)'\)\}/g)].map((m) => m[1]));
+
+    for (const route of GENERATED_ROUTES) {
+      // Only assert the ones the layout actually references, so an unused entry
+      // in the set cannot mask a deleted endpoint.
+      if (!urlCalls.has(route)) continue;
+      const page = resolve(process.cwd(), 'src/pages', `${route.replace(/^\/+/, '')}.ts`);
+      expect(existsSync(page), `generated route ${route} has no page module at ${page}`).toBe(true);
     }
   });
 

@@ -47,7 +47,7 @@ async fn json(_req: HttpRequest) -> Result<HttpResponse, Error> {
 }
 
 async fn get_user(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let id = req.param("id").cloned().unwrap_or_default();
+    let id = req.param("id").map(str::to_owned).unwrap_or_default();
     HttpResponse::json(&UserResponse {
         id: id.clone(),
         name: format!("User {}", id),

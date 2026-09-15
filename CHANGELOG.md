@@ -7,11 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-15
+
+### Changed
+
+- **`armature-core` requirement moved `0.9` → `0.10` (breaking).**
+  `src/lib.rs` opens with `pub use armature_core::*;`, so every type
+  `armature-core` exposes is part of this crate's public API. `armature-core
+  0.10.0` is itself breaking — `compact_str` 0.10 and `simd-json` 0.18 are
+  public dependencies of it (`CompactString` fields, `json::Value`) — so the
+  minor moves here too, as it did for 0.6.0. The other sibling requirements
+  follow their own minors in the same train: `armature-acme` 0.4,
+  `armature-auth` 0.4, `armature-compression` 0.4, `armature-config` 0.5,
+  `armature-cron` 0.5, `armature-graphql` 0.6, `armature-jwt` 0.4,
+  `armature-macros` 0.4, `armature-messaging` 0.5, `armature-openapi` 0.4,
+  `armature-opentelemetry` 0.5, `armature-queue` 0.6, `armature-ratelimit`
+  0.5, `armature-security` 0.4, `armature-testing` 0.5, `armature-validation`
+  0.5 and `armature-webhooks` 0.5. The four templates pin
+  `armature-framework` 0.7 and `armature-core` 0.10.
+- The MSRV CI job also checks `armature-aws`, `-mail`, `-messaging`,
+  `-storage` and `-opensearch` with `--all-features`, one crate at a time.
+- **Workspace-wide dependency upgrade.** Every member crate moved to the
+  newest releases of its third-party dependencies (`cargo upgrade
+  --incompatible allow`), including jsonwebtoken 11, sea-orm 2.0, sqlx 0.9,
+  compact_str 0.10, simd-json 0.18, reqwest 0.13 and redis 1.7; the AWS SDK
+  stack stays pinned at `aws-smithy-types` 1.6.3. The root package's
+  requirements follow: tokio 1.53, regex 1.13, redis 1.7, fastrand 2.5,
+  uuid 1.26, and the example dev-dependencies jsonwebtoken 11, sea-orm 2.0
+  and sqlx 0.9 — whose feature list changes from the removed
+  `runtime-tokio-rustls` to `runtime-tokio` + `tls-rustls-ring-webpki`. Root
+  `src/`, `examples/`, `tests/` and `benches/` needed no source changes: all
+  61 examples, benches and tests build clippy-clean against the new versions.
+  The standalone `benchmarks/comparison` crate moves axum `0.7` → `0.8`,
+  which its benchmark server builds against unchanged.
+
+### Security
+
+- Resolves the `cargo audit` findings: `rustls` 0.23.45 (RUSTSEC-2026-0285)
+  and `webbrowser` 1.2.4 (RUSTSEC-2026-0257) minimums, and `armature-azure`
+  0.3 drops the legacy `azure_core` 0.21 (RUSTSEC-2026-0275, -0174, -0097).
+  Advisories with no upstream fix are documented in `.cargo/audit.toml`.
+
+## [0.6.0] - 2026-08-05
+
+### Changed
+
+- **`armature-core` requirement moved `0.8` → `0.9` (breaking).**
+  `src/lib.rs` opens with `pub use armature_core::*;` — a glob re-export, so
+  every type `armature-core` exposes is part of *this* crate's public API and
+  `armature-core` is a public dependency of `armature-framework`. Under
+  Cargo's 0.x caret rules each `0.x` minor is a breaking boundary, so
+  `armature-core 0.9.0` (itself forced by `armature-h1` crossing 0.2 → 0.3, a
+  public dependency of core by the same re-export argument) is breaking for
+  anyone naming an `armature_core` type through the `armature` facade: the
+  0.8 and 0.9 types are distinct and do not unify. That is why the minor moves
+  here rather than the patch — a `0.5.2` would have handed 0.5.x consumers an
+  incompatible public API through a compatible-looking requirement.
+
+## [0.5.1] - 2026-08-04
+
+### Fixed
+
+- **Sibling requirements name a minor instead of `0`.** Every dependency on
+  another armature crate was declared `version = "0"`, which under Cargo's 0.x
+  rules matches any release ever made. Edition 2024 selects the MSRV-aware
+  resolver, so a consumer declaring an older `rust-version` was handed the
+  oldest version satisfying it — a project on 1.89 resolving `armature-core =
+  "0"` got `armature-core 0.2.3`, while an explicit `armature-core = "0.8"`
+  alongside it pulled 0.8.2, putting two copies of core in one graph and
+  failing on `armature_core::crypto`, which 0.2.3 does not have. 0.5.0 declared
+  all 21 of its siblings this way, so the meta-crate resolved `armature-auth
+  0.1.2`, `armature-graphql 0.2.0` and `armature-jwt 0.1.1` against current
+  everything else. Each 0.x minor here is breaking, so the requirement now
+  names one.
+
+## [Unreleased]
+
 > As of 2026-07-30, per-crate changes are recorded in each crate's own
 > `CHANGELOG.md` (e.g. `armature-core/CHANGELOG.md`). This file remains the
 > historical record through `0.3.0` and the home of workspace-wide notes.
 
 ### Added
+
+- **`armature-h1` `0.1.0` (new crate):** a zero-allocation HTTP/1.1 server layer.
+  See [`armature-h1/CHANGELOG.md`](armature-h1/CHANGELOG.md).
+
+### Changed
+
+- **Benchmarks moved into the crates they measure.** The root package no longer
+  owns one 19-target benchmark suite: `core`, `arena`, `body`, `json`, `micro`,
+  `pipeline`, `resilience`, `simd_parser` and `internal_overhead` now live in
+  `armature-core`; the rest moved to `armature-jwt`, `armature-auth`,
+  `armature-validation`, `armature-cache`, `armature-ratelimit`,
+  `armature-storage` and `armature-http-client`; and `data_benchmarks` split
+  into `armature-cron`'s `cron` and `armature-queue`'s `queue`. Every benchmark
+  is now run `-p`-scoped (`cargo bench -p armature-core --bench json`), and
+  `scripts/run-benchmarks.sh` groups them into suites. The root `benches/`
+  keeps only what is not crate-specific: the cross-framework comparison servers,
+  the TechEmpower harness, the `http-benchmark` load runner, and the
+  `database_benchmarks`/`memory_benchmarks` pattern benchmarks.
+
+- **`armature-framework` `0.4.0` → `0.5.0`.** The facade re-exports
+  `MethodExtractor` (renamed from `extractors::Method` to stop colliding with
+  the re-exported `Method` enum), so its prelude changed with `armature-core`
+  0.8. The four project templates pin the new minor.
+
+### Fixed
+
+- **Workspace-wide — conformance audit remediation.** A project-wide audit of
+  claim-versus-implementation found 27 Critical and 71 Warning issues; all are
+  resolved across 49 crates. The recurring shape was a control that looked
+  implemented and was not: CORS reflecting any origin once credentials were
+  enabled, a default rate limiter that could never derive a key and so allowed
+  everything, `#[body_limit(512kb)]` meaning 512 bytes, `ProcessingResult::DeadLetter`
+  deleting the message instead of dead-lettering it, and a job queue that wrote
+  an in-flight claim nothing ever read back. Each affected crate carries the
+  detail in its own `CHANGELOG.md`; crates with breaking changes took a minor
+  bump.
+
+### Changed
+
+- **Workspace-wide — `armature-core` `0.7.0` → `0.8.0`:** the request and response
+  types are now `Bytes`-backed and the serve path stops doing work no handler
+  asked for. This is a breaking change that every crate depending on
+  `armature-core` had to be migrated onto; each carries its own changelog entry,
+  and the full list of API changes is in
+  [`armature-core/CHANGELOG.md`](armature-core/CHANGELOG.md).
 
 - **`armature-graphql-macros` `0.1.0` (new crate):** `#[resolver]` attribute macro, re-exported from `armature-graphql`. Lets a single `impl` block mix `#[query]`/`#[mutation]`/`#[subscription]`-tagged methods — mirroring NestJS's `@Resolver()`/`@Query()`/`@Mutation()`/`@Subscription()` — and splits them at compile time into the separate `<Type>Query`/`<Type>Mutation`/`<Type>Subscription` wrapper types `async-graphql` needs, each still driven by `async-graphql`'s real `#[Object]`/`#[Subscription]` macros.
 - **`armature-graphql` `0.3.0` → `0.4.0`:** GraphQL subscriptions over WebSocket (new `websocket` feature) — drives `async-graphql`'s `graphql-ws`/`graphql-transport-ws` protocol over a caller-supplied `tokio_tungstenite::WebSocketStream`, with a `WebSocketConfig` (keep-alive timeout, per-connection subscription cap, `connection_init` auth hook) for abuse-resistance. Static SDL analyzer (`sdl-export` feature) extended to recognize `#[resolver]`'s markers and to fully parse `#[derive(Interface)]` field arguments/descriptions/deprecation.

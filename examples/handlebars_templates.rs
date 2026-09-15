@@ -280,8 +280,7 @@ impl UserController {
 
     async fn show(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
         let id: u64 = req
-            .path_params
-            .get("id")
+            .param("id")
             .ok_or_else(|| Error::BadRequest("Missing id".to_string()))?
             .parse()
             .map_err(|_| Error::BadRequest("Invalid id".to_string()))?;

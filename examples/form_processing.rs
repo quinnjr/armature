@@ -1,3 +1,16 @@
+//! Form and multipart request handling.
+//!
+//! Shows the `Form<T>` extractor for `application/x-www-form-urlencoded`
+//! bodies, multipart file uploads (single and multiple), and reading a form
+//! into an untyped map when the field set is not known ahead of time.
+//!
+//! ```bash
+//! cargo run --example form_processing
+//!
+//! curl -X POST http://localhost:3000/api/login \
+//!   -d 'username=admin&password=secret'
+//! ```
+
 #![allow(dead_code)]
 use armature::prelude::*;
 use serde::{Deserialize, Serialize};

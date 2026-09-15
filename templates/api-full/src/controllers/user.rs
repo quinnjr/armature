@@ -66,8 +66,7 @@ impl UserController {
 
 fn parse_user_id(req: &HttpRequest) -> Result<Uuid, Error> {
     let id_str = req
-        .path_params
-        .get("id")
+        .param("id")
         .ok_or_else(|| Error::bad_request("User ID required"))?;
 
     Uuid::parse_str(id_str).map_err(|_| Error::bad_request("Invalid user ID format"))

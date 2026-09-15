@@ -1,6 +1,6 @@
 //! GraphQL Mutation resolvers
 
-use async_graphql::{Object, Result, ID};
+use async_graphql::{ID, Object, Result};
 
 use crate::services::{BookService, UserService};
 

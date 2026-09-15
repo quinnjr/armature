@@ -46,4 +46,3 @@ pub struct ProcessDataJob {
     #[serde(default)]
     pub params: serde_json::Value,
 }
-

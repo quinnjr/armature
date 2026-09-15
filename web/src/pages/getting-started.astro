@@ -5,7 +5,15 @@ import Icon from '../components/Icon.astro';
 import { url } from '../lib/url';
 ---
 
-<BaseLayout title="Getting Started - Armature">
+<BaseLayout
+  title="Getting Started - Install & Build Your First Armature API"
+  description="Install Armature, scaffold a project with the CLI, and build your first Rust API: define a controller, inject a service with the DI container, and run the server."
+  canonicalPath="/getting-started"
+  breadcrumbs={[
+    { name: 'Home', path: '/' },
+    { name: 'Getting Started', path: '/getting-started' },
+  ]}
+>
   <section class="py-20 px-4 sm:px-6 lg:px-8 bg-stone-900">
     <div class="max-w-4xl mx-auto">
       <h2 class="text-4xl font-bold text-center text-white mb-12">Quick Start</h2>

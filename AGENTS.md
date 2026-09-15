@@ -35,8 +35,22 @@ cargo clippy --all-targets --features full -- -D warnings \
   -A clippy::useless_vec \
   -A clippy::unwrap_or_default
 
-# Run benchmarks
-cargo bench
+# Lint the per-crate benchmarks. The command above is scoped to the root
+# package, which no longer owns them, so it does NOT cover these.
+#
+# ONE CRATE AT A TIME: cargo unifies a dependency's features across every
+# package in a single `-p` selection, so a combined run lets one crate's
+# criterion features satisfy a sibling whose manifest omits them. These are
+# separately published crates and each must build from its own manifest alone.
+for c in $(cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[] | select([.targets[].kind[]] | index("bench")) | .name' \
+    | grep -v '^armature-framework$'); do
+  cargo clippy --benches -p "$c" -- -D warnings
+done
+
+# Run benchmarks (each one is owned by the crate it measures)
+./scripts/run-benchmarks.sh --all
+cargo bench -p armature-core --bench internal_overhead
 ```
 
 **SAML is optional.** Most development uses `--features full` without SAML. Only use `full-with-saml` when working on SAML-related code and you have the system libraries installed.
@@ -107,7 +121,9 @@ armature-framework/          # Workspace root, Cargo.toml defines all members
 ├── armature-macros-utils/   # Macro utilities
 ├── docs/                    # 70+ guides
 ├── examples/                # 60+ working examples
-├── benches/                 # Benchmarks (micro, internal-overhead, cross-framework comparison via comparison_servers/)
+├── benches/                 # Cross-framework comparison harness (comparison_servers/, techempower/,
+│                           # http-benchmark) + the database/memory pattern benches. Per-crate
+│                           # criterion benches live in each crate's own benches/.
 ├── tests/                   # Integration tests
 └── templates/               # Project scaffolding templates (excluded from workspace)
 ```
@@ -153,8 +169,9 @@ The framework follows NestJS/Angular conventions adapted to Rust:
 
 - Target: Actix-competitive performance (currently 242k req/sec plaintext)
 - JSON serialization is a known optimization area
-- Benchmark suite in `benches/` covers micro and internal-overhead scenarios (plus real cross-framework HTTP comparison via `benches/comparison_servers/` + the `http-benchmark` runner). Profiling (flamegraphs, DHAT/pprof) is not in `benches/` — it lives in `examples/profiling_server.rs`, `examples/memory_profile_server.rs`, and `scripts/memory-profile.sh`
-- Do not regress performance without justification — run `cargo bench` before and after changes
+- Criterion benchmarks live in the crate they measure (`armature-core/benches/`, `armature-jwt/benches/`, ...), so they are always run `-p`-scoped: `cargo bench -p armature-core --bench internal_overhead`. `scripts/run-benchmarks.sh` runs them by suite. Those crates set `autobenches = false`, so a new bench file needs an explicit `[[bench]]` entry
+- The root `benches/` keeps only what is not crate-specific: cross-framework HTTP comparison (`benches/comparison_servers/` + the `http-benchmark` runner, `benches/techempower/`) and the `database_benchmarks`/`memory_benchmarks` pattern benchmarks. Profiling (flamegraphs, DHAT/pprof) is not in `benches/` — it lives in `examples/profiling_server.rs`, `examples/memory_profile_server.rs`, and `scripts/memory-profile.sh`
+- Do not regress performance without justification — run the relevant benchmarks before and after changes
 
 ## When Making Changes
 

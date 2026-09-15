@@ -13,9 +13,11 @@ if ! git diff --quiet; then
     echo ""
 fi
 
+# Checks are scoped to the root crate only. Each armature-* submodule carries
+# its own cargo-husky hooks that gate the code in that repo.
 # 1. Check code formatting
 echo "📝 Checking code formatting..."
-if ! cargo fmt -- --check; then
+if ! cargo fmt -p armature-framework -- --check; then
     echo ""
     echo "❌ Code formatting check failed!"
     echo "   Run 'cargo fmt' to fix formatting issues."
@@ -27,7 +29,7 @@ echo ""
 
 # 2. Run clippy with warnings as errors (only on changed files)
 echo "🔍 Running clippy linter..."
-if ! cargo clippy --workspace --all-targets --features full-with-saml -- -D warnings; then
+if ! cargo clippy -p armature-framework --all-targets --features full-with-saml -- -D warnings; then
     echo ""
     echo "❌ Clippy check failed!"
     echo "   Fix the linting issues above before committing."

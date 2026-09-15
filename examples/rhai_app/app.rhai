@@ -84,8 +84,12 @@ request_logger.before(|req| {
     req
 });
 
-request_logger.after(|req, status| {
-    log_info(`← ${req.method} ${req.path} — ${status}`);
+// The after-hook receives the full outgoing response, not just its status, so
+// it can read and amend headers, cookies and body. Return a Response to
+// replace the outgoing one; return anything else to leave it as-is.
+request_logger.after(|req, res| {
+    log_info(`← ${req.method} ${req.path}`);
+    res.header("x-request-logger", "seen")
 });
 
 // ---------------------------------------------------------------------------

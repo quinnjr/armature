@@ -6,8 +6,10 @@ Thank you for your interest in contributing to Armature! This document provides 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/armature.git
+git clone --recurse-submodules https://github.com/yourusername/armature.git
 cd armature
+# If you cloned without --recurse-submodules:
+git submodule update --init --recursive
 ```
 
 2. Build the project:

@@ -10,13 +10,27 @@ export interface DocMetadata {
   file?: string | null;
   /** Rendered from a hand-built Astro component instead of markdown. */
   hasComponent?: boolean;
+  /**
+   * Meta description override. Omit to derive one from the markdown's first
+   * prose paragraph (see `docmeta.ts`) — only set this when the derived text
+   * reads badly, e.g. for component-rendered pages with no markdown source.
+   */
+  description?: string;
 }
 
 // Documentation metadata with user-friendly titles.
 // Category order here controls sidebar order.
 export const docs: DocMetadata[] = [
   // 1. Getting Started - First things first
-  { id: 'readme', title: 'Overview', category: 'Getting Started', file: 'README.md', hasComponent: true },
+  {
+    id: 'readme',
+    title: 'Overview',
+    category: 'Getting Started',
+    file: 'README.md',
+    hasComponent: true,
+    description:
+      'Armature is a batteries-included Rust web framework with NestJS-style dependency injection, decorator macros, modules, guards and interceptors. Start here.',
+  },
   { id: 'micro-framework-guide', title: 'Micro-Framework Mode', category: 'Getting Started' },
   { id: 'project-templates', title: 'Project Templates', category: 'Getting Started' },
   { id: 'config-guide', title: 'Configuration', category: 'Getting Started' },
@@ -118,7 +132,15 @@ export const docs: DocMetadata[] = [
   { id: 'testing-documentation', title: 'Testing Best Practices', category: 'Testing' },
 
   // 14. Performance - Optimization tools
-  { id: 'profiling-guide', title: 'CPU Profiling', category: 'Performance', file: null, hasComponent: true },
+  {
+    id: 'profiling-guide',
+    title: 'CPU Profiling',
+    category: 'Performance',
+    file: null,
+    hasComponent: true,
+    description:
+      'Profile an Armature service with perf, flamegraph and pprof: capture a CPU profile, read the flame graph, and find the hot path in a Rust web handler.',
+  },
 
   // 15. Benchmarks - Performance comparisons
   { id: 'framework-comparison', title: 'vs Actix vs Axum', category: 'Benchmarks' },
