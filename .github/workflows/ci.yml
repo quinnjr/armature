@@ -894,6 +894,13 @@ jobs:
           cargo check --features full-with-saml
           cargo build --features full-with-saml
           cargo test --features full-with-saml
+      # The root package enables none of the AWS features, so the optional AWS SDK
+      # dependencies are checked per crate (one -p at a time, so features don't unify).
+      - name: Check AWS-backed crates with all features
+        run: |
+          for c in armature-aws armature-mail armature-messaging armature-storage armature-opensearch; do
+            cargo check -p "$c" --all-targets --all-features
+          done
 
   # ============================================================================
   # BUILD
