@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-15
+
 ### Changed
 
+- **`armature-core` requirement moved `0.9` → `0.10` (breaking).**
+  `src/lib.rs` opens with `pub use armature_core::*;`, so every type
+  `armature-core` exposes is part of this crate's public API. `armature-core
+  0.10.0` is itself breaking — `compact_str` 0.10 and `simd-json` 0.18 are
+  public dependencies of it (`CompactString` fields, `json::Value`) — so the
+  minor moves here too, as it did for 0.6.0. The other sibling requirements
+  follow their own minors in the same train: `armature-acme` 0.4,
+  `armature-auth` 0.4, `armature-compression` 0.4, `armature-config` 0.5,
+  `armature-cron` 0.5, `armature-graphql` 0.6, `armature-jwt` 0.4,
+  `armature-macros` 0.4, `armature-messaging` 0.5, `armature-openapi` 0.4,
+  `armature-opentelemetry` 0.5, `armature-queue` 0.6, `armature-ratelimit`
+  0.5, `armature-security` 0.4, `armature-testing` 0.5, `armature-validation`
+  0.5 and `armature-webhooks` 0.5. The four templates pin
+  `armature-framework` 0.7 and `armature-core` 0.10.
+- The MSRV CI job also checks `armature-aws`, `-mail`, `-messaging`,
+  `-storage` and `-opensearch` with `--all-features`, one crate at a time.
 - **Workspace-wide dependency upgrade.** Every member crate moved to the
   newest releases of its third-party dependencies (`cargo upgrade
   --incompatible allow`), including jsonwebtoken 11, sea-orm 2.0, sqlx 0.9,
@@ -22,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   61 examples, benches and tests build clippy-clean against the new versions.
   The standalone `benchmarks/comparison` crate moves axum `0.7` → `0.8`,
   which its benchmark server builds against unchanged.
+
+### Security
+
+- Resolves the `cargo audit` findings: `rustls` 0.23.45 (RUSTSEC-2026-0285)
+  and `webbrowser` 1.2.4 (RUSTSEC-2026-0257) minimums, and `armature-azure`
+  0.3 drops the legacy `azure_core` 0.21 (RUSTSEC-2026-0275, -0174, -0097).
+  Advisories with no upstream fix are documented in `.cargo/audit.toml`.
 
 ## [0.6.0] - 2026-08-05
 
