@@ -156,11 +156,7 @@ mod tests {
             handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
                 let c = ctrl.clone();
                 Box::pin(async move {
-                    let id = req
-                        .path_params
-                        .get("id")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+                    let id = req.param("id").and_then(|s| s.parse().ok()).unwrap_or(0);
                     c.get_one(id)?.into_response()
                 })
             })),
@@ -195,11 +191,7 @@ mod tests {
             handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
                 let c = ctrl.clone();
                 Box::pin(async move {
-                    let id = req
-                        .path_params
-                        .get("id")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+                    let id = req.param("id").and_then(|s| s.parse().ok()).unwrap_or(0);
                     c.get_one(id)?.into_response()
                 })
             })),

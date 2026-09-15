@@ -60,7 +60,7 @@ use armature_proc_macro::{controller, guard, middleware, module, routes};
 /// such layer, so the "admin" designation here is simulated by checking for
 /// a distinguished bearer token value instead.
 fn require_admin_role(ctx: &GuardContext) -> Result<bool, Error> {
-    match ctx.get_header("authorization").map(String::as_str) {
+    match ctx.get_header("authorization") {
         Some("Bearer admin-token") => Ok(true),
         _ => Err(Error::Forbidden("Admin role required".to_string())),
     }

@@ -3,7 +3,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import { url } from '../lib/url';
 ---
 
-<BaseLayout title="Page Not Found - Armature">
+<BaseLayout
+  title="Page Not Found - Armature"
+  description="That page does not exist. Browse the Armature documentation or return to the home page."
+  noindex
+>
   <section class="bg-stone-950 py-24 text-center min-h-[60vh] flex flex-col items-center justify-center px-6">
     <h1 class="text-5xl font-bold text-white mb-4">404</h1>
     <p class="text-stone-400 mb-8">This page could not be found.</p>

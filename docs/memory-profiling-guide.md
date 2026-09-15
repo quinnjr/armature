@@ -142,18 +142,18 @@ Run the memory allocation benchmarks:
 
 ```bash
 # All memory benchmarks
-cargo bench --bench memory_benchmarks
+cargo bench -p armature-framework --bench memory_benchmarks
 
 # Specific benchmark group
-cargo bench --bench memory_benchmarks string_allocations
-cargo bench --bench memory_benchmarks vec_allocations
-cargo bench --bench memory_benchmarks hashmap_allocations
-cargo bench --bench memory_benchmarks smart_pointers
-cargo bench --bench memory_benchmarks request_response
-cargo bench --bench memory_benchmarks object_pool
-cargo bench --bench memory_benchmarks leak_patterns
-cargo bench --bench memory_benchmarks allocation_sizes
-cargo bench --bench memory_benchmarks drop_timing
+cargo bench -p armature-framework --bench memory_benchmarks string_allocations
+cargo bench -p armature-framework --bench memory_benchmarks vec_allocations
+cargo bench -p armature-framework --bench memory_benchmarks hashmap_allocations
+cargo bench -p armature-framework --bench memory_benchmarks smart_pointers
+cargo bench -p armature-framework --bench memory_benchmarks request_response
+cargo bench -p armature-framework --bench memory_benchmarks object_pool
+cargo bench -p armature-framework --bench memory_benchmarks leak_patterns
+cargo bench -p armature-framework --bench memory_benchmarks allocation_sizes
+cargo bench -p armature-framework --bench memory_benchmarks drop_timing
 ```
 
 ## Common Memory Leak Patterns
@@ -437,7 +437,7 @@ jobs:
 ./scripts/memory-profile.sh dhat 30
 
 # Memory benchmarks
-cargo bench --bench memory_benchmarks
+cargo bench -p armature-framework --bench memory_benchmarks
 
 # Detailed leak check
 ./scripts/memory-profile.sh valgrind 60

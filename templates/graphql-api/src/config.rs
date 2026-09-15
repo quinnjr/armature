@@ -56,4 +56,3 @@ impl Default for AppConfig {
         Self::from_env()
     }
 }
-

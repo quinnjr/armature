@@ -90,8 +90,13 @@ Allow: /
 # =============================================================================
 # Additional Resources for AI
 # =============================================================================
-# LLMs.txt - AI-readable project summary
+# llms.txt - AI-readable index of the site (llmstxt.org), generated at build
+# from the documentation registry so it cannot drift from the pages that exist.
 # https://quinnjr.github.io/armature/llms.txt
-
-# AI.txt - AI crawler guidelines
+#
+# llms-full.txt - every guide concatenated as plain markdown, so an agent can
+# ingest the whole corpus in one request instead of crawling ~60 pages.
+# https://quinnjr.github.io/armature/llms-full.txt
+#
+# ai.txt - AI crawler guidelines
 # https://quinnjr.github.io/armature/ai.txt

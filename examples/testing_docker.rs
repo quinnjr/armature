@@ -1,7 +1,19 @@
 #![allow(clippy::needless_question_mark)]
 //! Docker Test Containers Example
 //!
-//! Demonstrates Docker-based testing with automatic container lifecycle.
+//! Starts real Postgres, Redis and MySQL containers through
+//! `armature_testing::docker` and asserts the lifecycle actually happened -
+//! a started container reports an id, a stopped one does not, and
+//! `is_running()` tracks both. The `sleep`s between start and stop stand in
+//! for the work a test would do against the container; they are not the
+//! thing being demonstrated.
+//!
+//! Requires a running Docker daemon. Without one the example prints a notice
+//! and exits successfully rather than failing - it is a demo, not a test.
+//!
+//! ```bash
+//! cargo run --example testing_docker
+//! ```
 
 use armature_testing::docker::*;
 
@@ -28,19 +40,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match postgres.start().await {
         Ok(()) => {
             println!("   ✅ Postgres container started");
-            println!(
-                "   Container ID: {}",
-                postgres.container_id().unwrap_or("unknown")
+            // A successful `start()` must leave the container addressable: an
+            // id to reference it by and a running flag that agrees.
+            let id = postgres
+                .container_id()
+                .expect("a started container must expose its id")
+                .to_owned();
+            assert!(!id.is_empty(), "container id must not be empty");
+            assert!(
+                postgres.is_running(),
+                "container must report itself running"
             );
+            println!("   Container ID: {id}");
             println!("   Connection: postgres://testuser:testpass@localhost:5432/testdb");
 
-            // Simulate some work
+            // Stand-in for the database work a real test would do here.
             println!("   Simulating database operations...");
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             println!("   ✅ Database operations complete");
 
             // Stop container
             postgres.stop().await?;
+            assert!(
+                !postgres.is_running(),
+                "a stopped container must not report itself running"
+            );
             println!("   ✅ Container stopped");
         }
         Err(e) => {

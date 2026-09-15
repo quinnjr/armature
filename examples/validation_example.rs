@@ -150,11 +150,7 @@ impl UserController {
 
     #[put("/:id")]
     async fn update(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let id = req
-            .path_params
-            .get("id")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let id = req.param("id").and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let dto: UpdateUserDto = ValidationPipe::parse(&req)?;
         let service = UserService::default();

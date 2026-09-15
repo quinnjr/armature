@@ -333,15 +333,21 @@ cargo pgo-build
 
 ### Running Benchmarks
 
+Each criterion benchmark is owned by the crate it measures, so invocations are
+`-p`-scoped; `scripts/run-benchmarks.sh` groups them into suites.
+
 ```bash
 # All benchmarks
-cargo bench
+./scripts/run-benchmarks.sh --all
 
-# Specific benchmark
-cargo bench -- response_creation
+# One crate's benchmarks
+cargo bench -p armature-core
+
+# One benchmark target, filtered to a single case
+cargo bench -p armature-core --bench internal_overhead -- response_creation
 
 # With native optimizations
-cargo bench-native
+cargo bench-native -p armature-core
 ```
 
 ### Framework Comparison

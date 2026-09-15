@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: v1.apply_prefix("/users/:id"),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let id = req.path_params.get("id").unwrap();
+                let id = req.param("id").unwrap();
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
                     "api_version": "v1",
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: v1.apply_prefix("/posts/:page/comments"),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let page = req.path_params.get("page").unwrap();
+                let page = req.param("page").unwrap();
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
                     "api_version": "v1",
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: v2.apply_prefix("/users/:uuid"),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let uuid = req.path_params.get("uuid").unwrap();
+                let uuid = req.param("uuid").unwrap();
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
                     "api_version": "v2",
@@ -151,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: v2.apply_prefix("/products/:status"),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let status = req.path_params.get("status").unwrap();
+                let status = req.param("status").unwrap();
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
                     "api_version": "v2",
@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: v2.apply_prefix("/search/:query"),
         handler: from_legacy_handler(Arc::new(|req: HttpRequest| {
             Box::pin(async move {
-                let query = req.path_params.get("query").unwrap();
+                let query = req.param("query").unwrap();
 
                 Ok(HttpResponse::ok().with_json(&serde_json::json!({
                     "api_version": "v2",

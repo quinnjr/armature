@@ -4,6 +4,13 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
+# Fuzzing (cargo-fuzz): the corpus is regenerated per run and grows without
+# bound; crash artifacts are reproducers for a local failure, and one worth
+# keeping belongs in a test, not in this directory.
+**/fuzz/corpus/
+**/fuzz/artifacts/
+**/fuzz/coverage/
+
 # IDE
 .idea/
 .vscode/

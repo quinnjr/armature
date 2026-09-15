@@ -171,14 +171,20 @@ pub fn get_endpoints() -> Vec<Endpoint> {
             rust_path: "/api/users",
             nextjs_path: "/api/users",
         },
-        Endpoint {
-            name: "data_medium",
-            method: "GET",
-            rust_path: "/data?size=medium",
-            nextjs_path: "/api/data?size=medium",
-        },
+        // No `data_medium` here. `/data?size=medium` is served only by
+        // `examples/benchmark_server.rs`; actix/axum/warp/rocket and the Node
+        // servers all 404 it, so including it would rank Armature's real
+        // payload against four 404 pages. A comparison endpoint has to exist on
+        // every framework being compared.
     ]
 }
+
+/// Fraction of non-2xx responses above which a result is not comparable.
+///
+/// A run that mostly 404s still reports a high req/s - fast enough to look like
+/// a win - so results past this threshold are reported and discarded rather
+/// than ranked.
+const MAX_NON_2XX_RATIO: f64 = 0.01;
 
 /// Get the correct path for a framework
 fn get_endpoint_path<'a>(endpoint: &'a Endpoint, framework: &str) -> &'a str {
@@ -268,6 +274,12 @@ fn parse_oha_output(output: &str, url: &str) -> Result<BenchmarkResult, String> 
 
     let summary = json.get("summary").ok_or("Missing summary")?;
 
+    let transport_errors: u64 = summary["errorDistribution"]
+        .as_object()
+        .map(|m| m.values().filter_map(|v| v.as_u64()).sum())
+        .unwrap_or(0);
+    let non_2xx = count_non_2xx(&json);
+
     Ok(BenchmarkResult {
         framework: "unknown".to_string(),
         endpoint: url.to_string(),
@@ -289,34 +301,105 @@ fn parse_oha_output(output: &str, url: &str) -> Result<BenchmarkResult, String> 
             .map(|v| v * 1000.0)
             .unwrap_or(0.0),
         total_requests: summary["total"].as_u64().unwrap_or(0),
-        errors: summary["errorDistribution"]
-            .as_object()
-            .map(|m| m.values().filter_map(|v| v.as_u64()).sum())
-            .unwrap_or(0),
+        // `errorDistribution` counts transport failures only. A server that
+        // answers every request with a 404 produces zero entries there, so the
+        // status-code histogram has to be folded in as well or a 100%-404 run
+        // reads as clean throughput.
+        errors: transport_errors + non_2xx,
         transfer_rate_mbps: 0.0, // oha doesn't report this directly
     })
+}
+
+/// Count responses outside the 2xx range in oha's status-code histogram.
+fn count_non_2xx(json: &serde_json::Value) -> u64 {
+    json.get("statusCodeDistribution")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(code, _)| !matches!(code.parse::<u16>(), Ok(200..=299)))
+                .filter_map(|(_, count)| count.as_u64())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Escape a string for embedding in a double-quoted Lua literal.
+fn lua_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build the wrk Lua script that pins the method, body and content type.
+///
+/// wrk has no `-m`/`-d` flags; the only way to send anything but a bodyless GET
+/// is a `-s` script. Without one, a POST endpoint is silently benchmarked as a
+/// GET with no payload and still reported as a POST.
+fn wrk_script(method: &str, body: Option<&str>) -> String {
+    let mut script = format!("wrk.method = \"{}\"\n", lua_escape(method));
+    if let Some(b) = body {
+        script.push_str(&format!("wrk.body = \"{}\"\n", lua_escape(b)));
+        script.push_str("wrk.headers[\"Content-Type\"] = \"application/json\"\n");
+    }
+    script
 }
 
 /// Run benchmark using wrk
 pub fn run_wrk_benchmark(
     url: &str,
     config: &BenchmarkConfig,
-    _method: &str,
-    _body: Option<&str>,
+    method: &str,
+    body: Option<&str>,
 ) -> Result<BenchmarkResult, String> {
-    let output = Command::new("wrk")
-        .args([
-            "-t",
-            &config.threads.to_string(),
-            "-c",
-            &config.connections.to_string(),
-            "-d",
-            &format!("{}s", config.duration_secs),
-            "--latency",
-            url,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run wrk: {}", e))?;
+    let duration = format!("{}s", config.duration_secs);
+    let threads = config.threads.to_string();
+    let connections = config.connections.to_string();
+
+    let mut args: Vec<String> = vec![
+        "-t".into(),
+        threads,
+        "-c".into(),
+        connections,
+        "-d".into(),
+        duration,
+        "--latency".into(),
+    ];
+
+    // A bodyless GET is wrk's default, so it needs no script. Anything else
+    // does, or the request that actually goes on the wire will not be the one
+    // the result claims to measure.
+    let script_path = if method.eq_ignore_ascii_case("GET") && body.is_none() {
+        None
+    } else {
+        let path = std::env::temp_dir().join(format!(
+            "armature-wrk-{}-{}.lua",
+            std::process::id(),
+            method.to_ascii_lowercase()
+        ));
+        std::fs::write(&path, wrk_script(method, body))
+            .map_err(|e| format!("Failed to write wrk script {}: {}", path.display(), e))?;
+        args.push("-s".into());
+        args.push(path.display().to_string());
+        Some(path)
+    };
+
+    args.push(url.to_string());
+
+    let output = Command::new("wrk").args(&args).output();
+
+    if let Some(path) = &script_path {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let output = output.map_err(|e| format!("Failed to run wrk: {}", e))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -629,6 +712,25 @@ pub fn run_benchmarks(
                 Ok(mut r) => {
                     r.framework = framework.name.to_string();
                     r.endpoint = format!("{} {}", endpoint.method, endpoint.name);
+
+                    // A framework that does not implement the endpoint answers
+                    // fast and uniformly - which looks like a good score. Drop
+                    // the result rather than rank a 404 against a real payload.
+                    let error_ratio = if r.total_requests > 0 {
+                        r.errors as f64 / r.total_requests as f64
+                    } else {
+                        0.0
+                    };
+                    if error_ratio > MAX_NON_2XX_RATIO {
+                        println!(
+                            " ⚠️  discarded: {}/{} responses were errors or non-2xx ({:.1}%)",
+                            r.errors,
+                            r.total_requests,
+                            error_ratio * 100.0
+                        );
+                        continue;
+                    }
+
                     println!(
                         " {:.0} req/s, p99: {:.2}ms",
                         r.requests_per_second, r.latency_p99_ms

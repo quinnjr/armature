@@ -50,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
       - id: detect
         env:
@@ -103,17 +104,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt -- --check
 
+  workspace-membership:
+    name: Workspace Membership
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      # Cargo says nothing about a directory it was never told to care about.
+      # A crate in neither `members` nor `exclude` is not a workspace member, so
+      # every whole-workspace build, test and clippy run skips it and
+      # `scripts/publish.sh` never publishes it — silently. That has cost three
+      # incidents here: `armature-h1` (publish script could not see it, so
+      # publishing `armature-core` would have failed against an unpublished
+      # dependency), `armature-fuzz` (left a submodule after its targets moved,
+      # accumulating failing CI), and `armature-session` (reached 0.3.0 having
+      # never been built, tested, linted or published; adding it surfaced two
+      # clippy denials immediately).
+      - name: Every crate directory is a member or explicitly excluded
+        run: python3 scripts/check-workspace-membership.py
+
   clippy:
     name: Clippy (without SAML)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -126,12 +151,45 @@ jobs:
             -A dead_code \
             -A clippy::useless_vec \
             -A clippy::unwrap_or_default
+      # Criterion benchmarks are owned by the crates they measure, so the
+      # root-package `--all-targets` run above no longer reaches them.
+      #
+      # ONE CRATE PER INVOCATION, deliberately. Cargo unifies a dependency's
+      # features across every package named in a single `-p` selection, so a
+      # combined run lets one crate's `criterion = { features = ["async_tokio"] }`
+      # silently satisfy a sibling whose own manifest omits it. These are
+      # separately published crates: each must build from its own manifest
+      # alone. A combined invocation is structurally blind to that, and it is
+      # exactly how the async_tokio breakage reached review. Do not "simplify"
+      # this back into one command.
+      #
+      # No allow-list: unlike the root package, every bench here is clean under
+      # strict `-D warnings`, and the per-crate cargo-husky pre-commit hooks
+      # already gate on the strict form.
+      - name: Run Clippy on per-crate benchmarks
+        run: |
+          set -euo pipefail
+          # Derived, not hand-listed: `git ls-files` cannot see these files
+          # (they live inside submodules), so ask cargo which packages actually
+          # declare a bench target. A new benchmark-owning crate is picked up
+          # with no edit here.
+          crates=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select([.targets[].kind[]] | index("bench")) | .name' \
+            | grep -v '^armature-framework$' | sort)
+          test -n "$crates" || { echo "::error::no bench-owning crates found"; exit 1; }
+          for crate in $crates; do
+            echo "::group::clippy --benches -p $crate"
+            cargo clippy --benches -p "$crate" -- -D warnings
+            echo "::endgroup::"
+          done
 
   clippy-saml:
     name: Clippy (with SAML)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -168,6 +226,8 @@ jobs:
             rust: nightly
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -188,6 +248,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -305,11 +367,20 @@ jobs:
           # armature-core gates HTTP/3 (quinn/h3), io_uring, self-signed cert
           # generation (rcgen), and simd-json behind non-default features
           # that no root `full`/`full-with-saml` feature reaches. This row
-          # closes that gap by exercising it with --all-features. `default =
-          # []`, so `--no-default-features` would be identical to the plain
-          # default build already covered by the root `full` jobs and the
-          # coverage job; minimal is skipped.
+          # closes that gap by exercising it with --all-features.
+          #
+          # `default = ["h1-backend"]`, so the minimal step is *not* skippable
+          # here: `--no-default-features` is the only build in this workflow
+          # that compiles the hyper HTTP/1.1 serve path (the
+          # `#[cfg(not(feature = "h1-backend"))]` `listen_*_hyper` methods).
+          # That path is the documented rollback from armature-h1, so it has
+          # to be built and linted, not merely assumed to still compile.
           - crate: armature-core
+            minimal: "--no-default-features"
+          # armature-h1 gates its rustls acceptor and ALPN/h2c dispatch behind
+          # the `tls` feature, which no root feature reaches. `default = []`,
+          # so minimal is skipped as identical to the plain default build.
+          - crate: armature-h1
             minimal: ""
           # The crates below have feature-gated surfaces that are reachable
           # only via --all-features, since none of them are pulled into the
@@ -342,6 +413,8 @@ jobs:
     # dependency compilation, the actual test run) is what gets skipped.
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
         if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate) }}
       - name: Install system dependencies
         if: ${{ matrix.apt != '' && (github.event_name != 'pull_request' || needs.detect-changes.outputs.full == 'true' || contains(fromJson(needs.detect-changes.outputs.crates), matrix.crate)) }}
@@ -402,6 +475,8 @@ jobs:
         provider: [stripe, paypal, braintree]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -426,6 +501,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -461,6 +538,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -485,6 +564,41 @@ jobs:
       # with the `redis` service container above.
       - name: Run distributed_locks_example (mutual-exclusion assertions)
         run: cargo run --example distributed_locks_example --features full-with-saml
+
+  # ============================================================================
+  # OUT-OF-WORKSPACE CRATES
+  #
+  # benches/comparison_servers/* and benchmarks/comparison each declare their
+  # own `[workspace]`, so a workspace-wide `cargo check` never touches them and
+  # they can reference an API that no longer exists — both had accumulated
+  # exactly that. Each is checked from its own manifest here. The
+  # `http-benchmark` bin lives in the root package but no job built it either,
+  # so it is checked alongside them.
+  #
+  # The `<crate>/fuzz` crates are deliberately absent. `cargo check` on a fuzz
+  # target proves only that it compiles, and that is exactly the gap that let
+  # `armature-core`'s `routing` target sit broken until it was first actually
+  # run. Each crate's own repository fuzzes its targets now, and the fuzz-smoke
+  # job below runs them here, which subsumes checking that they build.
+  # ============================================================================
+
+  out-of-workspace-checks:
+    name: Out-of-Workspace Crate Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check hyper h1 baseline server
+        run: >-
+          cargo check --manifest-path
+          benches/comparison_servers/hyper_h1_server/Cargo.toml
+      - name: cargo check benchmarks/comparison bins
+        run: cargo check --manifest-path benchmarks/comparison/Cargo.toml --bins
+      - name: cargo check http-benchmark bin
+        run: cargo check --bin http-benchmark
 
   # ============================================================================
   # TEMPLATE BUILDS
@@ -512,6 +626,8 @@ jobs:
         template: [api-full, api-minimal, microservice, graphql-api]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Patch template to build against in-repo armature/armature-core (CI-only)
@@ -524,6 +640,41 @@ jobs:
           armature-core = { path = "../../armature-core" }
           EOF
       - name: cargo check --all-features
+        working-directory: templates/${{ matrix.template }}
+        run: cargo check --all-features
+
+  # ============================================================================
+  # TEMPLATE RESOLUTION AGAINST CRATES.IO
+  #
+  # `template-builds` above patches both armature deps to the in-repo source,
+  # so it proves the template source matches THIS tree — never that the
+  # published version pair a real user resolves actually works together. When
+  # armature-core publishes a breaking 0.x minor ahead of a matching facade
+  # release, that job stays green while `cargo new` from the template fails
+  # for everyone.
+  #
+  # This job resolves the committed version requirements against crates.io
+  # with no patching. It is `continue-on-error` on purpose: it legitimately
+  # fails in the window between bumping the in-repo version and publishing it,
+  # and blocking every PR on the state of the registry is worse than a
+  # visible-but-non-fatal signal.
+  # ============================================================================
+
+  template-crates-io-resolution:
+    name: Template Resolves From crates.io (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [api-full, api-minimal, microservice, graphql-api]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --all-features (no [patch.crates-io])
         working-directory: templates/${{ matrix.template }}
         run: cargo check --all-features
 
@@ -551,6 +702,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -569,6 +722,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -596,11 +751,126 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run security audit
         run: cargo audit
+
+  # ============================================================================
+  # FUZZ SMOKE (armature-h1)
+  #
+  # 60 seconds per target is not a fuzzing campaign — it is a regression gate.
+  # The corpus is not cached, so each run rediscovers coverage from scratch; what
+  # it reliably catches is a parser or framing change that panics or diverges on
+  # inputs a minute of libFuzzer reaches, which is the class of defect code
+  # review misses.
+  #
+  # `framing_differential` compares our accept/reject verdict and body length
+  # against hyper's; a body-length disagreement between two hops is request
+  # smuggling by definition, so that target failing is a security failure, not a
+  # flake. hyper is a dependency of the fuzz crate only, never of armature-h1.
+  #
+  # Scoped at the step level rather than the job level: `paths:` is a
+  # workflow-level filter, and a job-level `if:` cannot see the diff. On pushes,
+  # schedules, and PRs into main/release/**, every target runs unconditionally.
+  # ============================================================================
+
+  fuzz-smoke:
+    name: Fuzz Smoke (${{ matrix.crate }}/${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # One entry per fuzz target, each naming the crate that owns it. Fuzzing
+      # lives beside the code it exercises -- `<crate>/fuzz` inside each
+      # submodule -- so adding a target means adding a line here and nothing
+      # else.
+      matrix:
+        include:
+          - { crate: armature-h1, target: parse_head }
+          - { crate: armature-h1, target: chunked }
+          - { crate: armature-h1, target: framing_differential }
+          - { crate: armature-core, target: http_request }
+          - { crate: armature-core, target: http_response }
+          - { crate: armature-core, target: routing }
+          - { crate: armature-core, target: json }
+          - { crate: armature-core, target: url_parsing }
+          - { crate: armature-core, target: headers }
+          - { crate: armature-core, target: query_params }
+          - { crate: armature-core, target: path_params }
+          - { crate: armature-i18n, target: accept_language }
+          - { crate: armature-i18n, target: locale_tag }
+          - { crate: armature-webhooks, target: signature_verify }
+          - { crate: armature-config, target: config_parse }
+          - { crate: armature-jwt, target: token_verify }
+          - { crate: armature-validation, target: validators }
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - id: scope
+        name: Decide whether this PR touches the fuzzed surface
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" != "pull_request" ] || [ "$BASE_REF" = "main" ] \
+            || [[ "$BASE_REF" == release/* ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          if git diff --name-only "$merge_base"...HEAD \
+            | grep -qE "^(${{ matrix.crate }}(/|$)|Cargo\.toml|Cargo\.lock|armature-core(/|$)|armature-log(/|$)|\.github/workflows/ci\.yml)"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      # cargo-fuzz requires nightly: -Z sanitizer=address and the coverage
+      # instrumentation libFuzzer needs are nightly-only. `clippy` is requested
+      # explicitly because this action installs the minimal profile, which does
+      # not carry it -- the lint step below would fail with "no such command".
+      - uses: dtolnay/rust-toolchain@nightly
+        if: steps.scope.outputs.run == 'true'
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true'
+        with:
+          workspaces: ${{ matrix.crate }}/fuzz
+      - name: Install cargo-fuzz
+        if: steps.scope.outputs.run == 'true'
+        run: cargo install cargo-fuzz --locked
+      # Each `<crate>/fuzz` is its own workspace, so the repo-wide clippy run
+      # never sees it. Without this the harnesses are the one part of the tree
+      # outside the lint gate.
+      - name: Clippy ${{ matrix.crate }}/fuzz
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cargo clippy --manifest-path ${{ matrix.crate }}/fuzz/Cargo.toml \
+            --all-targets -- -D warnings
+      - name: Fuzz ${{ matrix.target }} for 60s
+        if: steps.scope.outputs.run == 'true'
+        working-directory: ${{ matrix.crate }}
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- \
+            -max_total_time=60 -print_final_stats=1
+      # A crash file is the reproducer. Without it the log line naming the input
+      # is all that survives the runner, and re-finding it costs another run.
+      - name: Upload crash artifacts
+        if: failure() && steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.crate }}-${{ matrix.target }}
+          path: ${{ matrix.crate }}/fuzz/artifacts/
+          if-no-files-found: ignore
 
   # ============================================================================
   # MSRV
@@ -611,6 +881,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update
@@ -622,6 +894,13 @@ jobs:
           cargo check --features full-with-saml
           cargo build --features full-with-saml
           cargo test --features full-with-saml
+      # The root package enables none of the AWS features, so the optional AWS SDK
+      # dependencies are checked per crate (one -p at a time, so features don't unify).
+      - name: Check AWS-backed crates with all features
+        run: |
+          for c in armature-aws armature-mail armature-messaging armature-storage armature-opensearch; do
+            cargo check -p "$c" --all-targets --all-features
+          done
 
   # ============================================================================
   # BUILD
@@ -633,6 +912,8 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install SAML system dependencies
         run: |
           sudo apt-get update

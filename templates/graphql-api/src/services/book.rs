@@ -9,6 +9,11 @@ use std::sync::{Arc, RwLock};
 use crate::schema::{Book, CreateBookInput};
 
 /// Book service for managing books
+///
+/// `#[injectable]` makes this resolvable from the DI container, but nothing in
+/// this template resolves it that way: `build_schema` in `main.rs` constructs
+/// it directly and the schema owns it for the process lifetime. The attribute
+/// is here so you can move it into the container without rewriting the type.
 #[injectable]
 #[derive(Clone)]
 pub struct BookService {
@@ -120,7 +125,11 @@ impl BookService {
 
     /// Delete a book
     pub fn delete(&self, id: &ID) -> bool {
-        self.books.write().unwrap().remove(&id.to_string()).is_some()
+        self.books
+            .write()
+            .unwrap()
+            .remove(&id.to_string())
+            .is_some()
     }
 }
 

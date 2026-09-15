@@ -1,8 +1,21 @@
+//! Configuring the ACME client, plus a printed walkthrough of the rest.
+//!
+//! This runs the parts of the flow that need no network and no real domain:
+//! building an [`AcmeConfig`] against the Let's Encrypt *staging* directory,
+//! constructing an [`AcmeClient`], and setting up an HTTP-01 challenge
+//! responder. It stops there.
+//!
+//! It does **not** obtain a certificate. Ordering one requires a publicly
+//! resolvable domain whose HTTP-01 challenge path Let's Encrypt can reach, so
+//! everything past challenge setup - `order_certificate`, `save_certificate`,
+//! renewal, wiring the result into `listen_https` - is *printed* as the code
+//! you would write, not executed. Nothing here writes to `./certs`.
+//!
+//! ```bash
+//! cargo run --example acme_certificate --features acme
+//! ```
+
 #![allow(dead_code)]
-/// Example demonstrating ACME certificate management with Let's Encrypt
-///
-/// This example shows how to obtain and manage SSL/TLS certificates
-/// automatically using the ACME protocol.
 use armature_acme::{AcmeClient, AcmeConfig, ChallengeType};
 
 #[tokio::main]

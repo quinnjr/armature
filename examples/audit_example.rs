@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: from_legacy_handler(Arc::new(move |req: HttpRequest| {
             let logger = audit_for_delete.clone();
             Box::pin(async move {
-                let id = req.path_params.get("id").unwrap();
+                let id = req.param("id").unwrap();
 
                 // Log critical action
                 logger

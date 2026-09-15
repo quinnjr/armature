@@ -255,9 +255,12 @@ impl UserController {
     /// GET /api/users - List all users with pagination
     #[get("")]
     async fn list_users(req: HttpRequest) -> Result<HttpResponse, Error> {
-        let page: usize = req.query("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+        let page: usize = req
+            .query_param("page")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(1);
         let per_page: usize = req
-            .query("per_page")
+            .query_param("per_page")
             .and_then(|p| p.parse().ok())
             .unwrap_or(10);
 
