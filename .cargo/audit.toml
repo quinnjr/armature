@@ -107,4 +107,32 @@ ignore = [
     # archives in the first place. The fix is rkyv >=0.8.17, which rust_decimal
     # does not yet allow; drop this once it releases against 0.8.
     "RUSTSEC-2026-0235",
+
+    # RUSTSEC-2026-0253: lru < 0.18.2 - `LruCache::pop()` is not panic-safe
+    # (use-after-free if a key's `Drop` panics under `catch_unwind`). Our own
+    # crates already require lru 0.18. The 0.16 line still enters through
+    # launchdarkly-server-sdk (every release, 3.2.0 included, requires ^0.16.3;
+    # armature-features' opt-in `launchdarkly` feature) and mysql_async 0.36,
+    # which diesel-async 0.9.2, its newest release, pins (armature-diesel's `mysql`
+    # feature). Neither upstream stores keys with a panicking `Drop`. Drop this
+    # once both release against lru >= 0.18.2.
+    "RUSTSEC-2026-0253",
+
+    # RUSTSEC-2026-0249: smartstring - unmaintained (repository archived).
+    # Used by: rhai (every release depends on it), via armature-rhai / armature-app.
+    # Drop when rhai replaces it.
+    "RUSTSEC-2026-0249",
+
+    # RUSTSEC-2026-0192: ttf-parser - unmaintained.
+    # Used by: ab_glyph / owned_ttf_parser (newest releases), via armature-files'
+    # default `images` feature for text watermarks. Drop when ab_glyph moves to a
+    # maintained parser such as skrifa.
+    "RUSTSEC-2026-0192",
+
+    # RUSTSEC-2025-0057 / RUSTSEC-2024-0384: fxhash / instant - unmaintained.
+    # Used by: sled 0.34.7 (newest release), which mq-bridge enables through its
+    # `dedup`/`sled` features; reached only via armature-messaging's opt-in
+    # `mq-bridge-full`. Drop when mq-bridge moves off sled 0.34.
+    "RUSTSEC-2025-0057",
+    "RUSTSEC-2024-0384",
 ]
