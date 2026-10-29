@@ -119,7 +119,7 @@ Set it with `Application::with_body_read_policy`.
 | `max_header_size` | 16 KiB | Byte cap on the request line plus headers (armature-h1 backend) |
 | `keep_alive_timeout` | 60 s | Deadline for the next request on an idle keep-alive connection (armature-h1 backend) |
 | `write_timeout` | `Some(300 s)` | How long one response write may take before the connection is torn down. Defends against peers that stop reading |
-| `request_timeout` | `None` | Handler deadline. When it expires the connection answers `408` and closes. Off by default so long-polls and SSE streams keep working |
+| `request_timeout` | `None` | Handler deadline. When it expires the connection answers `503` and closes. Off by default so long-polls and SSE streams keep working |
 
 The builder (`PipelineConfig::builder()`) exposes `keep_alive_timeout`,
 `max_header_size`, `max_connections` and the other tuning knobs. The
@@ -182,9 +182,11 @@ connection, and its buffered body, indefinitely.
 
 ### Handler deadline
 
-`PipelineConfig::request_timeout` races the whole handler future (on the
-armature-h1 backend), including the handler's own reads of the request body.
-Leave it at `None` unless you know your handlers' upper bound.
+`PipelineConfig::request_timeout` races the whole handler future from the
+moment it is called (on the armature-h1 backend, as
+`armature_h1::Limits::handler_timeout`), and answers `503 Service Unavailable`
+when it expires. Slow request bodies are the `BodyReadPolicy`'s job, not this
+deadline's. Leave it at `None` unless you know your handlers' upper bound.
 
 ## Error Responses
 
