@@ -827,11 +827,11 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
           tar -xzf gitleaks.tar.gz gitleaks
       - name: Scan the umbrella repository history
-        run: ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
+        run: ./gitleaks git --config .gitleaks.toml --redact --verbose --exit-code 1 .
       - name: Scan every crate repository's history
         run: |
           for dir in armature-*/; do
-            ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 "$dir"
+            ./gitleaks git --config .gitleaks.toml --redact --verbose --exit-code 1 "$dir"
           done
 
   # ============================================================================
@@ -961,10 +961,13 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Install SAML system dependencies
+      # libcurl: the per-crate loop below builds armature-messaging with
+      # --all-features, whose `kafka` feature compiles librdkafka from source,
+      # and librdkafka includes <curl/curl.h>.
+      - name: Install SAML and librdkafka system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl libssl-dev pkg-config
+          sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl libssl-dev libcurl4-openssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.1

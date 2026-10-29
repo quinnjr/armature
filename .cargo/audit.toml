@@ -45,6 +45,25 @@ ignore = [
     # Drop when pprof moves to inferno >= 0.12.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0382: rustls-webpki 0.102.8 - may accept distrusted
+    # intermediates. Same path as the 0.102.8 entries above: rumqttc 0.25.1
+    # (newest) <- mq-bridge `mqtt` <- armature-messaging (opt-in). Every
+    # first-party TLS stack resolves 0.103.16, which is patched.
+    # Drop with the rumqttc entries above.
+    "RUSTSEC-2026-0382",
+    # RUSTSEC-2026-0387: crypto-bigint 0.5.5 - timing variability in
+    # operations meant to be constant-time. Two paths:
+    # - elliptic-curve 0.13 <- p256/p384 0.13 <- jwt-simple 0.12 <- web-push
+    #   0.11.0 (newest, pins jwt-simple ^0.12.11) <- armature-push `web-push`
+    #   (opt-in), signing VAPID tokens. jwt-simple 0.13+ is on the fixed
+    #   p256 0.14, but web-push has not moved.
+    # - aws-sigv4 1.5.x (SigV4a request signing) <- armature-aws / -mail /
+    #   -messaging / -opensearch / -storage. aws-sigv4 1.6.4 is on the fixed
+    #   crypto-bigint 0.7, but needs aws-smithy-types 1.9, which those crates
+    #   pin below 1.7 until they move to aws-config 1.13.
+    # Drop when web-push releases against jwt-simple >= 0.13 and the AWS
+    # crates are on aws-config >= 1.13.
+    "RUSTSEC-2026-0387",
 
     #
     # === UNMAINTAINED ===
@@ -74,4 +93,29 @@ ignore = [
     # (opt-in). Drop when mq-bridge moves off sled 0.34.
     "RUSTSEC-2025-0057",
     "RUSTSEC-2024-0384",
+
+    # RUSTSEC-2026-0374: basic-toml. askama_derive 0.16.1 (newest, a proc
+    # macro reading askama.toml at compile time) <- armature-admin. Never
+    # parses anything at run time. Drop when askama replaces it.
+    "RUSTSEC-2026-0374",
+
+    # RUSTSEC-2024-0436: paste. A compile-time proc macro, via pulp 0.22.3 and
+    # rav1e 0.8.1 (both newest) <- the image stack in armature-files /
+    # armature-auth. Drop when both move off it.
+    "RUSTSEC-2024-0436",
+
+    #
+    # === UNSOUND ===
+    #
+
+    # RUSTSEC-2026-0253: lru 0.16 - use-after-free in `LruCache::pop()` when
+    # the key's Hash/Eq panics mid-call. Paths: mysql_async 0.36.2 <-
+    # diesel-async 0.9.2 (newest, pins ^0.36) <- armature-diesel `mysql`, and
+    # launchdarkly-server-sdk 3.1.1 <- armature-features `launchdarkly` (3.3+
+    # needs Rust 1.97, above the 1.94.1 MSRV). Unreachable in both:
+    # mysql_async calls `pop` only with `u32` statement ids, whose Hash/Eq
+    # cannot panic, and launchdarkly never calls `pop`.
+    # Drop when diesel-async moves to mysql_async >= 0.37 and the MSRV allows
+    # launchdarkly-server-sdk >= 3.3.
+    "RUSTSEC-2026-0253",
 ]
