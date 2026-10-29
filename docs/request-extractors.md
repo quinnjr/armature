@@ -42,7 +42,7 @@ Or use directly:
 
 ```toml
 [dependencies]
-armature-core = "0.11"
+armature-core = "0.12"
 ```
 
 ## Extractor Types

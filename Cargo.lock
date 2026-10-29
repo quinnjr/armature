@@ -294,7 +294,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -305,7 +305,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "armature-acme"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "armature-testkit",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "armature-admin"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "armature-analytics"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "armature-app"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-rhai",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "armature-audit"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-auth",
  "armature-core",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "armature-auth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "argon2",
  "armature-core",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "armature-aws"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "armature-azure-functions"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-azure",
  "armature-core",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "armature-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "armature-app",
  "armature-core",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "armature-cloudrun"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "armature-gcp",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "armature-collab"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "armature-compression"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "armature-config"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "cargo-husky",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "armature-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "armature-h1",
  "armature-log",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "armature-cqrs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "armature-events",
  "armature-eventsourcing",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "armature-cron"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "armature-events"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "cargo-husky",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "armature-eventsourcing"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "armature-events",
  "async-trait",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "armature-features"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "armature-graphql"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "armature-core",
  "armature-graphql-macros",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "armature-graphql-client"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "cargo-husky",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "armature-graphql-macros"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "armature-graphql",
  "async-graphql",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "armature-h1"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "cargo-husky",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "armature-i18n"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "armature-jwt"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "armature-lambda"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-aws",
  "armature-core",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "armature-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "cargo-husky",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "armature-macros-utils"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "armature-core",
  "cargo-husky",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "armature-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "armature-jwt",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "armature-metrics"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "armature-openapi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "armature-opensearch"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "armature-opentelemetry"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "armature-proc-macro"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "armature-queue"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "armature-ratelimit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "armature-rhai"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "armature-security"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "armature-siem"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "armature-audit",
  "armature-core",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "armature-tenancy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "armature-auth",
  "armature-core",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "armature-testing"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "async-trait",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "armature-toon"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-log",
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "armature-validation"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-proc-macro",
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "armature-webhooks"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "armature-core",
  "armature-http-client",
@@ -4918,7 +4918,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6018,7 +6018,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6320,7 +6320,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7399,7 +7399,7 @@ checksum = "aa0141e66c8d0302f8a586df12ad5d0cf87c0fa8c391f2f5b5dc296312dce569"
 dependencies = [
  "graphql-introspection-query",
  "graphql-parser",
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "serde",
@@ -8580,7 +8580,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10229,7 +10229,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10422,7 +10422,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http 1.5.0",
@@ -11944,7 +11944,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -11964,8 +11964,8 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.10.5",
+ "heck 0.5.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -11997,7 +11997,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -12237,7 +12237,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -12278,9 +12278,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13027,7 +13027,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13111,7 +13111,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14086,7 +14086,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14347,7 +14347,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14650,10 +14650,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -16257,7 +16257,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

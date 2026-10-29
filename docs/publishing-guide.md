@@ -21,7 +21,7 @@ The Armature workspace contains 47+ crates with inter-dependencies. Publishing t
 2. **Required Metadata**: All crates need license, description, and other metadata
 
 Sibling crates already depend on each other by version (for example
-`armature-core = { version = "0.11" }`); the workspace root's `[patch.crates-io]`
+`armature-core = { version = "0.12" }`); the workspace root's `[patch.crates-io]`
 table points those requirements at the local checkouts during development, so
 nothing has to be rewritten before publishing.
 
