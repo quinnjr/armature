@@ -51,18 +51,6 @@ regexes = [
 ]
 
 # -----------------------------------------------------------------------------
-# Test-only key material, by exact location
-# -----------------------------------------------------------------------------
-[[allowlists]]
-description = "Throwaway private keys used only by test suites"
-paths = [
-  # armature-jwt RS/EC/Ed25519 signing tests
-  '''(^|/)armature-jwt/tests/fixtures/test_(rsa|ec|ed25519)_priv\.pem$''',
-  # armature-auth OIDC id_token verification tests
-  '''(^|/)armature-auth/tests/fixtures/oidc_test_ec_priv\.pem$''',
-]
-
-# -----------------------------------------------------------------------------
 # Fixed fake values in unit tests, doc examples and docs (each checked by hand)
 # -----------------------------------------------------------------------------
 [[allowlists]]
@@ -94,6 +82,22 @@ regexes = [
   '''eyJhbGciOiJub25lIn0\.[A-Za-z0-9_-]+\.''',
 ]
 
+# -----------------------------------------------------------------------------
+# Test-only key material, by exact location, in this repository's history
+#
+# These paths carry the crate directory because they match commits from before
+# the crates moved into their own repositories, when the files lived here.
+# The per-crate scans are covered by the commit-pinned entries below.
+# -----------------------------------------------------------------------------
+[[allowlists]]
+description = "Throwaway private keys used only by test suites"
+paths = [
+  # armature-jwt RS/EC/Ed25519 signing tests
+  '''(^|/)armature-jwt/tests/fixtures/test_(rsa|ec|ed25519)_priv\.pem$''',
+  # armature-auth OIDC id_token verification tests
+  '''(^|/)armature-auth/tests/fixtures/oidc_test_ec_priv\.pem$''',
+]
+
 [[allowlists]]
 description = "PEM header literals in key-encoding code, and test-only keys in tests"
 targetRules = ["private-key"]
@@ -104,6 +108,78 @@ paths = [
   # Throwaway keys that sign only against stub servers in tests
   '''(^|/)armature-push/tests/(apns|fcm)\.rs$''',
 ]
+
+# -----------------------------------------------------------------------------
+# Test-only key material and PEM header literals, by exact commit AND path
+#
+# The CI loop scans each crate's own history (`gitleaks git armature-x/`), so
+# paths here are relative to that crate's repository, not to this one. A path
+# alone would then allow the same file name in every crate; pairing it with
+# the commit that introduced the match pins each entry to one file in one
+# repository, and a key added anywhere else — or later — is still a finding.
+# -----------------------------------------------------------------------------
+[[allowlists]]
+description = "armature-jwt: RS256 signing-test key"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["1390325d9f430160fdb71d9004e1332e1724b42b"]
+paths = ['''^tests/fixtures/test_rsa_priv\.pem$''']
+
+[[allowlists]]
+description = "armature-jwt: EC signing-test key"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["04169e270678676b1d8018bb35f862e4c621f1e1"]
+paths = ['''^tests/fixtures/test_ec_priv\.pem$''']
+
+[[allowlists]]
+description = "armature-jwt: Ed25519 signing-test key"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["04169e270678676b1d8018bb35f862e4c621f1e1"]
+paths = ['''^tests/fixtures/test_ed25519_priv\.pem$''']
+
+[[allowlists]]
+description = "armature-auth: OIDC id_token verification-test key"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["d003d10c02e11edfe21a553177cd1b3a59cec045"]
+paths = ['''^tests/fixtures/oidc_test_ec_priv\.pem$''']
+
+[[allowlists]]
+description = "armature-acme: PEM header literal in pkcs8_to_pem"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["05c2b05cc841b11ecc41f1471efbdf3754b2e896"]
+paths = ['''^src/jws\.rs$''']
+
+[[allowlists]]
+description = "armature-acme: PEM header literal in a save_certificate rejection test"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["05c2b05cc841b11ecc41f1471efbdf3754b2e896"]
+paths = ['''^src/client\.rs$''']
+
+[[allowlists]]
+description = "armature-push: throwaway keys signing only against stub servers"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["3e81a1ff59b0ae5d645d2ac18a1ef6c69dcb610a"]
+paths = ['''^tests/(apns|fcm)\.rs$''']
+
+[[allowlists]]
+description = "armature-storage: unit-test service-account key (signs nothing real)"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["8f45fa8a397cdd917c32d0f4de1b2b0691ad7149"]
+paths = ['''^src/gcs\.rs$''']
+
+[[allowlists]]
+description = "armature-storage: PEM header literal in a unit-test helper"
+condition = "AND"
+targetRules = ["private-key"]
+commits = ["81553fa5d4a329d7d777251654bf6282f79b4f3b"]
+paths = ['''^src/gcs\.rs$''']
 
 [[allowlists]]
 description = "Generated build output of the docs site (rendered copies of docs/)"
