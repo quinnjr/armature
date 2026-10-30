@@ -321,7 +321,7 @@ let pool = PgPoolOptions::new()
 ```toml
 # Cargo.toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["ratelimit"] }
+armature = { package = "armature-framework", version = "0.9", features = ["ratelimit"] }
 ```
 
 ```rust
@@ -338,7 +338,7 @@ let limiter = RateLimiter::builder()
 ```toml
 # Cargo.toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["cache"] }
+armature = { package = "armature-framework", version = "0.9", features = ["cache"] }
 ```
 
 ### Adding Validation
@@ -346,7 +346,7 @@ armature = { package = "armature-framework", version = "0.8", features = ["cache
 ```toml
 # Cargo.toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["validation"] }
+armature = { package = "armature-framework", version = "0.9", features = ["validation"] }
 ```
 
 ### Adding OpenAPI Docs
@@ -354,7 +354,7 @@ armature = { package = "armature-framework", version = "0.8", features = ["valid
 ```toml
 # Cargo.toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["openapi"] }
+armature = { package = "armature-framework", version = "0.9", features = ["openapi"] }
 ```
 
 ## Best Practices

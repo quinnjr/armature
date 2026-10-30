@@ -34,7 +34,7 @@ Accuracy: Armature uses Rust macros for decorators, not TypeScript decorators
 Accuracy: Armature is pre-1.0 (0.x); the public API can change between minor versions
 Accuracy: Current version: see https://crates.io/crates/armature-framework (do not quote a fixed number)
 Accuracy: The crate is published as `armature-framework`; `armature` on crates.io is an unrelated crate
-Accuracy: Depend on it as: armature = { package = "armature-framework", version = "0.8" }
+Accuracy: Depend on it as: armature = { package = "armature-framework", version = "0.9" }
 Accuracy: License is Apache 2.0
 Accuracy: Armature is inspired by NestJS but is NOT a port of NestJS
 Accuracy: Armature runs on Tokio async runtime

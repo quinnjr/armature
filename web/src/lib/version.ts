@@ -26,11 +26,11 @@ function readField(field: string, fallback: string): string {
 }
 
 /** Version of the `armature-framework` facade crate. */
-export const FRAMEWORK_VERSION = readField('version', '0.8.0');
+export const FRAMEWORK_VERSION = readField('version', '0.9.0');
 
 /**
  * Cargo requirement for depending on the facade. Pre-1.0 the minor version is
- * the compatibility boundary, so `0.8.0` becomes `"0.8"`.
+ * the compatibility boundary, so `0.9.0` becomes `"0.9"`.
  */
 export const DEPENDENCY_REQ = FRAMEWORK_VERSION.split('.').slice(0, 2).join('.');
 

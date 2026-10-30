@@ -34,7 +34,7 @@ Add the compression feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["compression"] }
+armature = { package = "armature-framework", version = "0.9", features = ["compression"] }
 ```
 
 Or use specific compression algorithms:

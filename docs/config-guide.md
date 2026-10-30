@@ -23,7 +23,7 @@ Add the config feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["config"] }
+armature = { package = "armature-framework", version = "0.9", features = ["config"] }
 armature-config = "0.5"
 ```
 

@@ -57,7 +57,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["openapi"] }
+armature = { package = "armature-framework", version = "0.9", features = ["openapi"] }
 ```
 
 ### Basic Example

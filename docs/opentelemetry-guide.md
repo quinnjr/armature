@@ -65,7 +65,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["opentelemetry"] }
+armature = { package = "armature-framework", version = "0.9", features = ["opentelemetry"] }
 
 # Choose exporters (available features: "otlp" [default], "zipkin", "full")
 armature-opentelemetry = { version = "0.5", features = ["otlp", "zipkin"] }
