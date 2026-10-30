@@ -54,7 +54,7 @@ Or use the crate directly:
 
 ```toml
 [dependencies]
-armature-webhooks = "0.6"
+armature-webhooks = "0.7"
 ```
 
 ### Signing Secrets

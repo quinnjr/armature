@@ -131,24 +131,24 @@ name = "armature"
 path = "src/lib.rs"
 
 [dependencies]
-armature-core = { path = "armature-core", version = "0.11" }
-armature-proc-macro = { path = "armature-proc-macro", version = "0.5" }
-armature-graphql = { path = "armature-graphql", version = "0.7", optional = true }
-armature-config = { path = "armature-config", version = "0.6", optional = true }
-armature-jwt = { path = "armature-jwt", version = "0.5", optional = true }
-armature-auth = { path = "armature-auth", version = "0.5", optional = true }
-armature-testing = { path = "armature-testing", version = "0.6", optional = true }
-armature-validation = { path = "armature-validation", version = "0.6", optional = true }
-armature-openapi = { path = "armature-openapi", version = "0.5", optional = true }
+armature-core = { path = "armature-core", version = "0.12" }
+armature-proc-macro = { path = "armature-proc-macro", version = "0.6" }
+armature-graphql = { path = "armature-graphql", version = "0.8", optional = true }
+armature-config = { path = "armature-config", version = "0.7", optional = true }
+armature-jwt = { path = "armature-jwt", version = "0.6", optional = true }
+armature-auth = { path = "armature-auth", version = "0.6", optional = true }
+armature-testing = { path = "armature-testing", version = "0.7", optional = true }
+armature-validation = { path = "armature-validation", version = "0.7", optional = true }
+armature-openapi = { path = "armature-openapi", version = "0.6", optional = true }
 armature-cache = { path = "armature-cache", version = "0.5", optional = true }
-armature-cron = { path = "armature-cron", version = "0.6", optional = true }
-armature-queue = { path = "armature-queue", version = "0.7", optional = true }
-armature-opentelemetry = { path = "armature-opentelemetry", version = "0.6", optional = true }
-armature-security = { path = "armature-security", version = "0.5", optional = true }
-armature-acme = { path = "armature-acme", version = "0.5", optional = true }
-armature-ratelimit = { path = "armature-ratelimit", version = "0.6", optional = true }
-armature-compression = { path = "armature-compression", version = "0.5", optional = true }
-armature-webhooks = { path = "armature-webhooks", version = "0.6", optional = true }
+armature-cron = { path = "armature-cron", version = "0.7", optional = true }
+armature-queue = { path = "armature-queue", version = "0.8", optional = true }
+armature-opentelemetry = { path = "armature-opentelemetry", version = "0.7", optional = true }
+armature-security = { path = "armature-security", version = "0.6", optional = true }
+armature-acme = { path = "armature-acme", version = "0.6", optional = true }
+armature-ratelimit = { path = "armature-ratelimit", version = "0.7", optional = true }
+armature-compression = { path = "armature-compression", version = "0.6", optional = true }
+armature-webhooks = { path = "armature-webhooks", version = "0.7", optional = true }
 armature-messaging = { path = "armature-messaging", version = "0.6", optional = true }
 
 # Re-export core functionality
@@ -248,8 +248,8 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 regex = "1.13"
 # Needed by macro_utils_example: it exercises the declarative macros from
 # armature-macros and the proc macros from armature-macros-utils directly.
-armature-macros = { path = "armature-macros", version = "0.5" }
-armature-macros-utils = { path = "armature-macros-utils", version = "0.4" }
+armature-macros = { path = "armature-macros", version = "0.6" }
+armature-macros-utils = { path = "armature-macros-utils", version = "0.5" }
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks"] }
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json"] }
