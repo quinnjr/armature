@@ -171,7 +171,7 @@ Enable SIMD-accelerated JSON with the `simd-json` feature:
 
 ```toml
 [dependencies]
-armature-core = { version = "0.11", features = ["simd-json"] }
+armature-core = { version = "0.12", features = ["simd-json"] }
 ```
 
 ```rust
@@ -280,7 +280,7 @@ Enable the `io_uring` feature for async I/O on Linux:
 
 ```toml
 [dependencies]
-armature-core = { version = "0.11", features = ["io_uring"] }
+armature-core = { version = "0.12", features = ["io_uring"] }
 ```
 
 ```rust
