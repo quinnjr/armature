@@ -24,7 +24,7 @@ Add the GraphQL feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["graphql"] }
+armature = { package = "armature-framework", version = "0.9", features = ["graphql"] }
 armature-graphql = "0.6"
 ```
 

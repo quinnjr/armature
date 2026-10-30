@@ -53,7 +53,7 @@ ACME (Automatic Certificate Management Environment) is a protocol for automating
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["acme"] }
+armature = { package = "armature-framework", version = "0.9", features = ["acme"] }
 tokio = { version = "1.35", features = ["full"] }
 ```
 

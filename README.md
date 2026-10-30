@@ -163,14 +163,14 @@ Main library that re-exports everything from core and macros. Add to your `Cargo
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8" }
+armature = { package = "armature-framework", version = "0.9" }
 ```
 
 Or with specific features:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["auth", "cache", "validation"] }
+armature = { package = "armature-framework", version = "0.9", features = ["auth", "cache", "validation"] }
 ```
 
 ## Decorators

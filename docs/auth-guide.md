@@ -36,7 +36,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["auth"] }
+armature = { package = "armature-framework", version = "0.9", features = ["auth"] }
 ```
 
 The `auth` feature automatically includes `armature-jwt`.
