@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-30
+
+### Security
+
+- **HTTP/1.1 parser hardening (breaking).** `armature-framework` now requires
+  `armature-core` 0.12, which builds on `armature-h1` 0.6. The details are in
+  each crate's own `CHANGELOG.md`; the visible changes are:
+  - A request target with an incomplete `%` escape is rejected with
+    `400 Bad Request`, and the hyper backend now validates request targets the
+    same way the native one does.
+  - Framing and hop-by-hop headers a handler sets under a non-canonical
+    spelling are recognised, so they can no longer duplicate or bypass the
+    ones the server writes; forbidden fields are dropped from chunked
+    trailers.
+  - When a request carries several `Expect` fields, the last one decides.
+- `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11.
+
+### Changed
+
+- Every `armature-*` dependency moves to the release built on
+  `armature-core` 0.12 (a new minor version for each crate that depends on
+  it), and every submodule now points at a tagged release.
+- Templates, guides and the website depend on
+  `armature = { package = "armature-framework", version = "0.9" }`.
+
 ## [0.8.0] - 2026-10-17
 
 ### Security
@@ -1177,7 +1202,8 @@ See [docs/migration.md](docs/migration.md) for detailed upgrade instructions bet
 
 ---
 
-[Unreleased]: https://github.com/quinnjr/armature/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/quinnjr/armature/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/quinnjr/armature/compare/v0.8.0...v0.9.0
 [0.3.0]: https://github.com/quinnjr/armature/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/quinnjr/armature/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/quinnjr/armature/releases/tag/v0.1.0

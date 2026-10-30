@@ -34,11 +34,11 @@ To add Armature to an existing project:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8" }
+armature = { package = "armature-framework", version = "0.9" }
 ```
 
 Enable optional crates with features, for example
-`armature = { package = "armature-framework", version = "0.8", features = ["auth", "security"] }`.
+`armature = { package = "armature-framework", version = "0.9", features = ["auth", "security"] }`.
 The library is imported as `armature` (`use armature::prelude::*;`).
 
 ### Secure defaults

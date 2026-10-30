@@ -43,7 +43,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["security"] }
+armature = { package = "armature-framework", version = "0.9", features = ["security"] }
 ```
 
 ## Quick Start

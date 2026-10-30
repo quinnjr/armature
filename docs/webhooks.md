@@ -47,7 +47,7 @@ Add the webhooks feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-armature = { package = "armature-framework", version = "0.8", features = ["webhooks"] }
+armature = { package = "armature-framework", version = "0.9", features = ["webhooks"] }
 ```
 
 Or use the crate directly:
