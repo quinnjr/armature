@@ -386,7 +386,7 @@ jobs:
       - name: Upload baseline
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: benchmark-baseline-${{ github.ref_name }}-${{ github.sha }}
+          name: benchmark-baseline-${{ github.sha }}
           path: benchmark-baseline/
           retention-days: 90
 
@@ -417,8 +417,10 @@ jobs:
         run: |
           mkdir -p trend-results
           # Benchmarks are owned by the crates they measure; the root package
-          # keeps only the framework-comparison ones.
-          cargo bench \
+          # keeps only the framework-comparison ones. `--bench '*'` selects
+          # only [[bench]] targets: `--benches` (and no filter) also runs each
+          # lib's libtest harness, which rejects criterion's `--noplot`.
+          cargo bench --bench '*' \
             -p armature-core \
             -p armature-h1 \
             -p armature-jwt \
