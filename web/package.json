@@ -39,7 +39,7 @@
     "@fontsource/inter": "^5.3.0",
     "@fortawesome/free-brands-svg-icons": "^7.1.0",
     "@fortawesome/free-solid-svg-icons": "^7.1.0",
-    "astro": "^7.4.0",
+    "astro": "^7.4.11",
     "marked": "^18.1.1",
     "sanitize-html": "^2.18.1",
     "tailswatch": "^1.7.0"
